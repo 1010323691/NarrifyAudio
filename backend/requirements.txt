@@ -1,0 +1,25 @@
+# AudiobookStudio backend
+# Shared application + TTS environment. The TTS worker is still a subprocess so
+# importing torch/model code never happens in the FastAPI process.
+# Platform-specific CUDA torch wheels are installed last by install_tts_env.ps1.
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.8
+# Required by FastAPI for the browser file-upload endpoint (multipart/form-data).
+python-multipart>=0.0.9
+
+# Persistent multi-user platform
+SQLAlchemy>=2.0.36
+alembic>=1.14
+psycopg[binary]>=3.2
+redis>=5.2
+
+# Qwen3-TTS runtime (torch/torchaudio are installed from the CUDA index by the
+# setup script; installing qwen-tts first may temporarily pull a CPU torch wheel).
+qwen-tts==0.1.1
+transformers==4.57.3
+accelerate==1.12.0
+soundfile>=0.12
+pydub>=0.25
+numpy>=2.0
+huggingface_hub>=0.25

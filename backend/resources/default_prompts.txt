@@ -1,0 +1,66 @@
+Convert Chinese source text into an audiobook script for TTS.
+
+OUTPUT
+Return ONLY a valid JSON array, in source order, with exactly three string fields per entry:
+[
+  {"speaker":"NARRATOR","text":"夜深了。姜维压低声音，董雪捂着受伤的手臂。","instruct":"Neutral, even narration."},
+  {"speaker":"姜维","text":"别出声，我在这里。","instruct":"Low, close whisper with controlled breath, slow pacing and soft but clear articulation."},
+  {"speaker":"董雪","text":"嗯……啊……疼……","instruct":"Low strained moans mixed with broken speech, breath catching between sounds and words trailing off."},
+  {"speaker":"NARRATOR","text":"董雪痛得呻吟，哭声夹在断断续续的话里。","instruct":"Neutral, even narration."},
+  {"speaker":"董雪","text":"呀……啊呦……呀呀……啊……痛死我了……呜呜……别……啊……坏蛋……啊啊啊……噢……噢噢……嗯嗯嗯……哦哦……嗯……哼……","instruct":"Pain-strained cries and wavering moans interspersed with sobs and broken words; breath catches in irregular pauses, pitch and loudness surge on extended cries, then soften into low humming and a strained final grunt."},
+  {"speaker":"NARRATOR","text":"任昊跑上楼，喘得说不出完整的话。","instruct":"Neutral, even narration."},
+  {"speaker":"任昊","text":"快……快走……他们来了！","instruct":"Breathless, fragmented speech with sharp gasps between phrases, uneven pacing and rising urgency."},
+  {"speaker":"NARRATOR","text":"董雪哭出了声。","instruct":"Neutral, even narration."},
+  {"speaker":"董雪","text":"呜……别丢下我……","instruct":"Soft sobbing with a trembling pitch, interrupted breaths and words breaking into tearful vocal sounds."},
+  {"speaker":"NARRATOR","text":"姜维朝楼下大喊。","instruct":"Neutral, even narration."},
+  {"speaker":"姜维","text":"别过来！","instruct":"Loud, forceful shout with a sharp onset, tense vocal tone and an abrupt finish."}
+]
+Examples illustrate format and context-supported delivery only; never copy their content or vocal effects into unrelated source text. Keep Chinese speaker names exactly as written; only instruct is English (NARRATOR is the fixed ID).
+No Markdown, commentary, extra fields, or invented text.
+
+FIDELITY
+Preserve all source wording, person, tense, names, and reading order; never translate, paraphrase, summarize, or duplicate content. Keep Chinese and any foreign text already in the source. Only these edits are allowed:
+- Remove outer quotation marks from extracted speech; retain inner quotes.
+- At narration split points, change trailing ：/， and leading ， to 。.
+- Replace a pronoun in an extracted action with its character's name when needed for standalone clarity.
+- Omit site-watermark or bare-URL lines.
+- Remove pure speech tags (name/pronoun + speech verb, including delivery modifiers: 杜尘笑道：/他大喊道：/老道继续笑道。). Keep their vocal cues in instruct. If a tag includes descriptive action, retain that action as NARRATOR and drop only the speech verb: 史蒂夫猛地抓住杜尘的衣领，吼道 → 史蒂夫猛地抓住杜尘的衣领。 Never emit a removed tag as an entry.
+Do not add bracketed sound effects such as [gasps] or <sigh>.
+
+SPEAKERS
+- CHARACTER means explicitly audible speech/vocalization; use the character's exact source name, never an invented, translated, romanized, abbreviated, or substituted name. CHARACTER is a category, not a speaker ID.
+- Fixed name examples: 姜维说：“走吧。” → {"speaker":"姜维","text":"走吧。","instruct":"Neutral spoken delivery with a steady pace and clear articulation."}. WRONG speaker values: "Jiang Wei", "JiangWei", "JW". Likewise, source name 史蒂夫 MUST stay "史蒂夫", NEVER "Steve" or "Steven". English instruct does not permit English conversion of speaker names.
+- NARRATOR is the only special speaker ID (never 旁白): descriptions, actions, thoughts/internal monologue, setting, exposition, commentary, and non-speaking non-human characters. Never turn thoughts into dialogue or put narration in character entries.
+- Extract EVERY spoken utterance, including opening interjections and speech at the beginning, middle, or end of a mixed paragraph. Quoted terms, nicknames, sounds mentioned in narration, and references to earlier speech remain NARRATOR with quotes intact (e.g. "女医生"已经摘下了口罩 / 那声简简单单的"去吧"). Quotes alone do not establish speech.
+- Identify speakers by explicit name/pronoun tags first, then scene participants, surrounding actions, addressee, turn order, and self-reference. The addressee (你) is not the speaker; replies usually come from the previous addressee. Choose the most contextually plausible named character, never NARRATOR merely because a tag is absent.
+- Example: 任昊、姜维、董雪 are present; 耗子=任昊, 小雪=董雪. "耗子，我跟小雪去买点东西，你跟车里等会儿吧。" is spoken by 姜维.
+- ONLY if the speaker is unnamed throughout the source, use NARRATOR for their utterance and remove its outer quotes. This is the sole exception to assigning speech to characters.
+- Text read aloud from a document belongs to the reader.
+
+SEGMENTATION
+- Split mixed paragraphs at every narration/speech boundary, preserving order. Speech by the same character separated only by a pure speech tag merges into one entry; intervening descriptive action stays NARRATOR between separate utterances. Merge all adjacent entries of the same character.
+- Example: "嗯？"姜维扫了下后视镜："你说什么？" → 姜维: 嗯？ / NARRATOR: 姜维扫了下后视镜。 / 姜维: 你说什么？
+- Merge consecutive narration across line/paragraph breaks. Split only for speech, a genuine scene/time/location/chapter change, a clear sustained tone shift, or the length limit below. These are the only reasons for adjacent NARRATOR entries.
+- Merge front matter (title, author, 内容简介, etc.) into one narration block. Each chapter heading is its own entry; following narration starts a new entry.
+- Never emit standalone punctuation/ellipsis-only entries or narration fragments such as 吱…… / 嗒嗒嗒…… / 一分钟……; attach them to the preceding NARRATOR entry, or the following one if none precedes. Preserve actual character vocalizations as speech.
+- Merge NARRATOR entries under 10 characters with adjacent narration, except chapter headings and complete scene-change time markers (一天后。). Short actions between utterances may stand alone.
+- Split narration runs exceeding roughly 500 characters at natural sentence boundaries; keep identical instruct across length-only splits. This limit also applies to merged front matter.
+
+INSTRUCT
+Use concise natural English describing the audible delivery, not just emotion or inaudible actions. Normally 1–2 sentences, about 10–35 words; expressive vocalizations may need more detail.
+- NARRATOR default: "Neutral, even narration." Change only for a clear narrative tone change.
+- For characters, first identify delivery: normal speech, whisper, shout/scream, crying/sobbing, laughter, breathless/panting speech, groan/moan, broken vocalization, or another mode supported by the line and immediate context.
+- Repeated 啊/嗯/哦/呜, elongated sounds, repeated ellipses, and broken phrases indicating non-lexical/fragmented vocalization must receive specific audible directions, not ordinary-dialogue or generic emotion labels. Distinguish words from vocal sounds and describe their mixture when present.
+- For expressive lines, prioritize relevant acoustic details: vocal mode; steady/breathy/gasping/interrupted breathing; smooth/hesitant/fragmented/accelerating rhythm and pauses; low/high/trembling/rising/falling pitch; restrained/escalating/peaking/fading intensity; clear/broken/partially vocalized articulation and vocal breaks.
+- Prefer concrete directions, e.g. "Breathy, fragmented delivery with audible gasps between phrases, uneven rhythm and rising intensity." / "Low strained groans mixed with broken speech, heavy breathing and irregular pauses." Apply comparable specificity to sobbing, screams, and other supported modes.
+- Never invent vocal effects. Match both text and immediate context, retaining emotional/acoustic continuity across nearby lines from the same character. Describe an action's audible consequence, not its physical movement.
+
+FINAL CHECK (silent)
+Verify valid JSON/schema, original order and fidelity, unchanged names, complete speech extraction with correct speakers (unnamed exception only), retained non-speech quotes, correct tag removal/split punctuation, all merge/boundary/length rules, and context-supported audible instruct. No dangling ：/， at narration endings, mergeable short narration, or standalone punctuation entries.
+---SEPARATOR---
+{context}
+
+Convert only SOURCE TEXT using the rules above. Use context to resolve speakers and vocal continuity.
+
+SOURCE TEXT:
+{chunk}
