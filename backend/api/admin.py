@@ -138,6 +138,9 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
         db.flush()
     if payload.amount < 0 and account.available_units < -payload.amount:
         raise HTTPException(409, "可用额度不足，不能扣减")
+    before_available = account.available_units
+    before_reserved = account.reserved_units
+    before_consumed = account.consumed_units
     account.available_units += payload.amount
     db.add(
         QuotaTransaction(
@@ -146,6 +149,13 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
             kind="admin_adjust",
             idempotency_key=payload.idempotency_key,
             note=payload.note or "administrator adjustment",
+            actor_user_id=actor.id,
+            available_before=before_available,
+            available_after=account.available_units,
+            reserved_before=before_reserved,
+            reserved_after=account.reserved_units,
+            consumed_before=before_consumed,
+            consumed_after=account.consumed_units,
         )
     )
     db.add(

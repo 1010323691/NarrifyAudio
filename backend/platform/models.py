@@ -206,10 +206,18 @@ class QuotaTransaction(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True)
+    reservation_id: Mapped[str | None] = mapped_column(ForeignKey("quota_reservations.id", name="fk_quota_transactions_reservation_id", ondelete="RESTRICT"), index=True)
+    actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", name="fk_quota_transactions_actor_user_id", ondelete="SET NULL"), index=True)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False)
     note: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    available_before: Mapped[int | None] = mapped_column(Integer)
+    available_after: Mapped[int | None] = mapped_column(Integer)
+    reserved_before: Mapped[int | None] = mapped_column(Integer)
+    reserved_after: Mapped[int | None] = mapped_column(Integer)
+    consumed_before: Mapped[int | None] = mapped_column(Integer)
+    consumed_after: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

@@ -45,6 +45,7 @@ def settle_reservation(db: Session, task: Task, *, note: str = "") -> bool:
         raise ValueError("额度预留账本不一致")
     before_reserved = account.reserved_units
     before_consumed = account.consumed_units
+    before_available = account.available_units
     account.reserved_units -= reservation.units
     account.consumed_units += reservation.units
     reservation.status = "settled"
@@ -53,10 +54,17 @@ def settle_reservation(db: Session, task: Task, *, note: str = "") -> bool:
         QuotaTransaction(
             user_id=task.owner_id,
             task_id=task.id,
+            reservation_id=reservation.id,
             amount=reservation.units,
             kind="settle",
             idempotency_key=f"settle:{task.id}",
             note=note or "task succeeded",
+            available_before=before_available,
+            available_after=account.available_units,
+            reserved_before=before_reserved,
+            reserved_after=account.reserved_units,
+            consumed_before=before_consumed,
+            consumed_after=account.consumed_units,
         )
     )
     return True
@@ -72,6 +80,9 @@ def release_reservation(db: Session, task: Task, *, kind: str = "release", note:
     account = _locked_quota(db, task.owner_id)
     if account.reserved_units < reservation.units:
         raise ValueError("额度预留账本不一致")
+    before_available = account.available_units
+    before_reserved = account.reserved_units
+    before_consumed = account.consumed_units
     account.reserved_units -= reservation.units
     account.available_units += reservation.units
     reservation.status = "released"
@@ -80,10 +91,17 @@ def release_reservation(db: Session, task: Task, *, kind: str = "release", note:
         QuotaTransaction(
             user_id=task.owner_id,
             task_id=task.id,
+            reservation_id=reservation.id,
             amount=reservation.units,
             kind=kind,
             idempotency_key=f"{kind}:{task.id}",
             note=note or "task did not complete",
+            available_before=before_available,
+            available_after=account.available_units,
+            reserved_before=before_reserved,
+            reserved_after=account.reserved_units,
+            consumed_before=before_consumed,
+            consumed_after=account.consumed_units,
         )
     )
     return True

@@ -40,9 +40,17 @@ def list_quota_transactions(user: User = Depends(require_user), db: Session = De
         {
             "id": row.id,
             "task_id": row.task_id,
+            "reservation_id": row.reservation_id,
+            "actor_user_id": row.actor_user_id,
             "amount": row.amount,
             "kind": row.kind,
             "note": row.note,
+            "available_before": row.available_before,
+            "available_after": row.available_after,
+            "reserved_before": row.reserved_before,
+            "reserved_after": row.reserved_after,
+            "consumed_before": row.consumed_before,
+            "consumed_after": row.consumed_after,
             "created_at": row.created_at.isoformat(),
         }
         for row in rows

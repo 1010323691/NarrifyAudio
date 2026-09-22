@@ -123,10 +123,30 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
     db.add(task)
     db.flush()
     if payload.estimated_units:
+        before_available = account.available_units
+        before_reserved = account.reserved_units
+        before_consumed = account.consumed_units
         account.available_units -= payload.estimated_units
         account.reserved_units += payload.estimated_units
-        db.add(QuotaReservation(user_id=user.id, task_id=task.id, units=payload.estimated_units))
-        db.add(QuotaTransaction(user_id=user.id, task_id=task.id, amount=-payload.estimated_units, kind="reserve", idempotency_key=f"reserve:{task.id}"))
+        reservation = QuotaReservation(user_id=user.id, task_id=task.id, units=payload.estimated_units)
+        db.add(reservation)
+        db.flush()
+        db.add(
+            QuotaTransaction(
+                user_id=user.id,
+                task_id=task.id,
+                reservation_id=reservation.id,
+                amount=-payload.estimated_units,
+                kind="reserve",
+                idempotency_key=f"reserve:{task.id}",
+                available_before=before_available,
+                available_after=account.available_units,
+                reserved_before=before_reserved,
+                reserved_after=account.reserved_units,
+                consumed_before=before_consumed,
+                consumed_after=account.consumed_units,
+            )
+        )
     append_task_event(db, task.id, "submitted", {"status": "pending", "estimated_units": payload.estimated_units})
     db.add(OutboxEvent(aggregate_type="task", aggregate_id=task.id, event_type="task.submitted", payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id}))
     db.commit()

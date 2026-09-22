@@ -168,6 +168,9 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     assert "succeeded" in events.text
     quota = client.get("/api/v1/quota")
     assert quota.json()["consumed_units"] == 2
+    ledger = client.get("/api/v1/quota/transactions")
+    assert {item["kind"] for item in ledger.json()} >= {"reserve", "settle"}
+    assert all(item["available_before"] is not None for item in ledger.json())
 
     with SessionLocal() as db:
         account = db.get(UserQuotaAccount, first["user"]["id"])
