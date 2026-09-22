@@ -76,6 +76,15 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
         account = db.get(UserQuotaAccount, user.id)
         assert account is not None
         account.available_units = 3
+    quota_setting = client.get("/api/v1/admin/settings/quota")
+    assert quota_setting.status_code == 200, quota_setting.text
+    updated_setting = client.patch(
+        "/api/v1/admin/settings/quota",
+        headers={"X-CSRF-Token": csrf},
+        json={"units": 5},
+    )
+    assert updated_setting.status_code == 200, updated_setting.text
+    assert updated_setting.json()["initial_units"] == 5
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Admin task"}).json()
     submitted = client.post(
         "/api/v1/tasks",
@@ -95,6 +104,12 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
     quota = client.get("/api/v1/quota").json()
     assert quota["available_units"] == 3
     assert quota["reserved_units"] == 0
+    reset_setting = client.patch(
+        "/api/v1/admin/settings/quota",
+        headers={"X-CSRF-Token": csrf},
+        json={"units": 0},
+    )
+    assert reset_setting.status_code == 200, reset_setting.text
 
 
 def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client: TestClient):

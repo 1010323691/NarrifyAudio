@@ -17,6 +17,8 @@ const { push: toast } = useToast()
 const users = ref<adminApi.AdminUser[]>([])
 const storage = ref<adminApi.StorageSettings | null>(null)
 const rootPath = ref('')
+const initialQuota = ref('0')
+const quotaSettings = ref<adminApi.QuotaSettings | null>(null)
 const quotaDraft = ref<Record<string, string>>({})
 const tasks = ref<adminApi.AdminTask[]>([])
 const workers = ref<adminApi.WorkerStatus[]>([])
@@ -30,12 +32,14 @@ function isLastActiveAdmin(user: adminApi.AdminUser): boolean {
 async function load() {
   busy.value = true
   try {
-    const [userRows, storageSettings, taskRows, workerRows, queueStatus] = await Promise.all([
-      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(),
+    const [userRows, storageSettings, quota, taskRows, workerRows, queueStatus] = await Promise.all([
+      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.getQuotaSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(),
     ])
     users.value = userRows
     storage.value = storageSettings
     rootPath.value = storageSettings.root_path
+    quotaSettings.value = quota
+    initialQuota.value = String(quota.initial_units)
     tasks.value = taskRows
     workers.value = workerRows
     queue.value = queueStatus
@@ -43,6 +47,17 @@ async function load() {
     toast({ title: '管理数据加载失败', description: error?.message || String(error), variant: 'destructive' })
   } finally {
     busy.value = false
+  }
+}
+
+async function saveInitialQuota() {
+  const units = Number(initialQuota.value)
+  if (!Number.isInteger(units) || units < 0) return
+  try {
+    quotaSettings.value = await adminApi.updateQuotaSettings(units)
+    toast({ title: '初始额度已保存', variant: 'success' })
+  } catch (error: any) {
+    toast({ title: '保存初始额度失败', description: error?.message || String(error), variant: 'destructive' })
   }
 }
 
@@ -122,6 +137,15 @@ onMounted(load)
           <Button @click="saveRoot"><Save class="h-4 w-4" />保存</Button>
         </div>
         <p v-if="storage" class="text-xs text-muted-foreground">来源：{{ storage.source === 'admin' ? '管理员设置' : '部署默认值' }}</p>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>新用户初始额度</CardTitle><CardDescription>仅影响之后注册的用户，默认 0；已有用户额度不会被覆盖。</CardDescription></CardHeader>
+      <CardContent class="flex flex-wrap items-end gap-3">
+        <div><Label for="initial-quota">额度单位</Label><Input id="initial-quota" v-model="initialQuota" class="mt-1 w-40" type="number" min="0" step="1" /></div>
+        <Button @click="saveInitialQuota"><Save class="h-4 w-4" />保存</Button>
+        <span v-if="quotaSettings" class="text-xs text-muted-foreground">来源：{{ quotaSettings.source === 'admin' ? '管理员设置' : '部署默认值' }}</span>
       </CardContent>
     </Card>
 

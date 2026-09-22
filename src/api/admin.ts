@@ -15,6 +15,11 @@ export interface StorageSettings {
   source: 'admin' | 'deployment-default'
 }
 
+export interface QuotaSettings {
+  initial_units: number
+  source: 'admin' | 'deployment-default'
+}
+
 export interface AdminTask {
   id: string
   owner_username: string
@@ -55,6 +60,14 @@ export function getStorageSettings(): Promise<StorageSettings> {
 
 export function updateStorageRoot(root_path: string): Promise<StorageSettings> {
   return http.patch('/api/v1/admin/settings/storage', { root_path })
+}
+
+export function getQuotaSettings(): Promise<QuotaSettings> {
+  return http.get('/api/v1/admin/settings/quota')
+}
+
+export function updateQuotaSettings(units: number): Promise<QuotaSettings> {
+  return http.patch('/api/v1/admin/settings/quota', { units })
 }
 
 export function adjustQuota(userId: string, amount: number, idempotency_key: string, note = ''): Promise<Record<string, number | string>> {

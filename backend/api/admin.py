@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, Project, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace, utcnow
@@ -29,6 +30,10 @@ class UserState(BaseModel):
 
 class StorageRootUpdate(BaseModel):
     root_path: str
+
+
+class InitialQuotaUpdate(BaseModel):
+    units: int = Field(ge=0, le=10_000_000)
 
 
 class QuotaAdjustment(BaseModel):
@@ -109,6 +114,33 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
     db.add(AuditLog(actor_user_id=actor.id, action="admin.storage_root_changed", target_type="system_config", target_id="storage.root", metadata_json={"path": str(resolved)}))
     db.commit()
     return {"root_path": str(resolved), "source": "admin"}
+
+
+@router.get("/settings/quota")
+def get_quota_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    config = db.get(SystemConfig, "quota.initial_units")
+    if config is None:
+        return {"initial_units": settings.initial_quota_units, "source": "deployment-default"}
+    try:
+        units = max(0, int(config.value.get("units", settings.initial_quota_units))) if isinstance(config.value, dict) else settings.initial_quota_units
+    except (TypeError, ValueError):
+        units = settings.initial_quota_units
+    return {"initial_units": units, "source": "admin"}
+
+
+@router.patch("/settings/quota")
+def update_quota_settings(payload: InitialQuotaUpdate, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    if actor.role != "admin":
+        raise HTTPException(403, "需要管理员权限")
+    config = db.get(SystemConfig, "quota.initial_units")
+    if config is None:
+        config = SystemConfig(key="quota.initial_units", value={"units": payload.units})
+        db.add(config)
+    else:
+        config.value = {"units": payload.units}
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.initial_quota_changed", target_type="system_config", target_id="quota.initial_units", metadata_json={"units": payload.units}))
+    db.commit()
+    return {"initial_units": payload.units, "source": "admin"}
 
 
 @router.get("/users")

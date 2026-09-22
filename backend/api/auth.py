@@ -12,6 +12,7 @@ from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
 from ..platform.models import AuditLog, Project, User, UserQuotaAccount, Workspace, new_id
+from ..platform.quota_config import initial_quota_units
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
 from ..platform.storage import user_workspace_root
 
@@ -57,7 +58,7 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
     user = User(email=email, username=username, display_name=payload.display_name.strip(), password_hash=hash_password(payload.password), role="user")
     db.add(user)
     db.flush()
-    db.add(UserQuotaAccount(user_id=user.id, available_units=0))
+    db.add(UserQuotaAccount(user_id=user.id, available_units=initial_quota_units(db)))
     workspace_id = new_id()
     workspace = Workspace(
         id=workspace_id,

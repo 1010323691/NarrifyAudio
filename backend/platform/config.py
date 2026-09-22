@@ -38,6 +38,7 @@ class PlatformSettings:
     task_max_attempts: int = int(os.getenv("NARRIFY_TASK_MAX_ATTEMPTS", "3"))
     bootstrap_admin_email: str = os.getenv("NARRIFY_BOOTSTRAP_ADMIN_EMAIL", "")
     bootstrap_admin_password: str = os.getenv("NARRIFY_BOOTSTRAP_ADMIN_PASSWORD", "")
+    initial_quota_units: int = int(os.getenv("NARRIFY_INITIAL_QUOTA_UNITS", "0"))
 
 
 settings = PlatformSettings()
