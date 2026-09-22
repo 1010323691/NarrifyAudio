@@ -6,7 +6,7 @@
 
 ## 多用户平台开发配置
 
-本地开发默认使用项目目录下的 SQLite 文件，仅用于方便启动；部署时必须设置 PostgreSQL 连接串，并关闭自动建表，使用 Alembic 迁移：
+应用数据库统一使用 PostgreSQL。默认连接串指向本机 PostgreSQL；部署时应显式设置连接串，并关闭自动建表，使用 Alembic 迁移：
 
 ```powershell
 $env:NARRIFY_DATABASE_URL = "postgresql+psycopg://narrify:change-me@localhost:5432/narrify"
@@ -14,7 +14,11 @@ $env:NARRIFY_AUTO_CREATE_SCHEMA = "false"
 $env:NARRIFY_STORAGE_ROOT = "D:\\narrify-storage"
 $env:NARRIFY_BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
 $env:NARRIFY_BOOTSTRAP_ADMIN_PASSWORD = "replace-with-a-long-secret"
+
+python -m alembic upgrade head
 ```
+
+测试套件会显式使用临时 SQLite 数据库，不代表应用运行时数据库配置。
 
 生产环境还应设置 `NARRIFY_COOKIE_SECURE=true`，并通过反向代理提供 HTTPS。注册、登录、项目和上传接口位于 `/api/auth` 与 `/api/v1/projects`；持久化任务提交位于 `/api/v1/tasks`，提交会在同一数据库事务内写入任务、额度预留、流水和 Outbox 事件。
 

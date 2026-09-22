@@ -17,7 +17,8 @@ def _bool_env(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class PlatformSettings:
     database_url: str = os.getenv(
-        "NARRIFY_DATABASE_URL", "sqlite:///./.narrify/narrify.db"
+        "NARRIFY_DATABASE_URL",
+        "postgresql+psycopg://narrify:change-me@localhost:5432/narrify",
     )
     storage_root: Path = Path(
         os.getenv("NARRIFY_STORAGE_ROOT", str(PROJECT_ROOT / "storage"))
@@ -36,4 +37,3 @@ class PlatformSettings:
 
 
 settings = PlatformSettings()
-
