@@ -261,9 +261,9 @@ async function loadFiles() {
   filesLoading.value = true
   filesError.value = ''
   try {
-    const r = await listDir('02_split_text')
+    const r = await listDir('02_split_text', true)
     // 已生成判断：03_parsed_json/ 下是否已有 <文件基名>.json（后端对缺失目录返回空列表）。
-    const out = await listDir('03_parsed_json').catch(() => null)
+    const out = await listDir('03_parsed_json', true).catch(() => null)
     const outNames = new Set((out?.items ?? []).map((i) => i.name))
     const txts: ParseFile[] = r.items
       .filter((i) => !i.is_dir && i.name.toLowerCase().endsWith('.txt'))

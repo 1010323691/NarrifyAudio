@@ -18,6 +18,7 @@ export async function uploadFile(file: File): Promise<UploadResult> {
  * ``module`` is the directory name (e.g. ``02_split_text``). Used by the parse page to
  * enumerate the split files the user can select — the backend does the reading.
  */
-export function listDir(module: string): Promise<DirListResult> {
-  return http.get<DirListResult>(`/api/files/list/${encodeURIComponent(module)}`)
+export function listDir(module: string, recursive = false): Promise<DirListResult> {
+  const suffix = recursive ? '?recursive=true' : ''
+  return http.get<DirListResult>(`/api/files/list/${encodeURIComponent(module)}${suffix}`)
 }

@@ -130,6 +130,23 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
         files={"file": ("legacy.txt", b"legacy content", "text/plain")},
     )
     assert uploaded.status_code == 200, uploaded.text
+    legacy_file = uploaded.json()
+    submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": legacy_file["project_id"],
+            "task_type": "book.split",
+            "payload": {"input_file_id": legacy_file["file_id"], "whole_book": True},
+            "estimated_units": 0,
+            "idempotency_key": f"legacy-book-split-{uuid.uuid4()}",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    assert process_task_message({"payload": {"task_id": submitted.json()["id"]}}, worker_id="test-worker") == "succeeded"
+    split_listing = client.get("/api/files/list/02_split_text?recursive=true")
+    assert split_listing.status_code == 200
+    assert split_listing.json()["items"]
 
 
 def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClient):

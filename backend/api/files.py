@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,7 @@ def _module_dir(module: str) -> Path:
 
 
 @router.get("/list/{module}")
-def list_module(module: str) -> dict:
+def list_module(module: str, recursive: bool = Query(False)) -> dict:
     if module not in _MODULE_ATTRS:
         raise HTTPException(404, "未知模块")
     if not is_workspace_set():
@@ -44,14 +44,22 @@ def list_module(module: str) -> dict:
     d = _module_dir(module)
     if not d.exists():
         return {"path": str(d), "items": []}
-    items = [
-        {
-            "name": p.name,
-            "is_dir": p.is_dir(),
-            "size": (p.stat().st_size if p.is_file() else None),
-        }
-        for p in sorted(d.iterdir())
-    ]
+    paths = sorted(d.rglob("*") if recursive else d.iterdir())
+    items = []
+    for p in paths:
+        resolved = p.resolve()
+        if not resolved.is_relative_to(d.resolve()) or p.is_symlink():
+            continue
+        if recursive and p.is_dir():
+            continue
+        relative = p.relative_to(d).as_posix()
+        items.append(
+            {
+                "name": relative if recursive else p.name,
+                "is_dir": p.is_dir(),
+                "size": (p.stat().st_size if p.is_file() else None),
+            }
+        )
     return {"path": str(d), "items": items}
 
 
