@@ -13,6 +13,7 @@ from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
 from ..platform.models import AuditLog, Project, User, UserQuotaAccount, Workspace, new_id
 from ..platform.quota_config import initial_quota_units
+from ..platform.registration_config import registration_enabled
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
 from ..platform.storage import user_workspace_root
 
@@ -45,7 +46,7 @@ def _set_cookies(response: Response, token: str, csrf: str) -> None:
 
 @router.post("/register", status_code=201)
 def register(payload: Credentials, response: Response, db: Session = Depends(get_db)) -> dict:
-    if not settings.registration_enabled:
+    if not registration_enabled(db):
         raise HTTPException(403, "当前已关闭注册")
     email = payload.email.strip().lower()
     if not EMAIL_RE.match(email):

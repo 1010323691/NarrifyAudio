@@ -85,6 +85,21 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
     )
     assert updated_setting.status_code == 200, updated_setting.text
     assert updated_setting.json()["initial_units"] == 5
+    registration_setting = client.get("/api/v1/admin/settings/registration")
+    assert registration_setting.status_code == 200, registration_setting.text
+    disabled_registration = client.patch(
+        "/api/v1/admin/settings/registration",
+        headers={"X-CSRF-Token": csrf},
+        json={"enabled": False},
+    )
+    assert disabled_registration.status_code == 200, disabled_registration.text
+    assert client.post("/api/auth/register", json={"email": f"{uuid.uuid4()}@example.com", "password": "a-strong-test-password"}).status_code == 403
+    enabled_registration = client.patch(
+        "/api/v1/admin/settings/registration",
+        headers={"X-CSRF-Token": csrf},
+        json={"enabled": True},
+    )
+    assert enabled_registration.status_code == 200, enabled_registration.text
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Admin task"}).json()
     submitted = client.post(
         "/api/v1/tasks",

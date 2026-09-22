@@ -20,6 +20,11 @@ export interface QuotaSettings {
   source: 'admin' | 'deployment-default'
 }
 
+export interface RegistrationSettings {
+  enabled: boolean
+  source: 'admin' | 'deployment-default'
+}
+
 export interface AdminTask {
   id: string
   owner_username: string
@@ -68,6 +73,14 @@ export function getQuotaSettings(): Promise<QuotaSettings> {
 
 export function updateQuotaSettings(units: number): Promise<QuotaSettings> {
   return http.patch('/api/v1/admin/settings/quota', { units })
+}
+
+export function getRegistrationSettings(): Promise<RegistrationSettings> {
+  return http.get('/api/v1/admin/settings/registration')
+}
+
+export function updateRegistrationSettings(enabled: boolean): Promise<RegistrationSettings> {
+  return http.patch('/api/v1/admin/settings/registration', { enabled })
 }
 
 export function adjustQuota(userId: string, amount: number, idempotency_key: string, note = ''): Promise<Record<string, number | string>> {

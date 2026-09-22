@@ -36,6 +36,10 @@ class InitialQuotaUpdate(BaseModel):
     units: int = Field(ge=0, le=10_000_000)
 
 
+class RegistrationUpdate(BaseModel):
+    enabled: bool
+
+
 class QuotaAdjustment(BaseModel):
     amount: int
     idempotency_key: str = Field(min_length=8, max_length=180)
@@ -141,6 +145,29 @@ def update_quota_settings(payload: InitialQuotaUpdate, actor: User = Depends(req
     db.add(AuditLog(actor_user_id=actor.id, action="admin.initial_quota_changed", target_type="system_config", target_id="quota.initial_units", metadata_json={"units": payload.units}))
     db.commit()
     return {"initial_units": payload.units, "source": "admin"}
+
+
+@router.get("/settings/registration")
+def get_registration_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    config = db.get(SystemConfig, "registration.enabled")
+    if config is None:
+        return {"enabled": settings.registration_enabled, "source": "deployment-default"}
+    enabled = bool(config.value.get("enabled", settings.registration_enabled)) if isinstance(config.value, dict) else settings.registration_enabled
+    return {"enabled": enabled, "source": "admin"}
+
+
+@router.patch("/settings/registration")
+def update_registration_settings(payload: RegistrationUpdate, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    if actor.role != "admin":
+        raise HTTPException(403, "需要管理员权限")
+    config = db.get(SystemConfig, "registration.enabled")
+    if config is None:
+        db.add(SystemConfig(key="registration.enabled", value={"enabled": payload.enabled}))
+    else:
+        config.value = {"enabled": payload.enabled}
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.registration_changed", target_type="system_config", target_id="registration.enabled", metadata_json={"enabled": payload.enabled}))
+    db.commit()
+    return {"enabled": payload.enabled, "source": "admin"}
 
 
 @router.get("/users")

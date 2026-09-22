@@ -19,6 +19,8 @@ const storage = ref<adminApi.StorageSettings | null>(null)
 const rootPath = ref('')
 const initialQuota = ref('0')
 const quotaSettings = ref<adminApi.QuotaSettings | null>(null)
+const registrationSettings = ref<adminApi.RegistrationSettings | null>(null)
+const registrationEnabled = ref(true)
 const quotaDraft = ref<Record<string, string>>({})
 const tasks = ref<adminApi.AdminTask[]>([])
 const workers = ref<adminApi.WorkerStatus[]>([])
@@ -32,14 +34,16 @@ function isLastActiveAdmin(user: adminApi.AdminUser): boolean {
 async function load() {
   busy.value = true
   try {
-    const [userRows, storageSettings, quota, taskRows, workerRows, queueStatus] = await Promise.all([
-      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.getQuotaSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(),
+    const [userRows, storageSettings, quota, registration, taskRows, workerRows, queueStatus] = await Promise.all([
+      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.getQuotaSettings(), adminApi.getRegistrationSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(),
     ])
     users.value = userRows
     storage.value = storageSettings
     rootPath.value = storageSettings.root_path
     quotaSettings.value = quota
     initialQuota.value = String(quota.initial_units)
+    registrationSettings.value = registration
+    registrationEnabled.value = registration.enabled
     tasks.value = taskRows
     workers.value = workerRows
     queue.value = queueStatus
@@ -47,6 +51,15 @@ async function load() {
     toast({ title: '管理数据加载失败', description: error?.message || String(error), variant: 'destructive' })
   } finally {
     busy.value = false
+  }
+}
+
+async function saveRegistration() {
+  try {
+    registrationSettings.value = await adminApi.updateRegistrationSettings(registrationEnabled.value)
+    toast({ title: registrationEnabled.value ? '注册已开启' : '注册已关闭', variant: 'success' })
+  } catch (error: any) {
+    toast({ title: '保存注册设置失败', description: error?.message || String(error), variant: 'destructive' })
   }
 }
 
@@ -137,6 +150,15 @@ onMounted(load)
           <Button @click="saveRoot"><Save class="h-4 w-4" />保存</Button>
         </div>
         <p v-if="storage" class="text-xs text-muted-foreground">来源：{{ storage.source === 'admin' ? '管理员设置' : '部署默认值' }}</p>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle>用户注册</CardTitle><CardDescription>关闭后阻止新用户注册，不影响已有用户登录。</CardDescription></CardHeader>
+      <CardContent class="flex flex-wrap items-center gap-3">
+        <label class="flex items-center gap-2 text-sm"><input v-model="registrationEnabled" type="checkbox" class="h-4 w-4 accent-primary" />允许新用户注册</label>
+        <Button @click="saveRegistration"><Save class="h-4 w-4" />保存</Button>
+        <span v-if="registrationSettings" class="text-xs text-muted-foreground">来源：{{ registrationSettings.source === 'admin' ? '管理员设置' : '部署默认值' }}</span>
       </CardContent>
     </Card>
 
