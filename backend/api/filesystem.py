@@ -1,13 +1,16 @@
 """Backend-owned folder browser and folder management endpoints."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..core import filesystem
 from ..core import filesystem_shortcuts
+from ..platform.deps import require_admin
 
-router = APIRouter(prefix="/api/filesystem", tags=["filesystem"])
+# This is a desktop/operations compatibility surface that can enumerate the
+# server filesystem.  Ordinary users use managed workspaces instead.
+router = APIRouter(prefix="/api/filesystem", tags=["filesystem"], dependencies=[Depends(require_admin)])
 
 
 class CreateFolderRequest(BaseModel):

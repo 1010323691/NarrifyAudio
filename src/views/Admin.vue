@@ -23,6 +23,10 @@ const workers = ref<adminApi.WorkerStatus[]>([])
 const queue = ref<adminApi.QueueStatus | null>(null)
 const busy = ref(false)
 
+function isLastActiveAdmin(user: adminApi.AdminUser): boolean {
+  return user.role === 'admin' && user.is_active && users.value.filter(item => item.role === 'admin' && item.is_active).length <= 1
+}
+
 async function load() {
   busy.value = true
   try {
@@ -58,6 +62,16 @@ async function toggleUser(user: adminApi.AdminUser) {
     toast({ title: user.is_active ? '用户已启用' : '用户已禁用', variant: 'success' })
   } catch (error: any) {
     toast({ title: '更新用户失败', description: error?.message || String(error), variant: 'destructive' })
+  }
+}
+
+async function toggleRole(user: adminApi.AdminUser) {
+  try {
+    const updated = await adminApi.updateUser(user.id, { role: user.role === 'admin' ? 'user' : 'admin' })
+    user.role = updated.role
+    toast({ title: user.role === 'admin' ? '已授予管理员角色' : '已移除管理员角色', variant: 'success' })
+  } catch (error: any) {
+    toast({ title: '更新角色失败', description: error?.message || String(error), variant: 'destructive' })
   }
 }
 
@@ -110,10 +124,10 @@ onMounted(load)
             <tbody>
               <tr v-for="user in users" :key="user.id" class="border-b last:border-0">
                 <td class="p-3"><div class="font-medium">{{ user.display_name }}</div><div class="text-xs text-muted-foreground">{{ user.username }} · {{ user.email }}</div></td>
-                <td class="p-3"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /></td>
+                <td class="p-3"><div class="flex items-center gap-2"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><Button variant="ghost" size="sm" :disabled="isLastActiveAdmin(user)" @click="toggleRole(user)">{{ user.role === 'admin' ? '降为用户' : '设为管理员' }}</Button></div></td>
                 <td class="p-3"><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></td>
                 <td class="p-3"><div class="flex gap-2"><Input v-model="quotaDraft[user.id]" class="w-28" type="number" placeholder="+/- 单位" /><Button variant="outline" size="sm" @click="adjust(user)">调整</Button></div></td>
-                <td class="p-3"><Button variant="ghost" size="sm" :disabled="user.role === 'admin' && user.is_active" @click="toggleUser(user)"><UserX v-if="user.is_active" class="h-4 w-4" /><UserCheck v-else class="h-4 w-4" />{{ user.is_active ? '禁用' : '启用' }}</Button></td>
+                <td class="p-3"><Button variant="ghost" size="sm" :disabled="isLastActiveAdmin(user)" @click="toggleUser(user)"><UserX v-if="user.is_active" class="h-4 w-4" /><UserCheck v-else class="h-4 w-4" />{{ user.is_active ? '禁用' : '启用' }}</Button></td>
               </tr>
             </tbody>
           </table>
