@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Literal
 
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat
+from ..platform.models import AuditLog, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root
 from ..platform.worker_registry import is_stale
@@ -53,10 +54,45 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
     if not path.is_absolute():
         raise HTTPException(422, "存储根目录必须是绝对路径")
     resolved = path.resolve()
+    previous = configured_storage_root(db)
+    existing_config = db.get(SystemConfig, "storage.root")
+    if resolved == previous and existing_config is not None:
+        return {"root_path": str(resolved), "source": "admin" if db.get(SystemConfig, "storage.root") else "deployment-default"}
+    if resolved.is_relative_to(previous) or previous.is_relative_to(resolved):
+        raise HTTPException(422, "新旧存储根目录不能互相嵌套")
     try:
         resolved.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise HTTPException(422, f"无法创建存储根目录：{exc}") from exc
+    moved: list[tuple[Path, Path]] = []
+    workspaces = db.scalars(select(Workspace)).all()
+    try:
+        for workspace in workspaces:
+            source = (previous / workspace.directory_key).resolve()
+            target = (resolved / workspace.directory_key).resolve()
+            if not source.is_relative_to(previous) or not target.is_relative_to(resolved):
+                raise HTTPException(422, "工作空间目录键越界")
+            if source == target or not source.exists():
+                if not source.exists() and target.exists():
+                    continue
+                continue
+            if source.is_symlink() or target.exists():
+                raise HTTPException(409, f"工作空间目录迁移冲突：{workspace.directory_key}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+            moved.append((source, target))
+    except HTTPException:
+        for source, target in reversed(moved):
+            if target.exists() and not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+        raise
+    except OSError as exc:
+        for source, target in reversed(moved):
+            if target.exists() and not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+        raise HTTPException(422, f"工作空间目录迁移失败：{exc}") from exc
     config = db.get(SystemConfig, "storage.root")
     if config is None:
         config = SystemConfig(key="storage.root", value={"path": str(resolved)})

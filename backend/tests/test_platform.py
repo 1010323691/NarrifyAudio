@@ -75,7 +75,8 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
     assert workspace["directory_key"].startswith(f"{first['user']['username']}/")
     with SessionLocal() as db:
         storage_root = configured_storage_root(db)
-    assert (storage_root / workspace["directory_key"]).is_dir()
+    old_workspace_path = storage_root / workspace["directory_key"]
+    assert old_workspace_path.is_dir()
 
     with SessionLocal.begin() as db:
         user = db.get(User, first["user"]["id"])
@@ -86,10 +87,23 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
     updated = client.patch("/api/v1/admin/settings/storage", headers={"X-CSRF-Token": csrf}, json={"root_path": str(root)})
     assert updated.status_code == 200, updated.text
     assert Path(updated.json()["root_path"]) == root
+    assert (root / workspace["directory_key"]).is_dir()
+    assert not old_workspace_path.exists()
     assert client.get("/api/v1/admin/settings/storage").json()["source"] == "admin"
     assert client.get("/api/v1/admin/tasks").status_code == 200
     assert client.get("/api/v1/admin/workers").status_code == 200
     assert client.get("/api/v1/admin/queue").status_code == 200
+
+
+def test_workspaces_for_different_users_have_separate_username_roots(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    first_info = client.get("/api/workspace").json()
+    second = _register(client, f"{uuid.uuid4()}@example.com")
+    second_info = client.get("/api/workspace").json()
+
+    assert first_info["path"] != second_info["path"]
+    assert first_info["path"].replace("\\", "/").split("/")[-2] == first["user"]["username"]
+    assert second_info["path"].replace("\\", "/").split("/")[-2] == second["user"]["username"]
 
 
 def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: TestClient):
