@@ -178,10 +178,11 @@ class UserQuotaAccount(Base):
     available_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     reserved_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     frozen_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    consumed_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="quota_account")
-    __table_args__ = (CheckConstraint("available_units >= 0 and reserved_units >= 0 and frozen_units >= 0", name="ck_quota_nonnegative"),)
+    __table_args__ = (CheckConstraint("available_units >= 0 and reserved_units >= 0 and frozen_units >= 0 and consumed_units >= 0", name="ck_quota_nonnegative"),)
 
 
 class QuotaReservation(Base):

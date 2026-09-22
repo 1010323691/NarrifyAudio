@@ -5,6 +5,7 @@ from typing import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from .config import settings
 
@@ -14,6 +15,8 @@ class Base(DeclarativeBase):
 
 
 def _engine_kwargs() -> dict:
+    if settings.database_url in {"sqlite://", "sqlite:///:memory:"}:
+        return {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool}
     if settings.database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
     return {"pool_pre_ping": True}
@@ -41,4 +44,3 @@ def initialize_schema() -> None:
     from . import models  # noqa: F401  (registers all model metadata)
 
     Base.metadata.create_all(engine)
-

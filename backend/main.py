@@ -25,6 +25,7 @@ from .api import filesystem as api_filesystem
 from .api import music as api_music
 from .api import platform_tasks as api_platform_tasks
 from .api import projects as api_projects
+from .api import quota as api_quota
 from .api import workspaces as api_workspaces
 from .api import script as api_script
 from .api import tasks as api_tasks
@@ -44,6 +45,7 @@ PORT = 8642
 ROUTERS = [
     api_auth.router,
     api_projects.router,
+    api_quota.router,
     api_workspaces.router,
     api_platform_tasks.router,
     api_admin.router,

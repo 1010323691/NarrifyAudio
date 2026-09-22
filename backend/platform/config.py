@@ -32,6 +32,8 @@ class PlatformSettings:
     max_upload_bytes: int = int(
         os.getenv("NARRIFY_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))
     )
+    task_lease_seconds: int = int(os.getenv("NARRIFY_TASK_LEASE_SECONDS", "120"))
+    task_max_attempts: int = int(os.getenv("NARRIFY_TASK_MAX_ATTEMPTS", "3"))
     bootstrap_admin_email: str = os.getenv("NARRIFY_BOOTSTRAP_ADMIN_EMAIL", "")
     bootstrap_admin_password: str = os.getenv("NARRIFY_BOOTSTRAP_ADMIN_PASSWORD", "")
 

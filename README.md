@@ -22,6 +22,15 @@ python -m alembic upgrade head
 
 生产环境还应设置 `NARRIFY_COOKIE_SECURE=true`，并通过反向代理提供 HTTPS。注册、登录、项目和上传接口位于 `/api/auth` 与 `/api/v1/projects`；持久化任务提交位于 `/api/v1/tasks`，提交会在同一数据库事务内写入任务、额度预留、流水和 Outbox 事件。
 
+Worker 通过 Redis Streams 消费 Outbox 事件：
+
+```powershell
+$env:NARRIFY_REDIS_URL = "redis://localhost:6379/0"
+python -m backend.worker
+```
+
+当前已接入真实持久化 Worker 的 `text.format` 与 `book.analyze` 任务：输入使用 `input_file_id`，输出登记为项目产物；Worker 使用租约和 attempt fencing，租约过期后由恢复扫描重新投递。任务事件可通过 `/api/v1/tasks/{task_id}/events` 按 `Last-Event-ID` 补发。用户额度查询位于 `/api/v1/quota`，管理员后台位于前端 `/admin`。
+
 所有平台工作空间都由服务端统一管理。管理员通过 `/api/v1/admin/settings/storage` 设置存储根目录；用户的目录固定落在 `<root>/<username>/<workspace-or-project-id>/` 下，客户端不能提交物理路径。项目文件、显式工作空间和后续产物均应复用这一规则；删除工作空间只做软删除并保留目录，物理清理由后续保留策略任务执行。
 
 ## 功能

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_user
-from ..platform.models import Project, ProjectFile, User, utcnow
+from ..platform.models import Project, ProjectFile, User, new_id, utcnow
 from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, user_workspace_root
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -105,10 +105,7 @@ def list_files(project_id: str, user: User = Depends(require_user), db: Session 
 @router.post("/{project_id}/files", status_code=201)
 async def upload_file(project_id: str, upload: UploadFile = File(...), user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     project = _owned_project(db, user, project_id)
-    file_id = ProjectFile.__table__.c.id.default.arg() if callable(ProjectFile.__table__.c.id.default.arg) else None
-    if not file_id:
-        import uuid
-        file_id = str(uuid.uuid4())
+    file_id = new_id()
     key = project_object_key(user.username, project.id, file_id, upload.filename or "upload.bin")
     destination = object_path(key, configured_storage_root(db))
     destination.parent.mkdir(parents=True, exist_ok=True)

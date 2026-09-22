@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import MainLayout from '@/layouts/MainLayout.vue'
 import Login from '@/views/Login.vue'
+import { useAuthStore } from '@/stores/auth'
 
 // Hash history: works in a plain browser with no server-side route handling.
 // All modules live under the persistent MainLayout so the left sidebar stays
@@ -69,6 +70,12 @@ const router = createRouter({
           meta: { title: '设置' },
         },
         {
+          path: 'admin',
+          name: 'admin',
+          component: () => import('@/views/Admin.vue'),
+          meta: { title: '管理后台', requiresAdmin: true },
+        },
+        {
           path: 'music',
           name: 'music',
           component: () => import('@/views/MusicLibrary.vue'),
@@ -77,6 +84,17 @@ const router = createRouter({
       ],
     },
   ],
+})
+
+router.beforeEach(async (to) => {
+  const auth = useAuthStore()
+  await auth.load()
+  if (to.path === '/login') {
+    return auth.isAuthenticated ? '/dashboard' : true
+  }
+  if (!auth.isAuthenticated) return '/login'
+  if (to.meta.requiresAdmin && auth.user?.role !== 'admin') return '/dashboard'
+  return true
 })
 
 export default router

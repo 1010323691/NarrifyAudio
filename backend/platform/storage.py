@@ -46,6 +46,23 @@ def project_object_key(username: str, project_id: str, file_id: str, name: str) 
     return f"{safe_display_name(username)}/{project_id}/{file_id}/{safe_display_name(name)}"
 
 
+def task_attempt_path(
+    db: Session | None,
+    username: str,
+    project_id: str,
+    task_id: str,
+    attempt_id: str,
+    name: str,
+) -> Path:
+    """Return an isolated temporary output path for one durable attempt."""
+    root = configured_storage_root(db)
+    relative = Path(safe_display_name(username)) / project_id / ".tasks" / task_id / attempt_id / safe_display_name(name)
+    candidate = (root / relative).resolve()
+    if not candidate.is_relative_to(root.resolve()):
+        raise ValueError("非法任务临时路径")
+    return candidate
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

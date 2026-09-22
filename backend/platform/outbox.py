@@ -45,6 +45,7 @@ def publish_pending(redis_url: str | None = None, limit: int = 100) -> int:
             .where(OutboxEvent.published_at.is_(None), OutboxEvent.available_at <= utcnow())
             .order_by(OutboxEvent.created_at)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         ).all()
         for event in rows:
             try:
@@ -58,4 +59,3 @@ def publish_pending(redis_url: str | None = None, limit: int = 100) -> int:
             db.commit()
             published += 1
     return published
-

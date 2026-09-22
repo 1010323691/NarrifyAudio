@@ -13,7 +13,9 @@ import {
   Settings,
   Disc3,
   Headphones,
+  ShieldCheck,
 } from 'lucide-vue-next'
+import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { useSettingsStore } from '@/stores/settings'
 import { cn } from '@/lib/utils'
@@ -21,6 +23,7 @@ import { cn } from '@/lib/utils'
 const route = useRoute()
 const app = useAppStore()
 const settings = useSettingsStore()
+const auth = useAuthStore()
 
 const ALL_ITEMS = [
   { to: '/dashboard', label: '开始', icon: LayoutDashboard },
@@ -34,14 +37,13 @@ const ALL_ITEMS = [
   { to: '/settings', label: '设置', icon: Settings },
   // 音乐库 = 全局资源（工作空间外、跨工程共享）——与设置同级、放导航栏最下方。
   { to: '/music', label: '音乐库', icon: Disc3 },
+  { to: '/admin', label: '管理后台', icon: ShieldCheck, admin: true },
 ]
 
 // 「音频分集」导航项受设置 ui.show_audio_split 控制（默认关 = 隐藏）。
 // 背景音乐 / 音乐库恒显示（不受 show_audio_split 过滤）。
 const items = computed(() =>
-  settings.config?.ui.show_audio_split
-    ? ALL_ITEMS
-    : ALL_ITEMS.filter((it) => it.to !== '/audio'),
+  ALL_ITEMS.filter((it) => (!it.admin || auth.user?.role === 'admin') && (settings.config?.ui.show_audio_split || it.to !== '/audio')),
 )
 
 function isActive(to: string) {
@@ -65,7 +67,7 @@ function isActive(to: string) {
       <div class="app-nav__group">
         <div class="app-nav__label">制作流程</div>
         <RouterLink
-          v-for="it in items.filter((item) => !['/settings', '/music'].includes(item.to))"
+          v-for="it in items.filter((item) => !['/settings', '/music', '/admin'].includes(item.to))"
           :key="it.to"
           :to="it.to"
           class="app-nav__item"
@@ -79,7 +81,7 @@ function isActive(to: string) {
       <div class="app-nav__group app-nav__group--secondary">
         <div class="app-nav__label">资源与设置</div>
         <RouterLink
-          v-for="it in items.filter((item) => ['/settings', '/music'].includes(item.to))"
+          v-for="it in items.filter((item) => ['/settings', '/music', '/admin'].includes(item.to))"
           :key="it.to"
           :to="it.to"
           class="app-nav__item"
