@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
-from ..platform.models import AuditLog, User, UserQuotaAccount, Workspace, new_id
+from ..platform.models import AuditLog, Project, User, UserQuotaAccount, Workspace, new_id
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
 from ..platform.storage import user_workspace_root
 
@@ -66,6 +66,7 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
         directory_key=f"{user.username}/{workspace_id}",
     )
     db.add(workspace)
+    db.add(Project(id=workspace_id, owner_id=user.id, name="默认工作空间", description="默认工作空间对应项目"))
     db.flush()
     user_workspace_root(db, user.username, workspace.id).mkdir(parents=True, exist_ok=True)
     token, csrf, session = create_session(db, user)

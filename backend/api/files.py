@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
 from ..core.paths import WORKSPACE_DIRS, get_layout, is_workspace_set
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_workspace import active_workspace, ensure_project
+from ..platform.models import ProjectFile, new_id
+from ..platform.config import settings
+from ..platform.storage import project_input_object_key, safe_display_name
 from . import _common
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -62,21 +69,59 @@ def download_file(module: str, name: str):
 
 
 @router.post("/upload")
-async def upload_file(file: UploadFile = File(...), filename: str | None = Form(None)) -> dict:
+async def upload_file(
+    file: UploadFile = File(...),
+    filename: str | None = Form(None),
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """File selection: save the uploaded file into ``01_input/`` and return its
     path. The frontend's hidden ``<input type=file>`` hands the file here, so this
     is the entry point into the ``01_input/`` directory."""
     _common.require_workspace()
     layout = get_layout()
     layout.input.mkdir(parents=True, exist_ok=True)
-    name = Path(filename or file.filename or "upload.bin").name  # strip any directory
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "上传内容为空。")
-    dest = (layout.input / name).resolve()
+    workspace = active_workspace(db, ctx.user, ctx.session)
+    if workspace is None:
+        raise HTTPException(409, "尚未设置工作空间")
+    project = ensure_project(db, ctx.user, workspace)
+    file_id = new_id()
+    name = safe_display_name(Path(filename or file.filename or "upload.bin").name)
+    dest = (layout.input / file_id / name).resolve()
     if not dest.is_relative_to(layout.input.resolve()):
         raise HTTPException(400, "非法文件名")
-    if dest.is_symlink():
-        raise HTTPException(400, "不允许写入符号链接")
-    dest.write_bytes(data)
-    return {"path": str(dest), "name": name, "size": len(data)}
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    digest_size = 0
+    import hashlib
+    digest = hashlib.sha256()
+    try:
+        with dest.open("xb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                digest_size += len(chunk)
+                if digest_size > settings.max_upload_bytes:
+                    raise HTTPException(413, "文件超过大小限制")
+                digest.update(chunk)
+                handle.write(chunk)
+        if digest_size == 0:
+            raise HTTPException(400, "上传内容为空。")
+        object_key = project_input_object_key(ctx.user.username, project.id, file_id, name)
+        db.add(
+            ProjectFile(
+                id=file_id,
+                project_id=project.id,
+                owner_id=ctx.user.id,
+                original_name=name,
+                object_key=object_key,
+                content_type=file.content_type or "application/octet-stream",
+                size_bytes=digest_size,
+                sha256=digest.hexdigest(),
+                kind="input",
+            )
+        )
+        db.commit()
+    except Exception:
+        if dest.exists():
+            dest.unlink()
+        db.rollback()
+        raise
+    return {"path": str(dest), "name": name, "size": digest_size, "id": file_id, "file_id": file_id, "project_id": project.id}

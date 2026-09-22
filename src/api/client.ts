@@ -18,10 +18,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const csrf = typeof document === 'undefined'
     ? ''
     : decodeURIComponent(document.cookie.split('; ').find((item) => item.startsWith('narrify_csrf='))?.split('=').slice(1).join('=') || '')
+  const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData
+  const headers: HeadersInit = { ...(isForm ? {} : { 'Content-Type': 'application/json' }), ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...(options.headers || {}) }
   const res = await fetch(API_BASE + path, {
     ...options,
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...(options.headers || {}) },
+    headers,
   })
   const text = await res.text()
   let body: unknown
@@ -47,6 +49,7 @@ export const http = {
     request<T>(p, { method: 'PATCH', body: body === undefined ? undefined : JSON.stringify(body) }),
   del: <T>(p: string, body?: unknown) =>
     request<T>(p, { method: 'DELETE', body: body === undefined ? undefined : JSON.stringify(body) }),
+  upload: <T>(p: string, body: FormData) => request<T>(p, { method: 'POST', body }),
 }
 
 export function health(): Promise<{ ok: boolean; service: string; port: number }> {

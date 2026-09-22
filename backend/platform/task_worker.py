@@ -14,6 +14,7 @@ import redis
 from sqlalchemy import func, select
 
 from ..core.config import TextConfig
+from ..core.paths import WORKSPACE_DIRS
 from ..engines.book import analyze_text, decode_buffer
 from ..engines.text import format_text
 from .config import settings
@@ -90,6 +91,7 @@ class TaskOutcome:
     size_bytes: int
     sha256: str
     metadata: dict[str, Any]
+    publish_module: str | None = None
 
 
 def ensure_consumer_group(client: redis.Redis) -> None:
@@ -255,7 +257,15 @@ def _input_file(db, claim: TaskClaim) -> tuple[User, Project, ProjectFile, Path]
     return user, project, item, path
 
 
-def _write_outcome(claim: TaskClaim, output_name: str, content_type: str, data: bytes, metadata: dict[str, Any]) -> TaskOutcome:
+def _write_outcome(
+    claim: TaskClaim,
+    output_name: str,
+    content_type: str,
+    data: bytes,
+    metadata: dict[str, Any],
+    *,
+    publish_module: str | None = None,
+) -> TaskOutcome:
     with SessionLocal() as db:
         user = db.get(User, claim.owner_id)
         if user is None:
@@ -270,6 +280,7 @@ def _write_outcome(claim: TaskClaim, output_name: str, content_type: str, data: 
         size_bytes=len(data),
         sha256=sha256_file(temp_path),
         metadata=metadata,
+        publish_module=publish_module,
     )
 
 
@@ -294,7 +305,14 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
             output_name,
             "text/plain; charset=utf-8",
             result["text"].encode("utf-8"),
-            {"engine": "text.format", "stats": result["stats"], "source_file_id": item.id},
+            {
+                "engine": "text.format",
+                "stats": result["stats"],
+                "source_file_id": item.id,
+                "preview": result["text"][:2000],
+                "full_length": len(result["text"]),
+            },
+            publish_module=str(claim.payload.get("publish_module") or "") or None,
         )
 
     analysis = analyze_text(source_text)
@@ -305,7 +323,8 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         output_name,
         "application/json",
         json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8"),
-        {"engine": "book.analyze", "source_file_id": item.id},
+        {"engine": "book.analyze", "source_file_id": item.id, "analysis": analysis},
+        publish_module=str(claim.payload.get("publish_module") or "") or None,
     )
 
 
@@ -322,7 +341,15 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
             outcome.temp_path.unlink(missing_ok=True)
             return False
         output_id = new_id()
-        object_key = project_object_key(user.username, task.project_id, output_id, outcome.output_name)
+        if outcome.publish_module:
+            module_names = {name for _, name in WORKSPACE_DIRS if name != "00_temp"}
+            if outcome.publish_module not in module_names:
+                db.rollback()
+                outcome.temp_path.unlink(missing_ok=True)
+                return False
+            object_key = f"{safe_display_name(user.username)}/{task.project_id}/{outcome.publish_module}/{output_id}/{safe_display_name(outcome.output_name)}"
+        else:
+            object_key = project_object_key(user.username, task.project_id, output_id, outcome.output_name)
         final_path = object_path(object_key, configured_storage_root(db))
         final_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(outcome.temp_path, final_path)
@@ -339,7 +366,10 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
                 kind="artifact",
             )
         )
-        db.add(TaskResult(task_id=task.id, result={"file_id": output_id, "object_key": object_key, "name": outcome.output_name, **outcome.metadata}))
+        result_payload = {"file_id": output_id, "object_key": object_key, "name": outcome.output_name, **outcome.metadata}
+        if outcome.publish_module:
+            result_payload["path"] = str(final_path)
+        db.add(TaskResult(task_id=task.id, result=result_payload))
         attempt.status = "succeeded"
         attempt.finished_at = utcnow()
         attempt.lease_expires_at = None

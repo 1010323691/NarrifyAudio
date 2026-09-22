@@ -145,7 +145,7 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
         json={
             "project_id": project["id"],
             "task_type": "text.format",
-            "payload": {"input_file_id": input_file["id"]},
+            "payload": {"input_file_id": input_file["id"], "publish_module": "01_input"},
             "estimated_units": 2,
             "idempotency_key": "worker-format-123",
         },
@@ -160,6 +160,13 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     assert task["status"] == "succeeded"
     assert task["progress"] == 100
     assert task["result"]["file_id"]
+    assert "/01_input/" in task["result"]["path"].replace("\\", "/")
+    legacy_analysis = client.post(
+        "/api/book/analyze",
+        headers={"X-CSRF-Token": csrf},
+        json={"path": task["result"]["path"]},
+    )
+    assert legacy_analysis.status_code == 200, legacy_analysis.text
     downloaded = client.get(f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}")
     assert downloaded.status_code == 200
     assert "第一章" in downloaded.text

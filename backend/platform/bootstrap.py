@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from .config import settings
 from .database import SessionLocal
-from .models import User, UserQuotaAccount, Workspace, new_id
+from .models import Project, User, UserQuotaAccount, Workspace, new_id
 from .security import hash_password
 from .storage import user_workspace_root
 
@@ -34,5 +34,6 @@ def ensure_bootstrap_admin() -> None:
                 directory_key=f"{user.username}/{workspace_id}",
             )
         )
+        db.add(Project(id=workspace_id, owner_id=user.id, name="默认工作空间", description="默认工作空间对应项目"))
         db.flush()
         user_workspace_root(db, user.username, workspace_id).mkdir(parents=True, exist_ok=True)

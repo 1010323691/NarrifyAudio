@@ -70,6 +70,7 @@ def _info(db: Session, ctx: AuthContext) -> dict:
         "exists": path.exists(),
         "is_default": item.name == "默认工作空间",
         "workspace_id": item.id,
+        "project_id": item.id,
         "workspace_name": item.name,
         "dirs": Layout(path).dirs(),
     }

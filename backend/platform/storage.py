@@ -46,6 +46,11 @@ def project_object_key(username: str, project_id: str, file_id: str, name: str) 
     return f"{safe_display_name(username)}/{project_id}/{file_id}/{safe_display_name(name)}"
 
 
+def project_input_object_key(username: str, project_id: str, file_id: str, name: str) -> str:
+    """Stable object key for an input also consumed by legacy workspace paths."""
+    return f"{safe_display_name(username)}/{project_id}/01_input/{file_id}/{safe_display_name(name)}"
+
+
 def task_attempt_path(
     db: Session | None,
     username: str,

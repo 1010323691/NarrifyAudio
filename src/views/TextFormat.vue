@@ -3,8 +3,8 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
-import { formatText } from '@/api/text'
 import { analyzeBook, smartSplitBook, splitBook } from '@/api/book'
+import { submitDurableTask, waitForDurableTask } from '@/api/persistentTasks'
 import { downloadFile, pickFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
 import type {
@@ -42,7 +42,7 @@ const settings = useSettingsStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
 
-const file = ref<{ path: string; name: string } | null>(null)
+const file = ref<{ path: string; name: string; size?: number; file_id?: string; project_id?: string } | null>(null)
 const toggles = reactive<TextToggles>({
   keep_single_space: false,
   sentence_break: true,
@@ -140,7 +140,7 @@ function resetPage() {
 async function choose() {
   const picked = await pickFile([{ name: '文本文件', extensions: ['txt'] }])
   if (picked) {
-    file.value = { path: picked.path, name: picked.name }
+    file.value = { path: picked.path, name: picked.name, size: picked.size, file_id: picked.file_id || picked.id, project_id: picked.project_id }
     resetDownstream()
   }
 }
@@ -151,10 +151,37 @@ async function run(auto = false) {
   busyFormat.value = true
   resetDownstream()
   try {
-    const r = await formatText(file.value.path, { ...toggles })
-    formatResult.value = r
+    if (!file.value.file_id || !file.value.project_id) {
+      throw new Error('上传文件未建立项目归属，请重新选择文件。')
+    }
+    const submitted = await submitDurableTask({
+      project_id: file.value.project_id,
+      task_type: 'text.format',
+      payload: {
+        input_file_id: file.value.file_id,
+        config: { ...toggles },
+        publish_module: '01_input',
+        output_name: `${file.value.name.replace(/\.[^.]+$/, '')}_排版.txt`,
+      },
+      // 计费规则尚未固定，本阶段保留零估算；任务仍完整进入额度账本。
+      estimated_units: 0,
+      idempotency_key: `text-format:${file.value.file_id}:${crypto.randomUUID()}`,
+    })
+    const task = await waitForDurableTask(submitted.id)
+    if (task.status !== 'succeeded' || !task.result) {
+      throw new Error(task.error_message || '持久化排版任务失败')
+    }
+    const result = task.result
+    formatResult.value = {
+      source: file.value.path,
+      encoding: 'UTF-8',
+      output_path: result.path || result.name || '',
+      stats: result.stats as TextFormatResult['stats'],
+      preview: String(result.preview || ''),
+      full_length: Number(result.full_length || 0),
+    }
     await settings.save({ text: { ...toggles } }).catch(() => {})
-    if (!auto) toast({ title: '排版完成', variant: 'success', description: r.output_path })
+    if (!auto) toast({ title: '排版完成', variant: 'success', description: formatResult.value.output_path })
     await analyzeAfterFormat(auto)
   } catch (e: any) {
     error.value = e?.message || '排版失败'

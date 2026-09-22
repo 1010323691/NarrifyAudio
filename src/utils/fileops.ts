@@ -10,6 +10,9 @@ export interface PickedFile {
   path: string
   name: string
   size: number
+  id?: string
+  file_id?: string
+  project_id?: string
 }
 
 export interface FileFilter {
@@ -39,7 +42,7 @@ export async function pickFile(filters: FileFilter[] = []): Promise<PickedFile |
       }
       try {
         const r = await uploadFile(file)
-        resolve({ path: r.path, name: r.name, size: r.size })
+        resolve({ path: r.path, name: r.name, size: r.size, id: r.id, file_id: r.file_id, project_id: r.project_id })
       } catch (e) {
         console.error('上传失败', e)
         resolve(null)

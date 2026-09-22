@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_user
-from ..platform.models import User, Workspace, new_id, utcnow
+from ..platform.models import Project, User, Workspace, new_id, utcnow
 from ..platform.storage import user_workspace_root
 
 router = APIRouter(prefix="/api/v1/workspaces", tags=["workspaces"])
@@ -42,6 +42,7 @@ def create_workspace(payload: WorkspaceCreate, user: User = Depends(require_csrf
     workspace_id = new_id()
     item = Workspace(id=workspace_id, owner_id=user.id, name=name, directory_key=f"{user.username}/{workspace_id}")
     db.add(item)
+    db.add(Project(id=workspace_id, owner_id=user.id, name=name, description="工作空间对应项目"))
     try:
         user_workspace_root(db, user.username, workspace_id).mkdir(parents=True, exist_ok=True)
         db.commit()
@@ -57,4 +58,3 @@ def delete_workspace(workspace_id: str, user: User = Depends(require_csrf), db: 
     item.deleted_at = utcnow()
     db.commit()
     return {"ok": True, "directory_retained": True}
-

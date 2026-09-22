@@ -6,6 +6,9 @@ export interface UploadResult {
   path: string
   name: string
   size: number
+  id?: string
+  file_id?: string
+  project_id?: string
 }
 export interface FileItem {
   name: string
@@ -628,6 +631,8 @@ export interface WorkspaceInfo {
   is_default: boolean
   /** Artifact directory name → absolute path (01_input, 02_split_text, …); empty when unset. */
   dirs: Record<string, string>
+  workspace_id?: string
+  project_id?: string
 }
 
 // ------------------------------ music library（全局音乐库） ------------------------------
