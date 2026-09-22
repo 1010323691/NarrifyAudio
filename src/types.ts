@@ -46,6 +46,8 @@ export interface TextFormatResult {
   stats: TextStats
   preview: string
   full_length: number
+  file_id?: string
+  project_id?: string
 }
 
 // ------------------------------ book ------------------------------

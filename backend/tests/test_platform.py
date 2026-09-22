@@ -179,6 +179,25 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     assert {item["kind"] for item in ledger.json()} >= {"reserve", "settle"}
     assert all(item["available_before"] is not None for item in ledger.json())
 
+    analyzed = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "book.analyze",
+            "payload": {"input_file_id": input_file["id"]},
+            "estimated_units": 0,
+            "idempotency_key": "worker-book-analyze-123",
+        },
+    )
+    assert analyzed.status_code == 201, analyzed.text
+    analyzed_id = analyzed.json()["id"]
+    assert process_task_message({"payload": {"task_id": analyzed_id}}, worker_id="test-worker") == "succeeded"
+    analyzed_task = client.get(f"/api/v1/tasks/{analyzed_id}").json()
+    assert analyzed_task["status"] == "succeeded"
+    assert analyzed_task["result"]["analysis"]["chapter_count"] == 1
+    assert analyzed_task["result"]["analysis"]["chapters"][0]["title"] == ""
+
     with SessionLocal() as db:
         account = db.get(UserQuotaAccount, first["user"]["id"])
         assert account is not None

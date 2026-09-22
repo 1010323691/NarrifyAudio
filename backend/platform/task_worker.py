@@ -15,7 +15,16 @@ from sqlalchemy import func, select
 
 from ..core.config import TextConfig
 from ..core.paths import WORKSPACE_DIRS
-from ..engines.book import analyze_text, decode_buffer
+from ..engines.book import (
+    EXPECTED_CHAPTER_FORMAT,
+    analyze_text,
+    base_name,
+    check_chapter_sequence,
+    decode_buffer,
+    make_chapter_filenames,
+    make_smart_filenames,
+    smart_repair,
+)
 from ..engines.text import format_text
 from .config import settings
 from .database import SessionLocal
@@ -284,6 +293,67 @@ def _write_outcome(
     )
 
 
+def _display_chapters(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    displayed = []
+    for index, chapter in enumerate(chapters, 1):
+        item = dict(chapter)
+        item["seq"] = index
+        if item.get("final_num") is not None:
+            item["num"] = item["final_num"]
+            item["numStr"] = str(item["final_num"])
+        displayed.append(item)
+    return displayed
+
+
+def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[str, Any]:
+    raw = analyze_text(text)
+    raw_chapters = raw["chapters"]
+    raw_sequence = check_chapter_sequence(raw_chapters)
+    chapters = raw_chapters
+    filenames = make_chapter_filenames(base_name(source_name), chapters)
+    repair_status = None
+    if raw_chapters:
+        repair = smart_repair(text, raw_chapters)
+        if repair["status"] != "error":
+            chapters = _display_chapters(repair["chapters"])
+            filenames = make_smart_filenames(repair["chapters"])
+            repair_status = repair["status"]
+    result = {
+        "source": source_name,
+        "encoding": encoding,
+        "base": base_name(source_name),
+        "total_chars": raw["totalChars"],
+        "chapters": [
+            {
+                "seq": chapter["seq"],
+                "num": chapter.get("final_num", chapter.get("num")),
+                "numStr": (
+                    str(chapter["final_num"])
+                    if chapter.get("final_num") is not None
+                    else chapter["numStr"]
+                ),
+                "title": chapter["title"],
+                "chars": chapter["chars"],
+            }
+            for chapter in chapters
+        ],
+        "chapter_count": len(chapters),
+        "filenames": filenames,
+        "expected_format": EXPECTED_CHAPTER_FORMAT,
+        "sequence": check_chapter_sequence(chapters),
+        "raw_chapter_count": len(raw_chapters),
+        "raw_sequence": raw_sequence,
+        "repair_status": repair_status,
+        "error": None,
+    }
+    if not chapters:
+        result["error"] = (
+            f"未检测到章节（系统识别的格式：{EXPECTED_CHAPTER_FORMAT}）。"
+            "可「不处理，按整本继续」（整本输出为单个文件），或重新上传原文。"
+        )
+    return result
+
+
 def execute_claim(claim: TaskClaim) -> TaskOutcome:
     """Execute one real deterministic engine behind the durable worker boundary."""
     if claim.task_type not in {"text.format", "book.analyze"}:
@@ -293,7 +363,7 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         if cancellation_requested(claim):
             raise TaskCancelledError()
         update_progress(claim, 10, "读取输入")
-        source_text, _ = decode_buffer(source_path.read_bytes())
+        source_text, encoding = decode_buffer(source_path.read_bytes())
 
     if claim.task_type == "text.format":
         config = TextConfig.model_validate(claim.payload.get("config") or {})
@@ -315,7 +385,7 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
             publish_module=str(claim.payload.get("publish_module") or "") or None,
         )
 
-    analysis = analyze_text(source_text)
+    analysis = _book_analysis_result(source_text, encoding, str(source_path))
     update_progress(claim, 75, "完成章节分析")
     output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_analysis.json")
     return _write_outcome(

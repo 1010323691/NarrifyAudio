@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
-import { analyzeBook, smartSplitBook, splitBook } from '@/api/book'
+import { smartSplitBook, splitBook } from '@/api/book'
 import { submitDurableTask, waitForDurableTask } from '@/api/persistentTasks'
 import { downloadFile, pickFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
@@ -179,6 +179,8 @@ async function run(auto = false) {
       stats: result.stats as TextFormatResult['stats'],
       preview: String(result.preview || ''),
       full_length: Number(result.full_length || 0),
+      file_id: result.file_id,
+      project_id: file.value.project_id,
     }
     await settings.save({ text: { ...toggles } }).catch(() => {})
     if (!auto) toast({ title: '排版完成', variant: 'success', description: formatResult.value.output_path })
@@ -192,10 +194,26 @@ async function run(auto = false) {
 }
 
 async function analyzeAfterFormat(auto: boolean) {
-  if (!formatResult.value) return
+  if (!formatResult.value?.file_id || !formatResult.value.project_id) {
+    error.value = '排版产物未建立项目归属，无法提交章节分析。'
+    return
+  }
   busyAnalyze.value = true
   try {
-    analysis.value = await analyzeBook(formatResult.value.output_path)
+    const submitted = await submitDurableTask({
+      project_id: formatResult.value.project_id,
+      task_type: 'book.analyze',
+      payload: {
+        input_file_id: formatResult.value.file_id,
+      },
+      estimated_units: 0,
+      idempotency_key: `book-analyze:${formatResult.value.file_id}:${crypto.randomUUID()}`,
+    })
+    const task = await waitForDurableTask(submitted.id)
+    if (task.status !== 'succeeded' || !task.result?.analysis) {
+      throw new Error(task.error_message || '持久化章节分析任务失败')
+    }
+    analysis.value = task.result.analysis as BookAnalyzeResult
     if (analysis.value.raw_chapter_count !== undefined) {
       smartOriginalCount.value = analysis.value.raw_chapter_count
     }
