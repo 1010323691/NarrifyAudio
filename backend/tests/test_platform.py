@@ -89,6 +89,32 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
     assert client.get("/api/v1/admin/settings/storage").json()["source"] == "admin"
 
 
+def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: TestClient):
+    anonymous = TestClient(app)
+    assert anonymous.get("/api/workspace").status_code == 401
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    current = client.get("/api/workspace")
+    assert current.status_code == 200, current.text
+    info = current.json()
+    assert info["workspace_id"]
+    assert info["path"].split("\\")[-2] == first["user"]["username"]
+
+    rejected = client.put(
+        "/api/workspace",
+        headers={"X-CSRF-Token": csrf},
+        json={"path": str(Path.cwd())},
+    )
+    assert rejected.status_code == 400, rejected.text
+    uploaded = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("legacy.txt", b"legacy content", "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+
+
 def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]

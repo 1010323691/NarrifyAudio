@@ -56,7 +56,7 @@ def download_file(module: str, name: str):
         raise HTTPException(404, "尚未设置工作空间")
     d = _module_dir(module).resolve()
     p = (d / name).resolve()
-    if not str(p).startswith(str(d)) or not p.is_file():
+    if not p.is_relative_to(d) or not p.is_file():
         raise HTTPException(400, "非法路径")
     return FileResponse(p, filename=p.name)
 
@@ -73,6 +73,10 @@ async def upload_file(file: UploadFile = File(...), filename: str | None = Form(
     data = await file.read()
     if not data:
         raise HTTPException(400, "上传内容为空。")
-    dest = layout.input / name
+    dest = (layout.input / name).resolve()
+    if not dest.is_relative_to(layout.input.resolve()):
+        raise HTTPException(400, "非法文件名")
+    if dest.is_symlink():
+        raise HTTPException(400, "不允许写入符号链接")
     dest.write_bytes(data)
     return {"path": str(dest), "name": name, "size": len(data)}

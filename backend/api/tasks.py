@@ -12,6 +12,7 @@ import queue as _queue
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+from ..core.paths import get_layout
 from ..core.tasks import TERMINAL, get_task_manager
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -21,9 +22,18 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _workspace_key() -> str | None:
+    workspace = get_layout().workspace
+    return str(workspace.resolve()) if workspace is not None else None
+
+
+def _visible(task) -> bool:
+    return task.workspace_path == _workspace_key()
+
+
 @router.get("")
 def list_tasks() -> list[dict]:
-    return [t.snapshot() for t in get_task_manager().list()]
+    return [t.snapshot() for t in get_task_manager().list() if _visible(t)]
 
 
 @router.get("/stream")
@@ -50,12 +60,14 @@ def stream_all_tasks():
         # queue and is forwarded once (no replay/live overlap for the same event).
         q = mgr.subscribe_all()
         try:
-            yield _sse({"type": "snapshot_all", "tasks": [t.snapshot() for t in mgr.list()]})
+            yield _sse({"type": "snapshot_all", "tasks": [t.snapshot() for t in mgr.list() if _visible(t)]})
             while True:
                 try:
                     task, event = q.get(timeout=15)
                 except _queue.Empty:
                     yield _sse({"type": "ping"})  # keep-alive
+                    continue
+                if not _visible(task):
                     continue
                 payload = dict(event)
                 payload["task_id"] = task.id
@@ -73,7 +85,7 @@ def stream_all_tasks():
 @router.get("/{task_id}")
 def get_task(task_id: str) -> dict:
     task = get_task_manager().get(task_id)
-    if task is None:
+    if task is None or not _visible(task):
         raise HTTPException(404, "任务不存在")
     return task.snapshot()
 
@@ -82,6 +94,9 @@ def get_task(task_id: str) -> dict:
 def control_task(task_id: str, action: str) -> dict:
     """action ∈ {cancel, pause, resume, retry}."""
     try:
+        task = get_task_manager().get(task_id)
+        if task is None or not _visible(task):
+            raise KeyError(task_id)
         task = get_task_manager().control(task_id, action)
     except KeyError:
         raise HTTPException(404, "任务不存在")
@@ -93,7 +108,7 @@ def control_task(task_id: str, action: str) -> dict:
 @router.get("/{task_id}/stream")
 def stream_task(task_id: str):
     task = get_task_manager().get(task_id)
-    if task is None:
+    if task is None or not _visible(task):
         raise HTTPException(404, "任务不存在")
 
     def gen():

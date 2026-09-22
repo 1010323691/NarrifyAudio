@@ -26,6 +26,8 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+from .request_context import _UNSET, bound_workspace
+
 # backend/core/paths.py  ->  parents[0]=core  parents[1]=backend  parents[2]=<project>
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,9 +130,7 @@ def is_workspace_set() -> bool:
 # comes back, instead of re-running the probes on every hit.
 _MISSING_KEY = object()
 _layout_lock = threading.Lock()
-_layout_cache: Layout | None = None
-_layout_cache_key = _MISSING_KEY  # a real key is (st_mtime_ns, st_size)
-_layout_ensured = False
+_layout_cache: dict[str, tuple[Layout, bool]] = {}
 
 
 def _root_pointer_key():
@@ -163,20 +163,23 @@ def get_layout() -> Layout:
     whose folder reappears runs ``ensure()`` exactly once (same skeleton-planting as an
     uncached call), after which the mkdir probes stop.
     """
-    global _layout_cache, _layout_cache_key, _layout_ensured
-    key = _root_pointer_key()
+    scoped = bound_workspace()
+    if scoped is _UNSET:
+        from .config import _workspace_path
+        workspace = _workspace_path()
+        key = str(_root_pointer_key())
+    else:
+        workspace = scoped
+        key = str(workspace.resolve()) if workspace is not None else "<unset>"
     with _layout_lock:
-        layout = _layout_cache
-        if layout is not None and _layout_cache_key == key:
-            if (layout.workspace is not None and not _layout_ensured
-                    and layout.workspace.exists()):
+        cached = _layout_cache.get(key)
+        if cached is not None:
+            layout, ensured = cached
+            if layout.workspace is not None and not ensured and layout.workspace.exists():
                 # Stale-pointer entry whose folder came back: plant the skeleton once.
                 layout.ensure()
-                _layout_ensured = True
+                _layout_cache[key] = (layout, True)
             return layout
-        from .config import _workspace_path  # local import to avoid a cycle
-
-        workspace = _workspace_path()
         if workspace is None:
             layout, ensured = Layout(None), True
         else:
@@ -190,7 +193,7 @@ def get_layout() -> Layout:
                 # A missing folder is the stale-pointer case: stay inert so nothing is
                 # planted at the old location.
                 ensured = False
-        _layout_cache, _layout_cache_key, _layout_ensured = layout, key, ensured
+        _layout_cache[key] = (layout, ensured)
     return layout
 
 
@@ -200,9 +203,8 @@ def reset_layout_cache() -> None:
     A test / debug seam — a real pointer change already invalidates via the root file's
     ``mtime_ns``/``size``. Mirrors ``core.config.reset_config_cache``.
     """
-    global _layout_cache, _layout_cache_key, _layout_ensured
     with _layout_lock:
-        _layout_cache, _layout_cache_key, _layout_ensured = None, _MISSING_KEY, False
+        _layout_cache.clear()
 
 
 # Sentinel: a 角色配音 request to operate over *every* parsed JSON at once

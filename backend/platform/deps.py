@@ -4,12 +4,15 @@ import hmac
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import get_db
-from .models import User, UserSession
+from .models import User, UserSession, Workspace
 from .security import load_session, token_digest
+from .storage import user_workspace_root
+from ..core.request_context import bind_workspace
 
 
 @dataclass(frozen=True)
@@ -22,6 +25,26 @@ def get_auth_context(request: Request, db: Session = Depends(get_db)) -> AuthCon
     session = load_session(db, request.cookies.get(settings.session_cookie))
     if session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要登录")
+    workspace = None
+    if session.active_workspace_id:
+        workspace = db.scalar(
+            select(Workspace).where(
+                Workspace.id == session.active_workspace_id,
+                Workspace.owner_id == session.user_id,
+                Workspace.deleted_at.is_(None),
+            )
+        )
+    if workspace is None:
+        workspace = db.scalar(
+            select(Workspace)
+            .where(Workspace.owner_id == session.user_id, Workspace.deleted_at.is_(None))
+            .order_by(Workspace.updated_at.desc())
+        )
+    bind_workspace(
+        user_workspace_root(db, session.user.username, workspace.id)
+        if workspace is not None
+        else None
+    )
     return AuthContext(user=session.user, session=session)
 
 
@@ -39,6 +62,18 @@ def require_csrf(request: Request, ctx: AuthContext = Depends(get_auth_context))
     # The CSRF cookie is intentionally readable by the browser; requiring the
     # header makes a cross-site form submission insufficient even when the
     # session cookie is attached.
+    supplied = request.headers.get("X-CSRF-Token")
+    if not supplied or not hmac.compare_digest(token_digest(supplied), ctx.session.csrf_hash):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF 校验失败")
+    return ctx.user
+
+
+def require_legacy_access(
+    request: Request, ctx: AuthContext = Depends(get_auth_context)
+) -> User:
+    """Authenticate legacy routes and require CSRF for state-changing calls."""
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return ctx.user
     supplied = request.headers.get("X-CSRF-Token")
     if not supplied or not hmac.compare_digest(token_digest(supplied), ctx.session.csrf_hash):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF 校验失败")

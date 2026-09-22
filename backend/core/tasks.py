@@ -16,7 +16,10 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Optional
+
+from .request_context import _UNSET, bind_workspace, bound_workspace, reset_workspace
 
 
 class TaskStatus(str, Enum):
@@ -198,6 +201,8 @@ class Task:
     created: float = field(default_factory=time.time)
     started: float = 0.0
     finished: float = 0.0
+    workspace_path: str | None = None
+    workspace_context_bound: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event)
     pause_event: threading.Event = field(default_factory=threading.Event)
     # Manager-level broadcast hook (set by ``TaskManager.create``): every event emitted
@@ -416,6 +421,10 @@ class TaskManager:
         thread calls :meth:`start` on each in selection order as capacity opens.
         """
         task = Task(id=uuid.uuid4().hex[:12], module=module, label=label, seq=next(self._seq))
+        scoped = bound_workspace()
+        if scoped is not _UNSET:
+            task.workspace_context_bound = True
+            task.workspace_path = str(scoped) if scoped is not None else None
         task._func, task._args, task._kwargs = func, args, kwargs
         task._broadcast = self._bus_event
         with self._lock:
@@ -453,6 +462,11 @@ class TaskManager:
 
     def _run(self, task: Task) -> None:
         handle = TaskHandle(task)
+        token = (
+            bind_workspace(Path(task.workspace_path) if task.workspace_path else None)
+            if task.workspace_context_bound
+            else None
+        )
         task.log("任务开始", "INFO")
         try:
             result = task._func(handle, *task._args, **task._kwargs) or {}
@@ -468,6 +482,8 @@ class TaskManager:
             task.log(f"任务失败：{exc}", "ERROR")
             task._set_status(TaskStatus.FAILED)
         finally:
+            if token is not None:
+                reset_workspace(token)
             task.finished = time.time()
             task._emit({"type": "final", "task": task.snapshot()})
 

@@ -1,116 +1,156 @@
-"""Workspace endpoints — show / change the pipeline's artifact folder.
-
-The workspace is the user's chosen folder; every pipeline artifact, the project
-config (``config/app.json``) and the log (``logs/app.log``) all live inside it
-(see ``core/paths.py``). Setting it records the pointer in the root ``app.json``,
-seeds the workspace's config from the root template (never overwriting an
-existing one), creates any missing directories, and re-points the log file there.
-Clearing it (empty path) re-locks the pipeline and drops file logging. Old files
-are never moved or deleted on a change.
-"""
+"""Compatibility workspace endpoints backed by managed user workspaces."""
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..core import config as core_config
-from ..core import filesystem
-from ..core import logging_setup
-from ..core import workspace_history
-from ..core import paths as core_paths
-from ..core.paths import WORKSPACE_DIR_NAMES, get_layout
+from ..core.paths import Layout, WORKSPACE_DIR_NAMES
+from ..core.request_context import bind_workspace
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context, require_csrf
+from ..platform.models import User, Workspace, utcnow
+from ..platform.storage import configured_storage_root, safe_display_name, user_workspace_root
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace"])
-log = logging.getLogger(__name__)
 
 
 class WorkspaceRequest(BaseModel):
-    path: str  # empty -> clear the workspace
+    path: str = ""
+    workspace_id: str | None = None
 
 
 class RecentWorkspaceRequest(BaseModel):
     path: str
 
 
-def _info() -> dict:
-    layout = get_layout()
-    if layout.workspace is None:
+def _owned(db: Session, user: User, workspace_id: str) -> Workspace:
+    item = db.scalar(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.owner_id == user.id,
+            Workspace.deleted_at.is_(None),
+        )
+    )
+    if item is None:
+        raise HTTPException(404, "工作空间不存在")
+    return item
+
+
+def _active(db: Session, ctx: AuthContext) -> Workspace | None:
+    if ctx.session.active_workspace_id:
+        item = db.scalar(
+            select(Workspace).where(
+                Workspace.id == ctx.session.active_workspace_id,
+                Workspace.owner_id == ctx.user.id,
+                Workspace.deleted_at.is_(None),
+            )
+        )
+        if item is not None:
+            return item
+    return db.scalar(
+        select(Workspace)
+        .where(Workspace.owner_id == ctx.user.id, Workspace.deleted_at.is_(None))
+        .order_by(Workspace.updated_at.desc())
+    )
+
+
+def _info(db: Session, ctx: AuthContext) -> dict:
+    item = _active(db, ctx)
+    if item is None:
         return {"set": False, "path": "", "exists": False, "is_default": True, "dirs": {}}
+    path = user_workspace_root(db, ctx.user.username, item.id)
     return {
         "set": True,
-        "path": str(layout.workspace),
-        # The folder the pointer names may have been moved or deleted since it was set —
-        # the dashboard uses this to tell the user to re-select it (the pipeline's write
-        # endpoints refuse with a clear error in that state).
-        "exists": layout.workspace.exists(),
-        "is_default": False,
-        "dirs": layout.dirs(),
+        "path": str(path),
+        "exists": path.exists(),
+        "is_default": item.name == "默认工作空间",
+        "workspace_id": item.id,
+        "workspace_name": item.name,
+        "dirs": Layout(path).dirs(),
     }
 
 
 @router.get("")
-def get_workspace() -> dict:
-    """Current workspace + its artifact dirs (empty path / dirs when unset)."""
-    return _info()
+def get_workspace(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
+    return _info(db, ctx)
 
 
 @router.get("/recent")
-def get_recent_workspaces() -> dict:
-    current = _info().get("path", "")
-    # Migrate a valid pre-history pointer on first read.
-    if current and Path(current).is_dir():
-        try:
-            existing = workspace_history.list_records(current)
-            if not any(item.get("is_current") for item in existing):
-                workspace_history.upsert(current)
-        except (OSError, ValueError) as exc:
-            log.warning("最近工作空间迁移失败：%s", exc)
-    return {"workspaces": workspace_history.list_records(current)}
+def get_recent_workspaces(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
+    rows = db.scalars(
+        select(Workspace)
+        .where(Workspace.owner_id == ctx.user.id, Workspace.deleted_at.is_(None))
+        .order_by(Workspace.updated_at.desc())
+    ).all()
+    current = _active(db, ctx)
+    return {
+        "workspaces": [
+            {
+                "path": str(user_workspace_root(db, ctx.user.username, item.id)),
+                "name": item.name,
+                "workspace_id": item.id,
+                "exists": user_workspace_root(db, ctx.user.username, item.id).is_dir(),
+                "is_current": current is not None and item.id == current.id,
+            }
+            for item in rows
+        ]
+    }
 
 
 @router.delete("/recent")
-def delete_recent_workspace(req: RecentWorkspaceRequest) -> dict:
-    if not (req.path or "").strip():
-        raise HTTPException(400, "历史工作空间路径不能为空")
-    workspace_history.remove(req.path)
-    return {"workspaces": workspace_history.list_records(_info().get("path", ""))}
+def delete_recent_workspace(
+    req: RecentWorkspaceRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    current = _active(db, ctx)
+    if current is not None:
+        path = user_workspace_root(db, ctx.user.username, current.id)
+        if Path(req.path).expanduser().resolve() == path:
+            ctx.session.active_workspace_id = None
+            db.commit()
+    return get_recent_workspaces(ctx, db)
 
 
 @router.put("")
-def set_workspace(req: WorkspaceRequest) -> dict:
-    path = (req.path or "").strip()
-    if not path:
-        # Clear: the pipeline re-locks, logging goes console-only; nothing
-        # existing is touched.
-        core_config.clear_workspace()
-        logging_setup.setup_logging(None, core_config.get_config().log.level)
-        return _info()
+def set_workspace(
+    req: WorkspaceRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    _: User = Depends(require_csrf),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not req.path.strip() and not req.workspace_id:
+        ctx.session.active_workspace_id = None
+        db.commit()
+        bind_workspace(None)
+        return _info(db, ctx)
 
-    workspace = Path(path)
-    if not workspace.is_absolute():
-        workspace = core_paths.PROJECT_ROOT / workspace
-    reason = filesystem.workspace_selection_reason(workspace)
-    if reason:
-        raise HTTPException(400, reason)
-    # Validate by creating before persisting, so an unusable path yields a 400
-    # without corrupting the stored pointer. mkdir(exist_ok) never touches
-    # existing content.
+    if req.workspace_id:
+        item = _owned(db, ctx.user, req.workspace_id)
+    else:
+        raw = Path(req.path).expanduser()
+        if not raw.is_absolute():
+            raise HTTPException(400, "工作空间必须由系统管理，不能使用相对路径")
+        root = (configured_storage_root(db) / safe_display_name(ctx.user.username)).resolve()
+        resolved = raw.resolve()
+        if not resolved.is_relative_to(root) or len(resolved.relative_to(root).parts) != 1:
+            raise HTTPException(400, "工作空间必须位于管理员设置的用户根目录下")
+        item = _owned(db, ctx.user, resolved.relative_to(root).parts[0])
+
+    path = user_workspace_root(db, ctx.user.username, item.id)
     try:
         for name in (*WORKSPACE_DIR_NAMES, "logs", "config"):
-            (workspace / name).mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise HTTPException(400, f"无法创建工作空间目录：{e}")
-
-    # Seed the workspace's own config from the root template (never overwrite an
-    # existing one), then record the pointer, then re-point the log file.
-    core_config.init_workspace_config(workspace)
-    try:
-        workspace_history.upsert(str(workspace))
+            (path / name).mkdir(parents=True, exist_ok=True)
+        core_config.init_workspace_config(path)
     except OSError as exc:
-        log.warning("最近工作空间保存失败：%s", exc)
-    core_config.set_workspace_pointer(str(workspace))
-    logging_setup.setup_logging(workspace / "logs", core_config.get_config().log.level)
-    return _info()
+        raise HTTPException(422, f"无法准备工作空间目录：{exc}") from exc
+    ctx.session.active_workspace_id = item.id
+    item.updated_at = utcnow()
+    db.commit()
+    bind_workspace(path)
+    return _info(db, ctx)

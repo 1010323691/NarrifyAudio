@@ -51,6 +51,9 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active_workspace_id: Mapped[str | None] = mapped_column(
+        ForeignKey("workspaces.id", name="fk_user_sessions_active_workspace_id", ondelete="SET NULL"), index=True
+    )
 
     user: Mapped[User] = relationship(back_populates="sessions")
     __table_args__ = (Index("ix_sessions_active_token", "token_hash", "revoked_at", "expires_at"),)

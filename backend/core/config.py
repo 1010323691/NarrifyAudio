@@ -26,6 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from .request_context import _UNSET, bound_workspace
 from .paths import PROJECT_ROOT
 
 
@@ -233,7 +234,7 @@ class AppConfig(BaseModel):
 TEMPLATE_FILE = PROJECT_ROOT / "app.json"
 
 _lock = threading.RLock()
-_config: AppConfig | None = None
+_config_cache: dict[str, AppConfig] = {}
 
 
 class WorkspaceNotSetError(RuntimeError):
@@ -262,6 +263,9 @@ def _workspace_path() -> Path | None:
     This is the single bootstrap-safe source of truth for "which workspace".
     Relative pointers resolve against ``PROJECT_ROOT``.
     """
+    scoped = bound_workspace()
+    if scoped is not _UNSET:
+        return scoped
     working = _read_root_pointer().strip()
     if not working:
         return None
@@ -313,16 +317,19 @@ def get_config() -> AppConfig:
     must not leak into the UI. The next settings save rewrites it persistently
     (``update_config`` already forces the field to the live workspace).
     """
-    global _config
     with _lock:
-        if _config is None:
-            _config = _load_unlocked()
         ws = _workspace_path()
-        if ws is not None and _config.paths.working_dir != str(ws):
-            _config = _config.model_copy(update={
-                "paths": _config.paths.model_copy(update={"working_dir": str(ws)})
+        key = str(ws.resolve()) if ws is not None else "<template>"
+        config = _config_cache.get(key)
+        if config is None:
+            config = _load_unlocked()
+            _config_cache[key] = config
+        if ws is not None and config.paths.working_dir != str(ws):
+            config = config.model_copy(update={
+                "paths": config.paths.model_copy(update={"working_dir": str(ws)})
             })
-        return _config
+            _config_cache[key] = config
+        return config
 
 
 def reset_config_cache() -> None:
@@ -331,9 +338,8 @@ def reset_config_cache() -> None:
     Called after the workspace pointer changes (set / clear) so reads switch from
     the old workspace's config to the new one (or the root template).
     """
-    global _config
     with _lock:
-        _config = None
+        _config_cache.clear()
 
 
 # -- writing ------------------------------------------------------------------ #
@@ -403,18 +409,18 @@ def update_config(patch: dict[str, Any]) -> AppConfig:
     HTTP 409). ``paths.working_dir`` is forced to the workspace itself, so the
     workspace can only be changed via the workspace endpoint, never a settings
     write. The root template is never touched."""
-    global _config
     with _lock:
         ws = _workspace_path()
         if ws is None:
             raise WorkspaceNotSetError(
                 "尚未设置工作空间——配置随工程，请先在「开始」页选择文件夹。"
             )
-        current = _config if _config is not None else _load_unlocked()
+        key = str(ws.resolve())
+        current = _config_cache.get(key) or _load_unlocked()
         data = current.model_dump()
         _deep_update(data, patch)
         new = AppConfig.model_validate(data)
         new.paths.working_dir = str(ws)
-        _config = new
+        _config_cache[key] = new
         _write_config_file(ws / "config" / "app.json", new)
         return new

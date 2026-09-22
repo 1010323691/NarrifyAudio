@@ -1,15 +1,13 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { Folder, FolderOpen, Trash2 } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
-import { getRecentWorkspaces, getWorkspace, removeRecentWorkspace, setWorkspace, type RecentWorkspace } from '@/api/workspace'
+import { createManagedWorkspace, getRecentWorkspaces, getWorkspace, removeRecentWorkspace, selectWorkspace, setWorkspace, type RecentWorkspace } from '@/api/workspace'
 import { useToast } from '@/components/ui/toast'
 import type { WorkspaceInfo } from '@/types'
-
-const WorkspaceBrowserDialog = defineAsyncComponent(() => import('@/components/WorkspaceBrowserDialog.vue'))
 
 const settings = useSettingsStore()
 const { workspaceSet } = useWorkspaceGate()
@@ -17,7 +15,7 @@ const { push: toast } = useToast()
 const ws = ref<WorkspaceInfo | null>(null)
 const recent = ref<RecentWorkspace[]>([])
 const wsBusy = ref(false)
-const browserOpen = ref(false)
+const newWorkspaceName = ref('')
 
 const wsPath = computed(() => ws.value?.path || settings.config?.paths?.working_dir || '')
 const wsStale = computed(() => !!ws.value?.set && ws.value.exists === false)
@@ -47,8 +45,7 @@ async function applyWorkspace(path: string) {
     ws.value = await setWorkspace(path)
     await settings.load()
     try { recent.value = (await getRecentWorkspaces()).workspaces } catch { /* 选择成功不因历史读取失败回滚 */ }
-    browserOpen.value = false
-    toast({ title: '工作空间已设置', variant: 'success', description: ws.value.path })
+    toast({ title: '工作空间已切换', variant: 'success', description: ws.value.path })
   } catch (e: any) {
     toast({ title: '设置工作空间失败', variant: 'destructive', description: e?.message || String(e) })
   } finally {
@@ -58,10 +55,43 @@ async function applyWorkspace(path: string) {
 
 async function selectRecent(item: RecentWorkspace) {
   if (!item.exists) {
-    toast({ title: '目录不存在', variant: 'destructive', description: '请移除这条记录，或使用“浏览文件夹”选择新的位置。' })
+    toast({ title: '目录不存在', variant: 'destructive', description: '请联系管理员检查存储根目录。' })
+    return
+  }
+  if (item.workspace_id) {
+    if (wsBusy.value) return
+    wsBusy.value = true
+    try {
+      ws.value = await selectWorkspace(item.workspace_id)
+      await settings.load()
+      recent.value = (await getRecentWorkspaces()).workspaces
+      toast({ title: '工作空间已切换', variant: 'success', description: ws.value.path })
+    } catch (e: any) {
+      toast({ title: '切换工作空间失败', variant: 'destructive', description: e?.message || String(e) })
+    } finally {
+      wsBusy.value = false
+    }
     return
   }
   await applyWorkspace(item.path)
+}
+
+async function createWorkspace() {
+  const name = newWorkspaceName.value.trim()
+  if (!name || wsBusy.value) return
+  wsBusy.value = true
+  try {
+    const created = await createManagedWorkspace(name)
+    ws.value = await selectWorkspace(created.id)
+    newWorkspaceName.value = ''
+    await settings.load()
+    recent.value = (await getRecentWorkspaces()).workspaces
+    toast({ title: '工作空间已创建', variant: 'success', description: ws.value.path })
+  } catch (e: any) {
+    toast({ title: '创建工作空间失败', variant: 'destructive', description: e?.message || String(e) })
+  } finally {
+    wsBusy.value = false
+  }
 }
 
 async function removeRecent(path: string) {
@@ -114,14 +144,15 @@ async function clearWorkspace() {
           </div>
           <StatusPill :label="wsStale ? '目录不存在' : '当前工作空间'" :tone="wsStale ? 'negative' : 'positive'" />
         </div>
-        <p v-if="!workspaceSet" class="text-sm font-medium text-amber-700 dark:text-amber-400">尚未设置工作空间，流水线已锁定。请选择一个本地文件夹开始。</p>
-        <p v-else-if="wsStale" class="mt-2 text-sm font-medium text-amber-700 dark:text-amber-400">工作目录已被移动或删除，请重新浏览并选择文件夹。</p>
+        <p v-if="!workspaceSet" class="text-sm font-medium text-amber-700 dark:text-amber-400">尚未设置工作空间，请创建或选择一个托管工作空间。</p>
+        <p v-else-if="wsStale" class="mt-2 text-sm font-medium text-amber-700 dark:text-amber-400">工作目录不可用，请联系管理员检查存储根目录。</p>
         <p v-else class="mt-2 text-sm text-muted-foreground">所有处理结果都会保存在此目录。</p>
       </div>
 
       <div class="mt-4 flex flex-wrap items-center gap-3">
-        <Button :disabled="wsBusy" @click="browserOpen = true"><FolderOpen class="h-4 w-4" aria-hidden="true" />浏览文件夹…</Button>
-        <span class="text-xs text-muted-foreground">由后端浏览本机磁盘，不使用浏览器文件权限。</span>
+        <input v-model="newWorkspaceName" class="h-9 min-w-60 rounded-md border border-input bg-background px-3 text-sm" maxlength="160" placeholder="新工作空间名称" @keyup.enter="createWorkspace" />
+        <Button :disabled="wsBusy || !newWorkspaceName.trim()" @click="createWorkspace">创建工作空间</Button>
+        <span class="text-xs text-muted-foreground">目录由管理员配置的根目录统一分配，并按用户名隔离。</span>
       </div>
 
       <div class="mt-6 border-t border-border pt-5">
@@ -135,18 +166,17 @@ async function clearWorkspace() {
             <button type="button" class="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" :disabled="!item.exists || wsBusy" @click="selectRecent(item)">
               <Folder class="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
               <span class="min-w-0 flex-1">
-                <span class="block truncate font-medium">{{ item.display_name }}</span>
+                <span class="block truncate font-medium">{{ item.name || item.display_name || item.path }}</span>
                 <span class="block break-all font-mono text-xs text-muted-foreground">{{ item.path }}</span>
               </span>
             </button>
             <StatusPill v-if="item.is_current" label="当前" tone="positive" />
             <StatusPill v-else-if="!item.exists" label="目录不存在" tone="negative" />
-            <Button variant="ghost" size="icon" :aria-label="`移除历史记录 ${item.display_name}`" @click="removeRecent(item.path)"><Trash2 class="h-4 w-4" aria-hidden="true" /></Button>
+            <Button variant="ghost" size="icon" :aria-label="`取消选择 ${item.name || item.display_name || item.path}`" @click="removeRecent(item.path)"><Trash2 class="h-4 w-4" aria-hidden="true" /></Button>
           </div>
         </div>
       </div>
     </section>
 
-    <WorkspaceBrowserDialog :open="browserOpen" @close="browserOpen = false" @select="applyWorkspace" />
   </div>
 </template>

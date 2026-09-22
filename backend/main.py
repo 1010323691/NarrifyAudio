@@ -10,7 +10,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -34,21 +34,32 @@ from .api import tts as api_tts
 from .api import workspace as api_workspace
 from .core import config as core_config
 from .core import logging_setup
+from .core.request_context import bind_workspace, reset_workspace
 from .core.paths import get_layout
 from .platform.bootstrap import ensure_bootstrap_admin
+from .platform.config import settings
 from .platform.database import initialize_schema
+from .platform.database import SessionLocal
+from .platform.deps import require_legacy_access
+from .platform.models import Workspace
+from .platform.security import load_session
+from .platform.storage import user_workspace_root
+from sqlalchemy import select
 
 PORT = 8642
 
 # All module routers (tts drives the isolated local engine; script drives the
 # LLM → JSON pipeline) plus the cross-cutting task / config / files routers.
-ROUTERS = [
+PLATFORM_ROUTERS = [
     api_auth.router,
     api_projects.router,
     api_quota.router,
     api_workspaces.router,
     api_platform_tasks.router,
     api_admin.router,
+]
+
+LEGACY_ROUTERS = [
     api_tasks.router,
     api_config.router,
     api_files.router,
@@ -75,6 +86,48 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="NarrifyAudio API", version="0.2.0", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def bind_authenticated_workspace(request, call_next):
+    """Bind the managed workspace before sync dependencies/endpoints run.
+
+    Starlette may execute a sync dependency and its endpoint in different
+    worker threads.  Binding only inside an auth dependency therefore does not
+    reliably reach the legacy engine call.  Middleware establishes the request
+    context in the parent task, while the dependency still repeats ownership
+    validation as defense in depth.
+    """
+    token = None
+    session_token = request.cookies.get(settings.session_cookie)
+    if session_token:
+        with SessionLocal() as db:
+            session = load_session(db, session_token)
+            if session is not None:
+                workspace = None
+                if session.active_workspace_id:
+                    workspace = db.scalar(
+                        select(Workspace).where(
+                            Workspace.id == session.active_workspace_id,
+                            Workspace.owner_id == session.user_id,
+                            Workspace.deleted_at.is_(None),
+                        )
+                    )
+                if workspace is None:
+                    workspace = db.scalar(
+                        select(Workspace)
+                        .where(Workspace.owner_id == session.user_id, Workspace.deleted_at.is_(None))
+                        .order_by(Workspace.updated_at.desc())
+                    )
+                if workspace is not None:
+                    token = bind_workspace(user_workspace_root(db, session.user.username, workspace.id))
+                else:
+                    token = bind_workspace(None)
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            reset_workspace(token)
+
 # Local client on this machine; origins are loopback addresses.
 app.add_middleware(
     CORSMiddleware,
@@ -84,8 +137,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in ROUTERS:
+for r in PLATFORM_ROUTERS:
     app.include_router(r)
+for r in LEGACY_ROUTERS:
+    # The old pipeline routes remain available during migration, but they no
+    # longer form an unauthenticated local filesystem API.  The dependency also
+    # requires CSRF for every state-changing legacy call.
+    app.include_router(r, dependencies=[Depends(require_legacy_access)])
 
 
 @app.get("/api/health")
