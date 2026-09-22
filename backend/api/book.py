@@ -139,7 +139,9 @@ def _register_split_files(ctx: AuthContext, db: Session, written: list[dict]) ->
     }
     now = utcnow()
     for item in existing.values():
-        item.deleted_at = now
+        relative_key = item.object_key.removeprefix(prefix)
+        if "/" not in relative_key:
+            item.deleted_at = now
     for row in written:
         path = Path(row["path"]).resolve()
         name = safe_display_name(row["name"])
