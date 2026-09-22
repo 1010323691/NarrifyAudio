@@ -19,7 +19,15 @@ def main() -> None:
     parser.add_argument("--worker-id", default=os.getenv("NARRIFY_WORKER_ID", "worker-local"))
     args = parser.parse_args()
     client = redis.Redis.from_url(os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
-    capabilities = {"task_types": ["text.format", "book.analyze", "book.split", "script.parse", "audio.silences", "audio.cut"], "queue": "narrify-tasks"}
+    capabilities = {
+        "task_types": [
+            "text.format", "book.analyze", "book.split", "script.parse",
+            "audio.silences", "audio.cut", "voices.foundation", "voices.clone",
+            "tts.batch", "tts.stress", "tts.merge", "bgm.analysis", "bgm.segment",
+            "bgm.mix", "music.suggest_tags",
+        ],
+        "queue": "narrify-tasks",
+    }
     heartbeat(args.worker_id, status="starting", capabilities=capabilities)
     try:
         while True:

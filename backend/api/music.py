@@ -15,9 +15,10 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
 from ..core.config import get_config
@@ -30,6 +31,9 @@ from ..engines.script import (
     _llm_chat_completion,
     llm_json_with_retry,
 )
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from .bgm import _run_bgm_coordinator
 
 router = APIRouter(prefix="/api/music", tags=["music"])
@@ -727,6 +731,38 @@ def suggest_tags(body: SuggestTagsReq) -> dict:
     return {"tags": parsed}
 
 
+@router.post("/suggest-tags-durable")
+def suggest_tags_durable(
+    body: SuggestTagsReq,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Submit the single-track recommendation as a durable Worker task."""
+    p = _track_path(body.name)
+    if not p.is_file():
+        raise HTTPException(404, f"音乐库中找不到{body.name}")
+    cfg = get_config()
+    if not cfg.llm.model_name:
+        raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
+    if body.name in active_durable_targets(
+        task_type="music.suggest_tags", payload_key="name", ctx=ctx, db=db,
+    ):
+        raise HTTPException(409, "该音乐已有 AI 推荐任务在途")
+    task = submit_legacy_engine_task(
+        task_type="music.suggest_tags",
+        label=f"{AI_TAGS_LABEL}：{body.name}",
+        payload={
+            "name": body.name,
+            "description": body.description,
+            "config": cfg.model_dump(mode="json"),
+        },
+        ctx=ctx,
+        db=db,
+        idempotency_prefix=f"music-ai-tags-single:{body.name}",
+    )
+    return {"task_id": task["id"]}
+
+
 # --------------------------------------------------------------------------- #
 # AI tag recognition — batch (one Task per selected track, shared LLM gate)
 # --------------------------------------------------------------------------- #
@@ -750,7 +786,11 @@ def _inflight_ai_names() -> set[str]:
 
 
 @router.post("/suggest-tags-batch")
-def suggest_tags_batch(body: SuggestBatchReq) -> dict:
+def suggest_tags_batch(
+    body: SuggestBatchReq,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start one AI-tag Task per selected track (PENDING shells + the shared
     BGM coordinator; gate = the process-wide LLM gate ``gate()``; slot scope =
     the whole task).
@@ -781,8 +821,31 @@ def suggest_tags_batch(body: SuggestBatchReq) -> dict:
     if not cfg.llm.model_name:
         raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
     conflicts = [n for n in names if n in _inflight_ai_names()]
+    if isinstance(ctx, AuthContext):
+        conflicts.extend(
+            n for n in names
+            if n in active_durable_targets(
+                task_type="music.suggest_tags", payload_key="name", ctx=ctx, db=db,
+            ) and n not in conflicts
+        )
     if conflicts:
         raise HTTPException(409, "以下音乐已有 AI 推荐任务在途：" + "、".join(conflicts))
+    if isinstance(ctx, AuthContext):
+        created = []
+        for name in names:
+            task = submit_legacy_engine_task(
+                task_type="music.suggest_tags",
+                label=f"{AI_TAGS_LABEL}：{name}",
+                payload={
+                    "name": name,
+                    "config": cfg.model_dump(mode="json"),
+                },
+                ctx=ctx,
+                db=db,
+                idempotency_prefix=f"music-ai-tags:{name}",
+            )
+            created.append({"name": name, "task_id": task["id"]})
+        return {"task_ids": [item["task_id"] for item in created], "tracks": created}
     set_concurrency(cfg.generation.max_concurrency)
     mgr = get_task_manager()
     created = [

@@ -653,7 +653,7 @@ def parse_suggestion_reply(content: str, registry: dict[str, list[str]]) -> dict
 # Task worker: one-track AI tag recognition (module ``music-ai-tags``)
 # --------------------------------------------------------------------------- #
 
-def suggest_track_tags(handle, name: str, llm_cfg) -> dict:
+def suggest_track_tags(handle, name: str, llm_cfg, description: str | None = None) -> dict:
     """Task worker: LLM-recommend tags for ONE track (2 attempts with
     parse-error feedback retry, same prompt semantics as the sync single-track
     endpoint).
@@ -679,7 +679,7 @@ def suggest_track_tags(handle, name: str, llm_cfg) -> dict:
 
     idx = load_index()
     tr = idx["tracks"].get(name)
-    description = ((tr or {}).get("description") or "").strip()
+    description = ((tr or {}).get("description") if description is None else description or "").strip()
     system, user = build_suggestion_prompts(Path(name).stem, description, idx["tags"])
 
     handle.progress(0.05, "排队中（等待并发槽位）")

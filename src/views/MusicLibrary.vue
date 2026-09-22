@@ -19,7 +19,7 @@ import {
   musicPreviewUrl,
   renameFolder,
   renameTag,
-  suggestTags,
+  suggestTagsDurable,
   suggestTagsBatch,
   updateTrack,
   uploadMusic,
@@ -744,8 +744,18 @@ async function doSuggest() {
   aiTags.value = null
   aiNote.value = ''
   try {
-    const r = await suggestTags(e.name, e.desc.trim() || undefined)
-    aiTags.value = ensureTags(r.tags)
+    const submitted = await suggestTagsDurable(e.name, e.desc.trim() || undefined)
+    await taskStore.refresh()
+    let task: TaskSnapshot | undefined
+    for (let attempt = 0; attempt < 1200; attempt += 1) {
+      task = taskStore.tasks.find((item) => item.id === submitted.task_id)
+      if (task && AI_TERMINAL.has(task.status)) break
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    if (!task || task.status !== 'succeeded') {
+      throw new Error(task?.error || 'AI 推荐任务未完成')
+    }
+    aiTags.value = ensureTags(task.result?.tags)
     aiNote.value = '已生成标签建议，请选择后保存。'
   } catch (err: any) {
     toast({ title: 'AI 推荐失败', variant: 'destructive', description: err?.message || '' })

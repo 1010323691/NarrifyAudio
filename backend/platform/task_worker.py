@@ -6,6 +6,7 @@ import os
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -671,8 +672,29 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
 
 def execute_claim(claim: TaskClaim) -> TaskOutcome:
     """Execute one real deterministic engine behind the durable worker boundary."""
-    if claim.task_type not in {"text.format", "book.analyze", "book.split", "script.parse", "audio.silences", "audio.cut"}:
+    legacy_engine_tasks = {
+        "voices.foundation",
+        "voices.clone",
+        "tts.batch",
+        "tts.stress",
+        "tts.merge",
+        "bgm.analysis",
+        "bgm.segment",
+        "bgm.mix",
+        "music.suggest_tags",
+    }
+    if claim.task_type not in {
+        "text.format",
+        "book.analyze",
+        "book.split",
+        "script.parse",
+        "audio.silences",
+        "audio.cut",
+        *legacy_engine_tasks,
+    }:
         raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
+    if claim.task_type in legacy_engine_tasks:
+        return _execute_legacy_engine(claim)
     if claim.task_type == "script.parse":
         return _execute_script_parse(claim)
     if claim.task_type == "audio.silences":
@@ -793,6 +815,152 @@ def _cleanup_outcome(outcome: TaskOutcome) -> None:
     outcome.temp_path.unlink(missing_ok=True)
     for extra in outcome.additional_outputs:
         extra.temp_path.unlink(missing_ok=True)
+
+
+@contextmanager
+def _legacy_engine_context(claim: TaskClaim):
+    """Bind the managed workspace and immutable config snapshot for one engine call.
+
+    Several mature engines still obtain their settings through ``get_config``.
+    Keeping the snapshot in the task payload makes a retry deterministic without
+    changing every engine signature at once.  A Worker processes one claim at a
+    time, so replacing this workspace's cache entry is scoped and restored in
+    the ``finally`` block.
+    """
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        if user is None:
+            raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+        workspace = user_workspace_root(db, user.username, claim.project_id)
+    snapshot = claim.payload.get("config")
+    key = str(workspace.resolve())
+    previous = None
+    had_previous = False
+    if isinstance(snapshot, dict):
+        config = core_config.AppConfig.model_validate(snapshot)
+        with core_config._lock:
+            had_previous = key in core_config._config_cache
+            previous = core_config._config_cache.get(key)
+            core_config._config_cache[key] = config
+    token = bind_workspace(workspace)
+    try:
+        yield workspace
+    finally:
+        reset_workspace(token)
+        if isinstance(snapshot, dict):
+            with core_config._lock:
+                if had_previous:
+                    core_config._config_cache[key] = previous
+                else:
+                    core_config._config_cache.pop(key, None)
+
+
+def _legacy_result_outcome(claim: TaskClaim, result: Any) -> TaskOutcome:
+    """Persist an engine's JSON result as a durable task result artifact."""
+    if isinstance(result, dict):
+        metadata = dict(result)
+    else:
+        metadata = {"value": result}
+    metadata["engine"] = claim.task_type
+    data = json.dumps(metadata, ensure_ascii=False, default=str).encode("utf-8")
+    output_name = f"{claim.task_type.replace('.', '_')}_{claim.attempt_id}.json"
+    return _write_outcome(
+        claim,
+        output_name,
+        "application/json",
+        data,
+        metadata,
+    )
+
+
+def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
+    """Run a migrated legacy engine inside the durable Worker boundary."""
+    from ..engines import bgm as bgm_engine
+    from ..engines import merge as merge_engine
+    from ..engines import music as music_engine
+    from ..engines import tts_batch
+    from ..engines import tts_stress
+    from ..engines import voices
+
+    handle = PersistentTaskHandle(claim)
+    payload = claim.payload
+    with _legacy_engine_context(claim):
+        try:
+            if claim.task_type == "voices.foundation":
+                result = voices.prepare_foundations(
+                    handle,
+                    payload.get("speakers"),
+                    bool(payload.get("new_only")),
+                    payload.get("overrides") or {},
+                    payload.get("script"),
+                )
+            elif claim.task_type == "voices.clone":
+                result = voices.make_clones(
+                    handle,
+                    payload.get("speakers"),
+                    bool(payload.get("new_only")),
+                    payload.get("concurrency"),
+                    payload.get("script"),
+                    payload.get("candidate_count"),
+                )
+            elif claim.task_type == "tts.batch":
+                scripts = payload.get("scripts") or []
+                if len(scripts) > 1:
+                    result = tts_batch.synthesize_multi(
+                        handle,
+                        scripts,
+                        payload.get("concurrency"),
+                        payload.get("seed"),
+                        bool(payload.get("auto_concurrency")),
+                    )
+                else:
+                    result = tts_batch.synthesize(
+                        handle,
+                        payload.get("indices"),
+                        scripts[0] if scripts else payload.get("script"),
+                        payload.get("concurrency"),
+                        payload.get("seed"),
+                        bool(payload.get("auto_concurrency")),
+                    )
+            elif claim.task_type == "tts.stress":
+                result = tts_stress.stress_test(
+                    handle,
+                    int(payload.get("rows") or 1),
+                    int(payload.get("start_chars") or 1),
+                    int(payload.get("step_chars") or 1),
+                    payload.get("max_rounds"),
+                    payload.get("speaker"),
+                    payload.get("seed"),
+                )
+            elif claim.task_type == "tts.merge":
+                result = merge_engine.run(
+                    handle,
+                    bool(payload.get("m4b")),
+                    str(payload.get("package") or ""),
+                )
+            elif claim.task_type == "bgm.analysis":
+                cfg = core_config.get_config()
+                result = bgm_engine.analyze_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
+            elif claim.task_type == "bgm.segment":
+                cfg = core_config.get_config()
+                result = bgm_engine.analyze_segment_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
+            elif claim.task_type == "bgm.mix":
+                cfg = core_config.get_config()
+                result = bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
+            elif claim.task_type == "music.suggest_tags":
+                cfg = core_config.get_config()
+                result = music_engine.suggest_track_tags(
+                    handle,
+                    str(payload["name"]),
+                    cfg.llm,
+                    payload.get("description"),
+                )
+            else:
+                raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
+        except TaskCancelled as exc:
+            raise TaskCancelledError() from exc
+    handle.progress(100, "完成")
+    return _legacy_result_outcome(claim, result)
 
 
 def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:

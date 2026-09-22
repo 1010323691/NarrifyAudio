@@ -54,11 +54,23 @@ def _legacy_status(status: str) -> str:
 
 
 def _durable_module(task_type: str) -> str:
-    return task_type.split(".", 1)[0]
+    return {
+        "voices.foundation": "voices-foundation",
+        "voices.clone": "voices-clone",
+        "tts.batch": "tts-batch",
+        "tts.stress": "tts-stress",
+        "tts.merge": "merge",
+        "bgm.analysis": "bgm-analysis",
+        "bgm.segment": "bgm-segment",
+        "bgm.mix": "bgm-mix",
+        "music.suggest_tags": "music-ai-tags",
+    }.get(task_type, task_type.split(".", 1)[0])
 
 
 def _durable_label(task: DurableTask) -> str:
     payload = task.payload if isinstance(task.payload, dict) else {}
+    if payload.get("label"):
+        return str(payload["label"])
     source = str(payload.get("source_name") or payload.get("output_name") or "")
     if task.task_type == "script.parse":
         return f"文本解析（{source or '文件'}）"

@@ -17,8 +17,9 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
 from ..core.config import get_config
@@ -30,6 +31,9 @@ from ..engines import merge as Merge
 from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
 from ..engines.audio import probe_duration
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from . import _common
 
 router = APIRouter(prefix="/api/bgm", tags=["bgm"])
@@ -321,7 +325,11 @@ class AnalyzeRequest(BaseModel):
 
 
 @router.post("/analyze")
-def run_analyze(req: AnalyzeRequest) -> dict:
+def run_analyze(
+    req: AnalyzeRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start one analysis Task per selected chapter (LLM slot = the shared
     process-wide gate; slot scope = the whole task — no check phase).
 
@@ -339,8 +347,28 @@ def run_analyze(req: AnalyzeRequest) -> dict:
     if not cfg.llm.model_name:
         raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
     conflicts = [s for s in stems if s in _inflight_bgm_stems(ANALYSIS_MODULE)]
+    if isinstance(ctx, AuthContext):
+        conflicts.extend(
+            s for s in stems
+            if s in active_durable_targets(
+                task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db,
+            ) and s not in conflicts
+        )
     if conflicts:
         raise HTTPException(409, "以下章节已有分析任务在途：" + "、".join(conflicts))
+    if isinstance(ctx, AuthContext):
+        created = []
+        for stem in stems:
+            task = submit_legacy_engine_task(
+                task_type="bgm.analysis",
+                label=f"{ANALYSIS_LABEL}：{stem}",
+                payload={"stem": stem, "config": cfg.model_dump(mode="json")},
+                ctx=ctx,
+                db=db,
+                idempotency_prefix=f"bgm-analysis:{stem}",
+            )
+            created.append({"stem": stem, "task_id": task["id"]})
+        return {"task_ids": [item["task_id"] for item in created], "chapters": created}
     set_concurrency(cfg.generation.max_concurrency)
     mgr = get_task_manager()
     created = [
@@ -366,7 +394,11 @@ class SegmentAnalyzeRequest(BaseModel):
 
 
 @router.post("/analyze-segment")
-def run_analyze_segment(req: SegmentAnalyzeRequest) -> dict:
+def run_analyze_segment(
+    req: SegmentAnalyzeRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start one paragraph-analysis Task per selected chapter (LLM slot = the
     shared process-wide gate; slot scope = the whole task — all batches).
 
@@ -389,6 +421,13 @@ def run_analyze_segment(req: SegmentAnalyzeRequest) -> dict:
     if not cfg.llm.model_name:
         raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
     conflicts = [s for s in stems if s in _inflight_bgm_stems(SEGMENT_MODULE)]
+    if isinstance(ctx, AuthContext):
+        conflicts.extend(
+            s for s in stems
+            if s in active_durable_targets(
+                task_type="bgm.segment", payload_key="stem", ctx=ctx, db=db,
+            ) and s not in conflicts
+        )
     if conflicts:
         raise HTTPException(409, "以下章节已有段落分析任务在途：" + "、".join(conflicts))
     audio_conflicts = _inflight_audio_stems(stems)
@@ -396,6 +435,19 @@ def run_analyze_segment(req: SegmentAnalyzeRequest) -> dict:
         raise HTTPException(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
+    if isinstance(ctx, AuthContext):
+        created = []
+        for stem in stems:
+            task = submit_legacy_engine_task(
+                task_type="bgm.segment",
+                label=f"{SEGMENT_LABEL}：{stem}",
+                payload={"stem": stem, "config": cfg.model_dump(mode="json")},
+                ctx=ctx,
+                db=db,
+                idempotency_prefix=f"bgm-segment:{stem}",
+            )
+            created.append({"stem": stem, "task_id": task["id"]})
+        return {"task_ids": [item["task_id"] for item in created], "chapters": created}
     set_concurrency(cfg.generation.max_concurrency)
     mgr = get_task_manager()
     created = [
@@ -587,7 +639,11 @@ class MixRequest(BaseModel):
 
 
 @router.post("/mix")
-def run_mix(req: MixRequest) -> dict:
+def run_mix(
+    req: MixRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start one mix Task per selected chapter (gate = the process-wide
     ``merge_gate()`` — ffmpeg/CPU/disk bound, same gate as audio merge).
 
@@ -645,8 +701,28 @@ def run_mix(req: MixRequest) -> dict:
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
     conflicts = [s for s in stems if s in _inflight_bgm_stems(MIX_MODULE)]
+    if isinstance(ctx, AuthContext):
+        conflicts.extend(
+            s for s in stems
+            if s in active_durable_targets(
+                task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db,
+            ) and s not in conflicts
+        )
     if conflicts:
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))
+    if isinstance(ctx, AuthContext):
+        created = []
+        for stem in stems:
+            task = submit_legacy_engine_task(
+                task_type="bgm.mix",
+                label=f"{MIX_LABEL}：{stem}",
+                payload={"stem": stem, "config": cfg.model_dump(mode="json")},
+                ctx=ctx,
+                db=db,
+                idempotency_prefix=f"bgm-mix:{stem}",
+            )
+            created.append({"stem": stem, "task_id": task["id"]})
+        return {"task_ids": [item["task_id"] for item in created], "chapters": created}
     set_merge_concurrency(Merge.concurrency_limit())
     mgr = get_task_manager()
     created = [

@@ -21,10 +21,12 @@ import time
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
+from sqlalchemy.orm import Session
 
 from ..core import pathio
+from ..core.config import get_config
 from ..core.concurrency import merge_gate, set_merge_concurrency
 from ..core.paths import ALL_PARSED_JSON, get_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..core.tasks import TERMINAL, TaskStatus, get_task_manager
@@ -33,6 +35,9 @@ from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import tts_stress as Stress
 from ..engines import voices as V
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from . import _common
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
@@ -90,7 +95,11 @@ def _scope_suffix(script: str | None) -> str:
 
 
 @router.post("/prepare-foundations")
-def prepare_foundations(req: PrepareFoundationsRequest) -> dict:
+def prepare_foundations(
+    req: PrepareFoundationsRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start Phase 1: batch-generate every character's voice foundation (LLM only, no TTS)."""
     _common.require_workspace()
     suffix = _scope_suffix(req.script)
@@ -100,6 +109,22 @@ def prepare_foundations(req: PrepareFoundationsRequest) -> dict:
         label = f"生成新增角色语音推理基础{suffix}"
     else:
         label = f"生成所有角色语音推理基础{suffix}"
+    if isinstance(ctx, AuthContext):
+        task = submit_legacy_engine_task(
+            task_type="voices.foundation",
+            label=label,
+            payload={
+                "speakers": req.speakers,
+                "new_only": req.new_only,
+                "overrides": req.overrides or {},
+                "script": req.script,
+                "config": get_config().model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix="voices-foundation",
+        )
+        return {"task_id": task["id"]}
     task = get_task_manager().create(
         "voices-foundation", label,
         V.prepare_foundations,
@@ -109,7 +134,11 @@ def prepare_foundations(req: PrepareFoundationsRequest) -> dict:
 
 
 @router.post("/make-clones")
-def make_clones(req: MakeClonesRequest) -> dict:
+def make_clones(
+    req: MakeClonesRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start Phase 2: batch-render every character's clone seed WAV (TTS only, no LLM)."""
     _common.require_workspace()
     suffix = _scope_suffix(req.script)
@@ -120,6 +149,23 @@ def make_clones(req: MakeClonesRequest) -> dict:
     else:
         label = f"制作所有角色克隆音频{suffix}"
     label += " · 备选 自动" if req.candidate_count is None else f" · 备选 {req.candidate_count}"
+    if isinstance(ctx, AuthContext):
+        task = submit_legacy_engine_task(
+            task_type="voices.clone",
+            label=label,
+            payload={
+                "speakers": req.speakers,
+                "new_only": req.new_only,
+                "concurrency": req.concurrency,
+                "script": req.script,
+                "candidate_count": req.candidate_count,
+                "config": get_config().model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix="voices-clone",
+        )
+        return {"task_id": task["id"]}
     task = get_task_manager().create(
         "voices-clone", label,
         V.make_clones,
@@ -564,7 +610,11 @@ class BatchRequest(BaseModel):
 
 
 @router.post("/batch")
-def run_batch(req: BatchRequest) -> dict:
+def run_batch(
+    req: BatchRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     _common.require_workspace()
     if req.script == ALL_PARSED_JSON or any(s == ALL_PARSED_JSON for s in (req.scripts or [])):
         raise HTTPException(status_code=400, detail="音频合成仅支持逐个解析 JSON（“全部”只用于「角色配音」）。")
@@ -583,6 +633,24 @@ def run_batch(req: BatchRequest) -> dict:
         label += f" · 批内 {req.concurrency}"
     if req.auto_concurrency:
         label += " · 自动批量"
+    if isinstance(ctx, AuthContext):
+        task = submit_legacy_engine_task(
+            task_type="tts.batch",
+            label=label,
+            payload={
+                "indices": req.indices,
+                "script": req.script,
+                "scripts": scripts,
+                "concurrency": req.concurrency,
+                "auto_concurrency": req.auto_concurrency,
+                "seed": req.seed,
+                "config": get_config().model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix="tts-batch",
+        )
+        return {"task_id": task["id"]}
     if len(scripts) > 1:
         task_args = (scripts, req.concurrency, req.seed, req.auto_concurrency) \
             if req.auto_concurrency else (scripts, req.concurrency, req.seed)
@@ -628,7 +696,11 @@ def _engine_task_active() -> bool:
 
 
 @router.post("/stress-test")
-def run_stress_test(req: StressTestRequest) -> dict:
+def run_stress_test(
+    req: StressTestRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """压测（临时测试入口）：机器自动生成自然语句（不借助 LLM、不需要解析脚本），固定批内
     行数、每行字数从起点每轮递增，用任意一个已有克隆音色逐轮跑下去，直到某轮未达吞吐标准
     （1 秒 10 字）/ 看门狗 / 引擎失败为止。逐轮报告（处理量 / 耗时 / 吞吐）写入工作空间
@@ -644,6 +716,24 @@ def run_stress_test(req: StressTestRequest) -> dict:
         raise HTTPException(409, "引擎任务进行中（音频合成 / 合并 / 角色克隆 / 压测），请待其结束后再压测。")
     rows = Batch.clamp_concurrency(req.rows)
     label = f"压测（{rows} 行 · {req.start_chars}字 起 · 每轮 +{req.step_chars}）"
+    if isinstance(ctx, AuthContext):
+        task = submit_legacy_engine_task(
+            task_type="tts.stress",
+            label=label,
+            payload={
+                "rows": rows,
+                "start_chars": req.start_chars,
+                "step_chars": req.step_chars,
+                "max_rounds": req.max_rounds,
+                "speaker": req.speaker,
+                "seed": req.seed,
+                "config": get_config().model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix="tts-stress",
+        )
+        return {"task_id": task["id"]}
     task = get_task_manager().create(
         "tts-stress", label,
         Stress.stress_test, rows, req.start_chars, req.step_chars, req.max_rounds,
@@ -954,7 +1044,11 @@ class MergeRequest(BaseModel):
 
 
 @router.post("/merge")
-def run_merge(req: MergeRequest) -> dict:
+def run_merge(
+    req: MergeRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start one merge Task per selected package.
 
     All task shells are created up front (PENDING, in request order) so the response
@@ -975,8 +1069,33 @@ def run_merge(req: MergeRequest) -> dict:
         if not p or p != Path(p).name:
             raise HTTPException(400, f"非法包名：{p}")
     conflicts = [p for p in pkgs if p in _inflight_merge_packages()]
+    if isinstance(ctx, AuthContext):
+        conflicts.extend(
+            p for p in pkgs
+            if p in active_durable_targets(
+                task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
+            ) and p not in conflicts
+        )
     if conflicts:
         raise HTTPException(409, "以下包已有合并任务在途：" + "、".join(conflicts))
+    if isinstance(ctx, AuthContext):
+        created = []
+        for package in pkgs:
+            label = ("merge-m4b" if req.m4b else "merge-audio") + ": " + package
+            task = submit_legacy_engine_task(
+                task_type="tts.merge",
+                label=label,
+                payload={
+                    "m4b": req.m4b,
+                    "package": package,
+                    "config": get_config().model_dump(mode="json"),
+                },
+                ctx=ctx,
+                db=db,
+                idempotency_prefix=f"tts-merge:{package}",
+            )
+            created.append({"package": package, "task_id": task["id"]})
+        return {"task_ids": [item["task_id"] for item in created], "packages": created}
     set_merge_concurrency(Merge.concurrency_limit())
     mgr = get_task_manager()
     created = [
