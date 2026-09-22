@@ -5,16 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.paths import WORKSPACE_DIRS, get_layout, is_workspace_set
 from ..platform.database import get_db
-from ..platform.deps import AuthContext, get_auth_context
 from ..platform.file_response import file_response
 from ..platform.legacy_workspace import active_workspace, ensure_project
 from ..platform.models import ProjectFile, new_id
+from ..platform.deps import AuthContext, get_auth_context
 from ..platform.config import settings
-from ..platform.storage import project_input_object_key, safe_display_name
+from ..platform.storage import configured_storage_root, project_input_object_key, safe_display_name
 from . import _common
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -35,7 +36,12 @@ def _module_dir(module: str) -> Path:
 
 
 @router.get("/list/{module}")
-def list_module(module: str, recursive: bool = Query(False)) -> dict:
+def list_module(
+    module: str,
+    recursive: bool = Query(False),
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     if module not in _MODULE_ATTRS:
         raise HTTPException(404, "未知模块")
     if not is_workspace_set():
@@ -45,6 +51,22 @@ def list_module(module: str, recursive: bool = Query(False)) -> dict:
     if not d.exists():
         return {"path": str(d), "items": []}
     paths = sorted(d.rglob("*") if recursive else d.iterdir())
+    catalog: dict[str, ProjectFile] = {}
+    workspace = active_workspace(db, ctx.user, ctx.session)
+    if workspace is not None:
+        prefix = f"{safe_display_name(ctx.user.username)}/{workspace.id}/{module}/"
+        catalog = {
+            item.object_key: item
+            for item in db.scalars(
+                select(ProjectFile).where(
+                    ProjectFile.owner_id == ctx.user.id,
+                    ProjectFile.project_id == workspace.id,
+                    ProjectFile.object_key.like(prefix + "%"),
+                    ProjectFile.deleted_at.is_(None),
+                )
+            ).all()
+        }
+    storage_root = configured_storage_root(db).resolve()
     items = []
     for p in paths:
         resolved = p.resolve()
@@ -53,13 +75,20 @@ def list_module(module: str, recursive: bool = Query(False)) -> dict:
         if recursive and p.is_dir():
             continue
         relative = p.relative_to(d).as_posix()
-        items.append(
-            {
-                "name": relative if recursive else p.name,
-                "is_dir": p.is_dir(),
-                "size": (p.stat().st_size if p.is_file() else None),
-            }
-        )
+        item = {
+            "name": relative if recursive else p.name,
+            "is_dir": p.is_dir(),
+            "size": (p.stat().st_size if p.is_file() else None),
+        }
+        if p.is_file():
+            try:
+                object_key = p.resolve().relative_to(storage_root).as_posix()
+            except ValueError:
+                object_key = ""
+            cataloged = catalog.get(object_key)
+            if cataloged is not None:
+                item.update({"id": cataloged.id, "file_id": cataloged.id, "project_id": cataloged.project_id})
+        items.append(item)
     return {"path": str(d), "items": items}
 
 

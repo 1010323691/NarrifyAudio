@@ -1,19 +1,29 @@
-"""Unified task-system endpoints (requirement #2): list / detail / control / SSE.
+"""Unified task endpoints for legacy pages and PostgreSQL-backed tasks.
 
-The SSE stream (``GET /api/tasks/{id}/stream``) is how the task centre gets live
-progress + logs. It replays the current snapshot on connect, then forwards each
-event until the task reaches a terminal state.
+The original UI consumes the in-process task snapshot/SSE contract. During the
+worker migration durable tasks must remain visible through that same contract,
+otherwise a page appears idle after its work moves to Redis. This module adapts
+durable Task/TaskEvent rows to the legacy snapshot shape while keeping ownership
+checks in the database.
 """
 from __future__ import annotations
 
 import json
 import queue as _queue
+import time
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from ..core.paths import get_layout
 from ..core.tasks import TERMINAL, get_task_manager
+from ..platform.database import SessionLocal
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_workspace import active_workspace
+from ..platform.models import Task as DurableTask, TaskEvent, utcnow
+from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation
+from .platform_tasks import retry_task as retry_durable_task
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -31,49 +41,213 @@ def _visible(task) -> bool:
     return task.workspace_path == _workspace_key()
 
 
+def _epoch(value) -> float:
+    return value.timestamp() if value is not None else 0.0
+
+
+def _legacy_status(status: str) -> str:
+    if status in {"queued", "retrying"}:
+        return "pending"
+    if status == "cancelling":
+        return "running"
+    return status
+
+
+def _durable_module(task_type: str) -> str:
+    return task_type.split(".", 1)[0]
+
+
+def _durable_label(task: DurableTask) -> str:
+    payload = task.payload if isinstance(task.payload, dict) else {}
+    source = str(payload.get("source_name") or payload.get("output_name") or "")
+    if task.task_type == "script.parse":
+        return f"文本解析（{source or '文件'}）"
+    if task.task_type == "audio.silences":
+        return f"停顿检测：{source or '音频'}"
+    if task.task_type == "audio.cut":
+        return f"音频分集：{source or '音频'}"
+    return f"持久化任务：{task.task_type}"
+
+
+def _durable_events(db, task_id: str) -> list[TaskEvent]:
+    return db.scalars(
+        select(TaskEvent)
+        .where(TaskEvent.task_id == task_id)
+        .order_by(TaskEvent.sequence)
+        .limit(1000)
+    ).all()
+
+
+def _durable_snapshot(db, task: DurableTask) -> dict:
+    events = _durable_events(db, task.id)
+    logs = []
+    current = ""
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        if event.event_type == "progress":
+            current = str(payload.get("current") or current)
+        elif event.event_type == "phase":
+            current = str(payload.get("phase") or current)
+        elif event.event_type == "log":
+            logs.append(
+                {
+                    "level": str(payload.get("level") or "INFO"),
+                    "msg": str(payload.get("msg") or ""),
+                    "t": _epoch(event.created_at),
+                }
+            )
+    result = task.result.result if task.result is not None else {}
+    return {
+        "id": task.id,
+        "module": _durable_module(task.task_type),
+        "label": _durable_label(task),
+        "seq": int(task.created_at.timestamp() * 1000),
+        "status": _legacy_status(task.status),
+        "progress": max(0.0, min(1.0, task.progress / 100.0)),
+        "current": current,
+        "logs": logs,
+        "llm_stream": "",
+        "llm_cps": 0,
+        "llm_cps_10s": 0,
+        "llm_chars": 0,
+        "llm_secs": 0,
+        "seg_done": 0,
+        "seg_total": 0,
+        "seg_chars_done": 0,
+        "seg_chars_total": 0,
+        "result": result,
+        "error": task.error_message or "",
+        "created": _epoch(task.created_at),
+        "started": _epoch(task.started_at),
+        "finished": _epoch(task.finished_at),
+    }
+
+
+def _current_project_id(db, ctx: AuthContext) -> str | None:
+    workspace = active_workspace(db, ctx.user, ctx.session)
+    return workspace.id if workspace is not None else None
+
+
+def _durable_rows(db, ctx: AuthContext) -> list[DurableTask]:
+    project_id = _current_project_id(db, ctx)
+    if project_id is None:
+        return []
+    return db.scalars(
+        select(DurableTask)
+        .where(DurableTask.owner_id == ctx.user.id, DurableTask.project_id == project_id)
+        .order_by(DurableTask.created_at.desc())
+        .limit(200)
+    ).all()
+
+
+def _combined_snapshot(ctx: AuthContext | None) -> list[dict]:
+    legacy = [task.snapshot() for task in get_task_manager().list() if _visible(task)]
+    if not isinstance(ctx, AuthContext):
+        return sorted(legacy, key=lambda item: item.get("created", 0), reverse=True)
+    with SessionLocal() as db:
+        durable = [_durable_snapshot(db, task) for task in _durable_rows(db, ctx)]
+    return sorted(legacy + durable, key=lambda item: item.get("created", 0), reverse=True)
+
+
+def _durable_owned(db, ctx: AuthContext, task_id: str) -> DurableTask | None:
+    project_id = _current_project_id(db, ctx)
+    if project_id is None:
+        return None
+    return db.scalar(
+        select(DurableTask).where(
+            DurableTask.id == task_id,
+            DurableTask.owner_id == ctx.user.id,
+            DurableTask.project_id == project_id,
+        ).with_for_update()
+    )
+
+
+def _durable_event_payload(db, task: DurableTask, event: TaskEvent) -> dict | None:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    if event.event_type == "progress":
+        return {
+            "type": "progress",
+            "progress": task.progress / 100.0,
+            "current": payload.get("current") or "",
+        }
+    if event.event_type == "log":
+        return {
+            "type": "log",
+            "level": payload.get("level") or "INFO",
+            "msg": payload.get("msg") or "",
+            "t": _epoch(event.created_at),
+        }
+    if event.event_type in {"succeeded", "failed", "cancelled"}:
+        status = _legacy_status("cancelled" if event.event_type == "cancelled" else event.event_type)
+        return {"type": "status", "status": status, "task": _durable_snapshot(db, task)}
+    if event.event_type == "submitted":
+        return {"type": "snapshot", "task": _durable_snapshot(db, task)}
+    return None
+
+
+def _persistent_events(ctx: AuthContext | None, seen: dict[str, int]) -> list[tuple[str, dict]]:
+    if not isinstance(ctx, AuthContext):
+        return []
+    emitted: list[tuple[str, dict]] = []
+    with SessionLocal() as db:
+        rows = _durable_rows(db, ctx)
+        current_ids = {row.id for row in rows}
+        for task in rows:
+            events = db.scalars(
+                select(TaskEvent)
+                .where(TaskEvent.task_id == task.id, TaskEvent.sequence > seen.get(task.id, 0))
+                .order_by(TaskEvent.sequence)
+                .limit(1000)
+            ).all()
+            for event in events:
+                seen[task.id] = max(seen.get(task.id, 0), event.sequence)
+                mapped = _durable_event_payload(db, task, event)
+                if mapped is not None:
+                    emitted.append((task.id, mapped))
+        for task_id in list(seen):
+            if task_id not in current_ids:
+                seen.pop(task_id, None)
+    return emitted
+
+
 @router.get("")
-def list_tasks() -> list[dict]:
-    return [t.snapshot() for t in get_task_manager().list() if _visible(t)]
+def list_tasks(ctx: AuthContext = Depends(get_auth_context)) -> list[dict]:
+    return _combined_snapshot(ctx)
 
 
 @router.get("/stream")
-def stream_all_tasks():
-    """Multiplexed SSE: ONE connection streams the events of ALL tasks.
+def stream_all_tasks(ctx: AuthContext = Depends(get_auth_context)):
+    """Multiplex in-memory and durable task events over one browser connection."""
 
-    Every event carries ``task_id``; the client dispatches on it. The UI holds
-    exactly one such stream per tab — browsers cap simultaneous HTTP/1.1
-    connections per host at ~6, so one connection *per task* (the
-    ``/{task_id}/stream`` endpoint below) is exhausted by a few parallel parses:
-    every EventSource beyond the cap never connects and its window shows no logs
-    at all while the backend runs fine.
-
-    On connect it replays ``snapshot_all`` (a snapshot of every task, so a late
-    or reconnecting client starts with the full picture — and a reconnect
-    self-heals anything missed), then forwards every event until the client
-    disconnects. The stream never ends on its own (tasks are created over time);
-    a 15 s ``ping`` keeps idle connections alive.
-    """
+    auth = ctx if isinstance(ctx, AuthContext) else None
 
     def gen():
-        mgr = get_task_manager()
-        # Subscribe AFTER snapshotting: an event emitted in between lands in the
-        # queue and is forwarded once (no replay/live overlap for the same event).
-        q = mgr.subscribe_all()
+        manager = get_task_manager()
+        q = manager.subscribe_all()
+        seen: dict[str, int] = {}
+        with SessionLocal() as db:
+            if auth is not None:
+                for task in _durable_rows(db, auth):
+                    events = _durable_events(db, task.id)
+                    seen[task.id] = events[-1].sequence if events else 0
         try:
-            yield _sse({"type": "snapshot_all", "tasks": [t.snapshot() for t in mgr.list() if _visible(t)]})
+            yield _sse({"type": "snapshot_all", "tasks": _combined_snapshot(auth)})
             while True:
                 try:
-                    task, event = q.get(timeout=15)
+                    task, event = q.get(timeout=0.5)
+                    if _visible(task):
+                        payload = dict(event)
+                        payload["task_id"] = task.id
+                        yield _sse(payload)
                 except _queue.Empty:
-                    yield _sse({"type": "ping"})  # keep-alive
-                    continue
-                if not _visible(task):
-                    continue
-                payload = dict(event)
-                payload["task_id"] = task.id
-                yield _sse(payload)
+                    pass
+                for task_id, event in _persistent_events(auth, seen):
+                    event["task_id"] = task_id
+                    yield _sse(event)
+                if not q.qsize():
+                    yield _sse({"type": "ping"})
         finally:
-            mgr.unsubscribe_all(q)
+            manager.unsubscribe_all(q)
 
     return StreamingResponse(
         gen(),
@@ -83,61 +257,118 @@ def stream_all_tasks():
 
 
 @router.get("/{task_id}")
-def get_task(task_id: str) -> dict:
+def get_task(task_id: str, ctx: AuthContext = Depends(get_auth_context)) -> dict:
     task = get_task_manager().get(task_id)
-    if task is None or not _visible(task):
-        raise HTTPException(404, "任务不存在")
-    return task.snapshot()
+    if task is not None:
+        if not _visible(task):
+            raise HTTPException(404, "任务不存在")
+        return task.snapshot()
+    with SessionLocal() as db:
+        durable = _durable_owned(db, ctx, task_id)
+        if durable is None:
+            raise HTTPException(404, "任务不存在")
+        return _durable_snapshot(db, durable)
 
 
 @router.post("/{task_id}/{action}")
-def control_task(task_id: str, action: str) -> dict:
-    """action ∈ {cancel, pause, resume, retry}."""
-    try:
-        task = get_task_manager().get(task_id)
-        if task is None or not _visible(task):
-            raise KeyError(task_id)
-        task = get_task_manager().control(task_id, action)
-    except KeyError:
-        raise HTTPException(404, "任务不存在")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return task.snapshot()
+def control_task(task_id: str, action: str, ctx: AuthContext = Depends(get_auth_context)) -> dict:
+    legacy = get_task_manager().get(task_id)
+    if legacy is not None:
+        if not _visible(legacy):
+            raise HTTPException(404, "任务不存在")
+        try:
+            return get_task_manager().control(task_id, action).snapshot()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    if action == "retry":
+        with SessionLocal() as db:
+            try:
+                return retry_durable_task(task_id, user=ctx.user, db=db)
+            except HTTPException:
+                raise
+    if action != "cancel":
+        raise HTTPException(400, "持久化任务当前只支持取消或重试")
+    with SessionLocal() as db:
+        durable = _durable_owned(db, ctx, task_id)
+        if durable is None:
+            raise HTTPException(404, "任务不存在")
+        if durable.status not in TERMINAL_TASK_STATUSES:
+            now = utcnow()
+            durable.status = "cancelling" if durable.status in {"running", "queued"} else "cancelled"
+            if durable.status == "cancelled":
+                durable.finished_at = now
+                release_reservation(db, durable, kind="release", note="user cancelled before execution")
+            durable.updated_at = now
+            append_task_event(db, durable.id, "cancel_requested", {"status": durable.status})
+            db.commit()
+        return _durable_snapshot(db, durable)
 
 
 @router.get("/{task_id}/stream")
-def stream_task(task_id: str):
-    task = get_task_manager().get(task_id)
-    if task is None or not _visible(task):
-        raise HTTPException(404, "任务不存在")
+def stream_task(task_id: str, ctx: AuthContext = Depends(get_auth_context)):
+    legacy = get_task_manager().get(task_id)
+    if legacy is not None:
+        if not _visible(legacy):
+            raise HTTPException(404, "任务不存在")
 
-    def gen():
-        # Snapshot BEFORE subscribing so the replayed state and the live events that
-        # follow never overlap: a chunk logged after the snapshot is forwarded once as
-        # an event, rather than appearing both in the snapshot and again as an event.
-        # (The lost-event window between the snapshot and the subscribe is a few
-        # instructions wide — negligible, and self-heals on the next snapshot/final.)
-        initial = task.snapshot()
-        q = task.subscribe()
-        try:
-            # Replay state so a late subscriber starts with the full picture.
-            yield _sse({"type": "snapshot", "task": initial})
-            if task.status in TERMINAL:
-                return
-            while True:
-                try:
-                    event = q.get(timeout=15)
-                except _queue.Empty:
-                    yield _sse({"type": "ping"})  # keep-alive
-                    continue
-                yield _sse(event)
-                if event.get("type") == "final":
-                    break
-        finally:
-            task.unsubscribe(q)
+        def legacy_gen():
+            initial = legacy.snapshot()
+            q = legacy.subscribe()
+            try:
+                yield _sse({"type": "snapshot", "task": initial})
+                if legacy.status in TERMINAL:
+                    return
+                while True:
+                    try:
+                        event = q.get(timeout=15)
+                    except _queue.Empty:
+                        yield _sse({"type": "ping"})
+                        continue
+                    yield _sse(event)
+                    if event.get("type") == "final":
+                        break
+            finally:
+                legacy.unsubscribe(q)
+
+        return StreamingResponse(legacy_gen(), media_type="text/event-stream")
+
+    with SessionLocal() as db:
+        durable = _durable_owned(db, ctx, task_id)
+        if durable is None:
+            raise HTTPException(404, "任务不存在")
+        initial = _durable_snapshot(db, durable)
+        events = _durable_events(db, task_id)
+        sequence = events[-1].sequence if events else 0
+
+    def durable_gen():
+        nonlocal sequence
+        yield _sse({"type": "snapshot", "task": initial})
+        while True:
+            with SessionLocal() as current_db:
+                current = _durable_owned(current_db, ctx, task_id)
+                if current is None:
+                    return
+                events = current_db.scalars(
+                    select(TaskEvent)
+                    .where(TaskEvent.task_id == task_id, TaskEvent.sequence > sequence)
+                    .order_by(TaskEvent.sequence)
+                    .limit(100)
+                ).all()
+                terminal = current.status in TERMINAL_TASK_STATUSES
+                for event in events:
+                    sequence = event.sequence
+                    mapped = _durable_event_payload(current_db, current, event)
+                    if mapped is not None:
+                        yield _sse(mapped)
+                if terminal and not events:
+                    return
+            if not events:
+                yield _sse({"type": "ping"})
+            time.sleep(0.5)
 
     return StreamingResponse(
-        gen(),
+        durable_gen(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

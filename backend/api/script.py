@@ -31,8 +31,9 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from ..core.config import PromptsConfig, get_config
 from ..core.concurrency import gate, set_concurrency
@@ -40,6 +41,10 @@ from ..core.paths import get_layout
 from ..core.tasks import TERMINAL, TaskStatus, get_task_manager
 from ..engines import script as S
 from ..engines.script_prompts import load_default_prompts
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_files import catalog_managed_file
+from .platform_tasks import TaskSubmit, cancel_task as cancel_durable_task, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/script", tags=["script"])
@@ -217,6 +222,55 @@ def generate_files(req: GenerateFilesRequest) -> dict:
     return {"task_ids": [c["task_id"] for c in created], "files": created}
 
 
+@router.post("/generate-files-durable")
+def generate_files_durable(
+    req: GenerateFilesRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Submit one PostgreSQL-backed parse task per selected split file.
+
+    The response deliberately keeps the legacy ``{file, task_id}`` shape so the
+    existing page can use the unified task centre while execution happens only
+    in the durable Worker.
+    """
+    _common.require_workspace()
+    names = list(dict.fromkeys(req.files))
+    if not names:
+        raise HTTPException(400, "请选择要解析的文件。")
+    cfg = get_config()
+    prompts = _resolved_prompts()
+    snapshot = {
+        "llm": cfg.llm.model_dump(mode="json"),
+        "prompts": prompts.model_dump(mode="json"),
+        "generation": cfg.generation.model_dump(mode="json"),
+    }
+    created = []
+    for name in names:
+        path = _resolve_split_file(name)
+        try:
+            item = catalog_managed_file(path, ctx, db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        task = submit_task(
+            TaskSubmit(
+                project_id=item.project_id,
+                task_type="script.parse",
+                payload={
+                    "input_file_id": item.id,
+                    "source_name": item.original_name,
+                    "config": snapshot,
+                },
+                estimated_units=0,
+                idempotency_key=f"script-parse:{item.id}:{uuid.uuid4()}",
+            ),
+            user=ctx.user,
+            db=db,
+        )
+        created.append({"file": name, "task_id": task["id"]})
+    return {"task_ids": [item["task_id"] for item in created], "files": created}
+
+
 class CancelBatchRequest(BaseModel):
     task_ids: list[str]
 
@@ -248,3 +302,22 @@ def cancel_batch(req: CancelBatchRequest) -> dict:
         mgr.control(tid, "cancel")
         cancelled.append(task.snapshot())
     return {"cancelled": cancelled, "batches_stopped": batches_stopped}
+
+
+@router.post("/cancel-batch-durable")
+def cancel_batch_durable(
+    req: CancelBatchRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Cancel durable parse tasks using the same batch-shaped response."""
+    cancelled = []
+    for task_id in dict.fromkeys(req.task_ids):
+        try:
+            result = cancel_durable_task(task_id, user=ctx.user, db=db)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                continue
+            raise
+        cancelled.append(result)
+    return {"cancelled": cancelled, "batches_stopped": 0}

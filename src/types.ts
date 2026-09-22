@@ -14,6 +14,9 @@ export interface FileItem {
   name: string
   is_dir: boolean
   size: number | null
+  id?: string
+  file_id?: string
+  project_id?: string
 }
 /** Response of ``GET /api/files/list/{module}``. */
 export interface DirListResult {

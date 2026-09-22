@@ -7,12 +7,13 @@ import asyncio
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_csrf, require_user
-from ..platform.models import OutboxEvent, Project, QuotaReservation, QuotaTransaction, Task, TaskEvent, TaskResult, User, UserQuotaAccount, utcnow
+from ..platform.models import OutboxEvent, Project, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, TaskResult, User, UserQuotaAccount, utcnow
+from ..platform.config import settings
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
@@ -167,5 +168,41 @@ def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = 
         release_reservation(db, task, kind="release", note="user cancelled before execution")
     task.updated_at = utcnow()
     append_task_event(db, task.id, "cancel_requested", {"status": task.status})
+    db.commit()
+    return _task_json(task)
+
+
+@router.post("/{task_id}/retry")
+def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    """Requeue a failed zero-cost task without losing its audit history."""
+    task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id).with_for_update())
+    if task is None:
+        raise HTTPException(404, "任务不存在")
+    if task.status not in {"failed", "cancelled", "timeout"}:
+        raise HTTPException(409, "任务当前不可重试")
+    reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
+    if reservation is not None and reservation.units:
+        raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
+    attempts = db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0
+    if attempts >= settings.task_max_attempts:
+        raise HTTPException(409, "任务已达到最大尝试次数")
+    if task.result is not None:
+        db.delete(task.result)
+    task.status = "pending"
+    task.progress = 0
+    task.error_code = ""
+    task.error_message = ""
+    task.started_at = None
+    task.finished_at = None
+    task.updated_at = utcnow()
+    append_task_event(db, task.id, "retry_requested", {"status": "pending"})
+    db.add(
+        OutboxEvent(
+            aggregate_type="task",
+            aggregate_id=task.id,
+            event_type="task.submitted",
+            payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
+        )
+    )
     db.commit()
     return _task_json(task)

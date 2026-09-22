@@ -16,13 +16,11 @@ from __future__ import annotations
 
 import shutil
 import zipfile
-import mimetypes
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
@@ -30,9 +28,8 @@ from ..core.paths import get_layout
 from ..engines import audio as A
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_files import catalog_managed_file
 from ..platform.models import ProjectFile
-from ..platform.storage import configured_storage_root, safe_display_name, sha256_file
-from ..platform.legacy_workspace import active_workspace, ensure_project
 from .platform_tasks import TaskSubmit, submit_task
 from . import _common
 
@@ -50,46 +47,10 @@ def _register_legacy_input(path: str, ctx: AuthContext, db: Session) -> ProjectF
     source = _common.resolve_inbound_path(path, label="音频文件")
     if not source.is_file():
         raise HTTPException(400, "不是一个文件。")
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is None:
-        raise HTTPException(409, "尚未设置工作空间")
-    project = ensure_project(db, ctx.user, workspace)
-    root = configured_storage_root(db).resolve()
     try:
-        relative = source.resolve().relative_to(root)
+        return catalog_managed_file(source, ctx, db)
     except ValueError as exc:
-        raise HTTPException(400, "音频文件不属于当前用户的托管工作空间") from exc
-    expected_prefix = f"{safe_display_name(ctx.user.username)}/{project.id}/"
-    object_key = relative.as_posix()
-    if not object_key.startswith(expected_prefix):
-        raise HTTPException(400, "音频文件不属于当前项目")
-    item = db.scalar(
-        select(ProjectFile).where(
-            ProjectFile.object_key == object_key,
-            ProjectFile.project_id == project.id,
-            ProjectFile.owner_id == ctx.user.id,
-        )
-    )
-    digest = sha256_file(source)
-    if item is None:
-        item = ProjectFile(
-            project_id=project.id,
-            owner_id=ctx.user.id,
-            original_name=safe_display_name(source.name),
-            object_key=object_key,
-            content_type=mimetypes.guess_type(source.name)[0] or "application/octet-stream",
-            size_bytes=source.stat().st_size,
-            sha256=digest,
-            kind="legacy",
-        )
-        db.add(item)
-        db.flush()
-    else:
-        item.original_name = safe_display_name(source.name)
-        item.size_bytes = source.stat().st_size
-        item.sha256 = digest
-        item.deleted_at = None
-    return item
+        raise HTTPException(400, str(exc)) from exc
 
 
 # ============================ Sync: probe / plan ============================
@@ -279,7 +240,7 @@ def silences(
         TaskSubmit(
             project_id=item.project_id,
             task_type="audio.silences",
-            payload={"input_file_id": item.id, "target": target, "tolerance": tol},
+            payload={"input_file_id": item.id, "source_name": item.original_name, "target": target, "tolerance": tol},
             estimated_units=0,
             idempotency_key=f"audio-silences:{item.id}:{uuid.uuid4()}",
         ),
@@ -319,6 +280,7 @@ def cut(
             task_type="audio.cut",
             payload={
                 "input_file_id": item.id,
+                "source_name": item.original_name,
                 "target": target,
                 "smart_align": smart,
                 "tolerance": tol,
