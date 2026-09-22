@@ -3,8 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +11,7 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_user
+from ..platform.file_response import file_response
 from ..platform.models import Project, ProjectFile, User, new_id, utcnow
 from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, user_workspace_root
 
@@ -130,7 +130,7 @@ async def upload_file(project_id: str, upload: UploadFile = File(...), user: Use
 
 
 @router.get("/{project_id}/files/{file_id}")
-def download_file(project_id: str, file_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)) -> FileResponse:
+def download_file(project_id: str, file_id: str, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
     _owned_project(db, user, project_id)
     item = db.scalar(select(ProjectFile).where(ProjectFile.id == file_id, ProjectFile.project_id == project_id, ProjectFile.owner_id == user.id, ProjectFile.deleted_at.is_(None)))
     if item is None:
@@ -138,4 +138,4 @@ def download_file(project_id: str, file_id: str, user: User = Depends(require_us
     path = object_path(item.object_key, configured_storage_root(db))
     if not path.is_file():
         raise HTTPException(410, "文件内容已丢失")
-    return FileResponse(path, media_type=item.content_type, filename=item.original_name)
+    return file_response(request, path, media_type=item.content_type, filename=item.original_name)

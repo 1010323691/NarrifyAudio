@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from ..core.paths import WORKSPACE_DIRS, get_layout, is_workspace_set
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
+from ..platform.file_response import file_response
 from ..platform.legacy_workspace import active_workspace, ensure_project
 from ..platform.models import ProjectFile, new_id
 from ..platform.config import settings
@@ -64,7 +64,7 @@ def list_module(module: str, recursive: bool = Query(False)) -> dict:
 
 
 @router.get("/download/{module}/{name:path}")
-def download_file(module: str, name: str):
+def download_file(module: str, name: str, request: Request):
     if module not in _MODULE_ATTRS:
         raise HTTPException(404, "未知模块")
     if not is_workspace_set():
@@ -73,7 +73,7 @@ def download_file(module: str, name: str):
     p = (d / name).resolve()
     if not p.is_relative_to(d) or not p.is_file():
         raise HTTPException(400, "非法路径")
-    return FileResponse(p, filename=p.name)
+    return file_response(request, p, media_type="application/octet-stream", filename=p.name)
 
 
 @router.post("/upload")

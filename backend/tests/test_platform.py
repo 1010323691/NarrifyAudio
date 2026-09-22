@@ -201,6 +201,13 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     downloaded = client.get(f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}")
     assert downloaded.status_code == 200
     assert "第一章" in downloaded.text
+    ranged = client.get(
+        f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}",
+        headers={"Range": "bytes=0-4"},
+    )
+    assert ranged.status_code == 206
+    assert ranged.headers["content-range"].startswith("bytes 0-4/")
+    assert len(ranged.content) == 5
     events = client.get(f"/api/v1/tasks/{task_id}/events")
     assert events.status_code == 200
     assert "succeeded" in events.text
