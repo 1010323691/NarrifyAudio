@@ -28,7 +28,9 @@ class PlatformSettings:
     session_ttl_hours: int = int(os.getenv("NARRIFY_SESSION_TTL_HOURS", "24"))
     cookie_secure: bool = _bool_env("NARRIFY_COOKIE_SECURE", False)
     registration_enabled: bool = _bool_env("NARRIFY_REGISTRATION_ENABLED", True)
-    auto_create_schema: bool = _bool_env("NARRIFY_AUTO_CREATE_SCHEMA", True)
+    # Production schema changes must go through Alembic. Tests and explicitly
+    # configured local SQLite runs may opt into create_all.
+    auto_create_schema: bool = _bool_env("NARRIFY_AUTO_CREATE_SCHEMA", False)
     max_upload_bytes: int = int(
         os.getenv("NARRIFY_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))
     )

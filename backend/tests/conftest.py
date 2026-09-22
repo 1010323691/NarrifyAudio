@@ -16,3 +16,4 @@ if str(_ROOT) not in sys.path:
 # Application deployments use PostgreSQL. Tests opt into a disposable local
 # SQLite database explicitly so the suite remains runnable without services.
 os.environ.setdefault("NARRIFY_DATABASE_URL", "sqlite://")
+os.environ.setdefault("NARRIFY_AUTO_CREATE_SCHEMA", "true")
