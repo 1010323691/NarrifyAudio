@@ -13,9 +13,9 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace
+from ..platform.models import AuditLog, Project, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace
 from ..platform.outbox import STREAM_NAME
-from ..platform.storage import configured_storage_root
+from ..platform.storage import configured_storage_root, safe_display_name
 from ..platform.worker_registry import is_stale
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -65,11 +65,17 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
     except OSError as exc:
         raise HTTPException(422, f"无法创建存储根目录：{exc}") from exc
     moved: list[tuple[Path, Path]] = []
-    workspaces = db.scalars(select(Workspace)).all()
+    directory_keys = {item.directory_key for item in db.scalars(select(Workspace)).all()}
+    directory_keys.update(
+        f"{safe_display_name(username)}/{project.id}"
+        for project, username in db.execute(
+            select(Project, User.username).join(User, User.id == Project.owner_id)
+        ).all()
+    )
     try:
-        for workspace in workspaces:
-            source = (previous / workspace.directory_key).resolve()
-            target = (resolved / workspace.directory_key).resolve()
+        for directory_key in directory_keys:
+            source = (previous / directory_key).resolve()
+            target = (resolved / directory_key).resolve()
             if not source.is_relative_to(previous) or not target.is_relative_to(resolved):
                 raise HTTPException(422, "工作空间目录键越界")
             if source == target or not source.exists():
@@ -77,7 +83,7 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
                     continue
                 continue
             if source.is_symlink() or target.exists():
-                raise HTTPException(409, f"工作空间目录迁移冲突：{workspace.directory_key}")
+                raise HTTPException(409, f"工作空间目录迁移冲突：{directory_key}")
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source), str(target))
             moved.append((source, target))
