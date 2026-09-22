@@ -186,7 +186,11 @@ class GenerateFilesRequest(BaseModel):
 
 
 @router.post("/generate-files")
-def generate_files(req: GenerateFilesRequest) -> dict:
+def generate_files(
+    req: GenerateFilesRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Start one parse Task per selected ``02_split_text`` file.
 
     All task shells are created up front (PENDING, in request order) so the response
@@ -195,6 +199,8 @@ def generate_files(req: GenerateFilesRequest) -> dict:
     ``config.generation.max_concurrency``.
     """
     _common.require_workspace()
+    if isinstance(ctx, AuthContext):
+        return generate_files_durable(req, ctx=ctx, db=db)
     names = list(dict.fromkeys(req.files))  # dedupe, preserving order
     if not names:
         raise HTTPException(400, "请选择要解析的文件。")
@@ -276,7 +282,11 @@ class CancelBatchRequest(BaseModel):
 
 
 @router.post("/cancel-batch")
-def cancel_batch(req: CancelBatchRequest) -> dict:
+def cancel_batch(
+    req: CancelBatchRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """【取消全部】：取消给定任务 + 停止其所属批次继续投放。
 
     For every batch the given tasks belong to: set the stop flag (the coordinator
@@ -285,6 +295,8 @@ def cancel_batch(req: CancelBatchRequest) -> dict:
     waiting ones honour it at the next cooperative check — queued ones within ~0.2 s
     via the gate's stop_check). Idempotent: terminal / unknown ids are ignored.
     """
+    if isinstance(ctx, AuthContext):
+        return cancel_batch_durable(req, ctx=ctx, db=db)
     mgr = get_task_manager()
     cancelled: list[dict] = []
     batches_stopped = 0

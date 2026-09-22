@@ -15,6 +15,7 @@ bypasses it.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -25,9 +26,11 @@ from ..core.paths import get_layout
 from ..engines import book as B
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_files import catalog_managed_file
 from ..platform.legacy_workspace import active_workspace, ensure_project
 from ..platform.models import ProjectFile, utcnow
 from ..platform.storage import safe_display_name
+from .platform_tasks import TaskSubmit, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/book", tags=["book"])
@@ -171,7 +174,32 @@ def _register_split_files(ctx: AuthContext, db: Session, written: list[dict]) ->
 
 
 @router.post("/analyze")
-def analyze(req: AnalyzeRequest) -> dict:
+def analyze(
+    req: AnalyzeRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    if isinstance(ctx, AuthContext):
+        _common.require_workspace()
+        source = _common.resolve_inbound_path(req.path, label="文本文件")
+        if not source.is_file():
+            raise HTTPException(400, f"不是一个文件：{req.path}")
+        try:
+            item = catalog_managed_file(source, ctx, db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        task = submit_task(
+            TaskSubmit(
+                project_id=item.project_id,
+                task_type="book.analyze",
+                payload={"input_file_id": item.id},
+                estimated_units=0,
+                idempotency_key=f"book-analyze:{item.id}:{uuid.uuid4()}",
+            ),
+            user=ctx.user,
+            db=db,
+        )
+        return {"task_id": task["id"], "project_id": item.project_id}
     prep = _prepare(req.path)
     raw_chapters = prep["chapters"]
     raw_sequence = B.check_chapter_sequence(raw_chapters)
@@ -210,6 +238,31 @@ def analyze(req: AnalyzeRequest) -> dict:
 @router.post("/split")
 def split(req: SplitRequest, ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
     _common.require_workspace()
+    if isinstance(ctx, AuthContext):
+        source = _common.resolve_inbound_path(req.path, label="文本文件")
+        if not source.is_file():
+            raise HTTPException(400, f"不是一个文件：{req.path}")
+        try:
+            item = catalog_managed_file(source, ctx, db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        task = submit_task(
+            TaskSubmit(
+                project_id=item.project_id,
+                task_type="book.split",
+                payload={
+                    "input_file_id": item.id,
+                    "base": req.base,
+                    "whole_book": req.whole_book,
+                    "smart": req.smart,
+                },
+                estimated_units=0,
+                idempotency_key=f"book-split:{item.id}:{req.base}:{req.whole_book}:{req.smart}:{uuid.uuid4()}",
+            ),
+            user=ctx.user,
+            db=db,
+        )
+        return {"task_id": task["id"], "project_id": item.project_id}
     prep = _prepare(req.path)
     chapters, analysis = prep["chapters"], prep["analysis"]
 
@@ -275,6 +328,26 @@ def smart_split(req: SmartSplitRequest, ctx: AuthContext = Depends(get_auth_cont
     every inferred action is reported with a confidence level. Never rewrites
     file content; previously generated split files are cleared first."""
     _common.require_workspace()
+    if isinstance(ctx, AuthContext):
+        source = _common.resolve_inbound_path(req.path, label="文本文件")
+        if not source.is_file():
+            raise HTTPException(400, f"不是一个文件：{req.path}")
+        try:
+            item = catalog_managed_file(source, ctx, db)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        task = submit_task(
+            TaskSubmit(
+                project_id=item.project_id,
+                task_type="book.split",
+                payload={"input_file_id": item.id, "smart": True, "whole_book": False},
+                estimated_units=0,
+                idempotency_key=f"book-smart-split:{item.id}:{uuid.uuid4()}",
+            ),
+            user=ctx.user,
+            db=db,
+        )
+        return {"task_id": task["id"], "project_id": item.project_id}
     prep = _prepare(req.path)
     chapters, analysis = prep["chapters"], prep["analysis"]
     if not chapters:

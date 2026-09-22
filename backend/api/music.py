@@ -693,13 +693,20 @@ def _delete_tag(idx: dict, category: str, name: str) -> None:
 # --------------------------------------------------------------------------- #
 
 @router.post("/suggest-tags")
-def suggest_tags(body: SuggestTagsReq) -> dict:
+def suggest_tags(
+    body: SuggestTagsReq,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """LLM-recommended tags from the file NAME + user DESCRIPTION only — the
     LLM never reads the audio. Results are candidates (filtered to the
     in-vocabulary names per category) for the user to confirm.
 
-    Single-track, SYNCHRONOUS (in-request helper inside the tag editor); the
-    batch one-click path is ``/suggest-tags-batch`` (one Task per track)."""
+    Direct Python calls retain the synchronous compatibility path; real HTTP
+    requests are submitted to the durable Worker task used by the UI.
+    The batch one-click path is ``/suggest-tags-batch`` (one Task per track)."""
+    if isinstance(ctx, AuthContext):
+        return suggest_tags_durable(body, ctx=ctx, db=db)
     p = _track_path(body.name)
     if not p.is_file():
         raise HTTPException(404, f"音乐库中找不到 {body.name}")
