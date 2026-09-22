@@ -192,6 +192,14 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     )
     assert uploaded.status_code == 200, uploaded.text
     legacy_file = uploaded.json()
+    legacy_split = client.post(
+        "/api/book/split",
+        headers={"X-CSRF-Token": csrf},
+        json={"path": legacy_file["path"], "whole_book": True},
+    )
+    assert legacy_split.status_code == 200, legacy_split.text
+    project_files = client.get(f"/api/v1/projects/{legacy_file['project_id']}/files").json()
+    assert any(item["module"] == "02_split_text" for item in project_files)
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},

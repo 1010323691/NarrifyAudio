@@ -14,11 +14,20 @@ bypasses it.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+import hashlib
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..core.paths import get_layout
 from ..engines import book as B
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.legacy_workspace import active_workspace, ensure_project
+from ..platform.models import ProjectFile, utcnow
+from ..platform.storage import safe_display_name
 from . import _common
 
 router = APIRouter(prefix="/api/book", tags=["book"])
@@ -111,6 +120,54 @@ def _clear_generated_split_files(split_dir) -> None:
             path.unlink()
 
 
+def _register_split_files(ctx: AuthContext, db: Session, written: list[dict]) -> None:
+    """Register legacy split output in the durable project-file catalog."""
+    workspace = active_workspace(db, ctx.user, ctx.session)
+    if workspace is None:
+        raise HTTPException(409, "尚未设置工作空间")
+    project = ensure_project(db, ctx.user, workspace)
+    prefix = f"{safe_display_name(ctx.user.username)}/{project.id}/02_split_text/"
+    existing = {
+        item.object_key: item
+        for item in db.scalars(
+            select(ProjectFile).where(
+                ProjectFile.project_id == project.id,
+                ProjectFile.owner_id == ctx.user.id,
+                ProjectFile.object_key.like(f"{prefix}%"),
+            )
+        ).all()
+    }
+    now = utcnow()
+    for item in existing.values():
+        item.deleted_at = now
+    for row in written:
+        path = Path(row["path"]).resolve()
+        name = safe_display_name(row["name"])
+        data = path.read_bytes()
+        key = f"{prefix}{name}"
+        item = existing.get(key)
+        if item is None:
+            item = ProjectFile(
+                project_id=project.id,
+                owner_id=ctx.user.id,
+                original_name=name,
+                object_key=key,
+                content_type="text/plain; charset=utf-8",
+                size_bytes=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+                kind="artifact",
+            )
+            db.add(item)
+        else:
+            item.original_name = name
+            item.content_type = "text/plain; charset=utf-8"
+            item.size_bytes = len(data)
+            item.sha256 = hashlib.sha256(data).hexdigest()
+            item.kind = "artifact"
+            item.deleted_at = None
+    db.commit()
+
+
 @router.post("/analyze")
 def analyze(req: AnalyzeRequest) -> dict:
     prep = _prepare(req.path)
@@ -149,7 +206,7 @@ def analyze(req: AnalyzeRequest) -> dict:
 
 
 @router.post("/split")
-def split(req: SplitRequest) -> dict:
+def split(req: SplitRequest, ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
     _common.require_workspace()
     prep = _prepare(req.path)
     chapters, analysis = prep["chapters"], prep["analysis"]
@@ -198,6 +255,7 @@ def split(req: SplitRequest) -> dict:
             written.append({"name": fname, "path": str(out_path), "chars": ch["chars"]})
         final_chapters = _chapters_payload(_display_chapters(chapters))
 
+    _register_split_files(ctx, db, written)
     return {
         "output_dir": str(layout.split_text),
         "file_count": len(written),
@@ -207,7 +265,7 @@ def split(req: SplitRequest) -> dict:
 
 
 @router.post("/smart-split")
-def smart_split(req: SmartSplitRequest) -> dict:
+def smart_split(req: SmartSplitRequest, ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
     """智能识别：mechanically repair the chapter structure (renumber 1..N in
     physical order, split abnormally long chapters, drop exact-duplicate
     chapters) and write one file per repaired chapter as ``第 NNN 章 标题.txt``
@@ -236,6 +294,7 @@ def smart_split(req: SmartSplitRequest) -> dict:
         out_path.write_bytes(data)
         written.append({"name": fname, "path": str(out_path), "chars": ch["chars"]})
 
+    _register_split_files(ctx, db, written)
     result: dict = {
         "status": repair["status"],
         "output_dir": str(layout.split_text),
