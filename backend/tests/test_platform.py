@@ -417,6 +417,82 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
     assert artifacts[0]["name"] == "chapter.json"
 
 
+def test_durable_worker_runs_audio_tasks_and_catalogs_outputs(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects",
+        headers={"X-CSRF-Token": csrf},
+        json={"name": "Durable audio"},
+    ).json()
+    uploaded = client.post(
+        f"/api/v1/projects/{project['id']}/files",
+        headers={"X-CSRF-Token": csrf},
+        files={"upload": ("merged.mp3", b"audio", "audio/mpeg")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    input_file = uploaded.json()
+
+    monkeypatch.setattr("backend.platform.task_worker.audio_engine.probe_duration", lambda *args: (4.0, ""))
+    monkeypatch.setattr(
+        "backend.platform.task_worker.audio_engine.detect_silences",
+        lambda *args, **kwargs: {"ok": True, "pauses": [{"start": 1.0, "end": 1.5}]},
+    )
+    planned = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "audio.silences",
+            "payload": {"input_file_id": input_file["id"], "target": "2", "tolerance": 5},
+            "estimated_units": 0,
+            "idempotency_key": "durable-audio-plan-123",
+        },
+    )
+    assert planned.status_code == 201, planned.text
+    planned_id = planned.json()["id"]
+    assert process_task_message({"payload": {"task_id": planned_id}}, worker_id="test-audio-worker") == "succeeded"
+    planned_result = client.get(f"/api/v1/tasks/{planned_id}").json()
+    assert planned_result["result"]["engine"] == "audio.silences"
+    assert planned_result["result"]["count"] == 2
+
+    def fake_cut(path, segments, out_dir, naming, start_number, *args, **kwargs):
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = []
+        for index, segment in enumerate(segments):
+            output = out_dir / f"episode-{index + 1}.mp3"
+            output.write_bytes(f"part-{index}".encode())
+            result.append({"name": output.name, "path": str(output), "size": output.stat().st_size, "duration": segment["duration"]})
+        return result
+
+    monkeypatch.setattr("backend.platform.task_worker.audio_engine.cut_segments", fake_cut)
+    cut = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "audio.cut",
+            "payload": {
+                "input_file_id": input_file["id"],
+                "smart_align": False,
+                "segments": [{"index": 0, "start": 0, "duration": 2}, {"index": 1, "start": 2, "duration": 2}],
+                "naming": "第 {} 集",
+                "start_number": "1",
+            },
+            "estimated_units": 0,
+            "idempotency_key": "durable-audio-cut-123",
+        },
+    )
+    assert cut.status_code == 201, cut.text
+    cut_id = cut.json()["id"]
+    assert process_task_message({"payload": {"task_id": cut_id}}, worker_id="test-audio-worker") == "succeeded"
+    cut_result = client.get(f"/api/v1/tasks/{cut_id}").json()
+    assert cut_result["result"]["engine"] == "audio.cut"
+    assert cut_result["result"]["file_count"] == 2
+    assert all("/07_output/" in item["path"].replace("\\", "/") for item in cut_result["result"]["files"])
+
+
 def test_cancel_before_claim_releases_quota(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]

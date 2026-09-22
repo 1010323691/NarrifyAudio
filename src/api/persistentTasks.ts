@@ -17,6 +17,7 @@ export interface DurableTask {
   task_type: string
   status: string
   progress: number
+  current?: string
   error_code: string
   error_message: string
   result: DurableTaskResult | null
@@ -34,6 +35,14 @@ export function submitDurableTask(payload: {
 
 export function getDurableTask(taskId: string): Promise<DurableTask> {
   return http.get(`/api/v1/tasks/${taskId}`)
+}
+
+export function listDurableTasks(): Promise<DurableTask[]> {
+  return http.get('/api/v1/tasks')
+}
+
+export function cancelDurableTask(taskId: string): Promise<DurableTask> {
+  return http.post(`/api/v1/tasks/${taskId}/cancel`, {})
 }
 
 export async function waitForDurableTask(taskId: string, intervalMs = 500): Promise<DurableTask> {

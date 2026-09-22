@@ -16,18 +16,80 @@ from __future__ import annotations
 
 import shutil
 import zipfile
+import mimetypes
+import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..core.config import get_config
 from ..core.paths import get_layout
-from ..core.tasks import get_task_manager
 from ..engines import audio as A
+from ..platform.database import get_db
+from ..platform.deps import AuthContext, get_auth_context
+from ..platform.models import ProjectFile
+from ..platform.storage import configured_storage_root, safe_display_name, sha256_file
+from ..platform.legacy_workspace import active_workspace, ensure_project
+from .platform_tasks import TaskSubmit, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
+
+
+def _register_legacy_input(path: str, ctx: AuthContext, db: Session) -> ProjectFile:
+    """Catalog a legacy workspace file before submitting a durable task.
+
+    The old audio picker returns a path rather than a ProjectFile id.  Resolve it
+    inside the authenticated managed workspace, then register that existing file
+    under the same user/project object-key namespace used by durable uploads.
+    """
+    _common.require_workspace()
+    source = _common.resolve_inbound_path(path, label="音频文件")
+    if not source.is_file():
+        raise HTTPException(400, "不是一个文件。")
+    workspace = active_workspace(db, ctx.user, ctx.session)
+    if workspace is None:
+        raise HTTPException(409, "尚未设置工作空间")
+    project = ensure_project(db, ctx.user, workspace)
+    root = configured_storage_root(db).resolve()
+    try:
+        relative = source.resolve().relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(400, "音频文件不属于当前用户的托管工作空间") from exc
+    expected_prefix = f"{safe_display_name(ctx.user.username)}/{project.id}/"
+    object_key = relative.as_posix()
+    if not object_key.startswith(expected_prefix):
+        raise HTTPException(400, "音频文件不属于当前项目")
+    item = db.scalar(
+        select(ProjectFile).where(
+            ProjectFile.object_key == object_key,
+            ProjectFile.project_id == project.id,
+            ProjectFile.owner_id == ctx.user.id,
+        )
+    )
+    digest = sha256_file(source)
+    if item is None:
+        item = ProjectFile(
+            project_id=project.id,
+            owner_id=ctx.user.id,
+            original_name=safe_display_name(source.name),
+            object_key=object_key,
+            content_type=mimetypes.guess_type(source.name)[0] or "application/octet-stream",
+            size_bytes=source.stat().st_size,
+            sha256=digest,
+            kind="legacy",
+        )
+        db.add(item)
+        db.flush()
+    else:
+        item.original_name = safe_display_name(source.name)
+        item.size_bytes = source.stat().st_size
+        item.sha256 = digest
+        item.deleted_at = None
+    return item
 
 
 # ============================ Sync: probe / plan ============================
@@ -203,18 +265,28 @@ class SilencesRequest(BaseModel):
 
 
 @router.post("/silences")
-def silences(req: SilencesRequest) -> dict:
+def silences(
+    req: SilencesRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     cfg = get_config()
     a = cfg.audio
     target = req.target_duration or a.target_duration
     tol = req.align_tolerance if req.align_tolerance is not None else a.align_tolerance
-    task = get_task_manager().create(
-        "audio", f"停顿检测：{Path(req.path).name}",
-        _silences_worker,
-        req.path, target, tol,
-        cfg.ffmpeg.ffmpeg_path, cfg.ffmpeg.ffprobe_path,
+    item = _register_legacy_input(req.path, ctx, db)
+    task = submit_task(
+        TaskSubmit(
+            project_id=item.project_id,
+            task_type="audio.silences",
+            payload={"input_file_id": item.id, "target": target, "tolerance": tol},
+            estimated_units=0,
+            idempotency_key=f"audio-silences:{item.id}:{uuid.uuid4()}",
+        ),
+        user=ctx.user,
+        db=db,
     )
-    return {"task_id": task.id}
+    return {"task_id": task["id"]}
 
 
 class CutRequest(BaseModel):
@@ -228,8 +300,11 @@ class CutRequest(BaseModel):
 
 
 @router.post("/cut")
-def cut(req: CutRequest) -> dict:
-    _common.require_workspace()
+def cut(
+    req: CutRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     cfg = get_config()
     a = cfg.audio
     target = req.target_duration or a.target_duration
@@ -237,15 +312,27 @@ def cut(req: CutRequest) -> dict:
     tol = req.align_tolerance if req.align_tolerance is not None else a.align_tolerance
     naming = req.naming_format if req.naming_format is not None else a.naming_format
     start = req.start_number if req.start_number is not None else a.start_number
-    ext = A.get_extension(Path(req.path).name)
-    task = get_task_manager().create(
-        "audio", f"音频分集：{Path(req.path).name}",
-        _cut_worker,
-        req.path, target, smart, tol, naming, start,
-        cfg.ffmpeg.ffmpeg_path, cfg.ffmpeg.ffprobe_path, ext,
-        segments=req.segments,
+    item = _register_legacy_input(req.path, ctx, db)
+    task = submit_task(
+        TaskSubmit(
+            project_id=item.project_id,
+            task_type="audio.cut",
+            payload={
+                "input_file_id": item.id,
+                "target": target,
+                "smart_align": smart,
+                "tolerance": tol,
+                "naming": naming,
+                "start_number": start,
+                "segments": req.segments,
+            },
+            estimated_units=0,
+            idempotency_key=f"audio-cut:{item.id}:{uuid.uuid4()}",
+        ),
+        user=ctx.user,
+        db=db,
     )
-    return {"task_id": task.id}
+    return {"task_id": task["id"]}
 
 
 # ============================ Sync: post-cut packaging / export =============

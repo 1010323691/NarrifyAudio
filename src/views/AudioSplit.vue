@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/project'
-import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { cutAudio, detectSilences, exportAudio, planAudio, probeAudio, zipAudio } from '@/api/audio'
+import { cancelDurableTask, getDurableTask, listDurableTasks } from '@/api/persistentTasks'
+import type { DurableTask } from '@/api/persistentTasks'
 import { downloadFile } from '@/utils/fileops'
 import { formatBytes, formatDuration } from '@/utils/format'
 import type {
@@ -49,7 +50,6 @@ import {
 
 const settings = useSettingsStore()
 const project = useProjectStore()
-const taskStore = useTaskStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
 
@@ -88,20 +88,50 @@ const cutResult = ref<AudioCutResult | null>(null)
 // Live task ids (progress shown inline in this view).
 const planTaskId = ref<string | null>(null)
 const cutTaskId = ref<string | null>(null)
-const planTask = computed(() => taskStore.tasks.find((t) => t.id === planTaskId.value))
-const cutTask = computed(() => taskStore.tasks.find((t) => t.id === cutTaskId.value))
+const planTask = ref<DurableTask | null>(null)
+const cutTask = ref<DurableTask | null>(null)
 
-// 刷新恢复：页面重载后本地 taskId 丢失，但后端任务仍在跑（store 的 refresh 已拉回全量任务）。
-// 按 label 前缀区分两种在途任务重新挂接——进度 Alert 模板只依赖 planTask / cutTask，
-// 取消钮走 taskStore.control，故无需恢复 file / plan 即可显示进度并可控。
+// 刷新恢复：页面重载后本地 taskId 丢失，但后端持久化任务仍在跑。
+// 按持久化 task_type 区分两种在途任务重新挂接。
 function reattachTasks() {
-  for (const t of taskStore.activeTasks('audio')) {
-    if (t.label.startsWith('停顿检测：') && !planTaskId.value) {
-      planTaskId.value = t.id
+  void listDurableTasks().then((tasks) => {
+    const active = tasks.filter((t) => ['pending', 'queued', 'running', 'cancelling', 'retrying'].includes(t.status))
+    const planning = active.find((t) => t.task_type === 'audio.silences')
+    const cutting = active.find((t) => t.task_type === 'audio.cut')
+    if (planning) {
+      planTaskId.value = planning.id
+      planTask.value = planning
       busyPlan.value = true
-    } else if (t.label.startsWith('音频分集：') && !cutTaskId.value) {
-      cutTaskId.value = t.id
+      void trackTask(planning.id, 'plan')
+    }
+    if (cutting) {
+      cutTaskId.value = cutting.id
+      cutTask.value = cutting
       busyCut.value = true
+      void trackTask(cutting.id, 'cut')
+    }
+  })
+}
+
+async function trackTask(id: string, kind: 'plan' | 'cut') {
+  try {
+    while (true) {
+      const task = await getDurableTask(id)
+      if (kind === 'plan') planTask.value = task
+      else cutTask.value = task
+      if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)) return
+      await new Promise((resolve) => window.setTimeout(resolve, 500))
+    }
+  } catch (e: any) {
+    error.value = e?.message || '持久化任务状态读取失败'
+    if (kind === 'plan') {
+      busyPlan.value = false
+      planTask.value = null
+      planTaskId.value = null
+    } else {
+      busyCut.value = false
+      cutTask.value = null
+      cutTaskId.value = null
     }
   }
 }
@@ -116,7 +146,6 @@ onMounted(async () => {
     namingFormat.value = a.naming_format
     startNumber.value = a.start_number
   }
-  await taskStore.refresh()
   reattachTasks()
 })
 
@@ -179,7 +208,8 @@ async function buildPlan() {
         alignTolerance: tolerance.value,
       })
       planTaskId.value = task_id
-      await taskStore.refresh()
+      planTask.value = await getDurableTask(task_id)
+      void trackTask(task_id, 'plan')
       // Completion is handled by the watcher on planTask.status.
     } else {
       const r = await planAudio(file.value.path, targetDuration.value)
@@ -201,16 +231,19 @@ watch(
     if (!st || !t) return
     busyPlan.value = false
     if (st === 'succeeded') {
-      const r = t.result as AudioSilencesResult
+      const r = t.result as unknown as AudioSilencesResult
       plan.value = { segments: r.segments, count: r.count, aligned: true, snapped: r.snapped, fallbacks: r.fallbacks }
       planTaskId.value = null
+      planTask.value = null
       rememberParams()
       toast({ title: '智能方案已生成', variant: 'success', description: `停顿吸附 ${r.snapped} 处，回退 ${r.fallbacks} 处` })
     } else if (st === 'failed') {
-      error.value = t.error || '停顿检测失败'
+      error.value = t.error_message || '停顿检测失败'
       planTaskId.value = null
+      planTask.value = null
     } else if (st === 'cancelled') {
       planTaskId.value = null
+      planTask.value = null
     }
   },
 )
@@ -225,9 +258,10 @@ async function doCut() {
       segments: plan.value.segments,
       namingFormat: namingFormat.value,
       startNumber: startNumber.value,
-    })
-    cutTaskId.value = task_id
-    await taskStore.refresh()
+      })
+      cutTaskId.value = task_id
+      cutTask.value = await getDurableTask(task_id)
+      void trackTask(task_id, 'cut')
     // Remember the cut parameters (fire-and-forget; the cut above already carries them).
     rememberParams()
     // Completion is handled by the watcher on cutTask.status.
@@ -245,23 +279,26 @@ watch(
     if (!st || !t) return
     busyCut.value = false
     if (st === 'succeeded') {
-      const r = t.result as AudioCutResult
+      const r = t.result as unknown as AudioCutResult
       cutResult.value = r
       project.recordAudio(r)
       cutTaskId.value = null
+      cutTask.value = null
       toast({ title: '切割完成', variant: 'success', description: `生成 ${r.file_count} 个文件` })
     } else if (st === 'failed') {
-      error.value = t.error || '切割失败'
+      error.value = t.error_message || '切割失败'
       cutTaskId.value = null
+      cutTask.value = null
       toast({ title: '切割失败', variant: 'destructive', description: error.value })
     } else if (st === 'cancelled') {
       cutTaskId.value = null
+      cutTask.value = null
     }
   },
 )
 
 function cancel(id: string) {
-  taskStore.control(id, 'cancel')
+  void cancelDurableTask(id)
 }
 
 // The cut output, shaped as the packaging / export endpoints expect it.
