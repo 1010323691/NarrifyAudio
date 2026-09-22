@@ -2850,23 +2850,25 @@ def select_spot_targets(entries: list, n_random: int, n_risk: int,
     return random_targets, sorted(risk)
 
 
-def _spot_history_path() -> Path | None:
+def _spot_history_path(path_override: Path | None = None) -> Path | None:
     """``<workspace>/config/spot_check_history.json`` (None with no workspace).
 
     Deliberately in ``config/`` — never ``03_parsed_json/``: that directory is globbed
     wholesale as parsed scripts by ``resolve_parsed_json_all``, and a stray JSON there
     would corrupt the 全部文件 aggregate. ``config/`` is invisible to the file-list API.
     """
+    if path_override is not None:
+        return path_override
     config = get_layout().config
     if config is None:
         return None
     return config / SPOT_CHECK_HISTORY_NAME
 
 
-def _load_spot_history(handle=None) -> list:
+def _load_spot_history(handle=None, path_override: Path | None = None) -> list:
     """The per-book readings (``[]`` when absent or corrupt — a stats read failure
     must never sink the parse task)."""
-    path = _spot_history_path()
+    path = _spot_history_path(path_override)
     if path is None or not path.exists():
         return []
     try:
@@ -2879,7 +2881,7 @@ def _load_spot_history(handle=None) -> list:
     return runs if isinstance(runs, list) else []
 
 
-def adaptive_spot_rate(generation: GenerationConfig) -> float:
+def adaptive_spot_rate(generation: GenerationConfig, history_path: Path | None = None) -> float:
     """Choose the next spot-check rate from the unbiased historical bucket.
 
     The configured rate is the cold-start rate.  After at least three recent runs
@@ -2894,7 +2896,8 @@ def adaptive_spot_rate(generation: GenerationConfig) -> float:
     maximum = max(minimum, min(1.0, float(getattr(generation, "spot_check_max_rate", 0.10) or 0)))
     current = min(configured, maximum)
     runs = []
-    for run in _load_spot_history():
+    history = _load_spot_history() if history_path is None else _load_spot_history(path_override=history_path)
+    for run in history:
         bucket = run.get("random") if isinstance(run, dict) else None
         if not isinstance(bucket, dict):
             continue
@@ -2919,7 +2922,7 @@ def adaptive_spot_rate(generation: GenerationConfig) -> float:
     return current
 
 
-def _append_spot_history(handle, file_stem: str, stats: dict) -> None:
+def _append_spot_history(handle, file_stem: str, stats: dict, path_override: Path | None = None) -> None:
     """Append one book's pure-random-bucket reading: locked read-modify-write, keep
     the last ``SPOT_CHECK_HISTORY_CAP`` runs, ``write_bytes`` full rewrite.
 
@@ -2927,11 +2930,11 @@ def _append_spot_history(handle, file_stem: str, stats: dict) -> None:
     parse task into a failure (the base file is the primary artifact).
     """
     try:
-        path = _spot_history_path()
+        path = _spot_history_path(path_override)
         if path is None:
             return
         with _SPOT_HISTORY_LOCK:
-            runs = _load_spot_history()
+            runs = _load_spot_history(path_override=path_override)
             runs.append({
                 "file": file_stem,
                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -3290,7 +3293,8 @@ def delete_pure_saying_tags(entries, title_test) -> tuple:
 
 
 def generate_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, generation: GenerationConfig,
-                  rng: "random.Random" | None = None) -> dict:
+                  rng: "random.Random" | None = None, *, output_path: Path | None = None,
+                  spot_history_path: Path | None = None) -> dict:
     """Task worker: turn one ``02_split_text`` file into its ``{speaker, text, instruct}``
     JSON entries.
 
@@ -3536,7 +3540,7 @@ def generate_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, generati
         # + 2/3 风险加权（特征数级联），用捆绑重判提示词 + 共享重判批协议重判，
         # 高置信改判在内存中生效、随本任务自己的基文件写出。
         configured_spot_rate = float(generation.spot_check_rate or 0)
-        spot_rate = adaptive_spot_rate(generation)
+        spot_rate = adaptive_spot_rate(generation, history_path=spot_history_path)
         if spot_rate != configured_spot_rate:
             handle.log(
                 f"归属抽样：历史随机桶反馈将抽样率从 {configured_spot_rate:.1%} 调整为 {spot_rate:.1%}"
@@ -3610,13 +3614,15 @@ def generate_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, generati
             long_split = 0
 
         out_name = f"{src.stem}.json"
-        out_path = get_layout().parsed_json / out_name
+        out_path = output_path or ((get_layout().parsed_json / out_name) if get_layout().parsed_json is not None else None)
+        if out_path is None:
+            raise RuntimeError("未设置工作空间，无法写入解析结果")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(all_entries, indent=2, ensure_ascii=False), encoding="utf-8")
 
         # 仪表读数：基文件落盘成功后才追加历史（解析结果是主产物，统计写失败绝不影响它）。
         if spot_stats["random_n"] > 0:
-            _append_spot_history(handle, src.stem, spot_stats)
+            _append_spot_history(handle, src.stem, spot_stats, path_override=spot_history_path)
         if spot_stats["checked"]:
             rnd_rate = spot_stats["random_rate"]
             rate_txt = (

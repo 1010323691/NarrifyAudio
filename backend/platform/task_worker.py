@@ -14,7 +14,10 @@ import redis
 from sqlalchemy import func, select
 
 from ..core.config import TextConfig
+from ..core import config as core_config
 from ..core.paths import WORKSPACE_DIRS
+from ..core.request_context import bind_workspace, reset_workspace
+from ..core.tasks import TaskCancelled
 from ..engines.book import (
     EXPECTED_CHAPTER_FORMAT,
     analyze_text,
@@ -28,6 +31,7 @@ from ..engines.book import (
     smart_repair,
 )
 from ..engines.text import format_text
+from ..engines import script as script_engine
 from .config import settings
 from .database import SessionLocal
 from .models import (
@@ -49,6 +53,7 @@ from .storage import (
     safe_display_name,
     sha256_file,
     task_attempt_path,
+    user_workspace_root,
 )
 from .task_state import (
     TERMINAL_TASK_STATUSES,
@@ -114,6 +119,44 @@ class TaskOutcome:
     metadata: dict[str, Any]
     publish_module: str | None = None
     additional_outputs: tuple[TaskFileOutcome, ...] = field(default_factory=tuple)
+
+
+class PersistentTaskHandle:
+    """Adapter from the legacy engine callback contract to durable task events."""
+
+    def __init__(self, claim: TaskClaim):
+        self.claim = claim
+
+    @property
+    def cancelled(self) -> bool:
+        return cancellation_requested(self.claim)
+
+    def progress(self, fraction: float, current: str = "") -> None:
+        update_progress(self.claim, round(max(0.0, min(1.0, fraction)) * 100), current)
+
+    def phase(self, name: str) -> None:
+        _append_claim_event(self.claim, "phase", {"phase": name})
+
+    def log(self, message: str, level: str = "INFO") -> None:
+        _append_claim_event(self.claim, "log", {"level": level, "msg": message})
+
+    def llm_chunk(self, _text: str) -> None:
+        # Raw model output is intentionally not persisted in TaskEvent history.
+        # The durable result is the published JSON artifact.
+        return
+
+    def llm_rate(self, _chars: int, _cps: float) -> None:
+        return
+
+    def llm_chars(self, _chars: int, _secs: float) -> None:
+        return
+
+    def segment_stats(self, _done: int, _total: int, _chars_done: int, _chars_total: int) -> None:
+        return
+
+    def check(self) -> None:
+        if self.cancelled:
+            raise TaskCancelled()
 
 
 def ensure_consumer_group(client: redis.Redis) -> None:
@@ -247,6 +290,18 @@ def update_progress(claim: TaskClaim, progress: int, current: str) -> bool:
         task.progress = max(0, min(100, int(progress)))
         task.updated_at = utcnow()
         append_task_event(db, task.id, "progress", {"progress": task.progress, "current": current})
+        db.commit()
+        return True
+
+
+def _append_claim_event(claim: TaskClaim, event_type: str, payload: dict[str, Any]) -> bool:
+    """Append an event only while this attempt still owns the task lease."""
+    with SessionLocal() as db:
+        task, attempt = _attempt_is_current(db, claim)
+        if task is None or attempt is None:
+            db.rollback()
+            return False
+        append_task_event(db, task.id, event_type, payload)
         db.commit()
         return True
 
@@ -391,10 +446,74 @@ def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[st
     return result
 
 
+def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
+    from ..core.config import GenerationConfig, LLMConfig, PromptsConfig
+
+    with SessionLocal() as db:
+        user, _project, item, source_path = _input_file(db, claim)
+        workspace = user_workspace_root(db, user.username, claim.project_id)
+        output_name = safe_display_name(f"{Path(item.original_name).stem}.json")
+        output_path = task_attempt_path(
+            db, user.username, claim.project_id, claim.task_id, claim.attempt_id, output_name
+        )
+
+    snapshot = claim.payload.get("config")
+    if isinstance(snapshot, dict):
+        llm = LLMConfig.model_validate(snapshot.get("llm") or {})
+        prompts = PromptsConfig.model_validate(snapshot.get("prompts") or {})
+        generation = GenerationConfig.model_validate(snapshot.get("generation") or {})
+    else:
+        token = bind_workspace(workspace)
+        try:
+            config = core_config.get_config()
+            llm, prompts, generation = config.llm, config.prompts, config.generation
+        finally:
+            reset_workspace(token)
+
+    history_path = workspace / "config" / "spot_check_history.json"
+    handle = PersistentTaskHandle(claim)
+    token = bind_workspace(workspace)
+    try:
+        try:
+            result = script_engine.generate_file(
+                handle,
+                source_path,
+                llm,
+                prompts,
+                generation,
+                output_path=output_path,
+                spot_history_path=history_path,
+            )
+        except TaskCancelled as exc:
+            raise TaskCancelledError() from exc
+    finally:
+        reset_workspace(token)
+
+    if not output_path.is_file():
+        raise TaskExecutionError("missing_output", "脚本解析未生成结果文件")
+    data = output_path.read_bytes()
+    metadata = dict(result)
+    metadata.pop("output_path", None)
+    metadata["engine"] = "script.parse"
+    metadata["source_file_id"] = item.id
+    metadata["output_name"] = output_name
+    return TaskOutcome(
+        temp_path=output_path,
+        output_name=output_name,
+        content_type="application/json",
+        size_bytes=len(data),
+        sha256=sha256_file(output_path),
+        metadata=metadata,
+        publish_module="03_parsed_json",
+    )
+
+
 def execute_claim(claim: TaskClaim) -> TaskOutcome:
     """Execute one real deterministic engine behind the durable worker boundary."""
-    if claim.task_type not in {"text.format", "book.analyze", "book.split"}:
+    if claim.task_type not in {"text.format", "book.analyze", "book.split", "script.parse"}:
         raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
+    if claim.task_type == "script.parse":
+        return _execute_script_parse(claim)
     with SessionLocal() as db:
         _, _, item, source_path = _input_file(db, claim)
         if cancellation_requested(claim):

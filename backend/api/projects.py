@@ -14,6 +14,7 @@ from ..platform.deps import require_csrf, require_user
 from ..platform.file_response import file_response
 from ..platform.models import Project, ProjectFile, User, new_id, utcnow
 from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, user_workspace_root
+from ..core.paths import WORKSPACE_DIRS
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
@@ -92,7 +93,10 @@ def delete_project(project_id: str, user: User = Depends(require_csrf), db: Sess
 
 
 def _file_json(item: ProjectFile) -> dict:
-    return {"id": item.id, "name": item.original_name, "kind": item.kind, "content_type": item.content_type, "size_bytes": item.size_bytes, "sha256": item.sha256, "created_at": item.created_at.isoformat()}
+    parts = item.object_key.split("/")
+    modules = {name for _, name in WORKSPACE_DIRS}
+    module = parts[2] if len(parts) >= 4 and parts[2] in modules else None
+    return {"id": item.id, "name": item.original_name, "module": module, "kind": item.kind, "content_type": item.content_type, "size_bytes": item.size_bytes, "sha256": item.sha256, "created_at": item.created_at.isoformat()}
 
 
 @router.get("/{project_id}/files")

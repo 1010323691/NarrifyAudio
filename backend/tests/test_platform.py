@@ -334,6 +334,74 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
         assert attempts[0].status == "succeeded"
 
 
+def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects",
+        headers={"X-CSRF-Token": csrf},
+        json={"name": "Durable script"},
+    ).json()
+    uploaded = client.post(
+        f"/api/v1/projects/{project['id']}/files",
+        headers={"X-CSRF-Token": csrf},
+        files={"upload": ("chapter.txt", b"narrator: hello", "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    input_file = uploaded.json()
+    observed: dict[str, str] = {}
+
+    def fake_generate(handle, path, llm, prompts, generation, *, output_path, spot_history_path):
+        observed["model"] = llm.model_name
+        observed["workspace"] = str(output_path.parent)
+        handle.log("durable script parsing started")
+        handle.progress(0.5, "parsing")
+        handle.check()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            '[{"speaker":"NARRATOR","text":"hello","instruct":""}]',
+            encoding="utf-8",
+        )
+        return {
+            "entries": [{"speaker": "NARRATOR", "text": "hello", "instruct": ""}],
+            "count": 1,
+            "output_path": str(output_path),
+        }
+
+    monkeypatch.setattr("backend.platform.task_worker.script_engine.generate_file", fake_generate)
+    submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "script.parse",
+            "payload": {
+                "input_file_id": input_file["id"],
+                "config": {
+                    "llm": {"model_name": "durable-snapshot-model"},
+                    "prompts": {},
+                    "generation": {"spot_check_rate": 0},
+                },
+            },
+            "estimated_units": 0,
+            "idempotency_key": "durable-script-parse-123",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-script-worker") == "succeeded"
+
+    result = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert result["status"] == "succeeded"
+    assert result["result"]["engine"] == "script.parse"
+    assert "output_path" not in result["result"]
+    assert observed["model"] == "durable-snapshot-model"
+    files = client.get(f"/api/v1/projects/{project['id']}/files").json()
+    artifacts = [item for item in files if item["module"] == "03_parsed_json"]
+    assert len(artifacts) == 1
+    assert artifacts[0]["name"] == "chapter.json"
+
+
 def test_cancel_before_claim_releases_quota(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
