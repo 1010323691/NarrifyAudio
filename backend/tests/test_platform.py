@@ -87,6 +87,9 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
     assert updated.status_code == 200, updated.text
     assert Path(updated.json()["root_path"]) == root
     assert client.get("/api/v1/admin/settings/storage").json()["source"] == "admin"
+    assert client.get("/api/v1/admin/tasks").status_code == 200
+    assert client.get("/api/v1/admin/workers").status_code == 200
+    assert client.get("/api/v1/admin/queue").status_code == 200
 
 
 def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: TestClient):

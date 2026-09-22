@@ -235,6 +235,18 @@ class SystemConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    status: Mapped[str] = mapped_column(String(30), default="starting", nullable=False)
+    capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    current_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Workspace(TimestampMixin, Base):
     """A user-owned workspace directory under the administrator's root."""
 

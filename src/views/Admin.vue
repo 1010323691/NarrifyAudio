@@ -18,15 +18,23 @@ const users = ref<adminApi.AdminUser[]>([])
 const storage = ref<adminApi.StorageSettings | null>(null)
 const rootPath = ref('')
 const quotaDraft = ref<Record<string, string>>({})
+const tasks = ref<adminApi.AdminTask[]>([])
+const workers = ref<adminApi.WorkerStatus[]>([])
+const queue = ref<adminApi.QueueStatus | null>(null)
 const busy = ref(false)
 
 async function load() {
   busy.value = true
   try {
-    const [userRows, storageSettings] = await Promise.all([adminApi.listUsers(), adminApi.getStorageSettings()])
+    const [userRows, storageSettings, taskRows, workerRows, queueStatus] = await Promise.all([
+      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(),
+    ])
     users.value = userRows
     storage.value = storageSettings
     rootPath.value = storageSettings.root_path
+    tasks.value = taskRows
+    workers.value = workerRows
+    queue.value = queueStatus
   } catch (error: any) {
     toast({ title: '管理数据加载失败', description: error?.message || String(error), variant: 'destructive' })
   } finally {
@@ -109,6 +117,42 @@ onMounted(load)
               </tr>
             </tbody>
           </table>
+        </div>
+      </CardContent>
+    </Card>
+
+    <div class="grid gap-6 xl:grid-cols-2">
+      <Card>
+        <CardHeader><CardTitle>Worker 状态</CardTitle><CardDescription>以数据库心跳判断在线状态。</CardDescription></CardHeader>
+        <CardContent>
+          <div v-if="!workers.length" class="text-sm text-muted-foreground">暂无 Worker 心跳。</div>
+          <div v-for="worker in workers" :key="worker.worker_id" class="flex items-center justify-between border-b py-2 last:border-0">
+            <div><div class="font-medium">{{ worker.worker_id }}</div><div class="text-xs text-muted-foreground">{{ worker.last_seen_at }}</div></div>
+            <StatusPill :label="worker.status" :tone="worker.status === 'idle' ? 'positive' : worker.status === 'offline' ? 'negative' : 'neutral'" />
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Redis Streams 队列</CardTitle><CardDescription>队列长度与消费者待确认消息。</CardDescription></CardHeader>
+        <CardContent>
+          <div v-if="queue" class="grid grid-cols-3 gap-3 text-center">
+            <div class="rounded-lg border p-3"><div class="text-2xl font-semibold">{{ queue.length }}</div><div class="text-xs text-muted-foreground">消息</div></div>
+            <div class="rounded-lg border p-3"><div class="text-2xl font-semibold">{{ queue.pending }}</div><div class="text-xs text-muted-foreground">待确认</div></div>
+            <div class="rounded-lg border p-3"><div class="text-sm font-semibold">{{ queue.available ? '正常' : '不可用' }}</div><div class="text-xs text-muted-foreground">连接状态</div></div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+
+    <Card>
+      <CardHeader><CardTitle>全局任务</CardTitle><CardDescription>最近 500 条持久化任务。</CardDescription></CardHeader>
+      <CardContent>
+        <div class="overflow-x-auto">
+          <table class="w-full min-w-[50rem] text-sm">
+            <thead><tr class="border-b text-left text-muted-foreground"><th class="p-3">任务</th><th class="p-3">用户</th><th class="p-3">状态</th><th class="p-3">进度</th><th class="p-3">创建时间</th></tr></thead>
+            <tbody><tr v-for="task in tasks" :key="task.id" class="border-b last:border-0"><td class="p-3"><div class="font-medium">{{ task.task_type }}</div><div class="text-xs text-muted-foreground">{{ task.id }}</div></td><td class="p-3">{{ task.owner_username }}</td><td class="p-3"><StatusPill :label="task.status" :tone="task.status === 'succeeded' ? 'positive' : ['failed', 'timeout'].includes(task.status) ? 'negative' : 'neutral'" /></td><td class="p-3">{{ task.progress }}%</td><td class="p-3 text-xs text-muted-foreground">{{ task.created_at }}</td></tr></tbody>
+          </table>
+          <div v-if="!tasks.length" class="py-6 text-center text-sm text-muted-foreground">暂无持久化任务。</div>
         </div>
       </CardContent>
     </Card>

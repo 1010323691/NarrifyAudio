@@ -9,6 +9,7 @@ import redis
 
 from .platform.outbox import publish_pending
 from .platform.task_worker import recover_database_tasks, run_once
+from .platform.worker_registry import heartbeat, mark_offline
 
 
 def main() -> None:
@@ -18,13 +19,24 @@ def main() -> None:
     parser.add_argument("--worker-id", default=os.getenv("NARRIFY_WORKER_ID", "worker-local"))
     args = parser.parse_args()
     client = redis.Redis.from_url(os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
-    while True:
-        recover_database_tasks()
-        publish_pending()
-        run_once(client, worker_id=args.worker_id, block_ms=100 if args.once else int(max(100, args.interval * 1000)))
-        if args.once:
-            return
-        time.sleep(max(0.1, args.interval))
+    capabilities = {"task_types": ["text.format", "book.analyze"], "queue": "narrify-tasks"}
+    heartbeat(args.worker_id, status="starting", capabilities=capabilities)
+    try:
+        while True:
+            heartbeat(args.worker_id, status="idle", capabilities=capabilities)
+            recover_database_tasks()
+            publish_pending()
+            result = run_once(client, worker_id=args.worker_id, block_ms=100 if args.once else int(max(100, args.interval * 1000)))
+            if result not in {"idle", "skipped"}:
+                heartbeat(args.worker_id, status="idle", capabilities=capabilities)
+            if args.once:
+                return
+            time.sleep(max(0.1, args.interval))
+    except Exception:
+        heartbeat(args.worker_id, status="error", capabilities=capabilities)
+        raise
+    finally:
+        mark_offline(args.worker_id)
 
 
 if __name__ == "__main__":

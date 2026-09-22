@@ -15,6 +15,32 @@ export interface StorageSettings {
   source: 'admin' | 'deployment-default'
 }
 
+export interface AdminTask {
+  id: string
+  owner_username: string
+  task_type: string
+  status: string
+  progress: number
+  error_message: string
+  created_at: string
+}
+
+export interface WorkerStatus {
+  worker_id: string
+  status: string
+  capabilities: Record<string, unknown>
+  current_task_id: string | null
+  last_seen_at: string
+}
+
+export interface QueueStatus {
+  available: boolean
+  stream: string
+  length: number
+  pending: number
+  error?: string
+}
+
 export function listUsers(): Promise<AdminUser[]> {
   return http.get('/api/v1/admin/users')
 }
@@ -33,4 +59,16 @@ export function updateStorageRoot(root_path: string): Promise<StorageSettings> {
 
 export function adjustQuota(userId: string, amount: number, idempotency_key: string, note = ''): Promise<Record<string, number | string>> {
   return http.post(`/api/v1/admin/users/${userId}/quota/adjust`, { amount, idempotency_key, note })
+}
+
+export function listTasks(): Promise<AdminTask[]> {
+  return http.get('/api/v1/admin/tasks')
+}
+
+export function listWorkers(): Promise<WorkerStatus[]> {
+  return http.get('/api/v1/admin/workers')
+}
+
+export function getQueueStatus(): Promise<QueueStatus> {
+  return http.get('/api/v1/admin/queue')
 }

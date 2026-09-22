@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
+import redis
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -10,8 +12,10 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, QuotaTransaction, SystemConfig, User, UserQuotaAccount
+from ..platform.models import AuditLog, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat
+from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root
+from ..platform.worker_registry import is_stale
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -155,3 +159,61 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
     )
     db.commit()
     return _quota_json(account)
+
+
+@router.get("/tasks")
+def list_all_tasks(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(Task).order_by(Task.created_at.desc()).limit(500)).all()
+    owners = {item.id: item.username for item in db.scalars(select(User)).all()}
+    return [
+        {
+            "id": item.id,
+            "owner_id": item.owner_id,
+            "owner_username": owners.get(item.owner_id, ""),
+            "project_id": item.project_id,
+            "task_type": item.task_type,
+            "status": item.status,
+            "progress": item.progress,
+            "error_code": item.error_code,
+            "error_message": item.error_message,
+            "created_at": item.created_at.isoformat(),
+            "updated_at": item.updated_at.isoformat(),
+        }
+        for item in rows
+    ]
+
+
+@router.get("/workers")
+def list_workers(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
+    rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
+    return [
+        {
+            "worker_id": item.worker_id,
+            "status": "offline" if is_stale(item.last_seen_at) else item.status,
+            "capabilities": item.capabilities,
+            "current_task_id": item.current_task_id,
+            "started_at": item.started_at.isoformat(),
+            "last_seen_at": item.last_seen_at.isoformat(),
+        }
+        for item in rows
+    ]
+
+
+@router.get("/queue")
+def queue_status(_: User = Depends(require_admin)) -> dict:
+    client = redis.Redis.from_url(
+        os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"),
+        decode_responses=True,
+    )
+    try:
+        client.ping()
+        length = int(client.xlen(STREAM_NAME))
+        pending = 0
+        try:
+            summary = client.xpending(STREAM_NAME, os.getenv("NARRIFY_TASK_GROUP", "narrify-workers"))
+            pending = int(summary.get("pending", 0)) if isinstance(summary, dict) else int(summary[0] or 0)
+        except redis.ResponseError:
+            pass
+        return {"available": True, "stream": STREAM_NAME, "length": length, "pending": pending}
+    except Exception as exc:  # Redis is an operational dependency, not a request crash.
+        return {"available": False, "stream": STREAM_NAME, "length": 0, "pending": 0, "error": str(exc)}
