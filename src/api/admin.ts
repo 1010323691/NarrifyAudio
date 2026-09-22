@@ -65,6 +65,10 @@ export function listTasks(): Promise<AdminTask[]> {
   return http.get('/api/v1/admin/tasks')
 }
 
+export function cancelTask(id: string): Promise<{ id: string; status: string }> {
+  return http.post(`/api/v1/admin/tasks/${id}/cancel`)
+}
+
 export function listWorkers(): Promise<WorkerStatus[]> {
   return http.get('/api/v1/admin/workers')
 }

@@ -13,9 +13,10 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, Project, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace
+from ..platform.models import AuditLog, Project, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace, utcnow
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, safe_display_name
+from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation
 from ..platform.worker_registry import is_stale
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -233,6 +234,29 @@ def list_all_tasks(_: User = Depends(require_admin), db: Session = Depends(get_d
         }
         for item in rows
     ]
+
+
+@router.post("/tasks/{task_id}/cancel")
+def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    if actor.role != "admin":
+        raise HTTPException(403, "需要管理员权限")
+    task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+    if task is None:
+        raise HTTPException(404, "任务不存在")
+    if task.status in TERMINAL_TASK_STATUSES:
+        return {"id": task.id, "status": task.status}
+    previous_status = task.status
+    if task.status in {"running", "cancelling"}:
+        task.status = "cancelling"
+    else:
+        task.status = "cancelled"
+        task.finished_at = task.finished_at or utcnow()
+        release_reservation(db, task, kind="release", note="administrator cancelled task")
+    task.updated_at = utcnow()
+    append_task_event(db, task.id, "admin_cancel_requested", {"actor_user_id": actor.id, "status": task.status})
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.task_cancelled", target_type="task", target_id=task.id, metadata_json={"previous_status": previous_status}))
+    db.commit()
+    return {"id": task.id, "status": task.status}
 
 
 @router.get("/workers")

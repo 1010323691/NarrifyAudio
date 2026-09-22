@@ -66,6 +66,37 @@ def test_admin_cannot_disable_last_admin(client: TestClient):
     assert client.get("/api/v1/admin/users").status_code == 403
 
 
+def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    with SessionLocal.begin() as db:
+        user = db.get(User, first["user"]["id"])
+        assert user is not None
+        user.role = "admin"
+        account = db.get(UserQuotaAccount, user.id)
+        assert account is not None
+        account.available_units = 3
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Admin task"}).json()
+    submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "text.format",
+            "payload": {},
+            "estimated_units": 3,
+            "idempotency_key": "admin-cancel-task-123",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    cancelled = client.post(f"/api/v1/admin/tasks/{submitted.json()['id']}/cancel", headers={"X-CSRF-Token": csrf})
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    quota = client.get("/api/v1/quota").json()
+    assert quota["available_units"] == 3
+    assert quota["reserved_units"] == 0
+
+
 def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]

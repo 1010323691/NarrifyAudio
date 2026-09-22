@@ -87,6 +87,16 @@ async function adjust(user: adminApi.AdminUser) {
   }
 }
 
+async function cancelTask(task: adminApi.AdminTask) {
+  try {
+    const updated = await adminApi.cancelTask(task.id)
+    task.status = updated.status
+    toast({ title: '任务已取消', variant: 'success' })
+  } catch (error: any) {
+    toast({ title: '取消任务失败', description: error?.message || String(error), variant: 'destructive' })
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -163,8 +173,8 @@ onMounted(load)
       <CardContent>
         <div class="overflow-x-auto">
           <table class="w-full min-w-[50rem] text-sm">
-            <thead><tr class="border-b text-left text-muted-foreground"><th class="p-3">任务</th><th class="p-3">用户</th><th class="p-3">状态</th><th class="p-3">进度</th><th class="p-3">创建时间</th></tr></thead>
-            <tbody><tr v-for="task in tasks" :key="task.id" class="border-b last:border-0"><td class="p-3"><div class="font-medium">{{ task.task_type }}</div><div class="text-xs text-muted-foreground">{{ task.id }}</div></td><td class="p-3">{{ task.owner_username }}</td><td class="p-3"><StatusPill :label="task.status" :tone="task.status === 'succeeded' ? 'positive' : ['failed', 'timeout'].includes(task.status) ? 'negative' : 'neutral'" /></td><td class="p-3">{{ task.progress }}%</td><td class="p-3 text-xs text-muted-foreground">{{ task.created_at }}</td></tr></tbody>
+            <thead><tr class="border-b text-left text-muted-foreground"><th class="p-3">任务</th><th class="p-3">用户</th><th class="p-3">状态</th><th class="p-3">进度</th><th class="p-3">创建时间</th><th class="p-3">操作</th></tr></thead>
+            <tbody><tr v-for="task in tasks" :key="task.id" class="border-b last:border-0"><td class="p-3"><div class="font-medium">{{ task.task_type }}</div><div class="text-xs text-muted-foreground">{{ task.id }}</div></td><td class="p-3">{{ task.owner_username }}</td><td class="p-3"><StatusPill :label="task.status" :tone="task.status === 'succeeded' ? 'positive' : ['failed', 'timeout'].includes(task.status) ? 'negative' : 'neutral'" /></td><td class="p-3">{{ task.progress }}%</td><td class="p-3 text-xs text-muted-foreground">{{ task.created_at }}</td><td class="p-3"><Button v-if="!['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)" variant="ghost" size="sm" @click="cancelTask(task)">取消</Button></td></tr></tbody>
           </table>
           <div v-if="!tasks.length" class="py-6 text-center text-sm text-muted-foreground">暂无持久化任务。</div>
         </div>
