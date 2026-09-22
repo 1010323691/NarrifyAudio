@@ -5,7 +5,7 @@ import os
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,9 @@ from ..engines.book import (
     check_chapter_sequence,
     decode_buffer,
     make_chapter_filenames,
+    make_whole_book_filename,
     make_smart_filenames,
+    chapter_content,
     smart_repair,
 )
 from ..engines.text import format_text
@@ -93,6 +95,16 @@ class TaskClaim:
 
 
 @dataclass(frozen=True)
+class TaskFileOutcome:
+    temp_path: Path
+    output_name: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    publish_module: str | None = None
+
+
+@dataclass(frozen=True)
 class TaskOutcome:
     temp_path: Path
     output_name: str
@@ -101,6 +113,7 @@ class TaskOutcome:
     sha256: str
     metadata: dict[str, Any]
     publish_module: str | None = None
+    additional_outputs: tuple[TaskFileOutcome, ...] = field(default_factory=tuple)
 
 
 def ensure_consumer_group(client: redis.Redis) -> None:
@@ -274,14 +287,37 @@ def _write_outcome(
     metadata: dict[str, Any],
     *,
     publish_module: str | None = None,
+    additional_outputs: list[tuple[str, str, bytes]] | None = None,
 ) -> TaskOutcome:
     with SessionLocal() as db:
         user = db.get(User, claim.owner_id)
         if user is None:
             raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
         temp_path = task_attempt_path(db, user.username, claim.project_id, claim.task_id, claim.attempt_id, output_name)
-    temp_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path.write_bytes(data)
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_bytes(data)
+        extra: list[TaskFileOutcome] = []
+        for index, (extra_name, extra_type, extra_data) in enumerate(additional_outputs or [], 1):
+            extra_path = task_attempt_path(
+                db,
+                user.username,
+                claim.project_id,
+                claim.task_id,
+                claim.attempt_id,
+                f"{index:05d}-{extra_name}",
+            )
+            extra_path.parent.mkdir(parents=True, exist_ok=True)
+            extra_path.write_bytes(extra_data)
+            extra.append(
+                TaskFileOutcome(
+                    temp_path=extra_path,
+                    output_name=safe_display_name(extra_name),
+                    content_type=extra_type,
+                    size_bytes=len(extra_data),
+                    sha256=sha256_file(extra_path),
+                    publish_module=publish_module,
+                )
+            )
     return TaskOutcome(
         temp_path=temp_path,
         output_name=safe_display_name(output_name),
@@ -290,6 +326,7 @@ def _write_outcome(
         sha256=sha256_file(temp_path),
         metadata=metadata,
         publish_module=publish_module,
+        additional_outputs=tuple(extra),
     )
 
 
@@ -356,7 +393,7 @@ def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[st
 
 def execute_claim(claim: TaskClaim) -> TaskOutcome:
     """Execute one real deterministic engine behind the durable worker boundary."""
-    if claim.task_type not in {"text.format", "book.analyze"}:
+    if claim.task_type not in {"text.format", "book.analyze", "book.split"}:
         raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
     with SessionLocal() as db:
         _, _, item, source_path = _input_file(db, claim)
@@ -385,17 +422,93 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
             publish_module=str(claim.payload.get("publish_module") or "") or None,
         )
 
-    analysis = _book_analysis_result(source_text, encoding, str(source_path))
-    update_progress(claim, 75, "完成章节分析")
-    output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_analysis.json")
+    if claim.task_type == "book.analyze":
+        analysis = _book_analysis_result(source_text, encoding, str(source_path))
+        update_progress(claim, 75, "完成章节分析")
+        output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_analysis.json")
+        return _write_outcome(
+            claim,
+            output_name,
+            "application/json",
+            json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8"),
+            {"engine": "book.analyze", "source_file_id": item.id, "analysis": analysis},
+            publish_module=str(claim.payload.get("publish_module") or "") or None,
+        )
+
+    raw = analyze_text(source_text)
+    chapters = raw["chapters"]
+    base = str(claim.payload.get("base") or base_name(item.original_name)).strip() or base_name(item.original_name)
+    outputs: list[tuple[str, str, bytes]] = []
+    final_chapters: list[dict[str, Any]] = []
+    repair_status: str | None = None
+    repair_report: dict[str, Any] | None = None
+    baseline_chars: int | None = None
+    if bool(claim.payload.get("whole_book")):
+        name = make_whole_book_filename(base)
+        outputs.append((name, "text/plain; charset=utf-8", source_text.encode("utf-8")))
+    else:
+        if not bool(claim.payload.get("smart")):
+            raise TaskExecutionError("invalid_payload", "分册任务必须启用 smart 或 whole_book")
+        if not chapters:
+            raise TaskExecutionError("no_chapters", "未检测到章节，无法分册")
+        repair = smart_repair(source_text, chapters)
+        if repair["status"] == "error":
+            raise TaskExecutionError("invalid_structure", repair.get("error") or "章节结构修复失败")
+        repair_status = repair["status"]
+        repair_report = repair["report"]
+        baseline_chars = repair.get("baseline_chars")
+        repaired = repair["chapters"]
+        names = make_smart_filenames(repaired)
+        final_chapters = [
+            {
+                "seq": index,
+                "num": chapter.get("final_num", chapter.get("num")),
+                "numStr": str(chapter.get("final_num", chapter.get("numStr"))),
+                "title": chapter["title"],
+                "chars": chapter["chars"],
+                "orig_num": chapter.get("repair", {}).get("orig_num", chapter.get("num")),
+                "orig_numStr": chapter.get("repair", {}).get("orig_numStr", chapter.get("numStr", "")),
+                "final_num": chapter.get("final_num", index),
+                "actions": chapter.get("repair", {}).get("actions", ["kept"]),
+                "confidence": chapter.get("repair", {}).get("confidence", "high"),
+            }
+            for index, chapter in enumerate(repaired, 1)
+        ]
+        outputs.extend(
+            (
+                name,
+                "text/plain; charset=utf-8",
+                chapter_content(raw, chapter).encode("utf-8"),
+            )
+            for name, chapter in zip(names, repaired)
+        )
+    update_progress(claim, 75, "完成分册")
     return _write_outcome(
         claim,
-        output_name,
-        "application/json",
-        json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8"),
-        {"engine": "book.analyze", "source_file_id": item.id, "analysis": analysis},
-        publish_module=str(claim.payload.get("publish_module") or "") or None,
+        outputs[0][0],
+        outputs[0][1],
+        outputs[0][2],
+        {
+            "engine": "book.split",
+            "source_file_id": item.id,
+            "file_count": len(outputs),
+            "chapters": final_chapters,
+            "status": repair_status or "ok",
+            "report": repair_report or {"actions": [], "warnings": [], "removed": []},
+            "baseline_chars": baseline_chars,
+            "original_count": len(chapters),
+            "expected_format": EXPECTED_CHAPTER_FORMAT,
+            "files": [{"name": name, "chars": len(data.decode("utf-8").replace("\n", "").replace("\r", ""))} for name, _, data in outputs],
+        },
+        publish_module="02_split_text",
+        additional_outputs=outputs[1:],
     )
+
+
+def _cleanup_outcome(outcome: TaskOutcome) -> None:
+    outcome.temp_path.unlink(missing_ok=True)
+    for extra in outcome.additional_outputs:
+        extra.temp_path.unlink(missing_ok=True)
 
 
 def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
@@ -403,42 +516,74 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
         task, attempt = _attempt_is_current(db, claim)
         if task is None or attempt is None or task.status == "cancelling":
             db.rollback()
-            outcome.temp_path.unlink(missing_ok=True)
+            _cleanup_outcome(outcome)
             return False
         user = db.get(User, task.owner_id)
         if user is None:
             db.rollback()
-            outcome.temp_path.unlink(missing_ok=True)
+            _cleanup_outcome(outcome)
             return False
-        output_id = new_id()
-        if outcome.publish_module:
-            module_names = {name for _, name in WORKSPACE_DIRS if name != "00_temp"}
-            if outcome.publish_module not in module_names:
-                db.rollback()
-                outcome.temp_path.unlink(missing_ok=True)
-                return False
-            object_key = f"{safe_display_name(user.username)}/{task.project_id}/{outcome.publish_module}/{output_id}/{safe_display_name(outcome.output_name)}"
-        else:
-            object_key = project_object_key(user.username, task.project_id, output_id, outcome.output_name)
-        final_path = object_path(object_key, configured_storage_root(db))
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(outcome.temp_path, final_path)
-        db.add(
-            ProjectFile(
-                id=output_id,
-                project_id=task.project_id,
-                owner_id=task.owner_id,
-                original_name=outcome.output_name,
-                object_key=object_key,
+        outputs = [
+            TaskFileOutcome(
+                temp_path=outcome.temp_path,
+                output_name=outcome.output_name,
                 content_type=outcome.content_type,
                 size_bytes=outcome.size_bytes,
                 sha256=outcome.sha256,
-                kind="artifact",
+                publish_module=outcome.publish_module,
+            ),
+            *outcome.additional_outputs,
+        ]
+        module_names = {name for _, name in WORKSPACE_DIRS if name != "00_temp"}
+        if any(item.publish_module and item.publish_module not in module_names for item in outputs):
+            db.rollback()
+            _cleanup_outcome(outcome)
+            return False
+        published: list[dict[str, Any]] = []
+        for item in outputs:
+            output_id = new_id()
+            if item.publish_module:
+                object_key = f"{safe_display_name(user.username)}/{task.project_id}/{item.publish_module}/{output_id}/{safe_display_name(item.output_name)}"
+            else:
+                object_key = project_object_key(user.username, task.project_id, output_id, item.output_name)
+            final_path = object_path(object_key, configured_storage_root(db))
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(item.temp_path, final_path)
+            db.add(
+                ProjectFile(
+                    id=output_id,
+                    project_id=task.project_id,
+                    owner_id=task.owner_id,
+                    original_name=item.output_name,
+                    object_key=object_key,
+                    content_type=item.content_type,
+                    size_bytes=item.size_bytes,
+                    sha256=item.sha256,
+                    kind="artifact",
+                )
             )
-        )
-        result_payload = {"file_id": output_id, "object_key": object_key, "name": outcome.output_name, **outcome.metadata}
+            published.append(
+                {
+                    "file_id": output_id,
+                    "object_key": object_key,
+                    "name": item.output_name,
+                    "path": str(final_path) if item.publish_module else None,
+                }
+            )
+        result_payload = {
+            "file_id": published[0]["file_id"],
+            "object_key": published[0]["object_key"],
+            "name": published[0]["name"],
+            **outcome.metadata,
+        }
         if outcome.publish_module:
-            result_payload["path"] = str(final_path)
+            result_payload["path"] = published[0]["path"]
+        if len(published) > 1 or isinstance(outcome.metadata.get("files"), list):
+            described = outcome.metadata.get("files") if isinstance(outcome.metadata.get("files"), list) else []
+            result_payload["files"] = [
+                {**published[index], **(described[index] if index < len(described) and isinstance(described[index], dict) else {})}
+                for index in range(len(published))
+            ]
         db.add(TaskResult(task_id=task.id, result=result_payload))
         attempt.status = "succeeded"
         attempt.finished_at = utcnow()

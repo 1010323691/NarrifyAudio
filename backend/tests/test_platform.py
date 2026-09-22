@@ -198,6 +198,32 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     assert analyzed_task["result"]["analysis"]["chapter_count"] == 1
     assert analyzed_task["result"]["analysis"]["chapters"][0]["title"] == ""
 
+    split_input = client.post(
+        f"/api/v1/projects/{project['id']}/files",
+        headers={"X-CSRF-Token": csrf},
+        files={"upload": ("split.txt", "第一章\n第一段\n第二章\n第二段\n".encode("utf-8"), "text/plain")},
+    )
+    assert split_input.status_code == 201, split_input.text
+    split_submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "book.split",
+            "payload": {"input_file_id": split_input.json()["id"], "smart": True},
+            "estimated_units": 0,
+            "idempotency_key": "worker-book-split-123",
+        },
+    )
+    assert split_submitted.status_code == 201, split_submitted.text
+    split_id = split_submitted.json()["id"]
+    assert process_task_message({"payload": {"task_id": split_id}}, worker_id="test-worker") == "succeeded"
+    split_task = client.get(f"/api/v1/tasks/{split_id}").json()
+    assert split_task["status"] == "succeeded"
+    assert split_task["result"]["file_count"] == 2
+    assert len(split_task["result"]["files"]) == 2
+    assert all("/02_split_text/" in item["path"].replace("\\", "/") for item in split_task["result"]["files"])
+
     with SessionLocal() as db:
         account = db.get(UserQuotaAccount, first["user"]["id"])
         assert account is not None

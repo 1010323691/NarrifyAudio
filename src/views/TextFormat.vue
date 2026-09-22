@@ -3,7 +3,6 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
-import { smartSplitBook, splitBook } from '@/api/book'
 import { submitDurableTask, waitForDurableTask } from '@/api/persistentTasks'
 import { downloadFile, pickFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
@@ -268,7 +267,8 @@ async function split() {
   busySplit.value = true
   error.value = ''
   try {
-    const r = await splitBook(formatResult.value.output_path, { smart: true })
+    const result = await runSplitTask({ smart: true })
+    const r = toBookSplitResult(result)
     splitResult.value = r
     if (r.chapters?.length) applyFinalAnalysis(r.chapters, r.files.map((f) => f.name))
     toast({ title: '分册完成', variant: 'success', description: `已按智能识别结果生成 ${r.file_count} 个分册文件` })
@@ -286,7 +286,7 @@ async function runWholeBook() {
   busySplit.value = true
   error.value = ''
   try {
-    const r = await splitBook(formatResult.value.output_path, { wholeBook: true })
+    const r = toBookSplitResult(await runSplitTask({ whole_book: true }))
     splitResult.value = r
     toast({ title: '整本分册完成', variant: 'success', description: `已生成整本文件 ${r.files[0]?.name ?? ''}` })
   } catch (e: any) {
@@ -304,7 +304,8 @@ async function runSmart() {
   busySmart.value = true
   error.value = ''
   try {
-    const r = await smartSplitBook(formatResult.value.output_path)
+    const result = await runSplitTask({ smart: true })
+    const r = toBookSmartSplitResult(result)
     smartResult.value = r
     // 用修复结果覆盖原始排版识别：此后「章节分析」卡展示修复后的 1..N 结构
     //（缺号/重号/乱序警告随之消失），「开始分册」也按这份结果拆分文件。
@@ -330,6 +331,58 @@ async function runSmart() {
     toast({ title: '智能识别失败', variant: 'destructive', description: error.value })
   } finally {
     busySmart.value = false
+  }
+}
+
+async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) {
+  if (!formatResult.value?.file_id || !formatResult.value.project_id) {
+    throw new Error('排版产物未建立项目归属，无法提交分册任务。')
+  }
+  const submitted = await submitDurableTask({
+    project_id: formatResult.value.project_id,
+    task_type: 'book.split',
+    payload: {
+      input_file_id: formatResult.value.file_id,
+      ...payload,
+    },
+    estimated_units: 0,
+    idempotency_key: `book-split:${formatResult.value.file_id}:${payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
+  })
+  const task = await waitForDurableTask(submitted.id)
+  if (task.status !== 'succeeded' || !task.result) {
+    throw new Error(task.error_message || '持久化分册任务失败')
+  }
+  return task.result
+}
+
+function toBookSplitResult(result: Record<string, unknown>): BookSplitResult {
+  const files = Array.isArray(result.files) ? result.files : []
+  return {
+    output_dir: String(result.output_dir || ''),
+    file_count: Number(result.file_count || files.length),
+    files: files.map((item) => {
+      const file = item as Record<string, unknown>
+      return { name: String(file.name || ''), path: String(file.path || ''), chars: Number(file.chars || 0) }
+    }),
+    chapters: Array.isArray(result.chapters) ? result.chapters as BookChapter[] : [],
+  }
+}
+
+function toBookSmartSplitResult(result: Record<string, unknown>): BookSmartSplitResult {
+  const files = Array.isArray(result.files) ? result.files : []
+  return {
+    status: result.status === 'clean' ? 'clean' : 'ok',
+    output_dir: String(result.output_dir || ''),
+    file_count: Number(result.file_count || files.length),
+    files: files.map((item) => {
+      const file = item as Record<string, unknown>
+      return { name: String(file.name || ''), path: String(file.path || ''), chars: Number(file.chars || 0) }
+    }),
+    chapters: Array.isArray(result.chapters) ? result.chapters as BookSmartSplitResult['chapters'] : [],
+    report: (result.report || { actions: [], warnings: [], removed: [] }) as BookSmartSplitResult['report'],
+    baseline_chars: typeof result.baseline_chars === 'number' ? result.baseline_chars : null,
+    original_count: Number(result.original_count || 0),
+    expected_format: String(result.expected_format || ''),
   }
 }
 
