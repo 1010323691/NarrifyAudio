@@ -332,7 +332,7 @@ async function cleanupTemp() {
         <tbody><tr v-for="user in shownUsers" :key="user.id"><td><strong>{{ user.display_name || user.username }}</strong><small>{{ user.username }} · {{ user.email }}</small></td>
           <td><div class="badge-stack"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></div></td>
           <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td><td>未配置</td>
-          <td>{{ user.consumed_units ?? 0 }} 字已用<small>{{ user.reserved_units ?? 0 }} 字预留 · {{ user.available_units ?? 0 }} 字可用</small></td>
+          <td>{{ user.consumed_units ?? 0 }} 已用<small>{{ user.reserved_units ?? 0 }} 预留 · {{ user.available_units ?? 0 }} 可用</small></td>
           <td>{{ user.project_count ?? 0 }} 项目<small>{{ user.workspace_count ?? '—' }} 工作空间</small></td>
           <td>{{ bytes(user.storage_bytes) }}<small>{{ user.workspace_file_count ?? '未采集' }} 个目录文件 · {{ user.file_count ?? 0 }} 个已登记</small></td>
           <td class="user-actions"><Button variant="outline" size="sm" @click="selectedUser = user">详情 / 操作</Button></td></tr></tbody></table></div>
@@ -342,9 +342,9 @@ async function cleanupTemp() {
       <Card v-if="selectedUser"><CardHeader><CardTitle>用户详情 · {{ selectedUser.username }}</CardTitle></CardHeader><CardContent class="admin-form">
         <p class="mono">{{ selectedUser.id }}</p><p>{{ selectedUser.email }} · {{ selectedUser.display_name || selectedUser.username }}</p>
         <p>套餐：未配置 · 项目：{{ selectedUser.project_count ?? 0 }} · 工作空间：{{ selectedUser.workspace_count ?? '—' }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
-        <p>字数额度：{{ selectedUser.consumed_units ?? 0 }} 字已用 · {{ selectedUser.reserved_units ?? 0 }} 字预留 · {{ selectedUser.available_units ?? 0 }} 字可用</p>
+        <p>额度：{{ selectedUser.consumed_units ?? 0 }} 已用 · {{ selectedUser.reserved_units ?? 0 }} 预留 · {{ selectedUser.available_units ?? 0 }} 可用</p>
         <div class="controls"><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { role: selectedUser.role === 'admin' ? 'user' : 'admin' })">{{ selectedUser.role === 'admin' ? '移除管理员' : '设为管理员' }}</Button><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { is_active: !selectedUser.is_active })">{{ selectedUser.is_active ? '禁用用户' : '启用用户' }}</Button></div>
-        <div class="controls"><label for="quota-adjust">字数额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="填写字数，正数增加 / 负数扣减" class="search" /><Button variant="outline" @click="adjustQuota">确认调整</Button></div>
+        <div class="controls"><label for="quota-adjust">额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="输入数量，正数增加 / 负数扣减" class="search" /><Button variant="outline" @click="adjustQuota">确认调整</Button></div>
       </CardContent></Card>
     </section>
 
@@ -382,7 +382,7 @@ async function cleanupTemp() {
       <Settings v-if="['text','models','audio'].includes(settingsSection)" :admin-only="true" :admin-section="settingsSection" />
       <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>通用</CardTitle></CardHeader><CardContent class="admin-form">
         <label><input v-model="registrationDraft" type="checkbox" /> 允许新用户注册</label><Button :disabled="!registration" @click="saveRegistration">保存注册设置</Button>
-        <label for="initial-quota">新用户初始字数额度（字）</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
+        <label for="initial-quota">新用户初始额度</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
       </CardContent></Card>
       <Card v-else-if="settingsSection === 'storage'"><CardHeader><CardTitle>存储路径</CardTitle></CardHeader><CardContent class="admin-form">
         <label for="storage-root">工作空间根目录</label><Input id="storage-root" v-model="rootDraft" class="mono" />
