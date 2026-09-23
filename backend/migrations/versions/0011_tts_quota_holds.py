@@ -1,7 +1,7 @@
 """reserve TTS input characters while synthesis is running
 
 Revision ID: 0011_tts_quota_holds
-Revises: 0010_character_quota_transactions
+Revises: 0010_character_quota
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "0011_tts_quota_holds"
-down_revision = "0010_character_quota_transactions"
+down_revision = "0010_character_quota"
 branch_labels = None
 depends_on = None
 

@@ -1,6 +1,6 @@
 """record resource and character details in quota transactions
 
-Revision ID: 0010_character_quota_transactions
+Revision ID: 0010_character_quota
 Revises: 0009_fair_scheduler_cursor
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0010_character_quota_transactions"
+revision = "0010_character_quota"
 down_revision = "0009_fair_scheduler_cursor"
 branch_labels = None
 depends_on = None
