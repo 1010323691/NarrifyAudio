@@ -478,6 +478,8 @@ export interface TaskSnapshot {
   id: string
   module: string
   label: string
+  /** Current engine stage, e.g. parse/check. */
+  phase?: string
   status: TaskStatus
   progress: number
   current: string

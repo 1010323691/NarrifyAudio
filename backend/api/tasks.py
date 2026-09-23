@@ -94,12 +94,13 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
     events = _durable_events(db, task.id)
     logs = []
     current = ""
+    phase = ""
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.event_type == "progress":
             current = str(payload.get("current") or current)
         elif event.event_type == "phase":
-            current = str(payload.get("phase") or current)
+            phase = str(payload.get("phase") or phase)
         elif event.event_type == "log":
             logs.append(
                 {
@@ -115,6 +116,7 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
         "label": _durable_label(task),
         "seq": int(task.created_at.timestamp() * 1000),
         "status": _legacy_status(task.status),
+        "phase": phase,
         "progress": max(0.0, min(1.0, task.progress / 100.0)),
         "current": current,
         "logs": logs,
@@ -182,6 +184,8 @@ def _durable_event_payload(db, task: DurableTask, event: TaskEvent) -> dict | No
             "progress": task.progress / 100.0,
             "current": payload.get("current") or "",
         }
+    if event.event_type == "phase":
+        return {"type": "phase", "phase": payload.get("phase") or ""}
     if event.event_type == "log":
         return {
             "type": "log",

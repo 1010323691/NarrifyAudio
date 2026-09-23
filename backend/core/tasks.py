@@ -70,9 +70,8 @@ class TaskHandle:
 
         The 文本解析 batch coordinator reads ``Task.phase`` to tell which tasks have
         already released their concurrency slot (the mechanical check stages run
-        slot-free) so it can keep admitting prefetched files. Display-neutral: the
-        frontend store ignores the SSE event, and ``current`` stays the user-facing
-        step text.
+        slot-free) so it can keep admitting prefetched files. The phase is also sent
+        to the UI separately from the user-facing ``current`` step text.
         """
         self._t.set_phase(name)
 
@@ -227,8 +226,7 @@ class Task:
         """Set the engine-reported work stage (see ``Task.phase``) and forward it.
 
         The event rides the usual bus; the multiplexed SSE stream passes it through
-        and the frontend store ignores unknown event types — the consumers are
-        in-process (the batch coordinator polls ``Task.phase`` directly).
+        to clients, while the batch coordinator polls ``Task.phase`` directly.
         """
         self.phase = phase
         self._emit({"type": "phase", "phase": phase})
@@ -352,6 +350,7 @@ class Task:
             "module": self.module,
             "label": self.label,
             "seq": self.seq,
+            "phase": self.phase,
             "status": self.status.value,
             "progress": self.progress,
             "current": self.current,

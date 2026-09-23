@@ -4,7 +4,6 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { cancelParseBatch, generateScriptFiles } from '@/api/script'
 import { listDir } from '@/api/files'
-import { downloadFile } from '@/utils/fileops'
 import type { FileItem, TaskSnapshot } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -26,8 +25,6 @@ import {
   ScanText,
   Loader2,
   XCircle,
-  CheckCircle2,
-  Download,
   RefreshCw,
   ListChecks,
   Eraser,
@@ -89,6 +86,7 @@ function jobState(task: TaskSnapshot | undefined): JobState {
     case 'running':
       // Still waiting on the concurrency gate reads as "queued", not actively working.
       // （后端排队文案含「排队」二字，勿改文案否则此判定失效。）
+      if (task.phase === 'parse' || task.phase === 'check') return { label: '解析中', variant: 'default' }
       if (/排队/.test(task.current || '')) return { label: '排队', variant: 'secondary' }
       return { label: '解析中', variant: 'default' }
     case 'pending':
@@ -112,7 +110,6 @@ interface JobRow {
   progress: number
   active: boolean
   error: string
-  outputName: string
 }
 const jobRows = computed<JobRow[]>(() =>
   fileJobs.value.map((j, idx) => {
@@ -130,9 +127,6 @@ const jobRows = computed<JobRow[]>(() =>
       progress: task?.progress ?? 0,
       active: status === 'pending' || status === 'running' || status === 'paused',
       error: task?.error || '',
-      outputName:
-        (task?.result?.output_name as string) ||
-        j.name.replace(/\.[^.]+$/, '') + '.json',
     }
   }),
 )
@@ -140,7 +134,7 @@ const jobRows = computed<JobRow[]>(() =>
 const jobRowByName = computed(() => new Map(jobRows.value.map((r) => [r.name, r])))
 
 /** 选择区渲染行 = 磁盘文件 + 本批进度行（若在该批中）。文件行即进度行：
- *  批次内文件直接在此显示状态 / 速度 / 进度条 / 取消·重试·下载。 */
+ *  批次内文件直接在此显示状态 / 速度 / 进度条 / 取消·重试。 */
 const fileRows = computed(() =>
   files.value.map((f) => ({ file: f, job: jobRowByName.value.get(f.name) })),
 )
@@ -349,9 +343,6 @@ async function cancelAll() {
   await taskStore.refresh()
 }
 
-function downloadJob(row: JobRow) {
-  downloadFile('03_parsed_json', row.outputName)
-}
 </script>
 
 <template>
@@ -386,7 +377,7 @@ function downloadJob(row: JobRow) {
           class="max-h-80 space-y-1 overflow-y-auto rounded-md border p-2"
         >
           <!-- 文件行 = 进度行：本批文件直接在此显示 状态（含排队位置）/ 速度 / 进度条 /
-               取消·重试·下载（行内按钮不包在 <label> 里，避免点按钮连带切换勾选）。 -->
+               取消·重试（行内按钮不包在 <label> 里，避免点按钮连带切换勾选）。 -->
           <div
             v-for="row in fileRows"
             :key="row.file.name"
@@ -435,15 +426,6 @@ function downloadJob(row: JobRow) {
                   @click="retryJob(row.job.task)"
                 >
                   <RefreshCw class="h-3.5 w-3.5" />重试
-                </Button>
-                <Button
-                  v-else-if="row.job.state.label === '已完成'"
-                  variant="outline"
-                  size="sm"
-                  class="shrink-0"
-                  @click="downloadJob(row.job)"
-                >
-                  <Download class="h-3.5 w-3.5" />下载 JSON
                 </Button>
               </template>
               <Badge v-else-if="row.file.done" variant="success" class="shrink-0">已完成</Badge>
@@ -557,14 +539,6 @@ function downloadJob(row: JobRow) {
               @click="retryJob(row.task)"
             >
               <RefreshCw class="h-3.5 w-3.5" />重试
-            </Button>
-            <Button
-              v-else-if="row.state.label === '已完成'"
-              variant="outline"
-              size="sm"
-              @click="downloadJob(row)"
-            >
-              <Download class="h-3.5 w-3.5" />下载 JSON
             </Button>
           </div>
 

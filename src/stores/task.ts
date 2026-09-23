@@ -66,6 +66,9 @@ export const useTaskStore = defineStore('task', () => {
         t.progress = e.progress
         if (e.current) t.current = e.current
         break
+      case 'phase':
+        t.phase = typeof e.phase === 'string' ? e.phase : ''
+        break
       case 'log':
         // Append chronologically (oldest first) so the UI shows the newest line at the
         // bottom; the snapshot replay uses the same order. Trim the OLDEST lines first.
