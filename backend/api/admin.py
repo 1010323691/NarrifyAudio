@@ -290,6 +290,8 @@ def list_all_tasks(_: User = Depends(require_admin), db: Session = Depends(get_d
             "error_message": item.error_message,
             "created_at": item.created_at.isoformat(),
             "updated_at": item.updated_at.isoformat(),
+            "started_at": item.started_at.isoformat() if item.started_at else None,
+            "finished_at": item.finished_at.isoformat() if item.finished_at else None,
         }
         for item in rows
     ]

@@ -1,0 +1,10 @@
+# Dependencies required by the durable platform smoke environment.
+# The production image additionally installs the optional local TTS runtime.
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.8
+python-multipart>=0.0.9
+SQLAlchemy>=2.0.36
+alembic>=1.14
+psycopg[binary]>=3.2
+redis>=5.2

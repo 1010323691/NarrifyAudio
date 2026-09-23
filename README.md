@@ -1,5 +1,24 @@
 # NarrifyAudio
 
+## PostgreSQL/Redis 多用户冒烟测试
+
+仓库提供了不加载本地 TTS 模型的轻量 Compose 冒烟环境。它会启动 PostgreSQL、Redis、两个持久化 Worker 和 OpenAI 兼容的 LLM stub，然后并发创建两个用户，提交多条 `script.parse` 任务，验证 LLM 结果、额度释放、排队取消、管理员统计和跨用户公平调度。
+
+在已安装 Docker Desktop 的机器上执行：
+
+```powershell
+$env:POSTGRES_PASSWORD = "narrify-smoke-postgres-password"
+$env:NARRIFY_BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
+$env:NARRIFY_BOOTSTRAP_ADMIN_PASSWORD = "smoke-admin-password-123"
+docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile smoke up --build --abort-on-container-exit --exit-code-from smoke --scale worker=2
+```
+
+冒烟结束后清理容器和数据卷：
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile smoke down -v
+```
+
 一个 Web 应用,在一个地方完成中文有声书的完整制作流程:**排版与分册(排版 → 自动章节分析 → 每章一册)→ 文本解析(内含断句失败校验 / 纯归属标签删除 / 归属抽样)→ 角色配音 → 音频合成 → 音频合并 → 音频分集**,外加开始(工作空间管理)与设置。
 
 当前仓库以 AudiobookStudio 的真实业务引擎为兼容基线，并逐步迁移到 NarrifyAudio 的多用户服务架构。新平台 API 位于 `/api/v1`，认证使用 HttpOnly Session Cookie + CSRF Token；用户、项目、文件、任务、额度预留和 Outbox 事件使用持久化数据库记录。
