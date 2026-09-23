@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
-import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
+import { useWorkspaceStore } from '@/stores/workspace'
 import { useToast } from '@/components/ui/toast'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
-import { health } from '@/api/client'
 import type { AppConfig, TextToggles } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -13,7 +12,6 @@ import CardHeader from '@/components/ui/CardHeader.vue'
 import CardTitle from '@/components/ui/CardTitle.vue'
 import CardDescription from '@/components/ui/CardDescription.vue'
 import CardContent from '@/components/ui/CardContent.vue'
-import CardFooter from '@/components/ui/CardFooter.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
 import Textarea from '@/components/ui/Textarea.vue'
@@ -25,9 +23,7 @@ import {
   Monitor,
   Sun,
   Moon,
-  RefreshCw,
   Palette,
-  FolderCog,
   Type,
   Server,
   SlidersHorizontal,
@@ -35,16 +31,19 @@ import {
   AudioWaveform,
   AudioLines,
   Music4,
+  UserRound,
+  ArrowRight,
 } from 'lucide-vue-next'
 
 const settings = useSettingsStore()
-const app = useAppStore()
+const auth = useAuthStore()
+const workspace = useWorkspaceStore()
 const { push: toast } = useToast()
-const { workspaceSet } = useWorkspaceGate()
 
 const draft = ref<AppConfig | null>(null)
 const saving = ref(false)
-const healthInfo = ref<{ ok: boolean; service: string; port: number } | null>(null)
+const section = ref<'account' | 'appearance' | 'text' | 'models' | 'audio'>('account')
+const workspaceSet = computed(() => workspace.hasActiveProject)
 
 const TOGGLES: { key: keyof TextToggles; label: string }[] = [
   { key: 'sentence_break', label: '断句换段' },
@@ -66,14 +65,9 @@ const THEMES = [
 ]
 
 onMounted(async () => {
-  app.ping()
+  if (!workspace.loaded) await workspace.refresh()
   if (!settings.loaded) await settings.load()
   if (settings.config) draft.value = JSON.parse(JSON.stringify(settings.config))
-  try {
-    healthInfo.value = await health()
-  } catch {
-    healthInfo.value = null
-  }
 })
 
 function setTheme(theme: string) {
@@ -95,49 +89,46 @@ async function save() {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex items-center justify-between">
+  <div class="user-settings">
+    <div class="settings-header">
       <div>
-        <h1 class="text-2xl font-bold tracking-tight">设置</h1>
-        <p class="mt-1 text-muted-foreground">配置应用和生成参数，设置会保存到当前工作空间。</p>
+        <p class="eyebrow">YOUR PREFERENCES</p>
+        <h1 class="page-title">设置</h1>
+        <p class="page-description">账号和界面偏好，以及当前项目的制作参数。</p>
       </div>
-      <Button @click="save" :disabled="saving || !draft || !workspaceSet">
+      <Button v-if="section !== 'account'" @click="save" :disabled="saving || !draft || !workspaceSet">
         <Save class="h-4 w-4" />{{ saving ? '保存中…' : '保存设置' }}
       </Button>
     </div>
 
+    <nav class="settings-tabs" aria-label="用户设置分类">
+      <button v-for="item in ([['account','账号与项目'],['appearance','界面'],['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频']] as const)" :key="item[0]" type="button" :class="section === item[0] ? 'is-active' : ''" @click="section = item[0]">{{ item[1] }}</button>
+    </nav>
+
     <Alert v-if="!draft" variant="destructive">
-      无法加载配置——请确认后端已启动（127.0.0.1:8642）。
+      当前项目设置暂时无法读取。确认项目可用后重试。
     </Alert>
 
     <template v-else>
-      <!-- 未设工作空间时提示（配置随工程，未开工不可保存） -->
-      <Alert v-if="!workspaceSet" variant="warning">
-        请先在「开始」页选择工作空间。
-      </Alert>
 
-      <!-- 后端状态 -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><RefreshCw class="h-5 w-5" />后端状态</CardTitle>
-        </CardHeader>
-        <CardContent class="flex flex-wrap items-center gap-3">
-          <StatusPill
-            :label="app.backendUp ? '已连接' : '未连接'"
-            :tone="app.backendUp ? 'positive' : 'negative'"
-            :aria-label="app.backendUp ? '后端已连接' : '后端未连接'"
-          />
-          <span v-if="healthInfo" class="text-sm text-muted-foreground">
-            {{ healthInfo.service }} · 端口 {{ healthInfo.port }}
-          </span>
-          <Button variant="outline" size="sm" class="ml-auto" @click="app.ping()">
-            <RefreshCw class="h-4 w-4" />重新检测
-          </Button>
+      <Card v-if="section === 'account'" class="settings-account">
+        <CardHeader><CardTitle class="flex items-center gap-2"><UserRound class="h-5 w-5" />账号</CardTitle></CardHeader>
+        <CardContent class="settings-account__body">
+          <div><span>显示名称</span><strong>{{ auth.user?.display_name || auth.user?.username || '—' }}</strong></div>
+          <div><span>用户名</span><strong>{{ auth.user?.username || '—' }}</strong></div>
+          <div><span>邮箱</span><strong>{{ auth.user?.email || '—' }}</strong></div>
+          <div><span>账户类型</span><StatusPill :label="auth.user?.role === 'admin' ? '管理员账户' : '个人账户'" :tone="auth.user?.role === 'admin' ? 'neutral' : 'positive'" /></div>
+          <div class="settings-current-project"><div><span>当前项目</span><strong>{{ workspace.activeProjectName || '未选择项目' }}</strong></div><RouterLink to="/dashboard">管理项目<ArrowRight class="h-4 w-4" /></RouterLink></div>
+          <p class="settings-help">制作参数保存在当前项目中。账户资料和套餐由账户服务管理。</p>
         </CardContent>
       </Card>
 
+      <Alert v-if="section !== 'account' && !workspaceSet" variant="warning">
+        先在「我的项目」中打开项目，再编辑项目级偏好。<RouterLink to="/dashboard" class="alert-link">选择项目</RouterLink>
+      </Alert>
+
       <!-- 外观 -->
-      <Card>
+      <Card v-if="section === 'appearance'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Palette class="h-5 w-5" />外观主题</CardTitle>
         </CardHeader>
@@ -173,26 +164,8 @@ async function save() {
         </CardContent>
       </Card>
 
-      <!-- 工作空间（在「开始」页设置，此处只读） -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><FolderCog class="h-5 w-5" />工作空间</CardTitle>
-        </CardHeader>
-        <CardContent class="space-y-2">
-          <Label>目录</Label>
-          <Input
-            :model-value="draft.paths.working_dir"
-            readonly
-            :placeholder="workspaceSet ? '' : '未设置——请在「开始」页选择文件夹'"
-          />
-          <p class="text-xs text-muted-foreground">
-            工作空间在「开始」页选择。
-          </p>
-        </CardContent>
-      </Card>
-
       <!-- 文本排版 -->
-      <Card>
+      <Card v-if="section === 'text'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Type class="h-5 w-5" />文本排版</CardTitle>
         </CardHeader>
@@ -207,7 +180,7 @@ async function save() {
       </Card>
 
       <!-- LLM 配置 -->
-      <Card>
+      <Card v-if="section === 'models'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Server class="h-5 w-5" />LLM 配置</CardTitle>
           <CardDescription>
@@ -233,7 +206,7 @@ async function save() {
       </Card>
 
       <!-- 生成参数 -->
-      <Card>
+      <Card v-if="section === 'models'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><SlidersHorizontal class="h-5 w-5" />生成参数</CardTitle>
           <CardDescription>调整文本解析的分段和采样参数。</CardDescription>
@@ -316,7 +289,7 @@ async function save() {
       </Card>
 
       <!-- Prompt 配置 -->
-      <Card>
+      <Card v-if="section === 'models'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><MessageSquareText class="h-5 w-5" />Prompt 配置</CardTitle>
           <CardDescription>查看或修改文本解析 Prompt；留空使用默认值。</CardDescription>
@@ -333,7 +306,7 @@ async function save() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card v-if="section === 'audio'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><AudioWaveform class="h-5 w-5" />TTS 批处理</CardTitle>
           <CardDescription>按文本长度排序后组批，仅使用批内上限。</CardDescription>
@@ -354,7 +327,7 @@ async function save() {
       </Card>
 
       <!-- 音频分集 -->
-      <Card>
+      <Card v-if="section === 'audio'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><AudioLines class="h-5 w-5" />音频分集</CardTitle>
         </CardHeader>
@@ -387,7 +360,7 @@ async function save() {
       </Card>
 
       <!-- 背景音乐 -->
-      <Card>
+      <Card v-if="section === 'audio'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Music4 class="h-5 w-5" />背景音乐</CardTitle>
           <CardDescription>
@@ -430,11 +403,10 @@ async function save() {
         </CardContent>
       </Card>
 
-      <div class="flex justify-end">
-        <Button @click="save" :disabled="saving || !workspaceSet">
-          <Save class="h-4 w-4" />{{ saving ? '保存中…' : '保存设置' }}
-        </Button>
-      </div>
     </template>
   </div>
 </template>
+
+<style scoped>
+.user-settings{display:grid;gap:14px;max-width:1100px;margin:0 auto;padding-bottom:32px}.settings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.14em;color:hsl(var(--primary))}.settings-header h1{margin-top:5px}.settings-header .page-description{margin-top:4px}.settings-tabs{display:flex;gap:6px;overflow-x:auto;border-bottom:1px solid hsl(var(--border));padding-bottom:8px}.settings-tabs button{white-space:nowrap;border:1px solid transparent;border-radius:8px;padding:8px 11px;color:hsl(var(--muted-foreground));font-size:12px;font-weight:650}.settings-tabs button.is-active{border-color:hsl(var(--border));background:hsl(var(--card));color:hsl(var(--foreground));box-shadow:0 1px 2px hsl(var(--foreground)/.05)}.settings-account__body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 20px}.settings-account__body>div{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;border-bottom:1px solid hsl(var(--border));font-size:12px}.settings-account__body>div>span,.settings-account__body>div>div>span{color:hsl(var(--muted-foreground))}.settings-account__body strong{max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}.settings-current-project{grid-column:1/-1}.settings-current-project>div{display:grid;gap:3px}.settings-current-project a{display:inline-flex;align-items:center;gap:5px;color:hsl(var(--primary));font-size:11px;font-weight:650}.settings-help{grid-column:1/-1;margin-top:10px;color:hsl(var(--muted-foreground));font-size:11px}.alert-link{margin-left:6px;font-weight:700;text-decoration:underline}@media(max-width:600px){.settings-account__body{grid-template-columns:1fr}.settings-current-project{grid-column:auto}.settings-help{grid-column:auto}.settings-tabs button{padding:7px 9px}}
+</style>

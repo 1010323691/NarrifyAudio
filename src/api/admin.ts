@@ -10,16 +10,22 @@ export interface AdminUser {
   created_at: string
   last_seen_at?: string | null
   project_count?: number
+  workspace_count?: number
+  workspace_file_count?: number
+  storage_bytes?: number
+  file_count?: number
   file_bytes?: number
+  available_units?: number
+  reserved_units?: number
   consumed_units?: number
 }
 
 export interface ServiceStatus { key: string; name: string; status: 'healthy' | 'warning' | 'error' | 'unknown'; detail: string }
-export interface GpuStatus { index: number; name: string; utilization_percent: number; memory_used_mb: number; memory_total_mb: number; temperature_c: number }
+export interface GpuStatus { index: number; name: string; utilization_percent: number | null; memory_used_mb: number | null; memory_total_mb: number | null; temperature_c: number | null; power_w?: number | null }
 export interface AdminEvent { id: string; time: string; level: string; module: string; type: string; message: string }
 export interface AdminOverview {
-  generated_at: string; services: ServiceStatus[]; today: { completed: number; failed: number; active_users: number }
-  tasks: { running: number; queued: number }; workers: TaskMetrics['worker_pool']; queue: QueueStatus; api: ApiSnapshot
+  generated_at: string; services: ServiceStatus[]; today: { completed: number; failed: number; active_users: number; api_requests: number; llm_tokens: number | null; tts_characters: number | null; api_requests_scope: string }
+  tasks: { running: number; queued: number; failed: number }; workers: TaskMetrics['worker_pool']; queue: QueueStatus; api: ApiSnapshot
   system: { cpu_percent: number | null; ram_used_bytes: number | null; ram_total_bytes: number | null }
   gpu: GpuStatus[]; user_count: number; recent_errors: AdminEvent[]
 }
@@ -36,8 +42,21 @@ export interface ApiSnapshot {
 export interface AdminResources {
   root_path: string; disk_total_bytes: number; disk_used_bytes: number; disk_free_bytes: number
   workspaces: number; projects: number; files: { kind: string; count: number; size_bytes: number }[]
-  users: { username: string; count: number; size_bytes: number }[]; scope: string
-  music_library: { count: number; size_bytes: number }
+  users: { username: string; workspace_count?: number; file_count?: number; count?: number; size_bytes: number; registered_file_count?: number; registered_file_bytes?: number }[]
+  workspace_storage?: {
+    size_bytes?: number; file_count?: number
+    categories?: { kind: string; label: string; count: number; size_bytes: number }[]
+    cleanup_candidates?: { count: number; size_bytes: number; older_than_days: number }
+  }
+  scope: string
+  music_library: { count: number; size_bytes: number; assigned_chapters?: number }
+}
+
+export interface RuntimeSettings {
+  limits: { max_upload_bytes: number; session_ttl_hours: number; task_lease_seconds: number; task_max_attempts: number }
+  source: 'deployment-environment'
+  editable_in_console: false
+  model_settings_scope: 'workspace'
 }
 
 export interface StorageSettings {
@@ -149,6 +168,10 @@ export function getRegistrationSettings(): Promise<RegistrationSettings> {
   return http.get('/api/v1/admin/settings/registration')
 }
 
+export function getRuntimeSettings(): Promise<RuntimeSettings> {
+  return http.get('/api/v1/admin/settings/runtime')
+}
+
 export function updateRegistrationSettings(enabled: boolean): Promise<RegistrationSettings> {
   return http.patch('/api/v1/admin/settings/registration', { enabled })
 }
@@ -180,6 +203,14 @@ export function getTaskActivity(): Promise<TaskActivity[]> {
 
 export function cancelTask(id: string): Promise<{ id: string; status: string }> {
   return http.post(`/api/v1/admin/tasks/${id}/cancel`)
+}
+
+export function retryTask(id: string): Promise<{ id: string; status: string; attempt_no: number }> {
+  return http.post(`/api/v1/admin/tasks/${id}/retry`)
+}
+
+export function cleanupStaleTemp(): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {
+  return http.post('/api/v1/admin/resources/cleanup-temp')
 }
 
 export function listWorkers(): Promise<WorkerStatus[]> {

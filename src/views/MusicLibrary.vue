@@ -1177,7 +1177,7 @@ onActivated(() => {
           </div>
 
           <!-- 行 = 曲目表 -->
-          <div class="overflow-x-auto overflow-y-visible rounded-lg border"><Table class="min-w-[60rem]">
+          <div class="overflow-x-auto overflow-y-visible rounded-lg border"><Table class="min-w-[66rem]">
             <TableHeader>
               <TableRow>
                 <TableHead class="w-8">
@@ -1194,6 +1194,7 @@ onActivated(() => {
                 <TableHead class="w-14">格式</TableHead>
                 <TableHead class="w-14">时长</TableHead>
                 <TableHead class="w-20">大小</TableHead>
+                <TableHead class="w-24" title="全部工作空间已保存的章节指派数">章节使用</TableHead>
                 <TableHead>标签</TableHead>
                 <TableHead class="w-40">AI 识别</TableHead>
                 <TableHead class="w-16">启用</TableHead>
@@ -1239,6 +1240,9 @@ onActivated(() => {
                   {{ formatDuration(tr.duration) }}
                 </TableCell>
                 <TableCell class="text-xs tabular-nums text-muted-foreground">{{ fileSize(tr.size_bytes) }}</TableCell>
+                <TableCell class="text-xs tabular-nums text-muted-foreground">
+                  {{ tr.use_count == null ? '—' : tr.use_count }}
+                </TableCell>
                 <TableCell class="w-28">
                   <div
                     v-if="CATEGORIES.some((c) => tr.tags?.[c]?.length)"

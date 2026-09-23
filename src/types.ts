@@ -638,6 +638,7 @@ export interface WorkspaceInfo {
   dirs: Record<string, string>
   workspace_id?: string
   project_id?: string
+  workspace_name?: string
 }
 
 // ------------------------------ music library（全局音乐库） ------------------------------
@@ -651,6 +652,8 @@ export interface MusicTrack {
   duration: number
   /** Actual on-disk size, or null if the indexed file is missing. */
   size_bytes?: number | null
+  /** Number of saved chapter assignments across managed workspaces (admin view). */
+  use_count?: number | null
   enabled: boolean
   description: string
   tags: TrackTags

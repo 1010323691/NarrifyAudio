@@ -1,9 +1,9 @@
 /** Thin HTTP client for the Python backend.
 
-All calls go to the absolute backend origin (CORS is wide open on the backend).
-Override the origin with ``VITE_API_BASE`` if the backend ever moves.
+Development requests use Vite's same-origin `/api` proxy. Production can set
+`VITE_API_BASE` when the API is served from another origin.
 */
-export const API_BASE: string = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8642'
+export const API_BASE: string = import.meta.env.VITE_API_BASE ?? (import.meta.env.DEV ? '' : 'http://127.0.0.1:8642')
 
 export class ApiError extends Error {
   status: number

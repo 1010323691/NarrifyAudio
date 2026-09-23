@@ -23,6 +23,14 @@ class PlatformSettings:
     storage_root: Path = Path(
         os.getenv("NARRIFY_STORAGE_ROOT", str(PROJECT_ROOT / "storage"))
     ).resolve()
+    cors_origins: tuple[str, ...] = tuple(
+        origin.strip()
+        for origin in os.getenv(
+            "NARRIFY_CORS_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    )
     session_cookie: str = os.getenv("NARRIFY_SESSION_COOKIE", "narrify_session")
     csrf_cookie: str = os.getenv("NARRIFY_CSRF_COOKIE", "narrify_csrf")
     session_ttl_hours: int = int(os.getenv("NARRIFY_SESSION_TTL_HOURS", "24"))

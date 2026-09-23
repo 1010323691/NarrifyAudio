@@ -1,179 +1,168 @@
 # NarrifyAudio
 
-## PostgreSQL/Redis 多用户冒烟测试
+NarrifyAudio 是 Windows 本地有声书制作工作台。用户端围绕项目和制作流程运行；管理控制台单独提供平台管理入口。应用由 Vue 3 前端、FastAPI API、后台 Worker、PostgreSQL 和 Redis 协议兼容缓存服务组成。
 
-仓库提供了不加载本地 TTS 模型的轻量 Compose 冒烟环境。它会启动 PostgreSQL、Redis、两个持久化 Worker 和 OpenAI 兼容的 LLM stub，然后并发创建两个用户，提交多条 `script.parse` 任务，验证 LLM 结果、额度释放、排队取消、管理员统计和跨用户公平调度。
+本指南面向 Windows 10/11 原生开发环境：PostgreSQL 与 Memurai 作为 Windows 服务运行，API、Worker 和前端作为本地进程运行。不需要 Docker 或 Linux/WSL。
 
-在已安装 Docker Desktop 的机器上执行：
+## 服务与本机地址
 
-```powershell
-$env:POSTGRES_PASSWORD = "narrify-smoke-postgres-password"
-$env:NARRIFY_BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
-$env:NARRIFY_BOOTSTRAP_ADMIN_PASSWORD = "smoke-admin-password-123"
-docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile smoke up --build --abort-on-container-exit --exit-code-from smoke --scale worker=2
-```
+| 服务 | 用途 | 地址 / 端口 | 启动方式 |
+| --- | --- | --- | --- |
+| PostgreSQL 16 | 用户、项目、任务和配置数据 | `127.0.0.1:5432` | Windows 服务 `postgresql-x64-16` |
+| Memurai Developer | Redis 协议缓存和任务队列 | `127.0.0.1:6379` | Windows 服务 `Memurai` |
+| FastAPI | 应用 API | `http://127.0.0.1:8642` | `.venv` 中的 Python |
+| Worker | 执行后台制作任务 | 与 API 共用 `.venv` | `.venv` 中的 Python |
+| Vite | 用户端和管理控制台 | `http://127.0.0.1:5173` | Node.js / npm |
 
-冒烟结束后清理容器和数据卷：
+## 首次安装
 
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.smoke.yml --profile smoke down -v
-```
+### 1. 安装依赖
 
-一个 Web 应用,在一个地方完成中文有声书的完整制作流程:**排版与分册(排版 → 自动章节分析 → 每章一册)→ 文本解析(内含断句失败校验 / 纯归属标签删除 / 归属抽样)→ 角色配音 → 音频合成 → 音频合并 → 音频分集**,外加开始(工作空间管理)与设置。
-
-当前仓库以 AudiobookStudio 的真实业务引擎为兼容基线，并逐步迁移到 NarrifyAudio 的多用户服务架构。新平台 API 位于 `/api/v1`，认证使用 HttpOnly Session Cookie + CSRF Token；用户、项目、文件、任务、额度预留和 Outbox 事件使用持久化数据库记录。
-
-## 多用户平台开发配置
-
-应用数据库统一使用 PostgreSQL。默认连接串指向本机 PostgreSQL；部署时应显式设置连接串，并关闭自动建表，使用 Alembic 迁移：
+安装 Git、Node.js（建议 20 LTS）和 Python 3.14。用 Windows 原生安装程序安装 PostgreSQL 16（安装时记下 `postgres` 数据库管理员密码）；Memurai Developer 可用 winget 安装。然后在仓库根目录打开 PowerShell：
 
 ```powershell
-$env:NARRIFY_DATABASE_URL = "postgresql+psycopg://narrify:change-me@localhost:5432/narrify"
-$env:NARRIFY_AUTO_CREATE_SCHEMA = "false"
-$env:NARRIFY_STORAGE_ROOT = "D:\\narrify-storage"
-$env:NARRIFY_BOOTSTRAP_ADMIN_EMAIL = "admin@example.com"
-$env:NARRIFY_BOOTSTRAP_ADMIN_PASSWORD = "replace-with-a-long-secret"
-
-python -m alembic upgrade head
-```
-
-测试套件会显式使用临时 SQLite 数据库，不代表应用运行时数据库配置。
-
-生产环境还应设置 `NARRIFY_COOKIE_SECURE=true`，并通过反向代理提供 HTTPS。注册、登录、项目和上传接口位于 `/api/auth` 与 `/api/v1/projects`；持久化任务提交位于 `/api/v1/tasks`，提交会在同一数据库事务内写入任务、额度预留、流水和 Outbox 事件。
-
-Worker 通过 Redis Streams 消费 Outbox 事件：
-
-```powershell
-$env:NARRIFY_REDIS_URL = "redis://localhost:6379/0"
-python -m backend.worker
-```
-
-当前已接入真实持久化 Worker 的 `text.format` 与 `book.analyze` 任务：输入使用 `input_file_id`，输出登记为项目产物；Worker 使用租约和 attempt fencing，租约过期后由恢复扫描重新投递。任务事件可通过 `/api/v1/tasks/{task_id}/events` 按 `Last-Event-ID` 补发。用户额度查询位于 `/api/v1/quota`，管理员后台位于前端 `/admin`。
-
-所有平台工作空间都由服务端统一管理。管理员通过 `/api/v1/admin/settings/storage` 设置存储根目录；用户的目录固定落在 `<root>/<username>/<workspace-or-project-id>/` 下，客户端不能提交物理路径。项目文件、显式工作空间和后续产物均应复用这一规则；删除工作空间只做软删除并保留目录，物理清理由后续保留策略任务执行。
-
-## 功能
-
-- **开始** — 设置 / 清除工作空间;未设置工作空间时流水线锁定(后端写端点返回 409,入口禁用)
-- **排版与分册** — 单一流程:对原始 TXT 做确定性排版(空白 / 段落 / 标点 / 章节,10 个可配置开关,结果内容保持、可重复排版)→ 自动分析章节 → **每章一个文件**分册(只在章节边界切割、绝不重编号,拼回所有分册可精确复现原文);章节号缺失/重号/乱序给出**非阻断**警告(逐条列出具体缺哪些章号 + 系统识别的章节格式),可选「不处理」继续或「重新上传原文」重跑;零章节时可选按整本继续(单个《全书》文件)
-- **文本解析** — 「LLM → JSON」管线:从 `02_split_text/` 勾选一个或多个文本文件(可多选),每个文件作为独立任务并发调用 LLM(并发数可配),逐段生成逐行标注脚本 `03_parsed_json/<文件基名>.json`(角色 / 类型 / 演绎指令 / 停顿);解析任务内含三个检查阶段——断句失败校验(疑似断句失败的条目逐条重判)/ 纯归属标签删除(独立短标签条确定性删除、不经 LLM)/ 归属抽样(按比例抽条目重判 speaker,整书错误率读数记入日志与历史文件)——各阶段均可在「设置」页单独开关(默认全开);每文件独立成败、互不影响
-- **角色配音** — 选择一个解析 JSON(或选「全部文件」一次性合并整本书所有角色),为角色生成声音画像(`voice_config.json` + 试听样本);阶段 2 可为每角色生成多条候选克隆音频(备选音频数:自动 / 2 / 4 / 6 / 8,候选间经随机种子产生差异),试听后单选其一为最终音色(未选择时默认使用第 1 条);支持一键全部、仅处理新增、或单角色按提示词重生成
-- **音频合成** — 勾选一个或多个解析 JSON(支持全选 = 全部未合成文件,已完成文件不会被自动勾中)后批量合成:单个长时任务内按顺序逐文件合成(每个未完成文件启动一次共享 `.venv` 子进程、模型只加载一次;已全部完成的文件自动跳过、不加载模型);单行 / 单文件失败只记录、不打断其余文件;每行实时显示 已合成 / 总段落 · 角色 · 已就绪声音,文件全部完成时显示【已合成】;每个 JSON 合成成一个「音频包」(子文件夹 `05_audio_chunk/<JSON 基名>/`,含逐行音频与 `manifest.json`)
-- **音频合并** — 从「音频包」列表(05_audio_chunk/ 的各子文件夹)选中一个包,按该包清单把逐行音频无损合并为 `06_audio_merge/<包名>.mp3`,支持换人 / 同人停顿
-- **音频分集** — 选择一个已合并的有声书(06_audio_merge/),无损切分为若干集(`-c copy` 不重编码),输出到 `07_output/<源名>/`;支持按停顿位置智能对齐边界
-- **长时任务系统** — 进度 / 日志 / 暂停 / 恢复 / 取消 / 重试;各流程页内联展示所启动任务的实时状态;失败任务自动隔离,不影响整个应用
-- **设置** — 工作空间、各模块参数(排版开关 / 分集 / TTS 模型与停顿)、ffmpeg 路径、界面主题、日志级别,持久化保存、重启自动恢复
-
-## 技术栈
-
-- Frontend: Vue 3 + TypeScript + Vite + Tailwind CSS + Pinia + vue-router(瘦客户端,只渲染 UI)
-- Backend: Python FastAPI + Uvicorn + Pydantic(监听 `127.0.0.1:8642`,**所有处理逻辑都在这里**)
-- TTS: 本地 Qwen3-TTS — 与后端共用 `.venv`(默认 Python 3.14 + torch (CUDA) + qwen-tts),通过一次性子进程编排;模型仍与 FastAPI 进程隔离
-
-## 环境要求
-
-- Windows 10/11(也支持 macOS / Linux)
-- Python 3.10+(本仓库 `.venv` 为 3.14)
-- Node.js 18+
-- ffmpeg / ffprobe(「音频分集」与「音频合并」需要;在 `PATH` 中,或在设置里填绝对路径)
-- TTS 相关功能(可选):共享 `.venv` 中的 Python 3.14 + torch (CUDA) + qwen-tts,数 GB 依赖由 `install_tts_env.ps1` 安装;若 3.14 的真实 TTS 冒烟测试失败,可用脚本的 3.10 回退参数重建
-
-## 安装
-
-### 1. 克隆项目
-
-```powershell
-git clone <仓库地址> audiobookstudio
-cd audiobookstudio
-```
-
-### 2. 安装依赖
-
-```powershell
-# Python 后端 + TTS(共享 .venv,默认 Python 3.14)
+npm.cmd install
 py -3.14 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r .\backend\requirements.txt
-
-# 前端
-npm.cmd install
-
-# 准备共享 TTS 环境(可选,首次下载数 GB 的 torch)
-powershell -ExecutionPolicy Bypass -File install_tts_env.ps1
-
-# 如果 3.14 的真实 TTS 冒烟测试失败,显式回退到 Python 3.10
-powershell -ExecutionPolicy Bypass -File install_tts_env.ps1 -PythonVersion 3.10 -Recreate
+winget install --id PostgreSQL.PostgreSQL.16 --exact
+winget install --id Memurai.MemuraiDeveloper --exact
 ```
 
-### 3. 启动
+PostgreSQL 安装程序会要求设置 `postgres` 密码；请记下该密码并按下一节填写 `.env`。如果 winget 没有提供交互式安装选项，可使用 PostgreSQL 官方 Windows 安装程序完成安装。
 
-Windows 推荐直接双击 `start.bat`，脚本会检查共享 `.venv` 和前端依赖，启动后端与 Vite，并在服务就绪后打开浏览器。
+首次使用 TTS 合成、角色配音或音频处理前，安装共享 TTS 环境（依赖体积较大）：
 
-也可以在 PowerShell 中运行：
+```powershell
+.\install_tts_env.ps1 -PythonVersion 3.14
+```
+
+如真实 TTS 冒烟运行不兼容 Python 3.14，可按脚本说明改用 Python 3.10 重建环境：
+
+```powershell
+.\install_tts_env.ps1 -PythonVersion 3.10 -Recreate
+```
+
+安装 FFmpeg 并确保 `ffmpeg` 和 `ffprobe` 可从 PATH 找到。TTS 音频工具需要 SoX_ng；启动脚本会在检测到 winget 安装的 SoX_ng 时，建立工作区内的 `sox.exe` 兼容副本。
+
+### 2. 配置环境变量和数据库
+
+复制示例配置并编辑本机 `.env`：
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+设置 `POSTGRES_PASSWORD` 为安装 PostgreSQL 时设置的 `postgres` 密码；`NARRIFY_DATABASE_URL` 中 `narrify` 后面的密码则是应用专用数据库用户的密码。生成强密码并在连接串中进行 URL 编码（例如 `@` 写成 `%40`）。`.env` 已被 Git 忽略，不要提交实际密码。
+
+以 PostgreSQL 管理员创建应用用户和数据库。将下方密码替换为 `.env` 中连接串对应的应用密码：
+
+```powershell
+$env:PGPASSWORD = '你的 postgres 管理员密码'
+psql -h 127.0.0.1 -U postgres -d postgres -c "CREATE ROLE narrify LOGIN PASSWORD '你的应用数据库密码';"
+psql -h 127.0.0.1 -U postgres -d postgres -c "CREATE DATABASE narrify OWNER narrify;"
+Remove-Item Env:PGPASSWORD
+```
+
+若数据库角色或数据库已存在，不要重复执行对应的 `CREATE` 命令。确认 `.env` 的数据库 URL 指向该数据库，例如：
+
+```text
+NARRIFY_DATABASE_URL=postgresql+psycopg://narrify:应用数据库密码@127.0.0.1:5432/narrify
+NARRIFY_REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+首次启动会运行 Alembic 数据库迁移，并按 `.env` 中的 `NARRIFY_BOOTSTRAP_ADMIN_EMAIL` 和 `NARRIFY_BOOTSTRAP_ADMIN_PASSWORD` 创建管理员账号（如果尚不存在）。不要把生产密码写进 README 或提交 `.env`。
+
+## 启动和关闭
+
+### 启动 PostgreSQL 与 Memurai
+
+在仓库根目录的 PowerShell 执行：
+
+```powershell
+.\start-data-services.ps1
+```
+
+脚本会启动 Windows 服务 `postgresql-x64-16` 与 `Memurai`，并等待 `5432`、`6379` 端口就绪。若服务尚未安装，请先安装 PostgreSQL 16 和 Memurai Developer。Windows 可能要求以管理员身份运行 PowerShell 来控制服务。
+
+### 启动整个应用
+
+数据服务就绪后，双击 `start.bat`，或运行：
 
 ```powershell
 .\start.ps1
 ```
 
-手动启动方式如下：
+该脚本会检查 PostgreSQL 和 Memurai，运行数据库迁移，按需启动 FastAPI、Worker 和 Vite，并在服务就绪后打开登录页。每个应用进程会有单独的控制台窗口。脚本可重复运行，已启动的进程会被复用。
+
+- 用户端：<http://127.0.0.1:5173/#/login>
+- 管理员登录：<http://127.0.0.1:5173/#/admin/login>
+- API 健康检查：<http://127.0.0.1:8642/api/health>
+
+用户与管理员使用各自账号登录；管理控制台入口和可执行操作由账号权限决定。管理员初始账号由 `.env` 的 bootstrap 配置确定，不应依赖 README 中的固定凭据。
+
+### 关闭服务
+
+先关闭 `start.ps1` 打开的 Backend、Worker 和 Frontend 控制台窗口（输入 `Ctrl+C` 并等待进程退出，或关闭窗口）。之后在仓库根目录运行：
 
 ```powershell
-.venv\Scripts\python -m backend.main    # → http://127.0.0.1:8642
+.\stop-data-services.ps1
 ```
 
-再任选一种方式打开界面:
+脚本会停止 Memurai 和 PostgreSQL Windows 服务。停止数据服务前先停止 API 与 Worker，避免正在运行的请求或任务因数据库、队列断开而失败。再次启动时先运行 `start-data-services.ps1`，再运行 `start.bat`。
 
-| 方式 | 命令 | 打开地址 |
-| --- | --- | --- |
-| 浏览器开发态 | `npm run dev` | `http://localhost:5173` |
-| 浏览器 + 后端托管(最简) | 先 `npm run build`,再开后端 | `http://127.0.0.1:8642` |
+## 目录和关键配置
 
-macOS / Linux 将 `.venv\Scripts\python` 换为 `.venv/bin/python` 即可。
+- `src/`：Vue 页面、组件、API 客户端和状态管理。
+- `backend/`：FastAPI 路由、业务逻辑、数据库模型和 Worker。
+- `tts-engine/`：隔离运行的 TTS 子进程代码。
+- `backend/resources/`：提示词和运行资源。
+- `.env`：本机数据库、队列和初始管理员配置；不要提交。
+- `storage/`、`config/`、`logs/`：运行时用户数据和配置；不要当作源码清理。
 
-## 构建
+常用 `.env` 配置：
 
-前后端统一构建命令：
+| 变量 | 说明 |
+| --- | --- |
+| `POSTGRES_PASSWORD` | PostgreSQL 安装时 `postgres` 管理员密码，便于本机维护 |
+| `NARRIFY_DATABASE_URL` | 应用数据库连接串 |
+| `NARRIFY_REDIS_URL` | Memurai/Redis 连接串 |
+| `NARRIFY_BOOTSTRAP_ADMIN_EMAIL` | 首次初始化管理员邮箱 |
+| `NARRIFY_BOOTSTRAP_ADMIN_PASSWORD` | 首次初始化管理员密码 |
+
+LLM 服务凭据和制作参数按应用设置页面配置。不要把 API 密钥写入 README、提交到 Git 或放进前端代码。
+
+## 常见问题
+
+### PostgreSQL 或 Memurai 没有启动
+
+运行 `Get-Service postgresql-x64-16, Memurai` 查看服务状态；启动时若遇到权限错误，以管理员身份打开 PowerShell，再运行 `start-data-services.ps1`。服务日志可从 Windows 事件查看器及各自安装目录排查。
+
+### 端口已被占用
 
 ```powershell
-npm.cmd run build:all
+Get-NetTCPConnection -State Listen -LocalPort 5173,5432,6379,8642 -ErrorAction SilentlyContinue
 ```
 
-该命令依次执行前端 `vue-tsc + vite build`，以及后端 `backend/`、`tts-engine/` 的 Python 语法与字节码编译检查；不会下载模型，也不会运行完整测试套件。
+确认占用端口的是 NarrifyAudio 对应服务。不要同时启动另一套 WSL、Docker 或 PostgreSQL/Redis 实例占用相同端口。
 
-## 使用方法
+### 数据库认证失败
 
-1. **开始**:选择一个文件夹作为工作空间(未设置时流水线锁定)→ 工程配置、日志与所有产物都落在该工作空间的固定子目录(`config/` · `logs/` · `00_temp` … `07_output`)
-2. **排版与分册**:选择 TXT 文件 → 勾选排版选项(句断、对话分行、章节检测、标点规范等)→ 点「开始排版」(自动触发章节分析,预览章节表与各分册文件名)→ 点「开始分册」(可选同时打包 zip)→ 每章生成一个分册文件;缺章号时出现非阻断警告,可「不处理,继续」或「重新上传原文」;完成后一键「前往下一步(文本解析)」
-3. **文本解析**:在 `02_split_text/` 勾选要解析的文本文件(可多选)→ 配置 LLM(base_url / api_key / 模型)、生成参数(含并发数)与 Prompt → 点「开始解析」,每个文件作为独立任务并发逐段调用 LLM,分别生成 `03_parsed_json/<文件基名>.json`;每文件独立状态(待处理 / 解析中 / 已完成 / 失败),一个失败不影响其他
-4. **角色配音**:选择一个解析 JSON(03_parsed_json/,或选「全部文件」合并整本书所有角色)→ 一键为角色生成声音画像(voice_config.json + 试听样本),也可仅处理新增角色或单角色重生成;阶段 2 可选备选音频数(自动 / 2 / 4 / 6 / 8),生成后在角色列表逐个试听候选并单选最终音色(未选择时默认使用第 1 条)
-5. **音频合成**:勾选一个或多个解析 JSON(03_parsed_json/,可多选;「全选未合成文件」不含已完成文件)→ 启动批量合成(长时任务,进度 / 日志内联显示在页面;行内 已合成 / 总段落 实时爬升,完成即现【已合成】)→ 在 `05_audio_chunk/` 产出逐行音频与 `manifest.json`
-6. **音频合并**:按清单把逐行音频合并为 `06_audio_merge/cloned_audiobook.mp3`(换人 / 同人停顿可配)
-7. **音频分集**:选择音频文件(通常是合并成品)→ 设置目标单集时长(默认 10:00)与命名格式 → 启动「停顿检测 + 切割」(长时任务,进度 / 日志内联显示在页面)→ 完成后可下载 zip 或输出到源音频同级「分集」文件夹
-8. **设置**:配置工作空间、各模块参数(排版开关 / 分集 / TTS 模型与停顿)、ffmpeg / ffprobe 路径、界面主题(跟随系统 / 亮 / 暗)、日志级别
+核对 PostgreSQL 的 `postgres` 安装密码、`.env` 中的 `NARRIFY_DATABASE_URL`、应用用户密码以及 `narrify` 数据库是否已创建。数据库连接串中的特殊字符需要 URL 编码。修改 `.env` 后，重新启动 API 进程使配置生效。
 
-所有产物按模块落在工作空间的固定子目录下:`01_input/`(排版文本)· `02_split_text/`(分册)· `03_parsed_json/`(解析 JSON,`<基名>.json` = 唯一产物;旧工程遗留的 `<基名>_checked.json` 为惰性文件,不再读取/生成)· `04_voice_profiles/`(角色声音)· `05_audio_chunk/`(合成片段)· `06_audio_merge/`(合并成品)· `07_output/`(最终分集);产物通过页面上的下载链接获取。
+### API、Worker 或前端未就绪
 
-## 项目结构
+查看对应控制台窗口中的首个错误。确认已安装 `.venv`、`node_modules` 和 `.env`，PostgreSQL/Memurai 端口正常，并且 `5173`、`8642` 没有被旧进程占用。
 
-```text
-项目目录/
-├── backend/                 # Python 后端(所有处理逻辑)
-│   ├── main.py              # 入口:路由、CORS、/api/health、静态托管 dist/
-│   ├── api/                 # 瘦路由:text / book / audio / tts / script + workspace / tasks / config / files
-│   ├── engines/             # 核心算法:排版 / 分册(每章一册)/ 解析(含解析内检查:断句校验 / 标签删除 / 归属抽样)/ 音频切割 / TTS(批量合成 / 合并 / 角色配音)
-│   ├── core/                # 目录布局、持久化配置、任务系统、日志
-│   ├── tests/               # pytest 测试套件(546 个测试)
-│   └── requirements.txt     # 精简依赖:fastapi / uvicorn / pydantic / python-multipart
-├── src/                     # Vue 3 前端(瘦客户端)
-│   ├── api/                 # HTTP 客户端(固定指向 127.0.0.1:8642)
-│   ├── views/               # 八个模块:开始 / 排版与分册 / 文本解析 / 角色配音 / 音频合成 / 音频合并 / 音频分集 / 设置
-│   ├── stores/              # Pinia 状态
-│   ├── components/          # 布局 + 原子组件
-│   └── utils/               # 文件选择 / 下载(浏览器 input + 上传)
-├── tts-engine/              # TTS 工作进程(运行在共享 .venv,一次性子进程)
-├── install_tts_env.ps1      # 准备共享 .venv(Python 3.14 + torch,数 GB)
-├── app.json                 # 运行时配置(gitignore):通用配置模板 + 当前工作空间指针;工程配置 / 日志 / 产物都在用户工作空间内
-├── dist/                    # 前端构建产物(gitignore),后端可直接托管
-├── package.json
-├── vite.config.ts
-└── README.md
+## 开发命令
+
+```powershell
+npm.cmd run dev                 # 仅启动前端
+.\.venv\Scripts\python.exe -m backend.main   # 仅启动 API
+.\.venv\Scripts\python.exe -m backend.worker # 仅启动 Worker
+npm.cmd run typecheck           # 前端类型检查
+npm.cmd run build               # 类型检查并构建前端
+npm.cmd run build:all           # 前端构建和后端编译检查
 ```
+
+后端监听 `127.0.0.1:8642`。本地 API 文档可在启动后访问 <http://127.0.0.1:8642/docs>。

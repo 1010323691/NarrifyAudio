@@ -149,8 +149,8 @@ async def bind_authenticated_workspace(request, call_next):
 # Local client on this machine; origins are loopback addresses.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=list(settings.cors_origins),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )

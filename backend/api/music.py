@@ -18,6 +18,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
@@ -33,7 +34,9 @@ from ..engines.script import (
 )
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
+from ..platform.models import User, Workspace
 from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
+from ..platform.storage import configured_storage_root, safe_display_name
 from .bgm import _run_bgm_coordinator
 
 router = APIRouter(prefix="/api/music", tags=["music"])
@@ -166,7 +169,7 @@ class ApplySuggestionsReq(BaseModel):
 # --------------------------------------------------------------------------- #
 
 @router.get("/library")
-def get_library() -> dict:
+def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
     """The full index (incl. the ``folders`` section + each track's ``folder``
     field) + ``folder_counts`` + pending AI suggestions (read-only).
 
@@ -179,8 +182,39 @@ def get_library() -> dict:
     """
     idx = music_engine.load_index()
     sugg = music_engine.load_suggestions().get("tracks") or {}
-    tracks = {name: {**track, "size_bytes": _track_size(name)}
-              for name, track in idx["tracks"].items()}
+    usage_counts: dict[str, int] = {}
+    is_admin = getattr(getattr(ctx, "user", None), "role", None) == "admin"
+    if is_admin and hasattr(db, "execute"):
+        root = configured_storage_root(db).resolve()
+        workspaces = db.execute(
+            select(Workspace, User.username).join(User, User.id == Workspace.owner_id)
+            .where(Workspace.deleted_at.is_(None))
+        ).all()
+        for workspace, username in workspaces:
+            workspace_root = root / safe_display_name(username) / workspace.id
+            if workspace_root.is_symlink() or workspace_root.parent.is_symlink():
+                continue
+            try:
+                if not workspace_root.resolve().is_relative_to(root):
+                    continue
+                assignments = workspace_root / "08_bgm" / "bgm_assignments.json"
+                if assignments.is_symlink() or assignments.parent.is_symlink() or not assignments.is_file() or assignments.stat().st_size > 5 * 1024 * 1024:
+                    continue
+                data = json.loads(assignments.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
+                continue
+            chapters = data.get("chapters") if isinstance(data, dict) else None
+            if not isinstance(chapters, dict):
+                continue
+            for entry in chapters.values():
+                if isinstance(entry, dict) and isinstance(entry.get("music"), str):
+                    music_name = entry["music"]
+                    usage_counts[music_name] = usage_counts.get(music_name, 0) + 1
+    tracks = {
+        name: {**track, "size_bytes": _track_size(name),
+               "use_count": usage_counts.get(name, 0) if is_admin else None}
+        for name, track in idx["tracks"].items()
+    }
     return {**idx, "tracks": tracks, "folder_counts": music_engine.folder_counts(idx),
             "suggestions": {n: e for n, e in sugg.items() if n in idx["tracks"]}}
 

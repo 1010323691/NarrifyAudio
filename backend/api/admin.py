@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -16,14 +17,112 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, Workspace, utcnow
+from ..platform.models import AuditLog, OutboxEvent, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, Workspace, utcnow
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, safe_display_name
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
-from ..core.observability import api_snapshot
+from ..core.observability import api_requests_today, api_snapshot
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+_ACTIVE_TASK_STATUSES = ("pending", "queued", "running", "paused", "cancelling", "retrying")
+_TEMP_CLEANUP_AGE_DAYS = 7
+_WORKSPACE_CATEGORY_LABELS = {
+    "00_temp": "临时文件",
+    "cache": "缓存文件",
+    ".cache": "缓存文件",
+    "01_input": "输入文件",
+    "02_split_text": "章节文本",
+    "03_parsed_json": "解析结果",
+    "04_voice_profiles": "角色资料",
+    "05_audio_chunk": "合成片段",
+    "06_audio_merge": "合并音频",
+    "07_output": "最终音频",
+    "08_bgm": "BGM 缓存与混音",
+    "logs": "工作空间日志",
+    "config": "工作空间配置",
+    "models": "模型文件",
+    "other": "其他文件",
+}
+
+
+def _workspace_path(root: Path, username: str, workspace_id: str) -> Path | None:
+    """Resolve an indexed workspace without following a user-controlled path."""
+    resolved_root = root.resolve()
+    candidate = root / safe_display_name(username) / workspace_id
+    if candidate.is_symlink() or candidate.parent.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(resolved_root):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return candidate
+
+
+def _read_bgm_usage(workspace: Path) -> dict[str, int]:
+    """Count saved chapter assignments without reading audio or analysis content."""
+    path = workspace / "08_bgm" / "bgm_assignments.json"
+    try:
+        if path.is_symlink() or path.parent.is_symlink() or not path.is_file() or path.stat().st_size > 5 * 1024 * 1024:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    chapters = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(chapters, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for entry in chapters.values():
+        if isinstance(entry, dict) and isinstance(entry.get("music"), str):
+            name = entry["music"]
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _scan_workspace(workspace: Path, *, active: bool = False) -> dict:
+    """Measure ordinary files, and identify old 00_temp files eligible for cleanup."""
+    result = {"size_bytes": 0, "file_count": 0, "categories": {},
+              "cleanup_count": 0, "cleanup_bytes": 0}
+    if workspace.is_symlink() or not workspace.is_dir():
+        return result
+    cutoff = datetime.now().timestamp() - _TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
+    for directory, child_dirs, filenames in os.walk(workspace, topdown=True, followlinks=False):
+        parent = Path(directory)
+        child_dirs[:] = [name for name in child_dirs if not (parent / name).is_symlink()]
+        for filename in filenames:
+            path = parent / filename
+            if path.is_symlink():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            relative = path.relative_to(workspace)
+            key = relative.parts[0] if relative.parts else "other"
+            category = key if key in _WORKSPACE_CATEGORY_LABELS else "other"
+            bucket = result["categories"].setdefault(category, {"count": 0, "size_bytes": 0})
+            bucket["count"] += 1
+            bucket["size_bytes"] += stat.st_size
+            result["file_count"] += 1
+            result["size_bytes"] += stat.st_size
+            if not active and category == "00_temp" and stat.st_mtime < cutoff:
+                result["cleanup_count"] += 1
+                result["cleanup_bytes"] += stat.st_size
+    return result
+
+
+def _music_use_counts(workspaces: list[tuple[Workspace, str]], root: Path) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for workspace, username in workspaces:
+        path = _workspace_path(root, username, workspace.id)
+        if path is None or not path.is_dir():
+            continue
+        for name, count in _read_bgm_usage(path).items():
+            counts[name] = counts.get(name, 0) + count
+    return counts
 
 
 def _memory_usage(host_total_bytes: int, cgroup_root: Path = Path("/sys/fs/cgroup")) -> tuple[int, int]:
@@ -189,18 +288,61 @@ def update_registration_settings(payload: RegistrationUpdate, actor: User = Depe
     return {"enabled": payload.enabled, "source": "admin"}
 
 
+@router.get("/settings/runtime")
+def get_runtime_settings(_: User = Depends(require_admin)) -> dict:
+    """Expose non-secret, deployment-owned runtime limits to administrators."""
+    return {
+        "limits": {
+            "max_upload_bytes": settings.max_upload_bytes,
+            "session_ttl_hours": settings.session_ttl_hours,
+            "task_lease_seconds": settings.task_lease_seconds,
+            "task_max_attempts": settings.task_max_attempts,
+        },
+        "source": "deployment-environment",
+        "editable_in_console": False,
+        "model_settings_scope": "workspace",
+    }
+
+
 @router.get("/users")
 def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
     users = db.scalars(select(User).order_by(User.created_at.desc())).all()
     projects = dict(db.execute(select(Project.owner_id, func.count()).where(Project.deleted_at.is_(None)).group_by(Project.owner_id)).all())
     last_seen = dict(db.execute(select(UserSession.user_id, func.max(UserSession.last_seen_at)).group_by(UserSession.user_id)).all())
-    file_sizes = dict(db.execute(select(ProjectFile.owner_id, func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.owner_id)).all())
-    quota_used = dict(db.execute(select(UserQuotaAccount.user_id, UserQuotaAccount.consumed_units)).all())
+    file_usage = {
+        user_id: {"count": int(count), "size_bytes": int(size)}
+        for user_id, count, size in db.execute(
+            select(ProjectFile.owner_id, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0))
+            .where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.owner_id)
+        ).all()
+    }
+    quota_accounts = {account.user_id: account for account in db.scalars(select(UserQuotaAccount)).all()}
+    workspace_usage: dict[str, dict[str, int]] = {}
+    root = configured_storage_root(db)
+    workspace_rows = db.execute(
+        select(Workspace, User.id, User.username).join(User, User.id == Workspace.owner_id)
+        .where(Workspace.deleted_at.is_(None))
+    ).all()
+    for workspace, user_id, username in workspace_rows:
+        usage = workspace_usage.setdefault(user_id, {"workspace_count": 0, "storage_bytes": 0, "workspace_file_count": 0})
+        usage["workspace_count"] += 1
+        path = _workspace_path(root, username, workspace.id)
+        if path is not None:
+            measured = _scan_workspace(path)
+            usage["storage_bytes"] += measured["size_bytes"]
+            usage["workspace_file_count"] += measured["file_count"]
     return [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name,
              "role": item.role, "is_active": item.is_active, "created_at": item.created_at.isoformat(),
              "last_seen_at": last_seen[item.id].isoformat() if item.id in last_seen else None,
-             "project_count": projects.get(item.id, 0), "file_bytes": file_sizes.get(item.id, 0),
-             "consumed_units": quota_used.get(item.id, 0)} for item in users]
+             "project_count": projects.get(item.id, 0),
+             "workspace_count": workspace_usage.get(item.id, {}).get("workspace_count", 0),
+             "workspace_file_count": workspace_usage.get(item.id, {}).get("workspace_file_count", 0),
+             "storage_bytes": workspace_usage.get(item.id, {}).get("storage_bytes", 0),
+             "file_count": file_usage.get(item.id, {}).get("count", 0),
+             "file_bytes": file_usage.get(item.id, {}).get("size_bytes", 0),
+             "available_units": quota_accounts[item.id].available_units if item.id in quota_accounts else 0,
+             "reserved_units": quota_accounts[item.id].reserved_units if item.id in quota_accounts else 0,
+             "consumed_units": quota_accounts[item.id].consumed_units if item.id in quota_accounts else 0} for item in users]
 
 
 @router.patch("/users/{user_id}")
@@ -304,7 +446,16 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
 def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
                    _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
     query = select(Task)
-    if status != "all":
+    status_groups = {
+        "queued": ("pending", "queued", "retrying"),
+        "running": ("running", "paused", "cancelling"),
+        "completed": ("succeeded",),
+        "failed": ("failed", "timeout"),
+        "cancelled": ("cancelled",),
+    }
+    if status in status_groups:
+        query = query.where(Task.status.in_(status_groups[status]))
+    elif status != "all":
         query = query.where(Task.status == status)
     if search:
         term = f"%{search.strip()}%"
@@ -456,6 +607,45 @@ def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session =
     return {"id": task.id, "status": task.status}
 
 
+@router.post("/tasks/{task_id}/retry")
+def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    """Requeue a failed, zero-cost task while preserving its event history."""
+    if actor.role != "admin":
+        raise HTTPException(403, "需要管理员权限")
+    task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+    if task is None:
+        raise HTTPException(404, "任务不存在")
+    if task.status not in {"failed", "cancelled", "timeout"}:
+        raise HTTPException(409, "任务当前不可重试")
+    reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
+    if reservation is not None and reservation.units:
+        raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
+    attempts = int(db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0)
+    if attempts >= settings.task_max_attempts:
+        raise HTTPException(409, "任务已达到最大尝试次数")
+    if task.result is not None:
+        db.delete(task.result)
+    previous_status = task.status
+    task.status = "pending"
+    task.progress = 0
+    task.error_code = ""
+    task.error_message = ""
+    task.started_at = None
+    task.finished_at = None
+    task.updated_at = utcnow()
+    append_task_event(db, task.id, "admin_retry_requested", {"actor_user_id": actor.id, "status": "pending"})
+    db.add(OutboxEvent(
+        aggregate_type="task",
+        aggregate_id=task.id,
+        event_type="task.submitted",
+        payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
+    ))
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.task_retried", target_type="task",
+                    target_id=task.id, metadata_json={"previous_status": previous_status, "attempts": attempts}))
+    db.commit()
+    return {"id": task.id, "status": task.status, "attempt_no": attempts}
+
+
 @router.get("/workers")
 def list_workers(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
@@ -498,18 +688,55 @@ def _gpu_status() -> list[dict]:
         return []
     try:
         result = subprocess.run(
-            [binary, "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=3, check=True,
+            [binary, "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3, check=False,
         )
-        return [
-            {"index": int(parts[0]), "name": parts[1], "utilization_percent": int(parts[2]),
-             "memory_used_mb": int(parts[3]), "memory_total_mb": int(parts[4]),
-             "temperature_c": int(parts[5])}
-            for line in result.stdout.splitlines()
-            if len(parts := [part.strip() for part in line.split(",")]) == 6
-        ]
-    except (OSError, ValueError, subprocess.SubprocessError):
+        if result.returncode != 0:
+            result = subprocess.run(
+                [binary, "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=3, check=True,
+            )
+
+        def numeric(value: str, *, integer: bool = True):
+            try:
+                parsed = float(value)
+                return int(parsed) if integer else round(parsed, 1)
+            except (TypeError, ValueError):
+                return None
+
+        rows = []
+        for line in result.stdout.splitlines():
+            parts = [part.strip() for part in line.split(",", 6)]
+            if len(parts) not in {6, 7}:
+                continue
+            index = numeric(parts[0])
+            if index is None:
+                continue
+            rows.append({
+                "index": index,
+                "name": parts[1],
+                "utilization_percent": numeric(parts[2]),
+                "memory_used_mb": numeric(parts[3]),
+                "memory_total_mb": numeric(parts[4]),
+                "temperature_c": numeric(parts[5]),
+                "power_w": numeric(parts[6], integer=False) if len(parts) == 7 else None,
+            })
+        return rows
+    except (OSError, subprocess.SubprocessError):
         return []
+
+
+def _task_module(task_type: str) -> str:
+    prefix = task_type.split(".", 1)[0]
+    if prefix in {"script", "music"}:
+        return "llm"
+    if prefix in {"tts", "voices"}:
+        return "tts"
+    if prefix in {"audio", "bgm"}:
+        return "audio"
+    if prefix in {"book", "text"}:
+        return "system"
+    return "worker"
 
 
 @router.get("/overview")
@@ -550,7 +777,7 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
     except ImportError:
         pass
     recent_errors = [
-        {"id": task.id, "time": task.updated_at.isoformat(), "module": task.task_type.split(".")[0],
+        {"id": task.id, "time": task.updated_at.isoformat(), "module": _task_module(task.task_type),
          "type": task.error_code or task.status, "message": task.error_message or task.status}
         for task in recent_failures
     ]
@@ -564,9 +791,19 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
         "today": {
             "completed": int(db.scalar(select(func.count()).select_from(Task).where(Task.finished_at >= today, Task.status == "succeeded")) or 0),
             "failed": int(db.scalar(select(func.count()).select_from(Task).where(Task.finished_at >= today, Task.status.in_(("failed", "timeout")))) or 0),
-            "active_users": int(db.scalar(select(func.count(func.distinct(UserSession.user_id))).where(UserSession.revoked_at.is_(None), UserSession.expires_at > now)) or 0),
+            "active_users": int(db.scalar(select(func.count(func.distinct(UserSession.user_id))).where(
+                UserSession.revoked_at.is_(None), UserSession.expires_at > now,
+                UserSession.last_seen_at >= now - timedelta(minutes=15))) or 0),
+            "api_requests": api_requests_today(tz_offset_minutes),
+            "llm_tokens": None,
+            "tts_characters": None,
+            "api_requests_scope": "当前 API 进程 · 控制台时区日期；进程重启后清零",
         },
-        "tasks": {"running": metrics["stage_counts"]["consuming"], "queued": metrics["stage_counts"]["production"] + metrics["stage_counts"]["queued"]},
+        "tasks": {
+            "running": metrics["stage_counts"]["consuming"],
+            "queued": metrics["stage_counts"]["production"] + metrics["stage_counts"]["queued"],
+            "failed": metrics["status_counts"].get("failed", 0) + metrics["status_counts"].get("timeout", 0),
+        },
         "workers": metrics["worker_pool"], "queue": queue, "api": api_metrics, "system": system_metrics,
         "gpu": gpu, "user_count": int(db.scalar(select(func.count()).select_from(User)) or 0),
         "recent_errors": sorted(recent_errors, key=lambda item: item["time"], reverse=True)[:5],
@@ -599,15 +836,114 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
     root = configured_storage_root(db)
     disk = shutil.disk_usage(root)
     file_rows = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
-    user_rows = db.execute(select(User.username, func.count(ProjectFile.id), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).join(ProjectFile, ProjectFile.owner_id == User.id).where(ProjectFile.deleted_at.is_(None)).group_by(User.username).order_by(func.sum(ProjectFile.size_bytes).desc()).limit(20)).all()
+    registered = {
+        username: {"count": int(count), "size_bytes": int(size)}
+        for username, count, size in db.execute(
+            select(User.username, func.count(ProjectFile.id), func.coalesce(func.sum(ProjectFile.size_bytes), 0))
+            .join(ProjectFile, ProjectFile.owner_id == User.id)
+            .where(ProjectFile.deleted_at.is_(None)).group_by(User.username)
+        ).all()
+    }
+    workspaces = db.execute(
+        select(Workspace, User.username).join(User, User.id == Workspace.owner_id)
+        .where(Workspace.deleted_at.is_(None))
+    ).all()
+    active_project_ids = set(db.scalars(
+        select(Task.project_id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).distinct()
+    ).all())
+    users: dict[str, dict] = {}
+    category_totals: dict[str, dict[str, int]] = {}
+    cleanup_count = cleanup_bytes = 0
+    for workspace, username in workspaces:
+        row = users.setdefault(username, {"workspace_count": 0, "size_bytes": 0, "file_count": 0})
+        row["workspace_count"] += 1
+        path = _workspace_path(root, username, workspace.id)
+        measured = _scan_workspace(path, active=workspace.id in active_project_ids) if path is not None else {
+            "size_bytes": 0, "file_count": 0, "categories": {}, "cleanup_count": 0, "cleanup_bytes": 0,
+        }
+        row["size_bytes"] += measured["size_bytes"]
+        row["file_count"] += measured["file_count"]
+        cleanup_count += measured["cleanup_count"]
+        cleanup_bytes += measured["cleanup_bytes"]
+        for category, values in measured["categories"].items():
+            total = category_totals.setdefault(category, {"count": 0, "size_bytes": 0})
+            total["count"] += values["count"]
+            total["size_bytes"] += values["size_bytes"]
+    user_rows = [
+        {"username": username, **values, "registered_file_count": registered.get(username, {}).get("count", 0),
+         "registered_file_bytes": registered.get(username, {}).get("size_bytes", 0)}
+        for username, values in sorted(users.items(), key=lambda item: item[1]["size_bytes"], reverse=True)[:20]
+    ]
+    music_usage = _music_use_counts(workspaces, root)
     music_files = [path for path in MUSIC_LIBRARY_DIR.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".mp3", ".wav", ".flac"}] if MUSIC_LIBRARY_DIR.is_dir() else []
     return {"root_path": str(root), "disk_total_bytes": disk.total, "disk_used_bytes": disk.used, "disk_free_bytes": disk.free,
             "workspaces": int(db.scalar(select(func.count()).select_from(Workspace).where(Workspace.deleted_at.is_(None))) or 0),
             "projects": int(db.scalar(select(func.count()).select_from(Project).where(Project.deleted_at.is_(None))) or 0),
             "files": [{"kind": kind, "count": count, "size_bytes": size} for kind, count, size in file_rows],
-            "users": [{"username": username, "count": count, "size_bytes": size} for username, count, size in user_rows],
-            "music_library": {"count": len(music_files), "size_bytes": sum(path.stat().st_size for path in music_files)},
-            "scope": "已登记的项目文件；工作空间中未登记的音频、缓存和模型文件暂未计量"}
+            "users": user_rows,
+            "workspace_storage": {
+                "size_bytes": sum(row["size_bytes"] for row in users.values()),
+                "file_count": sum(row["file_count"] for row in users.values()),
+                "categories": [
+                    {"kind": key, "label": _WORKSPACE_CATEGORY_LABELS[key], **values}
+                    for key, values in sorted(category_totals.items(), key=lambda item: item[1]["size_bytes"], reverse=True)
+                ],
+                "cleanup_candidates": {"count": cleanup_count, "size_bytes": cleanup_bytes,
+                                       "older_than_days": _TEMP_CLEANUP_AGE_DAYS},
+            },
+            "music_library": {"count": len(music_files), "size_bytes": sum(path.stat().st_size for path in music_files),
+                              "assigned_chapters": sum(music_usage.values())},
+            "scope": "工作空间目录按只读文件扫描（跳过符号链接）；用户的缓存、临时文件、音频、日志均计入。模型位于工作空间之外时不计入此处。"}
+
+
+@router.post("/resources/cleanup-temp")
+def cleanup_stale_temp(actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    """Delete only old regular files in inactive workspaces' 00_temp folders."""
+    if actor.role != "admin":
+        raise HTTPException(403, "需要管理员权限")
+    root = configured_storage_root(db)
+    workspaces = db.execute(
+        select(Workspace, User.username).join(User, User.id == Workspace.owner_id)
+        .where(Workspace.deleted_at.is_(None))
+    ).all()
+    active_project_ids = set(db.scalars(
+        select(Task.project_id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).distinct()
+    ).all())
+    cutoff = datetime.now().timestamp() - _TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
+    removed_count = removed_bytes = skipped = 0
+    root_resolved = root.resolve()
+    for workspace, username in workspaces:
+        if workspace.id in active_project_ids:
+            continue
+        workspace_path = _workspace_path(root, username, workspace.id)
+        if workspace_path is None:
+            continue
+        temp_dir = workspace_path / "00_temp"
+        if temp_dir.is_symlink() or not temp_dir.is_dir():
+            continue
+        for directory, child_dirs, filenames in os.walk(temp_dir, topdown=True, followlinks=False):
+            parent = Path(directory)
+            child_dirs[:] = [name for name in child_dirs if not (parent / name).is_symlink()]
+            for filename in filenames:
+                path = parent / filename
+                if path.is_symlink():
+                    continue
+                try:
+                    resolved = path.resolve()
+                    stat = path.stat()
+                    if not resolved.is_relative_to(root_resolved) or stat.st_mtime >= cutoff:
+                        continue
+                    path.unlink()
+                    removed_count += 1
+                    removed_bytes += stat.st_size
+                except OSError:
+                    skipped += 1
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.temp_cleanup", target_type="storage",
+                    target_id=str(root), metadata_json={"files": removed_count, "bytes": removed_bytes,
+                                                       "age_days": _TEMP_CLEANUP_AGE_DAYS, "skipped": skipped}))
+    db.commit()
+    return {"deleted_count": removed_count, "deleted_bytes": removed_bytes, "skipped_count": skipped,
+            "older_than_days": _TEMP_CLEANUP_AGE_DAYS}
 
 
 @router.get("/events")
@@ -617,13 +953,7 @@ def admin_events(level: str = "all", module: str = "all", search: str = "", limi
     cutoff = utcnow() - timedelta(hours=max(1, min(since_hours, 24 * 30)))
     task_rows = db.scalars(select(Task).where(Task.status.in_(("failed", "timeout")), Task.updated_at >= cutoff).order_by(Task.updated_at.desc()).limit(100)).all()
     audit_rows = db.scalars(select(AuditLog).where(AuditLog.created_at >= cutoff).order_by(AuditLog.created_at.desc()).limit(100)).all()
-    def task_module(task_type: str) -> str:
-        prefix = task_type.split(".")[0]
-        if prefix == "script": return "llm"
-        if prefix in {"audio", "bgm"}: return "audio"
-        if prefix == "tts": return "tts"
-        return "worker"
-    rows = ([{"id": task.id, "time": task.updated_at.isoformat(), "level": "error", "module": task_module(task.task_type),
+    rows = ([{"id": task.id, "time": task.updated_at.isoformat(), "level": "error", "module": _task_module(task.task_type),
               "type": task.error_code or task.status, "message": task.error_message or task.status} for task in task_rows] +
             [{"id": audit.id, "time": audit.created_at.isoformat(), "level": "info", "module": "system",
               "type": audit.action, "message": f"{audit.target_type} {audit.target_id}"} for audit in audit_rows])

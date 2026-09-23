@@ -2,19 +2,53 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import ceil
 from statistics import mean
 from threading import Lock
 from time import monotonic
 
 _samples: deque[tuple[float, str, str, int, float, str]] = deque(maxlen=5000)
+_daily_counts: dict[str, int] = {}
+_minute_counts: dict[int, int] = {}
 _lock = Lock()
 
 
 def record_api_request(route: str, status: int, duration_ms: float, method: str = "GET") -> None:
+    now = datetime.now(timezone.utc)
+    local_day = datetime.now().astimezone().date().isoformat()
+    minute = int(now.timestamp() // 60)
     with _lock:
-        _samples.append((monotonic(), method, route, status, duration_ms, datetime.now(timezone.utc).isoformat()))
+        _samples.append((monotonic(), method, route, status, duration_ms, now.isoformat()))
+        _daily_counts[local_day] = _daily_counts.get(local_day, 0) + 1
+        _minute_counts[minute] = _minute_counts.get(minute, 0) + 1
+        cutoff_minute = minute - 3 * 24 * 60
+        for bucket in tuple(_minute_counts):
+            if bucket < cutoff_minute:
+                del _minute_counts[bucket]
+        for day in tuple(_daily_counts):
+            if day != local_day:
+                del _daily_counts[day]
+
+
+def api_requests_today(tz_offset_minutes: int | None = None) -> int:
+    """Return requests since midnight, in the process or requested local timezone.
+
+    The per-minute aggregate supports the dashboard's timezone and survives the
+    rolling sample buffer limit. Counts intentionally reset when the process restarts.
+    """
+    if tz_offset_minutes is None:
+        local_day = datetime.now().astimezone().date().isoformat()
+        with _lock:
+            return _daily_counts.get(local_day, 0)
+
+    offset = timedelta(minutes=max(-840, min(int(tz_offset_minutes), 840)))
+    now = datetime.now(timezone.utc)
+    local_start = (now - offset).replace(hour=0, minute=0, second=0, microsecond=0) + offset
+    start_minute = int(local_start.timestamp() // 60)
+    current_minute = int(now.timestamp() // 60)
+    with _lock:
+        return sum(count for minute, count in _minute_counts.items() if start_minute <= minute <= current_minute)
 
 
 def api_snapshot(window_seconds: int = 300) -> dict:
