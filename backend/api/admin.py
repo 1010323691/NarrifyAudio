@@ -17,7 +17,7 @@ from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, Project, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace, utcnow
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, safe_display_name
-from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation
+from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -311,6 +311,7 @@ def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session =
         task.status = "cancelled"
         task.finished_at = task.finished_at or utcnow()
         release_reservation(db, task, kind="release", note="administrator cancelled task")
+        suppress_pending_dispatch(db, task.id)
     task.updated_at = utcnow()
     append_task_event(db, task.id, "admin_cancel_requested", {"actor_user_id": actor.id, "status": task.status})
     db.add(AuditLog(actor_user_id=actor.id, action="admin.task_cancelled", target_type="task", target_id=task.id, metadata_json={"previous_status": previous_status}))

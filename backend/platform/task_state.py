@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import QuotaReservation, QuotaTransaction, Task, TaskEvent, UserQuotaAccount, utcnow
+from .models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskEvent, UserQuotaAccount, utcnow
 
 
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled", "timeout"}
@@ -22,6 +22,16 @@ def append_task_event(db: Session, task_id: str, event_type: str, payload: dict)
     )
     db.add(event)
     return event
+
+
+def suppress_pending_dispatch(db: Session, task_id: str) -> int:
+    """Suppress not-yet-published dispatch events for a cancelled task."""
+    result = db.query(OutboxEvent).filter(
+        OutboxEvent.aggregate_type == "task",
+        OutboxEvent.aggregate_id == task_id,
+        OutboxEvent.published_at.is_(None),
+    ).update({OutboxEvent.published_at: utcnow()}, synchronize_session=False)
+    return int(result or 0)
 
 
 def _locked_quota(db: Session, user_id: str) -> UserQuotaAccount:

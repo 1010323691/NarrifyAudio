@@ -14,7 +14,8 @@ from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import OutboxEvent, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root
-from backend.platform.task_worker import claim_task, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.task_worker import claim_fair_task, claim_task, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.legacy_tasks import estimate_legacy_units
 
 
 @pytest.fixture(scope="module")
@@ -466,6 +467,10 @@ def test_durable_worker_runs_audio_tasks_and_catalogs_outputs(client: TestClient
     )
     assert uploaded.status_code == 201, uploaded.text
     input_file = uploaded.json()
+    with SessionLocal.begin() as db:
+        account = db.get(UserQuotaAccount, first["user"]["id"])
+        assert account is not None
+        account.available_units = 3
 
     monkeypatch.setattr("backend.platform.task_worker.audio_engine.probe_duration", lambda *args: (4.0, ""))
     monkeypatch.setattr(
@@ -549,6 +554,68 @@ def test_cancel_before_claim_releases_quota(client: TestClient):
         assert account is not None
         assert account.available_units == 3
         assert account.reserved_units == 0
+        event = db.scalar(select(OutboxEvent).where(OutboxEvent.aggregate_id == task_id))
+        assert event is not None
+        assert event.published_at is not None
+    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="cancelled-task-worker") == "skipped"
+    assert client.get(f"/api/v1/tasks/{task_id}").json()["status"] == "cancelled"
+
+
+def test_fair_scheduler_rotates_between_users(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    first_csrf = first["csrf_token"]
+    first_project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": first_csrf}, json={"name": "Fair first"}
+    ).json()
+    second = _register(client, f"{uuid.uuid4()}@example.com")
+    second_csrf = second["csrf_token"]
+    second_project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": second_csrf}, json={"name": "Fair second"}
+    ).json()
+
+    def submit(csrf: str, project_id: str, key: str) -> str:
+        response = client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": csrf},
+            json={"project_id": project_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": key},
+        )
+        assert response.status_code == 201, response.text
+        return response.json()["id"]
+
+    first_task = submit(first_csrf, first_project["id"], "fair-first-1")
+    submit(first_csrf, first_project["id"], "fair-first-2")
+    second_task = submit(second_csrf, second_project["id"], "fair-second-1")
+
+    claim_one = claim_fair_task("fair-worker-1")
+    assert claim_one is not None
+    claim_two = claim_fair_task("fair-worker-2")
+    assert claim_two is not None
+    assert claim_one.task_id == first_task
+    assert claim_two.task_id == second_task
+
+
+def test_legacy_task_estimates_are_reserved_by_work_item():
+    assert estimate_legacy_units("tts.batch", {"scripts": ["a.json", "b.json"]}) == 2
+    assert estimate_legacy_units("bgm.match", {"chapters": ["a", "b", "c"]}) == 3
+    assert estimate_legacy_units("audio.zip", {"files": [{"name": "a.mp3"}]}) == 0
+
+
+def test_public_submission_cannot_underestimate_known_task(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Quota floor"}).json()
+    response = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "tts.batch",
+            "payload": {"scripts": ["one.json", "two.json"]},
+            "estimated_units": 0,
+            "idempotency_key": "quota-floor-known-task",
+        },
+    )
+    assert response.status_code == 409
 
 
 def test_expired_worker_lease_is_fenced_and_recovery_requeues(client: TestClient):

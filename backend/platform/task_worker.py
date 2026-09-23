@@ -48,6 +48,7 @@ from .models import (
     TaskAttempt,
     TaskResult,
     User,
+    UserQuotaAccount,
     utcnow,
     new_id,
 )
@@ -269,6 +270,54 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
             task_type=task.task_type,
             payload=dict(task.payload),
         )
+
+
+def claim_fair_task(worker_id: str, *, lease_seconds: int | None = None) -> TaskClaim | None:
+    """Claim the next task using a persistent per-user round-robin cursor.
+
+    The account row is locked before selecting a task, so multiple Worker
+    processes cannot repeatedly choose the same user.  The oldest task from
+    the least recently scheduled user is then claimed through the same fenced
+    claim path used by Redis-delivered messages.
+    """
+    lease_seconds = lease_seconds or settings.task_lease_seconds
+    now = utcnow()
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(UserQuotaAccount)
+            .join(Task, Task.owner_id == UserQuotaAccount.user_id)
+            .where(Task.status.in_(["pending", "queued", "retrying"]))
+            .order_by(
+                UserQuotaAccount.last_scheduled_at.asc(),
+                Task.created_at.asc(),
+                Task.id.asc(),
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True, of=UserQuotaAccount)
+        )
+        if account is None:
+            db.rollback()
+            return None
+        task_id = db.scalar(
+            select(Task.id)
+            .where(
+                Task.owner_id == account.user_id,
+                Task.status.in_(["pending", "queued", "retrying"]),
+            )
+            .order_by(Task.created_at.asc(), Task.id.asc())
+            .limit(1)
+        )
+        if task_id is None:
+            db.rollback()
+            return None
+
+        # Advance the cursor before releasing the account lock. The next
+        # worker therefore selects another user even though claim_task uses a
+        # separate session for the task-row fence.
+        account.last_scheduled_at = now
+        db.commit()
+    claim = claim_task(str(task_id), worker_id, lease_seconds=lease_seconds)
+    return claim
 
 
 def heartbeat_claim(claim: TaskClaim, *, lease_seconds: int | None = None) -> bool:
@@ -1219,14 +1268,7 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
         return "failed"
 
 
-def process_task_message(message: dict[str, Any], *, worker_id: str) -> str:
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else message
-    task_id = str(payload.get("task_id", ""))
-    if not task_id:
-        return "invalid"
-    claim = claim_task(task_id, worker_id)
-    if claim is None:
-        return "skipped"
+def _process_claim(claim: TaskClaim) -> str:
     stop = threading.Event()
 
     def renew() -> None:
@@ -1254,6 +1296,17 @@ def process_task_message(message: dict[str, Any], *, worker_id: str) -> str:
     finally:
         stop.set()
         heartbeat.join(timeout=2)
+
+
+def process_task_message(message: dict[str, Any], *, worker_id: str) -> str:
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else message
+    task_id = str(payload.get("task_id", ""))
+    if not task_id:
+        return "invalid"
+    claim = claim_task(task_id, worker_id)
+    if claim is None:
+        return "skipped"
+    return _process_claim(claim)
 
 
 def _decode_stream_event(fields: dict[str, Any]) -> dict[str, Any]:
@@ -1338,6 +1391,9 @@ def recover_database_tasks(limit: int = 100) -> int:
 
 def run_once(client: redis.Redis, *, worker_id: str, block_ms: int = 1000) -> str:
     ensure_consumer_group(client)
+    fair_claim = claim_fair_task(worker_id)
+    if fair_claim is not None:
+        return _process_claim(fair_claim)
     try:
         result = client.xautoclaim(
             STREAM_NAME,

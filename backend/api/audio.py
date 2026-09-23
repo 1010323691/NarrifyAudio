@@ -29,7 +29,7 @@ from ..engines import audio as A
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_files import catalog_managed_file
-from ..platform.legacy_tasks import submit_legacy_engine_task
+from ..platform.legacy_tasks import estimate_legacy_units, submit_legacy_engine_task
 from ..platform.models import ProjectFile
 from .platform_tasks import TaskSubmit, submit_task
 from . import _common
@@ -242,7 +242,7 @@ def silences(
             project_id=item.project_id,
             task_type="audio.silences",
             payload={"input_file_id": item.id, "source_name": item.original_name, "target": target, "tolerance": tol},
-            estimated_units=0,
+            estimated_units=estimate_legacy_units("audio.silences", {"input_file_id": item.id}),
             idempotency_key=f"audio-silences:{item.id}:{uuid.uuid4()}",
         ),
         user=ctx.user,
@@ -289,7 +289,7 @@ def cut(
                 "start_number": start,
                 "segments": req.segments,
             },
-            estimated_units=0,
+            estimated_units=estimate_legacy_units("audio.cut", {"segments": req.segments}),
             idempotency_key=f"audio-cut:{item.id}:{uuid.uuid4()}",
         ),
         user=ctx.user,

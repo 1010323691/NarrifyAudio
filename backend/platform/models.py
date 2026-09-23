@@ -182,6 +182,8 @@ class UserQuotaAccount(Base):
     reserved_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     frozen_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     consumed_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Persistent round-robin cursor for fair scheduling across users.
+    last_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="quota_account")

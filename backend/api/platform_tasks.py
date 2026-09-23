@@ -14,7 +14,7 @@ from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_csrf, require_user
 from ..platform.models import OutboxEvent, Project, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, TaskResult, User, UserQuotaAccount, utcnow
 from ..platform.config import settings
-from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation
+from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 
@@ -95,6 +95,15 @@ def stream_task_events(
 
 @router.post("", status_code=201)
 def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    # The client may over-estimate its own work, but it must not under-report
+    # quota for a known task type.  Keep the estimator import local because
+    # legacy_tasks delegates back to this endpoint.
+    from ..platform.legacy_tasks import estimate_legacy_units
+
+    estimated_units = max(
+        payload.estimated_units,
+        estimate_legacy_units(payload.task_type, payload.payload),
+    )
     project = db.scalar(select(Project).where(Project.id == payload.project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)))
     if project is None:
         raise HTTPException(404, "项目不存在")
@@ -109,7 +118,7 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
         account = UserQuotaAccount(user_id=user.id, available_units=0)
         db.add(account)
         db.flush()
-    if account.available_units < payload.estimated_units:
+    if account.available_units < estimated_units:
         raise HTTPException(409, "额度不足")
     # The account row lock serializes submissions for one user. Re-check the
     # idempotency key after acquiring it so concurrent identical requests do
@@ -123,13 +132,13 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
     task = Task(owner_id=user.id, project_id=project.id, task_type=payload.task_type, payload={**payload.payload, "_request_hash": request_hash}, idempotency_key=payload.idempotency_key)
     db.add(task)
     db.flush()
-    if payload.estimated_units:
+    if estimated_units:
         before_available = account.available_units
         before_reserved = account.reserved_units
         before_consumed = account.consumed_units
-        account.available_units -= payload.estimated_units
-        account.reserved_units += payload.estimated_units
-        reservation = QuotaReservation(user_id=user.id, task_id=task.id, units=payload.estimated_units)
+        account.available_units -= estimated_units
+        account.reserved_units += estimated_units
+        reservation = QuotaReservation(user_id=user.id, task_id=task.id, units=estimated_units)
         db.add(reservation)
         db.flush()
         db.add(
@@ -137,7 +146,7 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
                 user_id=user.id,
                 task_id=task.id,
                 reservation_id=reservation.id,
-                amount=-payload.estimated_units,
+                amount=-estimated_units,
                 kind="reserve",
                 idempotency_key=f"reserve:{task.id}",
                 available_before=before_available,
@@ -148,7 +157,7 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
                 consumed_after=account.consumed_units,
             )
         )
-    append_task_event(db, task.id, "submitted", {"status": "pending", "estimated_units": payload.estimated_units})
+    append_task_event(db, task.id, "submitted", {"status": "pending", "estimated_units": estimated_units})
     db.add(OutboxEvent(aggregate_type="task", aggregate_id=task.id, event_type="task.submitted", payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id}))
     db.commit()
     return _task_json(task)
@@ -166,6 +175,7 @@ def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = 
     else:
         task.status = "cancelled"
         release_reservation(db, task, kind="release", note="user cancelled before execution")
+        suppress_pending_dispatch(db, task.id)
     task.updated_at = utcnow()
     append_task_event(db, task.id, "cancel_requested", {"status": task.status})
     db.commit()

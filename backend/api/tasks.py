@@ -22,7 +22,7 @@ from ..platform.database import SessionLocal
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_workspace import active_workspace
 from ..platform.models import Task as DurableTask, TaskEvent, utcnow
-from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation
+from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from .platform_tasks import retry_task as retry_durable_task
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -311,6 +311,7 @@ def control_task(task_id: str, action: str, ctx: AuthContext = Depends(get_auth_
             if durable.status == "cancelled":
                 durable.finished_at = now
                 release_reservation(db, durable, kind="release", note="user cancelled before execution")
+                suppress_pending_dispatch(db, durable.id)
             durable.updated_at = now
             append_task_event(db, durable.id, "cancel_requested", {"status": durable.status})
             db.commit()
