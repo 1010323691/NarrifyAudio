@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, Headphones, FolderOpen, LogOut,
+  Combine, Music4, ShieldCheck, Headphones, FolderOpen, LogOut, Monitor, Sun, Moon,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -18,7 +18,14 @@ const workspace = useWorkspaceStore()
 const accountMenuOpen = ref(false)
 const accountTrigger = ref<HTMLButtonElement | null>(null)
 const displayName = computed(() => auth.user?.display_name || auth.user?.username || '账户')
+const username = computed(() => auth.user?.username || displayName.value)
 const avatarInitial = computed(() => displayName.value.trim().charAt(0).toUpperCase() || 'U')
+const themeOptions = [
+  { key: 'system', label: '跟随系统', icon: Monitor },
+  { key: 'light', label: '浅色', icon: Sun },
+  { key: 'dark', label: '深色', icon: Moon },
+] as const
+const activeTheme = computed(() => settings.config?.ui.theme || 'system')
 
 const isProjectContext = computed(() => workspace.hasActiveProject && (
   route.path.startsWith('/projects/') || ['/text', '/script', '/voices', '/batch', '/merge', '/audio', '/bgm'].includes(route.path)
@@ -65,6 +72,14 @@ function isAdminItemActive(item: (typeof ADMIN_ITEMS)[number]) {
 function closeAccountMenu() {
   accountMenuOpen.value = false
   accountTrigger.value?.focus()
+}
+
+async function setTheme(theme: (typeof themeOptions)[number]['key']) {
+  const previousTheme = activeTheme.value
+  if (theme === previousTheme) return
+  settings.applyTheme(theme)
+  const saved = await settings.save({ ui: { theme } })
+  if (!saved) settings.applyTheme(previousTheme)
 }
 
 async function signOut() {
@@ -131,20 +146,37 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
         ref="accountTrigger"
         type="button"
         class="app-account__trigger"
-        :aria-label="`账户菜单：${displayName}`"
+        :aria-label="`账户菜单：${username}`"
         aria-haspopup="true"
         :aria-expanded="accountMenuOpen"
-        :title="displayName"
+        :title="username"
         @click="accountMenuOpen = !accountMenuOpen"
       >
         <span class="app-account__avatar" aria-hidden="true">{{ avatarInitial }}</span>
+        <span class="app-account__username">{{ username }}</span>
       </button>
 
-      <div v-if="accountMenuOpen" class="app-account__menu" role="group" aria-label="账户菜单">
+      <Transition name="account-popover">
+        <div v-if="accountMenuOpen" class="app-account__menu" role="group" aria-label="账户菜单">
         <div class="app-account__profile" role="group" aria-label="账户信息">
           <span class="app-account__avatar app-account__avatar--large" aria-hidden="true">{{ avatarInitial }}</span>
           <div class="app-account__profile-copy"><strong>{{ displayName }}</strong><small>{{ auth.user?.email }}</small></div>
         </div>
+        <div class="app-account__theme" role="group" aria-label="主题切换">
+          <button
+            v-for="theme in themeOptions"
+            :key="theme.key"
+            type="button"
+            class="app-account__theme-button"
+            :disabled="settings.saving"
+            :class="{ 'is-active': activeTheme === theme.key }"
+            :aria-label="theme.label"
+            :aria-pressed="activeTheme === theme.key"
+            :title="theme.label"
+            @click="setTheme(theme.key)"
+          ><component :is="theme.icon" class="h-4 w-4" aria-hidden="true" /></button>
+        </div>
+        <div class="app-account__theme-divider" aria-hidden="true" />
         <div class="app-account__menu-list">
           <template v-if="isAdminArea">
             <RouterLink to="/admin?tab=settings" class="app-account__menu-item" @click="accountMenuOpen = false"><Settings class="h-4 w-4" />系统配置</RouterLink>
@@ -156,7 +188,8 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
           </template>
           <button type="button" class="app-account__menu-item app-account__menu-item--logout" @click="signOut"><LogOut class="h-4 w-4" />退出登录</button>
         </div>
-      </div>
+        </div>
+      </Transition>
     </div>
   </aside>
 </template>
