@@ -25,7 +25,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: smoke-api
-    command: ["sh", "-c", "NARRIFY_WORKER_ID=worker-$HOSTNAME python -m backend.worker"]
+    command: ["sh", "-c", "NARRIFY_WORKER_ID=worker-$$HOSTNAME python -m backend.worker"]
 
   llm-stub:
     build:
