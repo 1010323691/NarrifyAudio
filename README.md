@@ -2,7 +2,7 @@
 
 NarrifyAudio 是 Windows 本地有声书制作工作台。用户端围绕项目和制作流程运行；管理控制台单独提供平台管理入口。应用由 Vue 3 前端、FastAPI API、后台 Worker、PostgreSQL 和 Redis 协议兼容缓存服务组成。
 
-本指南面向 Windows 10/11 原生开发环境：PostgreSQL 与 Memurai 作为 Windows 服务运行，API、Worker 和前端作为本地进程运行。不需要 Docker 或 Linux/WSL。
+本指南面向 Windows 10/11 原生开发环境：PostgreSQL 与 Memurai 作为 Windows 服务运行，API、Worker 和前端作为本地进程运行。
 
 ## 服务与本机地址
 
@@ -83,6 +83,8 @@ NARRIFY_REDIS_URL=redis://127.0.0.1:6379/0
 .\start-data-services.ps1
 ```
 
+也可以双击 `start-data-services.bat`；如果当前权限不足，Windows 会弹出管理员授权提示。
+
 脚本会启动 Windows 服务 `postgresql-x64-16` 与 `Memurai`，并等待 `5432`、`6379` 端口就绪。若服务尚未安装，请先安装 PostgreSQL 16 和 Memurai Developer。Windows 可能要求以管理员身份运行 PowerShell 来控制服务。
 
 ### 启动整个应用
@@ -109,7 +111,9 @@ NARRIFY_REDIS_URL=redis://127.0.0.1:6379/0
 .\stop-data-services.ps1
 ```
 
-脚本会停止 Memurai 和 PostgreSQL Windows 服务。停止数据服务前先停止 API 与 Worker，避免正在运行的请求或任务因数据库、队列断开而失败。再次启动时先运行 `start-data-services.ps1`，再运行 `start.bat`。
+也可以双击 `stop-data-services.bat`；如果当前权限不足，Windows 会弹出管理员授权提示。
+
+脚本会停止 Memurai 和 PostgreSQL Windows 服务。停止数据服务前先停止 API 与 Worker，避免正在运行的请求或任务因数据库、队列断开而失败。再次启动时先双击 `start-data-services.bat`，再运行 `start.bat`。
 
 ## 目录和关键配置
 
@@ -144,7 +148,7 @@ LLM 服务凭据和制作参数按应用设置页面配置。不要把 API 密�
 Get-NetTCPConnection -State Listen -LocalPort 5173,5432,6379,8642 -ErrorAction SilentlyContinue
 ```
 
-确认占用端口的是 NarrifyAudio 对应服务。不要同时启动另一套 WSL、Docker 或 PostgreSQL/Redis 实例占用相同端口。
+确认占用端口的是 NarrifyAudio 对应服务。不要同时启动另一套 WSL 或 PostgreSQL/Redis 实例占用相同端口。
 
 ### 数据库认证失败
 

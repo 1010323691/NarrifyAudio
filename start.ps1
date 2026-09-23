@@ -197,10 +197,6 @@ if (-not $frontendReady) {
   Write-Warning 'Frontend did not become ready within 30 seconds. Check its console window.'
 }
 
-if ($backendReady -and $frontendReady) {
-  Start-Process $frontendUrl
-}
-
 Write-Host ''
 Write-Host 'NarrifyAudio development environment'
 Write-Host "Backend:  $backendUrl"
@@ -208,3 +204,9 @@ Write-Host "Frontend: $frontendUrl"
 Write-Host 'Worker:   Windows Python task worker'
 Write-Host 'Admin login: http://127.0.0.1:5173/#/admin/login'
 Write-Host 'Close the Backend, Worker and Frontend console windows to stop processes started by this script. PostgreSQL and Memurai remain Windows services.'
+
+if ($backendReady -and $frontendReady) {
+  Write-Host 'Opening NarrifyAudio in your browser in 5 seconds...'
+  Start-Sleep -Seconds 5
+  Start-Process -FilePath $frontendUrl
+}

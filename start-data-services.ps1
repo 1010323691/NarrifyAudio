@@ -1,5 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw 'Administrator permission is required to control Windows services. Double-click start-data-services.bat and approve the Windows prompt.'
+}
+
 $services = @(
   @{ Name = 'postgresql-x64-16'; Port = 5432 },
   @{ Name = 'Memurai'; Port = 6379 }
