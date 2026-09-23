@@ -4,7 +4,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/project'
 import { useToast } from '@/components/ui/toast'
 import { cutAudio, detectSilences, exportAudio, planAudio, probeAudio, zipAudio } from '@/api/audio'
-import { cancelDurableTask, getDurableTask, listDurableTasks } from '@/api/persistentTasks'
+import { cancelDurableTask, getDurableTask, listDurableTasks, waitForDurableTask } from '@/api/persistentTasks'
 import type { DurableTask } from '@/api/persistentTasks'
 import { downloadFile } from '@/utils/fileops'
 import { formatBytes, formatDuration } from '@/utils/format'
@@ -52,6 +52,13 @@ const settings = useSettingsStore()
 const project = useProjectStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
+
+async function resolveAudioTask(response: { task_id: string } | Record<string, any>): Promise<Record<string, any>> {
+  if (!('task_id' in response)) return response
+  const task = await waitForDurableTask(response.task_id)
+  if (task.status !== 'succeeded') throw new Error(task.error_message || '任务执行失败')
+  return task.result ?? {}
+}
 
 const file = ref<{ path: string; name: string } | null>(null)
 const probe = ref<AudioProbeResult | null>(null)
@@ -313,9 +320,9 @@ async function doZip() {
   error.value = ''
   try {
     const base = (file.value?.name || '').replace(/\.[^.]+$/, '')
-    const r = await zipAudio({ base, files: cutFilesSpec() })
+    const r = await resolveAudioTask(await zipAudio({ base, files: cutFilesSpec() }))
     // 浏览器：下载 zip（后端回 Content-Disposition: attachment，存到下载目录）。
-    download(r.zip_path)
+    download(r.path || r.zip_path)
     toast({ title: '打包已开始下载', variant: 'success', description: `打包 ${r.file_count} 个文件` })
   } catch (e: any) {
     error.value = e?.message || '打包失败'
@@ -331,7 +338,7 @@ async function doExport() {
   busyExport.value = true
   error.value = ''
   try {
-    const r = await exportAudio(file.value.path, { files: cutFilesSpec() })
+    const r = await resolveAudioTask(await exportAudio(file.value.path, { files: cutFilesSpec() }))
     // 文件已落到磁盘——这本身就是成功。
     toast({ title: '已输出到源文件夹', variant: 'success', description: `${r.file_count} 个文件 → ${r.dest_dir}` })
   } catch (e: any) {

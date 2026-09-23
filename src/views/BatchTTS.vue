@@ -7,6 +7,7 @@ import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { listDir } from '@/api/files'
 import { batchStatusFiles, listVoices, resetBatch, runBatch, runStressTest, ttsStatus } from '@/api/tts'
+import { waitForDurableTask } from '@/api/persistentTasks'
 import type { BatchFileStatus, BatchResult, FileItem, StressTestResult, TTSStatus, VoiceItem } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -360,7 +361,13 @@ async function doRunAll() {
   const autoNow = autoConcurrency.value
   try {
     // Clear the completion state (the package folders) first …
-    await resetBatch(names)
+    const reset = await resetBatch(names)
+    if ('task_id' in reset) {
+      const resetTask = await waitForDurableTask(reset.task_id)
+      if (resetTask.status !== 'succeeded') {
+        throw new Error(resetTask.error_message || '重置合成包失败')
+      }
+    }
     // … then the identical one-click run: default resume, nothing done → everything re-done.
     const { task_id } = await runBatch({
       scripts: names,

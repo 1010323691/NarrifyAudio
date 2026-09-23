@@ -760,7 +760,11 @@ def _batch_task_active() -> bool:
 
 
 @router.post("/batch-reset")
-def reset_batch(req: ResetBatchRequest) -> dict:
+def reset_batch(
+    req: ResetBatchRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """「重新全部合成」第一步（同步、非任务）：删除选中解析 JSON 的合成包
     （``05_audio_chunk/<包名>/``：逐行 mp3 + manifest.json），使随后的一键合成请求
     （与默认续合同一条线路、同一请求形状）从头重做全部段落。
@@ -778,6 +782,21 @@ def reset_batch(req: ResetBatchRequest) -> dict:
         raise HTTPException(status_code=400, detail="没有要重置的文件。")
     if _batch_task_active():
         raise HTTPException(409, "合成任务进行中，请待其结束后再重置。")
+    if isinstance(ctx, AuthContext):
+        active = active_durable_targets(
+            task_type="tts.batch", payload_key="scripts", ctx=ctx, db=db,
+        )
+        if any(name in active for name in req.scripts):
+            raise HTTPException(409, "合成任务进行中，请等待其结束后再重置。")
+        task = submit_legacy_engine_task(
+            task_type="tts.reset",
+            label=f"重新合成：{len(req.scripts)} 个文件",
+            payload={"scripts": req.scripts},
+            ctx=ctx,
+            db=db,
+            idempotency_prefix="tts-reset",
+        )
+        return {"task_id": task["id"]}
     layout = get_layout()
     removed = []
     for name in req.scripts:

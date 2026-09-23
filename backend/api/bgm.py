@@ -474,7 +474,11 @@ class MatchRequest(BaseModel):
 
 
 @router.post("/match")
-def run_match(req: MatchRequest) -> dict:
+def run_match(
+    req: MatchRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """(Re-)match the selected chapters (default: ALL existing) and rewrite the
     assignments file once.
 
@@ -514,6 +518,28 @@ def run_match(req: MatchRequest) -> dict:
                 409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
             )
         cfg = get_config()
+        if isinstance(ctx, AuthContext):
+            conflicts = [
+                stem for stem in stems
+                if stem in active_durable_targets(
+                    task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
+                )
+            ]
+            if conflicts:
+                raise HTTPException(409, "以下章节已有匹配任务在途：" + "、".join(conflicts))
+            task = submit_legacy_engine_task(
+                task_type="bgm.match",
+                label=f"BGM 匹配（{req.mode}）：{len(stems)} 章",
+                payload={
+                    "chapters": stems,
+                    "mode": req.mode,
+                    "config": cfg.model_dump(mode="json"),
+                },
+                ctx=ctx,
+                db=db,
+                idempotency_prefix=f"bgm-match:{req.mode}",
+            )
+            return {"task_id": task["id"]}
         try:
             return Bgm.recompute_segment_timelines(
                 layout, stems, cfg.bgm.min_match_score,
@@ -536,8 +562,29 @@ def run_match(req: MatchRequest) -> dict:
         if not stems:
             raise HTTPException(400, "请选择要匹配的章节。")
     conflicts = [s for s in stems if s in _inflight_bgm_stems(ANALYSIS_MODULE)]
+    if isinstance(ctx, AuthContext):
+        conflicts.extend(
+            s for s in stems
+            if s in active_durable_targets(
+                task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
+            ) and s not in conflicts
+        )
     if conflicts:
         raise HTTPException(409, "以下章节有分析任务在途（避免读取半成品分析）：" + "、".join(conflicts))
+    if isinstance(ctx, AuthContext):
+        task = submit_legacy_engine_task(
+            task_type="bgm.match",
+            label=f"BGM 匹配（{req.mode}）：{len(stems)} 章",
+            payload={
+                "chapters": stems,
+                "mode": req.mode,
+                "config": get_config().model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"bgm-match:{req.mode}",
+        )
+        return {"task_id": task["id"]}
     return Bgm.match_stems(layout, stems, req.mode, get_config().bgm.min_match_score)
 
 
@@ -740,7 +787,10 @@ def run_mix(
 
 
 @router.post("/package")
-def package_mixed_audio() -> dict:
+def package_mixed_audio(
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Package every finished chapter mix into a source-named ZIP.
 
     The archive contains a top-level folder named after the source TXT stem,
@@ -760,6 +810,16 @@ def package_mixed_audio() -> dict:
         )
 
     base = _source_txt_base(layout)
+    if isinstance(ctx, AuthContext):
+        task = submit_legacy_engine_task(
+            task_type="bgm.package",
+            label=f"BGM 打包：{base}",
+            payload={"chapters": stems, "base": base},
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"bgm-package:{base}",
+        )
+        return {"task_id": task["id"]}
     out_dir = layout.bgm / base
     out_dir.mkdir(parents=True, exist_ok=True)
     zip_path = out_dir / f"{base}.zip"

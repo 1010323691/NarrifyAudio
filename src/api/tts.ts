@@ -100,8 +100,8 @@ export function runBatch(opts: BatchRunOptions = {}): Promise<{ task_id: string 
 /** 音频合成 · 重新全部合成 · 第一步（同步、非任务）：删除选中文件的合成包
  *  （``05_audio_chunk/<包>/``——逐行 mp3 + manifest），随后的「一键音频合成」（默认续合
  *  语义，与一键合成完全同一条线路）即从头重做全部段落。 */
-export function resetBatch(scripts: string[]): Promise<{ ok: boolean; removed: string[] }> {
-  return http.post<{ ok: boolean; removed: string[] }>('/api/tts/batch-reset', { scripts })
+export function resetBatch(scripts: string[]): Promise<{ ok: boolean; removed: string[] } | { task_id: string }> {
+  return http.post<{ ok: boolean; removed: string[] } | { task_id: string }>('/api/tts/batch-reset', { scripts })
 }
 
 /** 音频合成进度（每文件）：each file's 【已合成 / 总段落】· 角色 · 已就绪声音, plus the

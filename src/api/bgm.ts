@@ -28,9 +28,9 @@ export function analyzeChapters(chapters: string[]): Promise<BgmBatchResult> {
   return http.post<BgmBatchResult>('/api/bgm/analyze', { chapters })
 }
 
-/** (Re-)match the selected chapters (empty/omitted = all). Synchronous. */
-export function matchChapters(chapters: string[] | null, mode: string): Promise<BgmMatchResult> {
-  return http.post<BgmMatchResult>('/api/bgm/match', { chapters, mode })
+/** (Re-)match the selected chapters (empty/omitted = all) through the durable Worker. */
+export function matchChapters(chapters: string[] | null, mode: string): Promise<BgmMatchResult | { task_id: string }> {
+  return http.post<BgmMatchResult | { task_id: string }>('/api/bgm/match', { chapters, mode })
 }
 
 /** Start one paragraph-analysis Task per selected chapter (段落分析). */
@@ -63,7 +63,7 @@ export function mixChapters(chapters: string[]): Promise<BgmBatchResult> {
   return http.post<BgmBatchResult>('/api/bgm/mix', { chapters })
 }
 
-/** Package every finished BGM mix into a source-named ZIP. */
-export function packageMixedAudio(): Promise<BgmPackageResult> {
-  return http.post<BgmPackageResult>('/api/bgm/package')
+/** Package every finished BGM mix into a source-named ZIP through the durable Worker. */
+export function packageMixedAudio(): Promise<BgmPackageResult | { task_id: string }> {
+  return http.post<BgmPackageResult | { task_id: string }>('/api/bgm/package')
 }

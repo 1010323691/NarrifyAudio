@@ -199,12 +199,18 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     )
     assert formatted.status_code == 200, formatted.text
     assert formatted.json()["file_id"]
+    assert process_task_message(
+        {"payload": {"task_id": formatted.json()["task_id"]}}, worker_id="test-format-worker"
+    ) == "succeeded"
     legacy_split = client.post(
         "/api/book/split",
         headers={"X-CSRF-Token": csrf},
         json={"path": legacy_file["path"], "whole_book": True},
     )
     assert legacy_split.status_code == 200, legacy_split.text
+    assert process_task_message(
+        {"payload": {"task_id": legacy_split.json()["task_id"]}}, worker_id="test-book-worker"
+    ) == "succeeded"
     project_files = client.get(f"/api/v1/projects/{legacy_file['project_id']}/files").json()
     assert any(item["module"] == "02_split_text" for item in project_files)
     submitted = client.post(
@@ -223,6 +229,34 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     split_listing = client.get("/api/files/list/02_split_text?recursive=true")
     assert split_listing.status_code == 200
     assert split_listing.json()["items"]
+
+
+def test_legacy_audio_packaging_route_uses_durable_worker(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    uploaded = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("cut.mp3", b"fake audio", "audio/mpeg")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    source = uploaded.json()
+    submitted = client.post(
+        "/api/audio/zip",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "base": "book",
+            "files": [{"name": "cut.mp3", "path": source["path"]}],
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+    task_id = submitted.json()["task_id"]
+    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-audio-package-worker") == "succeeded"
+    task = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    assert task["result"]["engine"] == "audio.zip"
+    assert task["result"]["file_id"]
+    assert "/07_output/" in task["result"]["path"].replace("\\", "/")
 
 
 def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClient):

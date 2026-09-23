@@ -66,8 +66,8 @@ export interface AudioZipResult {
 
 /** Build a zip of the given cut files into the workspace's 07_output/; the result's
  *  ``zip_path`` is served by ``/api/files/download/07_output/<name>`` for download. */
-export function zipAudio(opts: { base?: string; files: CutFileSpec[] }): Promise<AudioZipResult> {
-  return http.post<AudioZipResult>('/api/audio/zip', {
+export function zipAudio(opts: { base?: string; files: CutFileSpec[] }): Promise<AudioZipResult | { task_id: string }> {
+  return http.post<AudioZipResult | { task_id: string }>('/api/audio/zip', {
     base: opts.base ?? null,
     files: opts.files,
   })
@@ -83,8 +83,8 @@ export interface AudioExportResult {
 export function exportAudio(
   sourcePath: string,
   opts: { files: CutFileSpec[] },
-): Promise<AudioExportResult> {
-  return http.post<AudioExportResult>('/api/audio/export', {
+): Promise<AudioExportResult | { task_id: string }> {
+  return http.post<AudioExportResult | { task_id: string }>('/api/audio/export', {
     source_path: sourcePath,
     files: opts.files,
   })

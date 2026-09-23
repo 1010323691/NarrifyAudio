@@ -71,8 +71,13 @@ def active_durable_targets(
             Task.status.in_(ACTIVE_TASK_STATUSES),
         )
     ).all()
-    return {
-        str(row.payload.get(payload_key))
-        for row in rows
-        if isinstance(row.payload, dict) and row.payload.get(payload_key) is not None
-    }
+    values: set[str] = set()
+    for row in rows:
+        if not isinstance(row.payload, dict):
+            continue
+        value = row.payload.get(payload_key)
+        if isinstance(value, list):
+            values.update(str(item) for item in value)
+        elif value is not None:
+            values.add(str(value))
+    return values

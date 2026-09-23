@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import io
 import mimetypes
 import os
 import secrets
+import shutil
 import threading
 import time
+import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -17,7 +20,7 @@ from sqlalchemy import func, select
 
 from ..core.config import TextConfig
 from ..core import config as core_config
-from ..core.paths import WORKSPACE_DIRS
+from ..core.paths import WORKSPACE_DIRS, get_layout
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.tasks import TaskCancelled
 from ..engines.book import (
@@ -681,7 +684,12 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         "bgm.analysis",
         "bgm.segment",
         "bgm.mix",
+        "bgm.match",
+        "bgm.package",
         "music.suggest_tags",
+        "audio.zip",
+        "audio.export",
+        "tts.reset",
     }
     if claim.task_type not in {
         "text.format",
@@ -955,10 +963,128 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                     cfg.llm,
                     payload.get("description"),
                 )
+            elif claim.task_type == "bgm.match":
+                cfg = core_config.get_config()
+                stems = [str(value) for value in (payload.get("chapters") or [])]
+                mode = str(payload.get("mode") or "llm")
+                if mode == "segment":
+                    result = bgm_engine.recompute_segment_timelines(
+                        get_layout(),
+                        stems,
+                        cfg.bgm.min_match_score,
+                        ffprobe_path=cfg.ffmpeg.ffprobe_path,
+                        pause_ms=cfg.tts.pause_between_speakers_ms or 500,
+                        same_ms=cfg.tts.pause_same_speaker_ms or 250,
+                        volume_base=cfg.bgm.volume,
+                        volume_tiers=cfg.bgm.segment_volume_tiers,
+                    )
+                else:
+                    result = bgm_engine.match_stems(
+                        get_layout(), stems, mode, cfg.bgm.min_match_score,
+                    )
+            elif claim.task_type == "bgm.package":
+                layout = get_layout()
+                stems = [str(value) for value in (payload.get("chapters") or [])]
+                base = safe_display_name(str(payload.get("base") or "bgm"))
+                archive = io.BytesIO()
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
+                    for index, stem in enumerate(stems, 1):
+                        if cancellation_requested(claim):
+                            raise TaskCancelledError()
+                        source = layout.bgm / f"{stem}.mp3"
+                        if not source.is_file():
+                            raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
+                        output.write(source, arcname=f"{base}/{stem}.mp3")
+                        update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
+                result = _write_outcome(
+                    claim,
+                    f"{base}.zip",
+                    "application/zip",
+                    archive.getvalue(),
+                    {"engine": "bgm.package", "base": base, "file_count": len(stems)},
+                    publish_module="08_bgm",
+                )
+                handle.progress(100, "完成")
+                return result
+            elif claim.task_type == "audio.zip":
+                workspace = get_layout().workspace
+                if workspace is None:
+                    raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
+                base = safe_display_name(str(payload.get("base") or "audio"))
+                archive = io.BytesIO()
+                files = payload.get("files") or []
+                with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
+                    for index, item in enumerate(files, 1):
+                        if cancellation_requested(claim):
+                            raise TaskCancelledError()
+                        if not isinstance(item, dict):
+                            raise TaskExecutionError("invalid_payload", "打包文件参数无效")
+                        relative = Path(str(item.get("relative_path") or ""))
+                        source = (workspace / relative).resolve()
+                        if not source.is_relative_to(workspace.resolve()) or not source.is_file():
+                            raise TaskExecutionError("input_missing", "待打包文件不存在")
+                        name = safe_display_name(str(item.get("name") or source.name))
+                        output.write(source, arcname=name)
+                        update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
+                result = _write_outcome(
+                    claim,
+                    f"{base}.zip",
+                    "application/zip",
+                    archive.getvalue(),
+                    {"engine": "audio.zip", "file_count": len(files)},
+                    publish_module="07_output",
+                )
+                handle.progress(100, "完成")
+                return result
+            elif claim.task_type == "audio.export":
+                workspace = get_layout().workspace
+                if workspace is None:
+                    raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
+                source_relative = Path(str(payload.get("source_relative") or ""))
+                source = (workspace / source_relative).resolve()
+                if not source.is_relative_to(workspace.resolve()) or not source.is_file():
+                    raise TaskExecutionError("input_missing", "源音频不存在")
+                destination = source.parent / "分集"
+                destination.mkdir(parents=True, exist_ok=True)
+                written = []
+                files = payload.get("files") or []
+                for index, item in enumerate(files, 1):
+                    if cancellation_requested(claim):
+                        raise TaskCancelledError()
+                    if not isinstance(item, dict):
+                        raise TaskExecutionError("invalid_payload", "导出文件参数无效")
+                    relative = Path(str(item.get("relative_path") or ""))
+                    input_path = (workspace / relative).resolve()
+                    if not input_path.is_relative_to(workspace.resolve()) or not input_path.is_file():
+                        raise TaskExecutionError("input_missing", "待导出文件不存在")
+                    name = safe_display_name(str(item.get("name") or input_path.name))
+                    target = destination / name
+                    shutil.copy2(input_path, target)
+                    written.append({"name": name, "path": str(target)})
+                    update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
+                result = {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
+            elif claim.task_type == "tts.reset":
+                layout = get_layout()
+                scripts = [str(value) for value in (payload.get("scripts") or [])]
+                removed = []
+                for index, name in enumerate(scripts, 1):
+                    if cancellation_requested(claim):
+                        raise TaskCancelledError()
+                    package = Batch.package_for(Path(name))
+                    target = (layout.audio_chunk / package).resolve()
+                    if not target.is_relative_to(layout.audio_chunk.resolve()):
+                        raise TaskExecutionError("invalid_payload", "合成包路径无效")
+                    if target.exists():
+                        shutil.rmtree(target)
+                        removed.append(package)
+                    update_progress(claim, int(index * 90 / max(1, len(scripts))), f"重置 {index}/{len(scripts)}")
+                result = {"engine": "tts.reset", "ok": True, "removed": removed}
             else:
                 raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
         except TaskCancelled as exc:
             raise TaskCancelledError() from exc
+    if isinstance(result, TaskOutcome):
+        return result
     handle.progress(100, "完成")
     return _legacy_result_outcome(claim, result)
 

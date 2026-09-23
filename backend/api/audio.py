@@ -29,6 +29,7 @@ from ..engines import audio as A
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_files import catalog_managed_file
+from ..platform.legacy_tasks import submit_legacy_engine_task
 from ..platform.models import ProjectFile
 from .platform_tasks import TaskSubmit, submit_task
 from . import _common
@@ -310,7 +311,11 @@ class ZipRequest(BaseModel):
 
 
 @router.post("/zip")
-def zip_files(req: ZipRequest) -> dict:
+def zip_files(
+    req: ZipRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Package already-cut files into a STORE zip under the workspace's
     ``07_output/`` so the browser can download it (mirrors the book module's
     optional ``.zip`` output)."""
@@ -319,6 +324,28 @@ def zip_files(req: ZipRequest) -> dict:
         raise HTTPException(400, "没有可打包的文件。")
     layout = get_layout()
     base = (req.base or "").strip() or "audio"
+    if isinstance(ctx, AuthContext):
+        workspace = layout.workspace
+        if workspace is None:
+            raise HTTPException(409, "尚未设置工作空间")
+        entries = []
+        for spec in req.files:
+            path = _common.resolve_inbound_path(spec.path, label=f"文件 {spec.name or ''}".strip())
+            if not path.is_file():
+                raise HTTPException(400, f"不是一个文件：{spec.name or path.name}")
+            entries.append({
+                "name": Path(spec.name or path.name).name,
+                "relative_path": path.relative_to(workspace).as_posix(),
+            })
+        task = submit_legacy_engine_task(
+            task_type="audio.zip",
+            label=f"音频打包：{base}",
+            payload={"base": base, "files": entries},
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"audio-zip:{base}",
+        )
+        return {"task_id": task["id"]}
     entries = []
     for spec in req.files:
         p = _common.resolve_inbound_path(spec.path, label=f"文件 {spec.name or ''}".strip())
@@ -341,7 +368,11 @@ class ExportRequest(BaseModel):
 
 
 @router.post("/export")
-def export_to_source(req: ExportRequest) -> dict:
+def export_to_source(
+    req: ExportRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Copy the cut files into a ``分集`` folder created beside the source audio, so
     the results land in the user's own folder next to the original file."""
     _common.require_workspace()
@@ -350,6 +381,34 @@ def export_to_source(req: ExportRequest) -> dict:
         raise HTTPException(400, "源音频不是一个文件。")
     if not req.files:
         raise HTTPException(400, "没有可输出的文件。")
+    if isinstance(ctx, AuthContext):
+        workspace = get_layout().workspace
+        if workspace is None:
+            raise HTTPException(409, "尚未设置工作空间")
+        entries = []
+        for spec in req.files:
+            path = _common.resolve_inbound_path(spec.path, label=f"文件 {spec.name or ''}".strip())
+            if not path.is_file():
+                raise HTTPException(400, f"不是一个文件：{spec.name or path.name}")
+            entries.append({
+                "name": Path(spec.name or path.name).name,
+                "relative_path": path.relative_to(workspace).as_posix(),
+            })
+        source = _common.resolve_inbound_path(req.source_path, label="源音频文件")
+        if not source.is_file():
+            raise HTTPException(400, "源音频不是一个文件。")
+        task = submit_legacy_engine_task(
+            task_type="audio.export",
+            label=f"音频导出：{source.name}",
+            payload={
+                "source_relative": source.relative_to(workspace).as_posix(),
+                "files": entries,
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"audio-export:{source.name}",
+        )
+        return {"task_id": task["id"]}
     dest_dir = src.parent / "分集"
     dest_dir.mkdir(parents=True, exist_ok=True)
     written = []

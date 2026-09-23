@@ -18,6 +18,7 @@ import {
   updateChapter,
 } from '@/api/bgm'
 import { downloadFile } from '@/utils/fileops'
+import { waitForDurableTask } from '@/api/persistentTasks'
 import { getLibrary, musicPreviewUrl } from '@/api/music'
 import type {
   BgmChapterRow,
@@ -65,6 +66,13 @@ const settings = useSettingsStore()
 const taskStore = useTaskStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
+
+async function resolveDurable<T>(response: T | { task_id: string }): Promise<T> {
+  if (!('task_id' in (response as object))) return response as T
+  const task = await waitForDurableTask((response as { task_id: string }).task_id)
+  if (task.status !== 'succeeded') throw new Error(task.error_message || '任务执行失败')
+  return (task.result ?? {}) as T
+}
 
 // ---------------------------------------------------------------------------
 // 行数据（磁盘口径：02 章节 stem + 两个 08_bgm JSON 缓存 + 06/08 存在性）
@@ -420,8 +428,8 @@ async function doPackageDownload() {
   packaging.value = true
   error.value = ''
   try {
-    const result = await packageMixedAudio()
-    downloadFile('08_bgm', result.zip_path)
+    const result = await resolveDurable(await packageMixedAudio()) as any
+    downloadFile('08_bgm', result.path || result.zip_path || result.name)
     toast({
       title: '打包完成',
       variant: 'success',
@@ -446,7 +454,7 @@ async function doRematch(stem: string) {
   if (matching.value) return
   matching.value = true
   try {
-    const r = await matchChapters([stem], mode.value)
+    const r = await resolveDurable(await matchChapters([stem], mode.value)) as any
     matchNote.value = `匹配完成：${r.matched} 章命中 · ${r.no_bgm} 章无 BGM${r.skipped_locked ? ` · ${r.skipped_locked} 章锁定跳过` : ''}`
     toast({ title: '重匹配完成', variant: 'success', description: `${stem}（${r.matched} 命中 / ${r.no_bgm} 无 BGM）` })
     await refreshRows()
@@ -475,7 +483,7 @@ async function switchMode(m: string) {
   await nextTick()
   await waitForPaint()
   try {
-    const r = await matchChapters(null, m)
+    const r = await resolveDurable(await matchChapters(null, m)) as any
     mode.value = m
     pendingMode.value = null
     matchNote.value = `已切换为「${m === 'random' ? '全章节随机' : 'LLM 标签匹配'}」并重匹配：${r.matched} 章命中 · ${r.no_bgm} 章无 BGM${r.skipped_locked ? ` · ${r.skipped_locked} 章锁定跳过` : ''}`
