@@ -21,7 +21,7 @@ const dailyUsage = computed(() => {
     const date = new Date(today)
     date.setDate(today.getDate() - (6 - offset))
     const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
-    const amount = transactions.value.filter((row) => row.kind === 'settle' && (() => {
+    const amount = transactions.value.filter((row) => ['consume', 'settle'].includes(row.kind) && (() => {
       const created = new Date(row.created_at)
       return `${created.getFullYear()}-${created.getMonth()}-${created.getDate()}` === key
     })()).reduce((sum, row) => sum + row.amount, 0)
@@ -30,7 +30,7 @@ const dailyUsage = computed(() => {
   const max = Math.max(1, ...days.map((day) => day.amount))
   return days.map((day) => ({ ...day, height: day.amount ? Math.max(6, day.amount / max * 100) : 0 }))
 })
-const hasUsage = computed(() => transactions.value.some((row) => row.kind === 'settle'))
+const hasUsage = computed(() => transactions.value.some((row) => ['consume', 'settle'].includes(row.kind)))
 
 function formatBytes(value: number | null) {
   if (value === null) return '未采集'
@@ -41,7 +41,7 @@ function formatBytes(value: number | null) {
 }
 
 function transactionLabel(kind: string) {
-  return ({ reserve: '额度预留', settle: '任务消耗', release: '额度退回', admin_adjust: '额度调整' } as Record<string, string>)[kind] || kind
+  return ({ consume: '字数消费', reserve: '额度预留', settle: '任务消费', release: '额度退回', admin_adjust: '额度调整' } as Record<string, string>)[kind] || kind
 }
 
 function formatDate(value: string) {
@@ -88,13 +88,13 @@ onMounted(load)
 
     <section class="usage-grid">
       <Card class="usage-card usage-card--plan"><div><span>当前套餐</span><StatusPill label="未配置套餐" tone="neutral" /></div><strong>—</strong><small>套餐信息尚未由平台提供。</small></Card>
-      <Card class="usage-card"><span>可用额度</span><strong>{{ loading ? '…' : balance?.available_units ?? '—' }}</strong><small>当前可用于新任务</small></Card>
-      <Card class="usage-card"><span>预留额度</span><strong>{{ loading ? '…' : balance?.reserved_units ?? '—' }}</strong><small>正在运行或排队的任务</small></Card>
-      <Card class="usage-card"><span>累计消耗</span><strong>{{ loading ? '…' : balance?.consumed_units ?? '—' }}</strong><small>已完成任务记账</small></Card>
+      <Card class="usage-card"><span>可用额度</span><strong>{{ loading ? '…' : balance?.available_units ?? '…' }} 字</strong><small>按 LLM 输出与 TTS 输入字数扣减</small></Card>
+      <Card class="usage-card"><span>预留额度</span><strong>{{ loading ? '…' : balance?.reserved_units ?? '…' }} 字</strong><small>正在运行或排队的任务</small></Card>
+      <Card class="usage-card"><span>累计消耗</span><strong>{{ loading ? '…' : balance?.consumed_units ?? '…' }} 字</strong><small>已记录的 LLM 输出字数与 TTS 输入字数</small></Card>
       <Card class="usage-card"><span>项目存储</span><strong>{{ loading ? '…' : formatBytes(storageBytes) }}</strong><small>只统计本人项目</small></Card>
     </section>
 
-    <Card class="usage-note"><strong>用量口径</strong><p>目前展示真实额度账本和项目存储。LLM Token、TTS 字符、并发上限与套餐尚未接入用户级计量，因此不估算或填入模拟值。</p></Card>
+    <Card class="usage-note"><strong>用量口径</strong><p>LLM 按最终有效输出字数扣减；TTS 按实际输入字数预留，并对成功合成的部分扣减、退回未执行部分。Prompt、Token、请求次数和音频时长不计费。</p></Card>
 
     <section class="usage-section usage-charts">
       <div class="section-heading"><div><h2>近 7 天额度消耗</h2><span class="muted">来源：已完成任务账本</span></div></div>
@@ -111,7 +111,7 @@ onMounted(load)
       <div class="section-heading"><div><h2>额度明细</h2><span class="muted">最近 {{ transactions.length }} 条记录</span></div></div>
       <Card v-if="loading" class="usage-empty">正在读取…</Card>
       <Card v-else-if="transactions.length" class="usage-table-card"><div class="usage-table"><table><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>额度</th><th>可用余额</th></tr></thead>
-        <tbody><tr v-for="row in transactions" :key="row.id"><td>{{ formatDate(row.created_at) }}</td><td>{{ transactionLabel(row.kind) }}</td><td>{{ row.note || row.task_id || '—' }}</td><td>{{ row.kind === 'settle' ? `-${row.amount}` : `+${row.amount}` }}</td><td>{{ row.available_after ?? '—' }}</td></tr></tbody></table></div></Card>
+        <tbody><tr v-for="row in transactions" :key="row.id"><td>{{ formatDate(row.created_at) }}</td><td>{{ row.resource_type ? `${row.operation_type || '模型调用'}（${row.resource_type}）` : transactionLabel(row.kind) }}</td><td>{{ row.note || row.task_id || '—' }}</td><td>{{ ['consume', 'settle'].includes(row.kind) ? `-${row.char_count ?? row.amount} 字` : `${row.amount > 0 ? '+' : ''}${row.amount} 字` }}</td><td>{{ row.available_after ?? '—' }} 字</td></tr></tbody></table></div></Card>
       <Card v-else class="usage-empty">暂无额度明细。开始处理任务后，记录会显示在这里。</Card>
     </section>
   </div>

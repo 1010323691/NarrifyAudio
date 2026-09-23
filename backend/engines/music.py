@@ -699,6 +699,7 @@ def suggest_track_tags(handle, name: str, llm_cfg, description: str | None = Non
                 max_tokens=2048,
                 extra_body={"enable_thinking": False},
                 format_hint='{"scene": [...], "mood": [...], "emotion": [...]}',
+                operation_type="music.suggest_tags",
             )
         except LLMJSONRetryExhausted as e:
             raise RuntimeError(

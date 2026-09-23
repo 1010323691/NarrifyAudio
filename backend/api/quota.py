@@ -17,6 +17,7 @@ def _account_json(account: UserQuotaAccount) -> dict:
         "reserved_units": account.reserved_units,
         "frozen_units": account.frozen_units,
         "consumed_units": account.consumed_units,
+        "unit": "字",
     }
 
 
@@ -24,7 +25,7 @@ def _account_json(account: UserQuotaAccount) -> dict:
 def get_quota(user: User = Depends(require_user), db: Session = Depends(get_db)) -> dict:
     account = db.get(UserQuotaAccount, user.id)
     if account is None:
-        return {"available_units": 0, "reserved_units": 0, "frozen_units": 0, "consumed_units": 0}
+        return {"available_units": 0, "reserved_units": 0, "frozen_units": 0, "consumed_units": 0, "unit": "字"}
     return _account_json(account)
 
 
@@ -51,6 +52,9 @@ def list_quota_transactions(user: User = Depends(require_user), db: Session = De
             "reserved_after": row.reserved_after,
             "consumed_before": row.consumed_before,
             "consumed_after": row.consumed_after,
+            "resource_type": row.resource_type,
+            "operation_type": row.operation_type,
+            "char_count": row.char_count,
             "created_at": row.created_at.isoformat(),
         }
         for row in rows

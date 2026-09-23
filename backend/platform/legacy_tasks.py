@@ -24,29 +24,7 @@ ACTIVE_TASK_STATUSES = {"pending", "queued", "running", "paused", "cancelling", 
 
 
 def estimate_legacy_units(task_type: str, payload: dict[str, Any]) -> int:
-    """Estimate billable work for legacy endpoints before dispatch.
-
-    Units deliberately describe work items rather than wall-clock seconds:
-    one chapter, script, package, or track is one unit.  Pure file packaging
-    and reset operations remain free.  The estimate is persisted in the task's
-    quota reservation and later settled or released transactionally.
-    """
-    if task_type in {"bgm.analysis", "bgm.segment", "bgm.mix", "voices.foundation", "voices.clone", "tts.stress", "music.suggest_tags", "audio.silences", "audio.cut"}:
-        for key in ("speakers", "rows", "names", "chapters", "scripts", "segments"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return max(1, len(value))
-        return 1
-    if task_type == "bgm.match":
-        chapters = payload.get("chapters")
-        return max(1, len(chapters)) if isinstance(chapters, list) else 1
-    if task_type == "tts.batch":
-        scripts = payload.get("scripts")
-        return max(1, len(scripts)) if isinstance(scripts, list) else 1
-    if task_type == "tts.merge":
-        return 1
-    # audio.zip/audio.export, bgm.package and tts.reset only arrange or
-    # remove already-produced files and do not consume generation quota.
+    """Task size is not billable; actual model calls meter characters."""
     return 0
 
 

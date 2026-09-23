@@ -1270,6 +1270,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
         task.progress = 100
         task.finished_at = utcnow()
         task.updated_at = utcnow()
+        from .quota import release_attempt_holds
+        release_attempt_holds(task.id, attempt.id, db=db)
         settle_reservation(db, task, note=f"{claim.task_type} completed")
         append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
         db.commit()
@@ -1289,6 +1291,8 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
         task.error_code = error.code
         task.error_message = str(error)
         task.updated_at = utcnow()
+        from .quota import release_attempt_holds
+        release_attempt_holds(task.id, attempt.id, db=db)
         if error.code == "cancelled" or task.status == "cancelling":
             task.status = "cancelled"
             task.finished_at = utcnow()
@@ -1320,6 +1324,9 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
 
 
 def _process_claim(claim: TaskClaim) -> str:
+    from .quota import reset_quota_context, set_quota_context
+
+    quota_token = set_quota_context(claim.owner_id, claim.task_id, claim.attempt_id)
     stop = threading.Event()
 
     def renew() -> None:
@@ -1341,12 +1348,17 @@ def _process_claim(claim: TaskClaim) -> str:
     except TaskExecutionError as exc:
         fail_claim(claim, exc)
         return exc.code
-    except Exception as exc:  # unexpected errors are retryable up to the attempt cap
+    except Exception as exc:
+        from .quota import QuotaInsufficientError
+        if isinstance(exc, QuotaInsufficientError):
+            fail_claim(claim, TaskExecutionError("quota_insufficient", str(exc)))
+            return "quota_insufficient"
         fail_claim(claim, TaskExecutionError("worker_error", str(exc), retryable=True))
         return "worker_error"
     finally:
         stop.set()
         heartbeat.join(timeout=2)
+        reset_quota_context(quota_token)
 
 
 def process_task_message(message: dict[str, Any], *, worker_id: str) -> str:

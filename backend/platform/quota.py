@@ -1,0 +1,264 @@
+"""Central character-based quota accounting for model work."""
+from __future__ import annotations
+
+from contextvars import ContextVar
+from dataclasses import dataclass
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .database import SessionLocal
+from .models import QuotaHold, QuotaTransaction, UserQuotaAccount, new_id
+
+
+class QuotaInsufficientError(RuntimeError):
+    """Raised before resource execution when available character quota is insufficient."""
+
+
+@dataclass(frozen=True)
+class QuotaContext:
+    user_id: str
+    task_id: str
+    attempt_id: str
+
+
+_context: ContextVar[QuotaContext | None] = ContextVar("quota_context", default=None)
+_llm_sequence: ContextVar[int] = ContextVar("quota_llm_sequence", default=0)
+
+
+def set_quota_context(user_id: str, task_id: str, attempt_id: str):
+    return _context.set(QuotaContext(user_id, task_id, attempt_id))
+
+
+def reset_quota_context(token) -> None:
+    _context.reset(token)
+    _llm_sequence.set(0)
+
+
+def consume_llm_output(output: str, operation_type: str = "llm.operation") -> bool:
+    """Charge one accepted business response; malformed retry responses are excluded."""
+    context = _context.get()
+    if context is None:
+        return True
+    sequence = _llm_sequence.get() + 1
+    _llm_sequence.set(sequence)
+    require_quota("LLM", operation_type)
+    charged = consume_quota(
+        "LLM", operation_type, len(output or ""),
+        idempotency_key=f"{context.task_id}:llm:{sequence}",
+    )
+    if not charged:
+        raise QuotaInsufficientError(f"字数额度不足，无法结算{operation_type}（LLM）")
+    return True
+
+
+def reserve_tts_quota(char_count: int, operation_type: str) -> bool:
+    context = _context.get()
+    if context is None:
+        return True
+    count = max(0, int(char_count))
+    if count == 0:
+        return True
+    with SessionLocal() as db:
+        hold = db.scalar(select(QuotaHold).where(
+            QuotaHold.attempt_id == context.attempt_id,
+            QuotaHold.operation_type == operation_type,
+        ).with_for_update())
+        if hold is not None:
+            return hold.status == "held"
+        account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == context.user_id).with_for_update())
+        hold = db.scalar(select(QuotaHold).where(
+            QuotaHold.attempt_id == context.attempt_id,
+            QuotaHold.operation_type == operation_type,
+        ).with_for_update())
+        if hold is not None:
+            db.rollback()
+            return hold.status == "held"
+        if account is None or account.available_units < count:
+            db.rollback()
+            return False
+        before = account.available_units
+        account.available_units -= count
+        account.reserved_units += count
+        hold = QuotaHold(
+            user_id=context.user_id, task_id=context.task_id, attempt_id=context.attempt_id,
+            operation_type=operation_type, units=count,
+        )
+        db.add(hold)
+        db.flush()
+        db.add(QuotaTransaction(
+            user_id=context.user_id, task_id=context.task_id, amount=-count, kind="reserve",
+            idempotency_key=f"hold:{context.attempt_id}:{operation_type}",
+            note=f"{operation_type} TTS 输入字数预留", resource_type="TTS",
+            operation_type=operation_type, char_count=count,
+            available_before=before, available_after=account.available_units,
+            reserved_before=account.reserved_units - count, reserved_after=account.reserved_units,
+            consumed_before=account.consumed_units, consumed_after=account.consumed_units,
+        ))
+        db.commit()
+    return True
+
+
+def consume_tts_input(char_count: int, operation_type: str, idempotency_key: str) -> bool:
+    context = _context.get()
+    if context is None:
+        return True
+    count = max(0, int(char_count))
+    if count == 0:
+        return True
+    key = f"{context.task_id}:tts:{idempotency_key}"
+    with SessionLocal() as db:
+        prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))
+        if prior is not None:
+            return True
+        hold = db.scalar(select(QuotaHold).where(
+            QuotaHold.attempt_id == context.attempt_id,
+            QuotaHold.operation_type == operation_type,
+        ).with_for_update())
+        account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == context.user_id).with_for_update())
+        prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))
+        if prior is not None:
+            db.rollback()
+            return True
+        if hold is None or hold.status != "held" or hold.units < count or account is None or account.reserved_units < count:
+            db.rollback()
+            raise RuntimeError(f"TTS 字数预留不足：{operation_type} 需要 {count} 字")
+        before_consumed = account.consumed_units
+        hold.units -= count
+        account.reserved_units -= count
+        account.consumed_units += count
+        db.add(QuotaTransaction(
+            user_id=context.user_id, task_id=context.task_id, amount=count, kind="consume",
+            idempotency_key=key, note=f"{operation_type}（TTS 输入字数）",
+            resource_type="TTS", operation_type=operation_type, char_count=count,
+            available_before=account.available_units, available_after=account.available_units,
+            reserved_before=account.reserved_units + count, reserved_after=account.reserved_units,
+            consumed_before=before_consumed, consumed_after=account.consumed_units,
+        ))
+        if hold.units == 0:
+            hold.status = "consumed"
+        db.commit()
+    return True
+
+
+def release_tts_quota(operation_type: str) -> None:
+    context = _context.get()
+    if context is None:
+        return
+    _release_holds(context.task_id, context.attempt_id, operation_type)
+
+
+def release_attempt_holds(task_id: str, attempt_id: str, *, db: Session) -> None:
+    _release_holds(task_id, attempt_id, None, db=db)
+
+
+def _release_holds(task_id: str, attempt_id: str, operation_type: str | None, *, db: Session | None = None) -> None:
+    own_session = db is None
+    db = db or SessionLocal()
+    try:
+        statement = select(QuotaHold).where(
+            QuotaHold.task_id == task_id, QuotaHold.attempt_id == attempt_id, QuotaHold.status == "held",
+        )
+        if operation_type:
+            statement = statement.where(QuotaHold.operation_type == operation_type)
+        for hold in db.scalars(statement.with_for_update()).all():
+            account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == hold.user_id).with_for_update())
+            if account is None:
+                continue
+            amount = hold.units
+            if not amount:
+                hold.status = "released"
+                continue
+            before_available, before_reserved = account.available_units, account.reserved_units
+            account.available_units += amount
+            account.reserved_units -= amount
+            hold.units = 0
+            hold.status = "released"
+            db.add(QuotaTransaction(
+                user_id=hold.user_id, task_id=task_id, amount=amount, kind="release",
+                idempotency_key=f"release:{hold.id}", note=f"{hold.operation_type} 未执行字数退回",
+                resource_type="TTS", operation_type=hold.operation_type, char_count=amount,
+                available_before=before_available, available_after=account.available_units,
+                reserved_before=before_reserved, reserved_after=account.reserved_units,
+                consumed_before=account.consumed_units, consumed_after=account.consumed_units,
+            ))
+        if own_session:
+            db.commit()
+    except Exception:
+        if own_session:
+            db.rollback()
+        raise
+    finally:
+        if own_session:
+            db.close()
+
+
+def check_quota_available(user_id: str, *, db: Session | None = None) -> bool:
+    if db is not None:
+        account = db.get(UserQuotaAccount, user_id)
+        return bool(account and account.available_units > 0)
+    with SessionLocal() as session:
+        account = session.get(UserQuotaAccount, user_id)
+        return bool(account and account.available_units > 0)
+
+
+def consume_quota(
+    resource_type: str,
+    operation_type: str,
+    char_count: int,
+    *,
+    idempotency_key: str | None = None,
+    task_id: str | None = None,
+    user_id: str | None = None,
+) -> bool:
+    """Atomically charge actual LLM output or successful TTS input characters."""
+    count = max(0, int(char_count))
+    if count == 0:
+        return True
+    context = _context.get()
+    user_id = user_id or (context.user_id if context else None)
+    task_id = task_id or (context.task_id if context else None)
+    if not user_id or resource_type not in {"LLM", "TTS"}:
+        return False  # non-user maintenance/benchmark invocation
+    key = idempotency_key or f"{task_id or 'direct'}:{resource_type}:{new_id()}"
+    with SessionLocal() as db:
+        prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))
+        if prior is not None:
+            return True
+        account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user_id).with_for_update())
+        prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))
+        if prior is not None:
+            db.rollback()
+            return True
+        if account is None or account.available_units < count:
+            db.rollback()
+            return False
+        before_available = account.available_units
+        before_consumed = account.consumed_units
+        account.available_units -= count
+        account.consumed_units += count
+        db.add(QuotaTransaction(
+            user_id=user_id, task_id=task_id, amount=count, kind="consume",
+            idempotency_key=key, note=f"{operation_type}（{resource_type} 字数）",
+            resource_type=resource_type, operation_type=operation_type, char_count=count,
+            available_before=before_available, available_after=account.available_units,
+            reserved_before=account.reserved_units, reserved_after=account.reserved_units,
+            consumed_before=before_consumed, consumed_after=account.consumed_units,
+        ))
+        db.commit()
+    return True
+
+
+def require_quota(resource_type: str, operation_type: str) -> None:
+    """Fail before a model request when the account has no spendable characters."""
+    context = _context.get()
+    if context and resource_type == "TTS":
+        with SessionLocal() as session:
+            holds = session.scalars(select(QuotaHold).where(
+                QuotaHold.attempt_id == context.attempt_id,
+                QuotaHold.status == "held",
+            )).all()
+        if any(hold.operation_type == operation_type or hold.operation_type.startswith(operation_type + ".") for hold in holds):
+            return
+    if context and not check_quota_available(context.user_id):
+        raise QuotaInsufficientError(f"字数额度不足，无法执行{operation_type}（{resource_type}）")

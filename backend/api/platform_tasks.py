@@ -95,15 +95,8 @@ def stream_task_events(
 
 @router.post("", status_code=201)
 def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    # The client may over-estimate its own work, but it must not under-report
-    # quota for a known task type.  Keep the estimator import local because
-    # legacy_tasks delegates back to this endpoint.
-    from ..platform.legacy_tasks import estimate_legacy_units
-
-    estimated_units = max(
-        payload.estimated_units,
-        estimate_legacy_units(payload.task_type, payload.payload),
-    )
+    # Task counts are not billable. Engines meter successful model output/input chars.
+    estimated_units = 0
     project = db.scalar(select(Project).where(Project.id == payload.project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)))
     if project is None:
         raise HTTPException(404, "项目不存在")
@@ -118,6 +111,8 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
         account = UserQuotaAccount(user_id=user.id, available_units=0)
         db.add(account)
         db.flush()
+    if payload.task_type in {"script.parse", "voices.foundation", "voices.clone", "tts.batch", "tts.stress", "bgm.analysis", "bgm.segment", "music.suggest_tags"} and account.available_units <= 0:
+        raise HTTPException(409, "额度不足")
     if account.available_units < estimated_units:
         raise HTTPException(409, "额度不足")
     # The account row lock serializes submissions for one user. Re-check the
@@ -132,31 +127,6 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
     task = Task(owner_id=user.id, project_id=project.id, task_type=payload.task_type, payload={**payload.payload, "_request_hash": request_hash}, idempotency_key=payload.idempotency_key)
     db.add(task)
     db.flush()
-    if estimated_units:
-        before_available = account.available_units
-        before_reserved = account.reserved_units
-        before_consumed = account.consumed_units
-        account.available_units -= estimated_units
-        account.reserved_units += estimated_units
-        reservation = QuotaReservation(user_id=user.id, task_id=task.id, units=estimated_units)
-        db.add(reservation)
-        db.flush()
-        db.add(
-            QuotaTransaction(
-                user_id=user.id,
-                task_id=task.id,
-                reservation_id=reservation.id,
-                amount=-estimated_units,
-                kind="reserve",
-                idempotency_key=f"reserve:{task.id}",
-                available_before=before_available,
-                available_after=account.available_units,
-                reserved_before=before_reserved,
-                reserved_after=account.reserved_units,
-                consumed_before=before_consumed,
-                consumed_after=account.consumed_units,
-            )
-        )
     append_task_event(db, task.id, "submitted", {"status": "pending", "estimated_units": estimated_units})
     db.add(OutboxEvent(aggregate_type="task", aggregate_id=task.id, event_type="task.submitted", payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id}))
     db.commit()
@@ -193,6 +163,13 @@ def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = D
     reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
     if reservation is not None and reservation.units:
         raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
+    metered = db.scalar(select(QuotaTransaction.id).where(
+        QuotaTransaction.task_id == task.id,
+        QuotaTransaction.resource_type.in_(["LLM", "TTS"]),
+        QuotaTransaction.kind == "consume",
+    ).limit(1))
+    if metered:
+        raise HTTPException(409, "已有模型消费的任务请重新提交，以创建新的计费操作")
     attempts = db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0
     if attempts >= settings.task_max_attempts:
         raise HTTPException(409, "任务已达到最大尝试次数")

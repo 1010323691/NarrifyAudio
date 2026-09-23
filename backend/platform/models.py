@@ -202,6 +202,19 @@ class QuotaReservation(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class QuotaHold(Base):
+    __tablename__ = "quota_holds"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True, nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    operation_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    units: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="held", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class QuotaTransaction(Base):
     __tablename__ = "quota_transactions"
 
@@ -220,6 +233,9 @@ class QuotaTransaction(Base):
     reserved_after: Mapped[int | None] = mapped_column(Integer)
     consumed_before: Mapped[int | None] = mapped_column(Integer)
     consumed_after: Mapped[int | None] = mapped_column(Integer)
+    resource_type: Mapped[str | None] = mapped_column(String(10))
+    operation_type: Mapped[str | None] = mapped_column(String(80))
+    char_count: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 

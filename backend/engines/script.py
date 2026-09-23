@@ -461,6 +461,8 @@ def _llm_chat_completion(base_url, api_key, model, messages,
     the extra keys — strict gateways (e.g. the real OpenAI API) reject unknown
     parameters, and the plain request still works there.
     """
+    from ..platform.quota import require_quota
+    require_quota("LLM", "llm.operation")
     url = base_url.rstrip("/") + "/chat/completions"
     body = {
         "model": model,
@@ -597,7 +599,8 @@ def llm_json_with_retry(llm_cfg, system: str, user: str, parse, *,
                         max_tokens: int = 512, temperature: float = 0.2,
                         top_p: float = 0.9, presence_penalty: float = 0.0,
                         format_hint: str = "",
-                        extra_body: dict | None = None) -> tuple[object, int]:
+                        extra_body: dict | None = None,
+                        operation_type: str = "llm.operation") -> tuple[object, int]:
     """LLM call + strict parse with error-feedback retries.
 
     Each attempt: ``handle.check()`` (``TaskCancelled`` propagates and is never
@@ -652,6 +655,8 @@ def llm_json_with_retry(llm_cfg, system: str, user: str, parse, *,
         parsed = parse(content)
         rejected = parsed if isinstance(parsed, ParseRejected) else None
         if rejected is None and parsed is not None:
+            from ..platform.quota import consume_llm_output
+            consume_llm_output(content, operation_type)
             return parsed, attempt
         last_raw = content
         # 诊断失败根因并打进终端日志：截断（服务端明确报 finish_reason=length）
@@ -701,6 +706,8 @@ def _llm_chat_completion_stream(base_url, api_key, model, messages,
     call. Raises on HTTP / network / parse failure — the caller's retry loop handles it.
     ``handle`` may be ``None`` (no UI forwarding / no mid-stream cancel) for tests.
     """
+    from ..platform.quota import require_quota
+    require_quota("LLM", "llm.operation")
     url = base_url.rstrip("/") + "/chat/completions"
     body = {
         "model": model,
@@ -1112,6 +1119,8 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
         # Try to parse, with repair attempts.
         entries = repair_json_array(json_text, log=lambda m: handle.log(m, "WARNING"))
         if entries:
+            from ..platform.quota import consume_llm_output
+            consume_llm_output(text, "script.parse")
             return entries, text
 
         handle.log(f"chunk {chunk_num} 响应无法解析为 JSON", "WARNING")
@@ -1120,6 +1129,8 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
         # Last resort: extract individual valid entries with regex.
         salvaged = salvage_json_entries(json_text)
         if salvaged:
+            from ..platform.quota import consume_llm_output
+            consume_llm_output(text, "script.parse")
             handle.log(f"正则抢救出 {len(salvaged)} 条 entries（来自畸形响应）")
             return salvaged, text
         return None, text
@@ -1823,6 +1834,8 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
                 "WARNING",
             )
             return
+        from ..platform.quota import consume_llm_output
+        consume_llm_output(reply, stage)
         votes.append(sig)
         parts_by_sig.setdefault(sig, parts)
 

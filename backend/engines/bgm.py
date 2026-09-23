@@ -1300,6 +1300,7 @@ def analyze_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
                 max_tokens=2048,
                 extra_body={"enable_thinking": False},
                 format_hint=_ANALYSIS_FORMAT_HINT,
+                operation_type="bgm.analysis",
             )
         except LLMJSONRetryExhausted as e:
             # 全败 → 任务失败、零落盘（旧的「3 败 → 空标签记录 + 成功」语义已移除）
@@ -1480,6 +1481,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
                     max_tokens=4096,
                     extra_body={"enable_thinking": False},
                     format_hint=_SEGMENT_FORMAT_HINT,
+                    operation_type="bgm.segment",
                 )
             except LLMJSONRetryExhausted as e:
                 raise RuntimeError(

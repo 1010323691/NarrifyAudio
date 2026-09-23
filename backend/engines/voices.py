@@ -313,6 +313,8 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
             desc = str(parsed.get("description", "") or "").strip()
             ref = str(parsed.get("ref_text", "") or "").strip()
             if desc:
+                from ..platform.quota import consume_llm_output
+                consume_llm_output(text, "voices.foundation")
                 gender = _normalize_gender(parsed.get("gender")) or _gender_from_description(desc)
                 return desc, ref, gender
         handle.log(f"  LLM 响应无法解析为 persona（第 {attempt + 1} 次）", "WARNING")
@@ -911,6 +913,10 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
             "results": results,
         }
 
+    from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+    if not reserve_tts_quota(sum(len(job.get("ref_text") or "") for job in to_render), "voices.clone"):
+        raise QuotaInsufficientError("TTS 输入字数超过可用额度")
+
     # One subprocess per attempt: a fresh ``design-batch`` run (the model loads once per
     # attempt) whose candidates settle through [design] lines; a watchdog restart adopts
     # whatever already landed on disk.
@@ -953,6 +959,8 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
             if len(parts) < 4:
                 handle.log(line, "WARNING")
                 return
+            from ..platform.quota import consume_tts_input
+            consume_tts_input(len(job.get("ref_text") or ""), "voices.clone", f"{sp}:{k}")
             seed = _seed_of(parts[2])
             r = {"sp": sp, "k": k, "ok": True, "type": "clone", "preview": parts[3],
                  "seed": seed, "description": job["description"], "ref_text": job["ref_text"],
@@ -1030,6 +1038,8 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
 
         in_flight.clear()  # a fresh child starts with an empty in-flight set
         try:
+            from ..platform.quota import require_quota
+            require_quota("TTS", "voices.clone")
             run_worker(cmd, handle, on_line, temp_files=(job_file,),
                        fail_prefix="角色克隆引擎", watchdog_code=124, log_file=run_log)
             break  # a clean exit (0)

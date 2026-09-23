@@ -1583,6 +1583,43 @@ def test_synthesize_multi_per_file_fatal_error_isolated(workspace, monkeypatch):
     assert all(Path(r["out_dir"]).name == "s" for r in rows)  # bad.json never joined the pool
 
 
+@pytest.mark.parametrize("affordable_chapters", [1, 2])
+def test_synthesize_multi_admits_chapters_until_character_quota_is_exhausted(
+    workspace, monkeypatch, affordable_chapters,
+):
+    """Synthesize affordable chapters in order and report the rest as insufficient."""
+    ws = workspace
+    _seed_second_file(ws)
+    (ws / "03_parsed_json" / "u.json").write_text(
+        json.dumps([{"speaker": "D", "text": "tres"}]), encoding="utf-8",
+    )
+    reservations = []
+
+    def reserve_chapter(char_count, operation_type):
+        reservations.append((char_count, operation_type))
+        return len(reservations) <= affordable_chapters
+
+    monkeypatch.setattr("backend.platform.quota.reserve_tts_quota", reserve_chapter)
+    calls = []
+    _stub_engine_pool(monkeypatch, calls)
+    handle = _Handle()
+    result = tts_batch.synthesize_multi(handle, ["s.json", "t.json", "u.json"], 4)
+
+    assert len(reservations) == affordable_chapters + 1  # later chapters skip reservation
+    pooled_chapters = [Path(row["out_dir"]).name for row in json.loads(
+        Path(calls[0][calls[0].index("--segments-file") + 1]).read_text("utf-8")
+    )]
+    assert pooled_chapters == [name for chapter in ["s", "t"][:affordable_chapters]
+                               for name in [chapter, chapter]]
+    assert result["files"][0]["completed"] == 2
+    if affordable_chapters == 2:
+        assert result["files"][1]["completed"] == 2
+    else:
+        assert "额度不足" in result["files"][1]["error"]
+    assert "额度不足" in result["files"][2]["error"]
+    assert sum("额度不足" in message for _level, message in handle.logs) == 3 - affordable_chapters
+
+
 def test_synthesize_multi_all_files_fail_raises(workspace):
     """Nothing got synthesized while files WERE attempted (prep fatals) → the task fails."""
     ws = workspace

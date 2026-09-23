@@ -238,6 +238,10 @@ def stress_test(handle, rows, start_chars, step_chars, max_rounds=None,
              "instruct": "", "pause_after": None}
             for r in range(rows)
         ]
+        from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+        stress_operation = f"tts.stress.round{k}"
+        if not reserve_tts_quota(sum(len(row["text"]) for row in segments), stress_operation):
+            raise QuotaInsufficientError("TTS 输入字数超过可用额度")
         seg_file = layout.temp / f"stress_segments_{uuid.uuid4().hex[:12]}.json"
         out_dir = layout.temp / f"stress_out_{time.strftime('%H%M%S')}_{L}"
         seg_file.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
@@ -259,6 +263,9 @@ def stress_test(handle, rows, start_chars, step_chars, max_rounds=None,
             if line.startswith("[segment]"):
                 parts = line[len("[segment]"):].split(None, 2)
                 if len(parts) >= 2 and parts[1] == "ok":
+                    index = int(parts[0])
+                    from ..platform.quota import consume_tts_input
+                    consume_tts_input(len(segments[index]["text"]), stress_operation, f"{k}:{index}")
                     ok[0] += 1
                     _sub.log(f"第 {ok[0] + fail[0]}/{rows} 行：完成")
                 else:
@@ -281,6 +288,8 @@ def stress_test(handle, rows, start_chars, step_chars, max_rounds=None,
         synth_secs: float | None = None
         reason = ""
         try:
+            from ..platform.quota import require_quota
+            require_quota("TTS", "tts.stress")
             run_worker(cmd, sub, on_line, temp_files=(seg_file,),
                        fail_prefix="压测引擎", watchdog_code=124, log_file=run_log)
             if ready_at[0] is not None:
@@ -312,6 +321,8 @@ def stress_test(handle, rows, start_chars, step_chars, max_rounds=None,
             sub.log(f"{label}：引擎失败 → 压测停止", "WARNING")
         finally:
             # Our own temp artifacts (段表已由 run_worker 清理) — never pipeline output.
+            from ..platform.quota import release_tts_quota
+            release_tts_quota(stress_operation)
             shutil.rmtree(out_dir, ignore_errors=True)
 
         throughput = (round(L * rows / synth_secs, 1) if (passed and synth_secs) else None)

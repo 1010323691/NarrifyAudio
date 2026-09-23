@@ -609,6 +609,7 @@ class _PooledFile:
     all_count: int = 0
     error: str | None = None
     dirty: bool = False
+    quota_operation: str = "tts.batch"
 
 
 def _build_pool_rows(files, pool_start: int = 0) -> tuple:
@@ -1211,6 +1212,10 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             "all_count": len(all_segments),
         }
 
+    from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+    if not reserve_tts_quota(sum(len(segment["text"]) for segment in segments), "tts.batch"):
+        raise QuotaInsufficientError("TTS 输入字数超过可用额度")
+
     if not voice_config:
         handle.log("警告：未找到 voice_config.json——请先在「角色配音」页生成角色声音，否则所有段都会失败。", "WARNING")
 
@@ -1297,7 +1302,12 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     def on_line(line: str) -> None:
         nonlocal workers  # a confirmed restore re-syncs the per-batch cap
         if line.startswith("[segment]"):
-            segment_log.add(_handle_segment(line, by_index, run_total, seg_results, handle))
+            outcome = _handle_segment(line, by_index, run_total, seg_results, handle)
+            if outcome and outcome.get("ok"):
+                from ..platform.quota import consume_tts_input
+                segment_index = outcome["index"]
+                consume_tts_input(len(by_index[segment_index]["text"]), "tts.batch", str(segment_index))
+            segment_log.add(outcome)
             _write_manifest()
             _report_stats()
         elif line.startswith("[perf] "):
@@ -1364,6 +1374,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             )
             in_flight.clear()  # a fresh child starts with an empty in-flight set
             try:
+                from ..platform.quota import require_quota
+                require_quota("TTS", "tts.batch")
                 run_worker(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
                            log_line=_format_batch_log_line)
@@ -1608,6 +1620,22 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     if not voice_config:
         handle.log("警告：未找到 voice_config.json——请先在「角色配音」页生成角色声音，否则所有段都会失败。", "WARNING")
 
+    # Admit chapters in request order. Each chapter reserves its pending input before
+    # entering the pool. After the first quota failure, report all following chapters too.
+    from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+    quota_exhausted = False
+    for chapter_index, f in enumerate(files, 1):
+        if f.error or not f.pending:
+            continue
+        f.quota_operation = f"tts.batch.chapter.{chapter_index}.{hashlib.sha1(f.name.encode('utf-8')).hexdigest()[:8]}"
+        required_chars = sum(len(f.by_index[index]["text"]) for index in f.pending)
+        if quota_exhausted or not reserve_tts_quota(required_chars, f.quota_operation):
+            quota_exhausted = True
+            f.error = f"额度不足：本章需要 {required_chars} 字，当前可用额度不足"
+            handle.log(f"{f.name}：{f.error}，跳过本章及后续章节", "ERROR")
+        else:
+            handle.log(f"{f.name}：已预留本章 TTS 输入 {required_chars} 字")
+
     # -- build the unified pool ----------------------------------------------------------
     pool_rows, pool_owners = _build_pool_rows(files)
     pool_total = len(pool_rows)
@@ -1664,7 +1692,15 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     def on_line(line: str) -> None:
         nonlocal workers  # a confirmed restore re-syncs the per-batch cap
         if line.startswith("[segment]"):
-            segment_log.add(_handle_segment_pool(line, pool_map, pool_total, handle))
+            outcome = _handle_segment_pool(line, pool_map, pool_total, handle)
+            if outcome and outcome.get("ok"):
+                from ..platform.quota import consume_tts_input
+                file, local_index = pool_map[outcome["index"]]
+                consume_tts_input(
+                    len(file.by_index[local_index]["text"]), file.quota_operation,
+                    f"{file.name}:{local_index}",
+                )
+            segment_log.add(outcome)
             flush_manifests()
             _report_stats()  # resolved at call time (defined before the loop below)
         elif line.startswith("[perf] "):
@@ -1701,8 +1737,11 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     # No pool (everything done / empty, or every file a prep fatal): settle without the
     # engine — all-fatals raise inside _settle_pool (nothing was synthesized).
     if pool_total == 0:
+        if quota_exhausted:
+            raise QuotaInsufficientError("TTS 输入字数额度不足，未合成任何章节")
         handle.log(f"无待合成段（{n} 个文件），不启动引擎")
         return _settle_pool(handle, files)
+
 
     # Resolve the external TTS environment only after validation has produced
     # actual work.  Corrupt or empty inputs should report their per-file errors
@@ -1786,6 +1825,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             )
             in_flight.clear()  # a fresh child starts with an empty in-flight set
             try:
+                from ..platform.quota import require_quota
+                require_quota("TTS", "tts.batch")
                 run_worker(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
                            log_line=_format_batch_log_line)

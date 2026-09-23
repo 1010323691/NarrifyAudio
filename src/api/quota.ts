@@ -5,6 +5,7 @@ export interface QuotaBalance {
   reserved_units: number
   frozen_units: number
   consumed_units: number
+  unit?: string
 }
 
 export interface QuotaTransaction {
@@ -20,6 +21,9 @@ export interface QuotaTransaction {
   consumed_before?: number | null
   consumed_after?: number | null
   created_at: string
+  resource_type?: 'LLM' | 'TTS' | null
+  operation_type?: string | null
+  char_count?: number | null
 }
 
 export function getQuota(): Promise<QuotaBalance> {
