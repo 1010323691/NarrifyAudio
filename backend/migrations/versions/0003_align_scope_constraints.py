@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "0003_align_scope_constraints"
-down_revision = "0002_usernames_and_workspace_paths"
+down_revision = "0002_usernames_paths"
 branch_labels = None
 depends_on = None
 

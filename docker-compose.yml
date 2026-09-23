@@ -72,6 +72,7 @@ services:
       NARRIFY_DATABASE_URL: postgresql+psycopg://narrify:${POSTGRES_PASSWORD}@postgres:5432/narrify
       NARRIFY_REDIS_URL: redis://redis:6379/0
       NARRIFY_AUTO_CREATE_SCHEMA: "false"
+      NARRIFY_STORAGE_ROOT: /var/lib/narrify/storage
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -79,6 +80,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - narrify-storage:/var/lib/narrify/storage
     command: ["python", "-m", "backend.worker"]
 
 volumes:

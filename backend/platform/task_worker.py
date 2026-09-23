@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import redis
 from sqlalchemy import func, select
@@ -1372,7 +1373,9 @@ def recover_database_tasks(limit: int = 100) -> int:
             if pending_event is not None:
                 continue
             attempt_number = (attempt.attempt_no + 1) if attempt is not None else 0
-            event_id = f"recover:{task.id}:{attempt_number}"
+            # Outbox ids are UUID-sized (VARCHAR(36)); use a deterministic UUID
+            # so recovery remains idempotent without overflowing the column.
+            event_id = str(uuid5(NAMESPACE_URL, f"recover:{task.id}:{attempt_number}"))
             if db.get(OutboxEvent, event_id) is None:
                 db.add(
                     OutboxEvent(

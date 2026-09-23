@@ -1,6 +1,6 @@
 """add stable usernames and user-owned workspace metadata
 
-Revision ID: 0002_usernames_and_workspace_paths
+Revision ID: 0002_usernames_paths
 Revises: 0001_platform_foundation
 """
 from __future__ import annotations
@@ -8,7 +8,7 @@ from __future__ import annotations
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0002_usernames_and_workspace_paths"
+revision = "0002_usernames_paths"
 down_revision = "0001_platform_foundation"
 branch_labels = None
 depends_on = None
