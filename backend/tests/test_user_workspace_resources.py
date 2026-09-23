@@ -10,9 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.platform.config import settings
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import Task, Workspace
+from backend.platform.storage import configured_storage_root
 
 
 @pytest.fixture(scope="module")
@@ -26,14 +26,15 @@ def _create_workspace(client: TestClient) -> tuple[str, str, Path]:
     email = f"{uuid.uuid4()}@example.test"
     response = client.post(
         "/api/auth/register",
-        json={"email": email, "password": "a-strong-test-password"},
+        json={"email": email, "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
     )
     assert response.status_code == 201, response.text
     user = response.json()["user"]
     workspaces = client.get("/api/v1/workspaces")
     assert workspaces.status_code == 200, workspaces.text
     workspace_id = workspaces.json()[0]["id"]
-    path = settings.storage_root / user["username"] / workspace_id
+    with SessionLocal() as db:
+        path = configured_storage_root(db) / user["username"] / workspace_id
     return response.json()["csrf_token"], workspace_id, path
 
 
@@ -58,7 +59,7 @@ def test_user_workspace_summary_only_returns_owned_project_storage(client: TestC
 
     other = client.post(
         "/api/auth/register",
-        json={"email": f"{uuid.uuid4()}@example.test", "password": "a-strong-test-password"},
+        json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
     )
     assert other.status_code == 201, other.text
     denied = client.get(f"/api/v1/workspaces/{workspace_id}/summary")

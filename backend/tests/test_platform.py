@@ -27,7 +27,7 @@ def client():
 
 
 def _register(client: TestClient, email: str) -> dict:
-    response = client.post("/api/auth/register", json={"email": email, "password": "a-strong-test-password", "display_name": "Test User"})
+    response = client.post("/api/auth/register", json={"email": email, "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234", "display_name": "Test User"})
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -49,7 +49,11 @@ def test_idempotent_task_submission_and_quota_guard(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Queue book"}).json()
-    response = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 1, "idempotency_key": "request-123456"})
+    with SessionLocal.begin() as db:
+        account = db.get(UserQuotaAccount, first["user"]["id"])
+        assert account is not None
+        account.available_units = 0
+    response = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={"project_id": project["id"], "task_type": "script.parse", "payload": {}, "estimated_units": 1, "idempotency_key": "request-123456"})
     assert response.status_code == 409
 
     # A zero-cost task can be submitted and a duplicate request returns the
@@ -97,7 +101,7 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
         json={"enabled": False},
     )
     assert disabled_registration.status_code == 200, disabled_registration.text
-    assert client.post("/api/auth/register", json={"email": f"{uuid.uuid4()}@example.com", "password": "a-strong-test-password"}).status_code == 403
+    assert client.post("/api/auth/register", json={"email": f"{uuid.uuid4()}@example.com", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"}).status_code == 403
     enabled_registration = client.patch(
         "/api/v1/admin/settings/registration",
         headers={"X-CSRF-Token": csrf},
@@ -228,16 +232,6 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     )
     assert uploaded.status_code == 200, uploaded.text
     legacy_file = uploaded.json()
-    formatted = client.post(
-        "/api/text/format",
-        headers={"X-CSRF-Token": csrf},
-        json={"path": legacy_file["path"]},
-    )
-    assert formatted.status_code == 200, formatted.text
-    assert formatted.json()["file_id"]
-    assert process_task_message(
-        {"payload": {"task_id": formatted.json()["task_id"]}}, worker_id="test-format-worker"
-    ) == "succeeded"
     legacy_split = client.post(
         "/api/book/split",
         headers={"X-CSRF-Token": csrf},
@@ -249,13 +243,37 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     ) == "succeeded"
     project_files = client.get(f"/api/v1/projects/{legacy_file['project_id']}/files").json()
     assert any(item["module"] == "02_split_text" for item in project_files)
+
+    formatted_upload = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("format.txt", b"text to format", "text/plain")},
+    )
+    assert formatted_upload.status_code == 200, formatted_upload.text
+    formatted = client.post(
+        "/api/text/format",
+        headers={"X-CSRF-Token": csrf},
+        json={"path": formatted_upload.json()["path"]},
+    )
+    assert formatted.status_code == 200, formatted.text
+    assert formatted.json()["file_id"]
+    assert process_task_message(
+        {"payload": {"task_id": formatted.json()["task_id"]}}, worker_id="test-format-worker"
+    ) == "succeeded"
+
+    durable_upload = client.post(
+        f"/api/v1/projects/{legacy_file['project_id']}/files",
+        headers={"X-CSRF-Token": csrf},
+        files={"upload": ("durable.txt", b"durable source", "text/plain")},
+    )
+    assert durable_upload.status_code == 201, durable_upload.text
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
         json={
             "project_id": legacy_file["project_id"],
             "task_type": "book.split",
-            "payload": {"input_file_id": legacy_file["file_id"], "whole_book": True},
+            "payload": {"input_file_id": durable_upload.json()["id"], "whole_book": True},
             "estimated_units": 0,
             "idempotency_key": f"legacy-book-split-{uuid.uuid4()}",
         },
@@ -295,7 +313,7 @@ def test_legacy_audio_packaging_route_uses_durable_worker(client: TestClient):
     assert "/07_output/" in task["result"]["path"].replace("\\", "/")
 
 
-def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClient):
+def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     project = client.post(
@@ -338,12 +356,21 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     assert task["progress"] == 100
     assert task["result"]["file_id"]
     assert "/01_input/" in task["result"]["path"].replace("\\", "/")
-    legacy_analysis = client.post(
-        "/api/book/analyze",
+    analysis = client.post(
+        "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
-        json={"path": task["result"]["path"]},
+        json={
+            "project_id": project["id"],
+            "task_type": "book.analyze",
+            "payload": {"input_file_id": task["result"]["file_id"]},
+            "estimated_units": 0,
+            "idempotency_key": "worker-book-analysis-123",
+        },
     )
-    assert legacy_analysis.status_code == 200, legacy_analysis.text
+    assert analysis.status_code == 201, analysis.text
+    assert process_task_message(
+        {"payload": {"task_id": analysis.json()["id"]}}, worker_id="test-book-analysis-worker"
+    ) == "succeeded"
     downloaded = client.get(f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}")
     assert downloaded.status_code == 200
     assert "第一章" in downloaded.text
@@ -358,10 +385,9 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     assert events.status_code == 200
     assert "succeeded" in events.text
     quota = client.get("/api/v1/quota")
-    assert quota.json()["consumed_units"] == 2
+    assert quota.json()["consumed_units"] == 0
     ledger = client.get("/api/v1/quota/transactions")
-    assert {item["kind"] for item in ledger.json()} >= {"reserve", "settle"}
-    assert all(item["available_before"] is not None for item in ledger.json())
+    assert ledger.json() == []
 
     analyzed = client.post(
         "/api/v1/tasks",
@@ -411,9 +437,9 @@ def test_durable_worker_formats_uploaded_file_and_settles_quota(client: TestClie
     with SessionLocal() as db:
         account = db.get(UserQuotaAccount, first["user"]["id"])
         assert account is not None
-        assert account.available_units == 0
+        assert account.available_units == 2
         assert account.reserved_units == 0
-        assert account.consumed_units == 2
+        assert account.consumed_units == 0
         attempts = db.query(TaskAttempt).filter(TaskAttempt.task_id == task_id).all()
         assert len(attempts) == 1
         assert attempts[0].status == "succeeded"
@@ -435,6 +461,10 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
     assert uploaded.status_code == 201, uploaded.text
     input_file = uploaded.json()
     observed: dict[str, str] = {}
+    with SessionLocal.begin() as db:
+        account = db.get(UserQuotaAccount, first["user"]["id"])
+        assert account is not None
+        account.available_units = 3
 
     def fake_generate(handle, path, llm, prompts, generation, *, output_path, spot_history_path):
         observed["model"] = llm.model_name
@@ -602,36 +632,37 @@ def test_fair_scheduler_rotates_between_users(client: TestClient):
     first_project = client.post(
         "/api/v1/projects", headers={"X-CSRF-Token": first_csrf}, json={"name": "Fair first"}
     ).json()
-    second = _register(client, f"{uuid.uuid4()}@example.com")
-    second_csrf = second["csrf_token"]
-    second_project = client.post(
-        "/api/v1/projects", headers={"X-CSRF-Token": second_csrf}, json={"name": "Fair second"}
-    ).json()
+    with TestClient(app) as second_client:
+        second = _register(second_client, f"{uuid.uuid4()}@example.com")
+        second_csrf = second["csrf_token"]
+        second_project = second_client.post(
+            "/api/v1/projects", headers={"X-CSRF-Token": second_csrf}, json={"name": "Fair second"}
+        ).json()
 
-    def submit(csrf: str, project_id: str, key: str) -> str:
-        response = client.post(
-            "/api/v1/tasks",
-            headers={"X-CSRF-Token": csrf},
-            json={"project_id": project_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": key},
-        )
-        assert response.status_code == 201, response.text
-        return response.json()["id"]
+        def submit(test_client: TestClient, csrf: str, project_id: str, key: str) -> str:
+            response = test_client.post(
+                "/api/v1/tasks",
+                headers={"X-CSRF-Token": csrf},
+                json={"project_id": project_id, "task_type": "scheduler.test", "payload": {}, "estimated_units": 0, "idempotency_key": key},
+            )
+            assert response.status_code == 201, response.text
+            return response.json()["id"]
 
-    first_task = submit(first_csrf, first_project["id"], "fair-first-1")
-    submit(first_csrf, first_project["id"], "fair-first-2")
-    second_task = submit(second_csrf, second_project["id"], "fair-second-1")
+        first_task = submit(client, first_csrf, first_project["id"], "fair-first-1")
+        submit(client, first_csrf, first_project["id"], "fair-first-2")
+        second_task = submit(second_client, second_csrf, second_project["id"], "fair-second-1")
 
-    claim_one = claim_fair_task("fair-worker-1")
+    claim_one = claim_fair_task("fair-worker-1", task_types=("scheduler.test",))
     assert claim_one is not None
-    claim_two = claim_fair_task("fair-worker-2")
+    claim_two = claim_fair_task("fair-worker-2", task_types=("scheduler.test",))
     assert claim_two is not None
     assert claim_one.task_id == first_task
     assert claim_two.task_id == second_task
 
 
-def test_legacy_task_estimates_are_reserved_by_work_item():
-    assert estimate_legacy_units("tts.batch", {"scripts": ["a.json", "b.json"]}) == 2
-    assert estimate_legacy_units("bgm.match", {"chapters": ["a", "b", "c"]}) == 3
+def test_legacy_task_estimates_are_non_billable():
+    assert estimate_legacy_units("tts.batch", {"scripts": ["a.json", "b.json"]}) == 0
+    assert estimate_legacy_units("bgm.match", {"chapters": ["a", "b", "c"]}) == 0
     assert estimate_legacy_units("audio.zip", {"files": [{"name": "a.mp3"}]}) == 0
 
 
@@ -678,7 +709,12 @@ def test_expired_worker_lease_is_fenced_and_recovery_requeues(client: TestClient
     assert claim_two is not None
     assert claim_two.attempt_no == 2
     assert heartbeat_claim(claim_one) is False
-    assert recover_database_tasks() == 0
+    recover_database_tasks()
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        attempt = db.get(TaskAttempt, claim_two.attempt_id)
+        assert task is not None and task.status == "running"
+        assert attempt is not None and attempt.status == "running"
 
 
 def test_api_snapshot_p95_uses_request_durations():

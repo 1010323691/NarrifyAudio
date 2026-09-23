@@ -26,7 +26,7 @@ def client():
 def _create_admin(client: TestClient) -> tuple[str, str]:
     response = client.post(
         "/api/auth/register",
-        json={"email": f"{uuid.uuid4()}@example.test", "password": "a-strong-test-password"},
+        json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
     )
     assert response.status_code == 201, response.text
     body = response.json()
@@ -40,7 +40,7 @@ def _create_admin(client: TestClient) -> tuple[str, str]:
 def test_regular_user_cannot_access_admin_api(client: TestClient):
     registered = client.post(
         "/api/auth/register",
-        json={"email": f"{uuid.uuid4()}@example.test", "password": "a-strong-test-password"},
+        json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
     )
     assert registered.status_code == 201, registered.text
 

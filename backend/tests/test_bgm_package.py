@@ -5,8 +5,6 @@ import json
 import zipfile
 
 import pytest
-from fastapi import HTTPException
-
 from backend.api import bgm as api_bgm
 from backend.core import config as core_config
 from backend.core import paths as core_paths
@@ -58,7 +56,7 @@ def test_package_mixed_audio_uses_source_txt_folder(workspace):
         assert archive.read("My Book/第 002 章.mp3") == "第 002 章".encode()
 
 
-def test_package_mixed_audio_rejects_incomplete_chapters(workspace):
+def test_package_mixed_audio_includes_only_completed_chapters(workspace):
     (workspace / "01_input" / "Book.txt").write_text("原文", encoding="utf-8")
     for stem in ("第 001 章", "第 002 章"):
         (workspace / "02_split_text" / f"{stem}.txt").write_text(
@@ -66,5 +64,10 @@ def test_package_mixed_audio_rejects_incomplete_chapters(workspace):
         )
     (workspace / "08_bgm" / "第 001 章.mp3").write_bytes(b"done")
 
-    with pytest.raises(HTTPException, match="未完成混音"):
-        api_bgm.package_mixed_audio()
+    result = api_bgm.package_mixed_audio()
+
+    assert result["file_count"] == 1
+    assert result["base"] == "Book"
+    with zipfile.ZipFile(result["zip_path"]) as archive:
+        assert archive.namelist() == ["Book/第 001 章.mp3"]
+        assert archive.read("Book/第 001 章.mp3") == b"done"
