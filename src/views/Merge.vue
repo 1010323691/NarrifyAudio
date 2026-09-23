@@ -438,7 +438,7 @@ onActivated(() => {
             </div>
           </div>
           <p v-else class="text-sm text-muted-foreground">
-            05_audio_chunk/ 下暂无音频包——请先到「音频合成」生成。
+            暂无可合并的音频，请先到「音频合成」生成音频。
           </p>
 
           <div class="flex flex-wrap items-center gap-2">

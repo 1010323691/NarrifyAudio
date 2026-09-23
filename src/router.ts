@@ -15,6 +15,8 @@ const router = createRouter({
     { path: '/login', name: 'user-login', component: Login, meta: { title: '用户登录', portal: 'user' } },
     { path: '/admin/login', name: 'admin-login', component: Login, meta: { title: '管理员登录', portal: 'admin' } },
     { path: '/access-denied', name: 'access-denied', component: AccessDenied, meta: { title: '无权访问' } },
+    // Keep old links working after the admin console route was nested under /admin.
+    { path: '/music', redirect: '/admin/music' },
     {
       path: '/',
       component: MainLayout,

@@ -22,8 +22,6 @@ import CardHeader from '@/components/ui/CardHeader.vue'
 import CardTitle from '@/components/ui/CardTitle.vue'
 import CardContent from '@/components/ui/CardContent.vue'
 import CardFooter from '@/components/ui/CardFooter.vue'
-import Label from '@/components/ui/Label.vue'
-import Switch from '@/components/ui/Switch.vue'
 import Alert from '@/components/ui/Alert.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
 import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
@@ -54,19 +52,6 @@ const toggles = reactive<TextToggles>({
   punct_dash: false,
   live: true,
 })
-
-const TOGGLES: { key: keyof TextToggles; label: string }[] = [
-  { key: 'sentence_break', label: '断句换段' },
-  { key: 'dialogue_separate', label: '对话独立成段' },
-  { key: 'detect_chapters', label: '识别章节标题' },
-  { key: 'keep_single_space', label: '保留单个空格' },
-  { key: 'punct_ellipsis', label: '省略号统一' },
-  { key: 'punct_repeated', label: '合并重复标点' },
-  { key: 'punct_quotes', label: '引号成对' },
-  { key: 'punct_lone_ascii', label: '半角标点转全角' },
-  { key: 'punct_dash', label: '破折号统一' },
-  { key: 'live', label: '实时预览' },
-]
 
 const busyFormat = ref(false)
 const formatResult = ref<TextFormatResult | null>(null)
@@ -181,7 +166,6 @@ async function run(auto = false) {
       file_id: result.file_id,
       project_id: file.value.project_id,
     }
-    await settings.save({ text: { ...toggles } }).catch(() => {})
     if (!auto) toast({ title: '排版完成', variant: 'success', description: formatResult.value.output_path })
     await analyzeAfterFormat(auto)
   } catch (e: any) {
@@ -334,6 +318,12 @@ async function runSmart() {
   }
 }
 
+async function formatAndRecognize() {
+  await run()
+  if (!formatResult.value || !analysis.value || zeroChapters.value) return
+  await runSmart()
+}
+
 async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) {
   if (!formatResult.value?.file_id || !formatResult.value.project_id) {
     throw new Error('排版产物未建立项目归属，无法提交分册任务。')
@@ -440,41 +430,21 @@ function download(p: string) {
         <Button @click="choose" :disabled="busyFormat || busyAnalyze || busySplit || busySmart">选择 TXT 文件</Button>
         <template v-if="file">
           <span class="text-sm font-medium">{{ file.name }}</span>
-          <span class="text-xs text-muted-foreground truncate max-w-[260px]" :title="file.path">{{ file.path }}</span>
         </template>
         <span v-else class="text-sm text-muted-foreground">尚未选择文件</span>
       </CardContent>
     </Card>
 
-    <!-- 排版选项 -->
-    <Card>
-      <CardHeader>
-        <CardTitle>排版选项</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3">
-          <div v-for="t in TOGGLES" :key="t.key" class="flex items-center justify-between">
-            <Label class="font-normal">{{ t.label }}</Label>
-            <Switch :model-value="toggles[t.key]" @update:model-value="toggles[t.key] = $event" />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-
     <!-- 操作 -->
     <div class="flex flex-wrap items-center gap-x-5 gap-y-3">
-      <Button @click="run()" :disabled="busyFormat || busyAnalyze || !file || !workspaceSet">
-        <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': busyFormat || busyAnalyze }" />
-        {{ busyFormat ? '排版中…' : busyAnalyze ? '章节分析中…' : '开始排版' }}
-      </Button>
       <Button
-        @click="runSmart"
-        :disabled="!smartEnabled"
+        @click="formatAndRecognize"
+        :disabled="busyFormat || busyAnalyze || busySmart || busySplit || !file || !workspaceSet"
         :class="seqHasIssues && !smartResult ? 'ring-2 ring-amber-400/80' : ''"
-        :title="seqHasIssues ? '章节号存在问题（缺号/重号/乱序），点击按物理顺序修复' : '按物理顺序修复章节结构：重编号、拆分异常长章、删除重复章'"
+        :title="seqHasIssues ? '章节号存在问题（缺号/重号/乱序），点击按物理顺序修复' : ''"
       >
-        <Sparkles class="h-4 w-4" />
-        {{ busySmart ? '智能识别中…' : '智能识别' }}
+        <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': busyFormat || busyAnalyze || busySmart }" />
+        {{ busyFormat ? '排版中…' : busyAnalyze ? '章节分析中…' : busySmart ? '智能识别中…' : '排版识别' }}
       </Button>
       <Button @click="split" :disabled="!splitEnabled">
         <Scissors class="h-4 w-4" />
@@ -650,7 +620,7 @@ function download(p: string) {
           </TableHeader>
           <TableBody>
             <TableRow v-for="f in splitResult.files" :key="f.path">
-              <TableCell class="max-w-[420px] truncate" :title="f.path">{{ f.name }}</TableCell>
+              <TableCell class="max-w-[420px] truncate">{{ f.name }}</TableCell>
               <TableCell class="text-right">{{ formatNumber(f.chars) }}</TableCell>
               <TableCell class="text-right">
                 <div class="flex items-center justify-end gap-1">
@@ -752,7 +722,7 @@ function download(p: string) {
             </TableHeader>
             <TableBody>
               <TableRow v-for="f in smartResult.files" :key="f.path">
-                <TableCell class="max-w-[420px] truncate" :title="f.path">{{ f.name }}</TableCell>
+                <TableCell class="max-w-[420px] truncate">{{ f.name }}</TableCell>
                 <TableCell class="text-right">{{ formatNumber(f.chars) }}</TableCell>
                 <TableCell class="text-right">
                   <div class="flex items-center justify-end gap-1">

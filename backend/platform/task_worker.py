@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import redis
 from sqlalchemy import func, select
@@ -1217,29 +1217,59 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
             db.rollback()
             _cleanup_outcome(outcome)
             return False
+        legacy_module_paths: list[tuple[str, Path]] = []
+        module_outputs = {item.publish_module for item in outputs if item.publish_module}
+        for module in module_outputs:
+            module_prefix = f"{safe_display_name(user.username)}/{task.project_id}/{module}/"
+            for existing in db.scalars(
+                select(ProjectFile).where(
+                    ProjectFile.owner_id == task.owner_id,
+                    ProjectFile.project_id == task.project_id,
+                    ProjectFile.object_key.like(module_prefix + "%"),
+                )
+            ).all():
+                relative_parts = existing.object_key.removeprefix(module_prefix).split("/")
+                if len(relative_parts) == 2:
+                    try:
+                        UUID(relative_parts[0])
+                    except ValueError:
+                        continue
+                    existing.deleted_at = utcnow()
+                    legacy_module_paths.append((module, object_path(existing.object_key, configured_storage_root(db))))
         published: list[dict[str, Any]] = []
         for item in outputs:
-            output_id = new_id()
+            file_record = None
             if item.publish_module:
-                object_key = f"{safe_display_name(user.username)}/{task.project_id}/{item.publish_module}/{output_id}/{safe_display_name(item.output_name)}"
+                object_key = f"{safe_display_name(user.username)}/{task.project_id}/{item.publish_module}/{safe_display_name(item.output_name)}"
+                file_record = db.scalar(select(ProjectFile).where(ProjectFile.object_key == object_key))
+                output_id = file_record.id if file_record is not None else new_id()
             else:
+                output_id = new_id()
                 object_key = project_object_key(user.username, task.project_id, output_id, item.output_name)
             final_path = object_path(object_key, configured_storage_root(db))
             final_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(item.temp_path, final_path)
-            db.add(
-                ProjectFile(
-                    id=output_id,
-                    project_id=task.project_id,
-                    owner_id=task.owner_id,
-                    original_name=item.output_name,
-                    object_key=object_key,
-                    content_type=item.content_type,
-                    size_bytes=item.size_bytes,
-                    sha256=item.sha256,
-                    kind="artifact",
+            if item.publish_module and file_record is not None:
+                file_record.original_name = item.output_name
+                file_record.content_type = item.content_type
+                file_record.size_bytes = item.size_bytes
+                file_record.sha256 = item.sha256
+                file_record.kind = "artifact"
+                file_record.deleted_at = None
+            else:
+                db.add(
+                    ProjectFile(
+                        id=output_id,
+                        project_id=task.project_id,
+                        owner_id=task.owner_id,
+                        original_name=item.output_name,
+                        object_key=object_key,
+                        content_type=item.content_type,
+                        size_bytes=item.size_bytes,
+                        sha256=item.sha256,
+                        kind="artifact",
+                    )
                 )
-            )
             published.append(
                 {
                     "file_id": output_id,
@@ -1275,6 +1305,20 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
         settle_reservation(db, task, note=f"{claim.task_type} completed")
         append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
         db.commit()
+        storage_root = configured_storage_root(db) / safe_display_name(user.username) / task.project_id
+        for module, legacy_path in legacy_module_paths:
+            try:
+                legacy_path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            module_root = storage_root / module
+            parent = legacy_path.parent
+            while parent != module_root and parent.is_relative_to(module_root):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
         return True
 
 

@@ -23,6 +23,7 @@ from ..platform.storage import configured_storage_root, safe_display_name
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
 from ..core.observability import api_requests_today, api_snapshot
+from ..core import config as core_config
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -156,6 +157,47 @@ class InitialQuotaUpdate(BaseModel):
 
 class RegistrationUpdate(BaseModel):
     enabled: bool
+
+
+_FEATURE_CONFIG_SECTIONS = {
+    "text", "audio", "tts", "llm", "prompts", "persona_prompts",
+    "generation", "ffmpeg", "bgm",
+}
+
+
+@router.get("/settings/application")
+def get_application_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """Return effective feature settings, including shared admin overrides."""
+    config = core_config.get_config().model_dump()
+    stored = db.get(SystemConfig, "application.features")
+    return {"config": config, "source": "admin" if stored else "deployment-default"}
+
+
+@router.patch("/settings/application")
+def update_application_settings(payload: dict, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    if actor.role != "admin":
+        raise HTTPException(403, "闇€瑕佺鐞嗗憳鏉冮檺")
+    if not isinstance(payload, dict) or not payload or not set(payload).issubset(_FEATURE_CONFIG_SECTIONS):
+        raise HTTPException(422, "鍙兘鏇存柊鍔熻兘閰嶇疆鍒嗘")
+    try:
+        # Validate the submitted sections against the canonical schema, then
+        # persist only those sections so platform defaults remain independent
+        # of any admin workspace's UI and path settings.
+        patch = {key: payload[key] for key in payload}
+        merged = core_config.AppConfig.model_validate({**core_config.AppConfig().model_dump(), **patch})
+    except Exception as exc:
+        raise HTTPException(422, f"Invalid feature configuration: {exc}") from exc
+    config = db.get(SystemConfig, "application.features")
+    if config is None:
+        config = SystemConfig(key="application.features", value={})
+        db.add(config)
+    config.value = {**(config.value if isinstance(config.value, dict) else {}), **{
+        key: getattr(merged, key).model_dump() for key in patch
+    }}
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.application_features_changed", target_type="system_config", target_id="application.features", metadata_json={"sections": sorted(patch)}))
+    db.commit()
+    core_config.set_platform_config_cache(config.value)
+    return {"config": core_config.get_config().model_dump(), "source": "admin"}
 
 
 class QuotaAdjustment(BaseModel):
@@ -300,7 +342,7 @@ def get_runtime_settings(_: User = Depends(require_admin)) -> dict:
         },
         "source": "deployment-environment",
         "editable_in_console": False,
-        "model_settings_scope": "workspace",
+        "model_settings_scope": "platform",
     }
 
 

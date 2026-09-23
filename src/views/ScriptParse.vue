@@ -454,7 +454,7 @@ function downloadJob(row: JobRow) {
           </div>
         </div>
         <p v-else class="text-sm text-muted-foreground">
-          02_split_text/ 下暂无 .txt 文件——请先到「排版与分册」生成分册。
+          暂无待解析的章节文本，请先到「排版与分册」生成章节。
         </p>
 
         <div class="flex flex-wrap items-center gap-2">
@@ -508,7 +508,7 @@ function downloadJob(row: JobRow) {
       </CardContent>
       <CardFooter>
         <span class="text-xs text-muted-foreground">
-          解析结果会保存到 <code class="text-xs">03_parsed_json/</code>。
+          解析结果会保存在当前项目中，可在后续制作步骤中继续使用。
         </span>
       </CardFooter>
     </Card>

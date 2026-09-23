@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -50,6 +51,7 @@ _CACHE_DIRS = {"00_temp", ".cache", "cache"}
 _CACHE_MAX_AGE = timedelta(days=7)
 _ACTIVE_TASKS = ("pending", "queued", "running", "paused", "cancelling", "retrying")
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".zip"}
+_SPLIT_VOLUME_NAME = re.compile(r"^第\s+\d+\s+章(?:\s|\.|$)")
 
 
 def _safe_user_workspace(db: Session, user: User, item: Workspace) -> Path | None:
@@ -72,11 +74,12 @@ def _workspace_summary(root: Path, *, active: bool) -> dict:
     """Collect file metadata only; never follows links or reads file contents."""
     totals: dict[str, dict[str, int]] = {}
     files: list[dict] = []
-    cleanup_count = cleanup_bytes = 0
+    cleanup_count = cleanup_bytes = split_volume_count = 0
     cutoff = datetime.now().timestamp() - _CACHE_MAX_AGE.total_seconds()
     if not root.is_dir() or root.is_symlink():
         return {
-            "file_count": 0, "size_bytes": 0, "categories": [], "recent_files": [],
+            "file_count": 0, "size_bytes": 0, "split_volume_count": 0,
+            "categories": [], "recent_files": [],
             "recent_outputs": [],
             "cleanup_candidates": {"count": 0, "size_bytes": 0, "older_than_days": 7,
                                    "blocked_by_active_tasks": active},
@@ -100,6 +103,8 @@ def _workspace_summary(root: Path, *, active: bool) -> dict:
             bucket = totals.setdefault(category, {"count": 0, "size_bytes": 0})
             bucket["count"] += 1
             bucket["size_bytes"] += stat.st_size
+            if category == "02_split_text" and _SPLIT_VOLUME_NAME.match(filename):
+                split_volume_count += 1
             if not active and relative.parts and relative.parts[0] in _CACHE_DIRS and stat.st_mtime < cutoff:
                 cleanup_count += 1
                 cleanup_bytes += stat.st_size
@@ -120,6 +125,7 @@ def _workspace_summary(root: Path, *, active: bool) -> dict:
     return {
         "file_count": sum(bucket["count"] for bucket in totals.values()),
         "size_bytes": sum(bucket["size_bytes"] for bucket in totals.values()),
+        "split_volume_count": split_volume_count,
         "categories": [
             {"key": key, "label": _CATEGORY_LABELS[key], **value}
             for key, value in sorted(totals.items(), key=lambda pair: pair[1]["size_bytes"], reverse=True)
@@ -160,7 +166,22 @@ def create_workspace(payload: WorkspaceCreate, user: User = Depends(require_csrf
 @router.delete("/{workspace_id}")
 def delete_workspace(workspace_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, workspace_id)
+    active_task = db.scalar(select(Task.id).where(
+        Task.owner_id == user.id,
+        Task.project_id == item.id,
+        Task.status.in_(_ACTIVE_TASKS),
+    ).limit(1))
+    if active_task is not None:
+        raise HTTPException(409, "项目仍有未完成任务，请先等待任务完成或取消任务后再删除。")
+
     item.deleted_at = utcnow()
+    project = db.scalar(select(Project).where(
+        Project.id == item.id,
+        Project.owner_id == user.id,
+        Project.deleted_at.is_(None),
+    ))
+    if project is not None:
+        project.deleted_at = item.deleted_at
     db.commit()
     return {"ok": True, "directory_retained": True}
 

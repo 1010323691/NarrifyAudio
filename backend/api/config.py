@@ -24,6 +24,10 @@ def get_config() -> dict:
         prompts["system_prompt"] = load_default_prompts()[0]
     if not prompts.get("user_prompt"):
         prompts["user_prompt"] = load_default_prompts()[1]
+    # Shared model credentials are managed in the administrator console and
+    # must never be returned by the workspace-facing settings endpoint.
+    if isinstance(data.get("llm"), dict):
+        data["llm"]["api_key"] = ""
     return data
 
 

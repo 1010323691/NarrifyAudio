@@ -22,8 +22,8 @@ def _unb64(value: str) -> bytes:
 
 
 def hash_password(password: str) -> str:
-    if len(password) < 12:
-        raise ValueError("密码至少需要 12 个字符")
+    if not 6 <= len(password) <= 20:
+        raise ValueError("密码必须为 6–20 个字符")
     salt = secrets.token_bytes(16)
     derived = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1, maxmem=64 * 1024 * 1024)
     return f"scrypt$16384$8$1${_b64(salt)}${_b64(derived)}"

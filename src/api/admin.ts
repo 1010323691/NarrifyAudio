@@ -56,7 +56,7 @@ export interface RuntimeSettings {
   limits: { max_upload_bytes: number; session_ttl_hours: number; task_lease_seconds: number; task_max_attempts: number }
   source: 'deployment-environment'
   editable_in_console: false
-  model_settings_scope: 'workspace'
+  model_settings_scope: 'platform'
 }
 
 export interface StorageSettings {
@@ -170,6 +170,14 @@ export function getRegistrationSettings(): Promise<RegistrationSettings> {
 
 export function getRuntimeSettings(): Promise<RuntimeSettings> {
   return http.get('/api/v1/admin/settings/runtime')
+}
+
+export function getApplicationSettings(): Promise<{ config: import('@/types').AppConfig; source: 'admin' | 'deployment-default' }> {
+  return http.get('/api/v1/admin/settings/application')
+}
+
+export function updateApplicationSettings(config: Record<string, unknown>): Promise<{ config: import('@/types').AppConfig; source: 'admin' }> {
+  return http.patch('/api/v1/admin/settings/application', config)
 }
 
 export function updateRegistrationSettings(enabled: boolean): Promise<RegistrationSettings> {

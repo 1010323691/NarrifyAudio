@@ -324,6 +324,10 @@ class AnalyzeRequest(BaseModel):
     chapters: list[str]
 
 
+class PackageRequest(BaseModel):
+    chapters: list[str] | None = None  # None = all existing chapters (legacy callers)
+
+
 @router.post("/analyze")
 def run_analyze(
     req: AnalyzeRequest,
@@ -790,8 +794,9 @@ def run_mix(
 def package_mixed_audio(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    req: PackageRequest | None = None,
 ) -> dict:
-    """Package every finished chapter mix into a source-named ZIP.
+    """Package selected finished chapter mixes into a source-named ZIP.
 
     The archive contains a top-level folder named after the source TXT stem,
     with one final ``.mp3`` per chapter.  The same folder is used under
@@ -799,15 +804,15 @@ def package_mixed_audio(
     """
     _common.require_workspace()
     layout = get_layout()
-    stems = Bgm.list_chapter_stems(layout)
+    if req is None or req.chapters is None:
+        stems = Bgm.list_chapter_stems(layout)
+    else:
+        stems = _validated_stems(layout, req.chapters)
     if not stems:
         raise HTTPException(400, "未找到任何章节文件，无法打包下载。")
-    missing = [s for s in stems if not (layout.bgm / f"{s}.mp3").is_file()]
-    if missing:
-        raise HTTPException(
-            400,
-            f"还有 {len(missing)} 章未完成混音，暂不能打包下载：" + "、".join(missing),
-        )
+    stems = [s for s in stems if (layout.bgm / f"{s}.mp3").is_file()]
+    if not stems:
+        raise HTTPException(400, "选中的章节尚未完成混音，没有可下载的音频。")
 
     base = _source_txt_base(layout)
     if isinstance(ctx, AuthContext):

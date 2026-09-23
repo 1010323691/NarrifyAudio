@@ -2,7 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// Vite dev server + build config for the AudiobookStudio frontend.
+// Vite dev server + build config for the Narrify Audio frontend.
 //
 // In development, proxy API requests through Vite so browser cookies remain
 // same-origin. Production can still point directly at the configured API.

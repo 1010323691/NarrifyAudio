@@ -166,7 +166,7 @@ watch(() => props.module, scan)
         </label>
 
         <p v-if="!entries.length" class="px-2 py-1.5 text-sm text-muted-foreground">
-          {{ emptyHint || (pickDirs ? `${module}/ 下暂无可选项` : `${module}/ 下暂无文件`) }}
+          {{ emptyHint || (pickDirs ? '暂无可选文件夹' : '暂无可选文件') }}
         </p>
       </div>
       <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="loading" @click="scan">

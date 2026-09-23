@@ -25,6 +25,20 @@ const pageError = ref('')
 const search = ref('')
 const selectedKind = ref('all')
 const cleaningId = ref('')
+const MODULE_LABELS: Record<string, string> = {
+  '00_temp': '临时缓存',
+  '01_input': '原始文件',
+  '02_split_text': '章节文本',
+  '03_parsed_json': '解析结果',
+  '04_voice_profiles': '角色资料',
+  '05_audio_chunk': '合成音频',
+  '06_audio_merge': '合并音频',
+  '07_output': '最终成品',
+  '08_bgm': '背景音乐',
+  config: '项目配置',
+  logs: '项目日志',
+  other: '其他文件',
+}
 
 const kinds = computed(() => {
   const values = new Map<string, string>()
@@ -86,7 +100,7 @@ async function load() {
           summary: {
             workspace_id: project.id, name: project.name, updated_at: project.updated_at,
             file_count: summaryFiles.length, size_bytes: summaryFiles.reduce((sum, file) => sum + file.size_bytes, 0),
-            categories: Array.from(totals, ([key, value]) => ({ key, label: key, ...value })),
+          categories: Array.from(totals, ([key, value]) => ({ key, label: MODULE_LABELS[key] || '其他文件', ...value })),
             recent_files: summaryFiles, recent_outputs: audio,
             cleanup_candidates: { count: 0, size_bytes: 0, older_than_days: 7, blocked_by_active_tasks: false },
           },
@@ -153,7 +167,7 @@ onMounted(load)
       <Card v-else-if="recentOutputs.length" class="outputs-list">
         <div v-for="file in recentOutputs" :key="`${file.projectName}-${file.relative_path}`" class="output-row">
           <div class="output-icon"><span class="sr-only">音频文件</span>♫</div>
-          <div class="output-copy"><strong>{{ file.name }}</strong><small>{{ file.projectName }} · {{ file.module }}</small></div>
+          <div class="output-copy"><strong>{{ file.name }}</strong><small>{{ file.projectName }} · {{ MODULE_LABELS[file.module] || '其他文件' }}</small></div>
           <span>{{ formatBytes(file.size_bytes) }}</span><time>{{ formatDate(file.modified_at) }}</time>
         </div>
       </Card>
@@ -173,7 +187,7 @@ onMounted(load)
       <Card v-if="loading" class="resource-empty">正在加载…</Card>
       <Card v-else-if="fileRows.length" class="resource-table-card">
         <div class="resource-table"><table><thead><tr><th>文件</th><th>项目</th><th>类型</th><th>大小</th><th>最近修改</th></tr></thead>
-          <tbody><tr v-for="file in fileRows.slice(0, 100)" :key="`${file.projectName}-${file.relative_path}`"><td><strong>{{ file.name }}</strong><small>{{ file.relative_path }}</small></td><td>{{ file.projectName }}</td><td>{{ kinds.find((kind) => kind.key === file.module)?.label || file.module }}</td><td>{{ formatBytes(file.size_bytes) }}</td><td>{{ formatDate(file.modified_at) }}</td></tr></tbody>
+          <tbody><tr v-for="file in fileRows.slice(0, 100)" :key="`${file.projectName}-${file.relative_path}`"><td><strong>{{ file.name }}</strong></td><td>{{ file.projectName }}</td><td>{{ kinds.find((kind) => kind.key === file.module)?.label || MODULE_LABELS[file.module] || '其他文件' }}</td><td>{{ formatBytes(file.size_bytes) }}</td><td>{{ formatDate(file.modified_at) }}</td></tr></tbody>
         </table></div>
         <p v-if="fileRows.length > 100" class="table-footnote">显示最近 100 个匹配文件。</p>
       </Card>

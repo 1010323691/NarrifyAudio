@@ -164,7 +164,7 @@
   }
 
   .app-nav__group + .app-nav__group {
-    margin-top: 22px;
+    margin-top: 18px;
   }
 
   .app-nav__label {
@@ -222,6 +222,36 @@
     stroke-width: 1.8;
   }
 
+  .app-nav__project-nav {
+    border-top: 1px solid hsl(var(--border));
+    padding-top: 14px;
+  }
+
+  .app-nav__project-title {
+    display: flex;
+    min-height: 36px;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+    padding: 0 10px 8px;
+    color: hsl(var(--foreground));
+    font-size: 12px;
+    letter-spacing: 0;
+    text-decoration: none;
+    text-transform: none;
+  }
+
+  .app-nav__project-title svg {
+    flex: 0 0 15px;
+    color: hsl(var(--primary));
+  }
+
+  .app-nav__project-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .app-status {
     border-top: 1px solid hsl(var(--border));
     padding: 14px 18px 16px;
@@ -262,6 +292,159 @@
     -webkit-line-clamp: 2;
   }
 
+  .app-account {
+    position: relative;
+    width: 100%;
+    flex: 0 0 auto;
+    margin-top: auto;
+    border-top: 1px solid hsl(var(--border));
+    padding: 10px 12px;
+  }
+
+  .app-account__trigger {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    align-items: center;
+    gap: 10px;
+    border: 0;
+    border-radius: 11px;
+    background: transparent;
+    padding: 7px 8px;
+    color: hsl(var(--foreground));
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 140ms ease;
+  }
+
+  .app-account__trigger:hover,
+  .app-account__trigger:focus-visible {
+    background: hsl(var(--muted));
+  }
+
+  .app-account__trigger:focus-visible,
+  .app-account__menu-item:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  .app-account__avatar {
+    display: grid;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    place-items: center;
+    border: 1px solid hsl(var(--primary) / 0.2);
+    border-radius: 50%;
+    background: hsl(var(--primary) / 0.1);
+    color: hsl(var(--primary));
+    font-size: 14px;
+    font-weight: 750;
+  }
+
+  .app-account__profile-copy {
+    display: grid;
+    min-width: 0;
+    flex: 1;
+    gap: 2px;
+  }
+
+  .app-account__profile-copy strong {
+    overflow: hidden;
+    font-size: 12px;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-account__profile-copy small {
+    overflow: hidden;
+    color: hsl(var(--muted-foreground));
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-account__menu {
+    position: absolute;
+    z-index: 60;
+    bottom: calc(100% + 8px);
+    left: 12px;
+    width: calc(100% - 24px);
+    border: 1px solid hsl(var(--border));
+    border-radius: 18px;
+    background: hsl(var(--popover));
+    padding: 12px;
+    color: hsl(var(--popover-foreground));
+    box-shadow: 0 18px 48px hsl(222 35% 10% / 0.16);
+  }
+
+  .app-account__profile {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid hsl(var(--border));
+    padding: 6px 7px 12px;
+  }
+
+  .app-account__avatar--large {
+    width: 42px;
+    height: 42px;
+    flex-basis: 42px;
+    font-size: 16px;
+  }
+
+  .app-account__profile-copy strong {
+    font-size: 14px;
+  }
+
+  .app-account__profile-copy small {
+    font-size: 11px;
+  }
+
+  .app-account__menu-list {
+    display: grid;
+    gap: 2px;
+    padding-top: 8px;
+  }
+
+  .app-account__menu-item {
+    display: flex;
+    min-height: 30px;
+    align-items: center;
+    gap: 11px;
+    border: 0;
+    border-radius: 9px;
+    background: transparent;
+    padding: 4px 9px;
+    color: hsl(var(--foreground));
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .app-account__menu-item:hover {
+    background: hsl(var(--muted));
+  }
+
+  .app-account__menu-item svg {
+    flex: 0 0 17px;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .app-account__menu-item--logout {
+    margin-top: 4px;
+    border-top: 1px solid hsl(var(--border));
+    border-radius: 0 0 9px 9px;
+    padding-top: 7px;
+  }
+
+  .app-account__menu-item--logout svg {
+    color: hsl(var(--destructive));
+  }
+
   .app-main {
     min-width: 0;
     flex: 1;
@@ -269,61 +452,14 @@
     background: hsl(var(--background));
   }
 
-  .app-topbar {
-    position: sticky;
-    top: 0;
-    z-index: 20;
-    display: flex;
-    min-height: 52px;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    border-bottom: 1px solid hsl(var(--border) / 0.75);
-    background: hsl(var(--background) / 0.94);
-    padding: 0 clamp(20px, 4vw, 48px);
-    backdrop-filter: blur(12px);
-  }
-
-  .app-breadcrumb {
-    display: flex;
-    min-width: 0;
-    align-items: center;
-    gap: 8px;
-    color: hsl(var(--muted-foreground));
-    font-size: 12px;
-  }
-
-  .app-breadcrumb__root {
-    font-weight: 600;
-  }
-
-  .app-breadcrumb__separator {
-    color: hsl(var(--border));
-  }
-
-  .app-breadcrumb__current {
-    overflow: hidden;
-    color: hsl(var(--foreground));
-    font-weight: 700;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .app-context {
-    flex: 0 0 auto;
-    border: 1px solid hsl(var(--border));
-    border-radius: 999px;
-    background: hsl(var(--card));
-    padding: 5px 10px;
-    color: hsl(var(--muted-foreground));
-    font-size: 11px;
-    font-weight: 600;
-  }
-
   .app-content {
     width: min(100%, 1440px);
     margin: 0 auto;
     padding: clamp(28px, 4vw, 52px) clamp(20px, 4vw, 48px) 64px;
+  }
+
+  .app-content--admin {
+    padding-top: 28px;
   }
 
   .page-header {
@@ -713,6 +849,26 @@
       border-bottom: 1px solid hsl(var(--border));
     }
 
+    .app-account {
+      display: flex;
+      width: 100%;
+      align-self: flex-end;
+      justify-content: flex-end;
+      margin: 0;
+      border-top: 0;
+      padding: 0 12px 8px;
+    }
+
+    .app-account__trigger {
+      width: auto;
+      padding: 4px;
+    }
+
+    .app-account__menu {
+      right: 12px;
+      left: auto;
+    }
+
     .app-brand {
       min-height: 62px;
       padding: 12px 16px;
@@ -741,6 +897,13 @@
       display: none;
     }
 
+    .app-nav__project-title {
+      display: flex;
+      min-height: 38px;
+      flex: 0 0 auto;
+      padding: 8px 11px;
+    }
+
     .app-nav__item {
       min-height: 38px;
       flex: 0 0 auto;
@@ -756,8 +919,7 @@
       border-radius: 3px 3px 0 0;
     }
 
-    .app-status,
-    .app-topbar {
+    .app-status {
       display: none;
     }
 

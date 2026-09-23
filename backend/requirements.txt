@@ -1,4 +1,4 @@
-# AudiobookStudio backend
+# Narrify Audio backend
 # Shared application + TTS environment. The TTS worker is still a subprocess so
 # importing torch/model code never happens in the FastAPI process.
 # Platform-specific CUDA torch wheels are installed last by install_tts_env.ps1.

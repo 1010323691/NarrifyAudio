@@ -1,4 +1,4 @@
-"""AudiobookStudio backend — FastAPI application entrypoint.
+"""Narrify Audio backend — FastAPI application entrypoint.
 
 Run (API only):      ``python -m backend.main``  →  http://127.0.0.1:8642
 Run (whole app):     ``npm run build`` then the same command, and open

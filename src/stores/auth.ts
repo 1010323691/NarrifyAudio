@@ -21,11 +21,11 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function signIn(email: string, password: string) {
+  async function signIn(identifier: string, password: string) {
     busy.value = true
     error.value = ''
     try {
-      user.value = (await authApi.login({ email, password })).user
+      user.value = (await authApi.login({ identifier, password })).user
     } catch (cause: any) {
       error.value = cause?.message || '登录失败'
       throw cause

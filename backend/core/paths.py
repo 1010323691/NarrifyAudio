@@ -1,4 +1,4 @@
-"""Unified directory layout for the AudiobookStudio backend.
+"""Unified directory layout for the Narrify Audio backend.
 
 One root — the user's chosen workspace (``paths.working_dir`` in the root
 ``app.json``) holds everything for the project::

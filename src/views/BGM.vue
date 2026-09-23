@@ -89,6 +89,8 @@ const error = ref('')
 const selected = reactive<Record<string, boolean>>({})
 const submitting = ref(false)
 const packaging = ref(false)
+const packageConfirmOpen = ref(false)
+const packageSelection = ref<string[]>([])
 
 // ---------------------------------------------------------------------------
 // 行任务派生：bgm-analysis / bgm-segment / bgm-mix 任务按 label 尾部「：{stem}」归位。
@@ -243,9 +245,15 @@ const rows = computed<BgmRow[]>(() => {
 })
 
 const selectedNames = computed(() => rowsData.value.filter((r) => !!selected[r.stem]).map((r) => r.stem))
+const selectedMixedNames = computed(() => rows.value
+  .filter((r) => !!selected[r.stem] && r.data.mix_exists && !r.mixTask)
+  .map((r) => r.stem))
+const selectedUnmixedCount = computed(() => Math.max(0, packageSelection.value.length - packageSelection.value.filter((stem) =>
+  isMixReady(stem),
+).length))
+const packageReadyCount = computed(() => packageSelection.value.length - selectedUnmixedCount.value)
 const matchedRows = computed(() => rows.value.filter((r) => r.matched))
 const mixedCount = computed(() => rowsData.value.filter((r) => r.mix_exists).length)
-const allMixedReady = computed(() => rowsData.value.length > 0 && rowsData.value.every((r) => r.mix_exists))
 const pendingAnalysisStems = computed(() =>
   rows.value
     .filter((r) => {
@@ -423,12 +431,22 @@ function waitForPaint() {
   return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 }
 
-async function doPackageDownload() {
-  if (!allMixedReady.value || packaging.value || !workspaceSet.value) return
+function handlePackageClick() {
+  if (!selectedNames.value.length || packaging.value || !workspaceSet.value) return
+  packageSelection.value = [...selectedNames.value]
+  if (selectedMixedNames.value.length !== selectedNames.value.length) {
+    packageConfirmOpen.value = true
+    return
+  }
+  void doPackageDownload([...selectedNames.value])
+}
+
+async function doPackageDownload(chapters: string[]) {
+  if (!chapters.length || packaging.value || !workspaceSet.value) return
   packaging.value = true
   error.value = ''
   try {
-    const result = await resolveDurable(await packageMixedAudio()) as any
+    const result = await resolveDurable(await packageMixedAudio(chapters)) as any
     downloadFile('08_bgm', result.path || result.zip_path || result.name)
     toast({
       title: '打包完成',
@@ -442,6 +460,48 @@ async function doPackageDownload() {
     packaging.value = false
   }
 }
+
+function confirmPackageDownload() {
+  packageConfirmOpen.value = false
+  const ready = packageSelection.value.filter(isMixReady)
+  void doPackageDownload(ready)
+}
+
+function isMixReady(stem: string) {
+  return rows.value.some((row) => row.stem === stem && row.data.mix_exists && !row.mixTask)
+}
+
+function closePackageConfirm() {
+  packageConfirmOpen.value = false
+}
+
+function trapPackageDialogTab(event: KeyboardEvent) {
+  if (event.key !== 'Tab') return
+  const dialog = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('[data-bgm-package-dialog]')
+  if (!dialog) return
+  const controls = [...dialog.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )]
+  if (!controls.length) return
+  const first = controls[0]
+  const last = controls[controls.length - 1]
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+watch(packageConfirmOpen, async (open) => {
+  await nextTick()
+  if (open) {
+    document.querySelector<HTMLElement>('[data-bgm-package-dialog]')?.focus()
+  } else {
+    document.querySelector<HTMLElement>('[data-bgm-package-trigger]')?.focus()
+  }
+})
 
 function rowTags(row: BgmRow): TrackTags {
   const tags = mode.value === 'segment'
@@ -998,7 +1058,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
           </div>
         </div>
         <p v-else class="text-sm text-muted-foreground">
-          02_split_text/ 下暂无章节文件——请先到「排版与分册」完成分册。
+          暂无章节文本，请先到「排版与分册」完成分册。
         </p>
 
         <div class="flex flex-wrap items-center gap-2">
@@ -1043,14 +1103,15 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
           <Button
             variant="outline"
             class="min-w-[11rem] flex-1"
-            :disabled="!workspaceSet || packaging || !allMixedReady"
-            :title="allMixedReady ? '打包全部已完成混音的章节' : '所有章节完成混音后才可打包下载'"
+            :disabled="!workspaceSet || packaging || !selectedNames.length"
+            :title="`打包下载已选的 ${selectedNames.length} 个章节`"
             :aria-busy="packaging"
-            @click="doPackageDownload"
+            data-bgm-package-trigger
+            @click="handlePackageClick"
           >
             <Loader2 v-if="packaging" class="h-4 w-4 animate-spin" />
             <Package v-else class="h-4 w-4" />
-            {{ packaging ? '打包中…' : '打包下载' }}
+            {{ packaging ? '打包中…' : `打包下载（${selectedNames.length} 章）` }}
           </Button>
           <Button v-if="bgmActive.length" variant="destructive" @click="cancelAll">
             <XCircle class="h-4 w-4" />取消全部
@@ -1070,6 +1131,39 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
     </Alert>
 
     <!-- 手动选曲弹层 -->
+    <div
+      v-if="packageConfirmOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      @click.self="closePackageConfirm"
+      @keydown.esc.stop="closePackageConfirm"
+      @keydown.tab="trapPackageDialogTab"
+    >
+      <section
+        data-bgm-package-dialog
+        class="w-full max-w-md rounded-xl border bg-background p-5 shadow-xl"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="bgm-package-confirm-title"
+        aria-describedby="bgm-package-confirm-description"
+        tabindex="-1"
+      >
+        <h2 id="bgm-package-confirm-title" class="text-lg font-semibold">确认打包下载</h2>
+        <p id="bgm-package-confirm-description" class="mt-2 text-sm leading-6 text-muted-foreground">
+          <template v-if="packageReadyCount">
+            所选章节中有 {{ selectedUnmixedCount }} 个尚未完成混音。继续后只会打包 {{ packageReadyCount }} 个已完成混音的章节，是否下载？
+          </template>
+          <template v-else>
+            所选章节均尚未完成混音，当前没有可下载的音频。请完成混音后再打包。
+          </template>
+        </p>
+        <div class="mt-5 flex justify-end gap-2">
+          <Button variant="outline" @click="closePackageConfirm">取消</Button>
+          <Button v-if="packageReadyCount" @click="confirmPackageDownload">继续下载</Button>
+          <Button v-else @click="closePackageConfirm">知道了</Button>
+        </div>
+      </section>
+    </div>
+
     <div
       v-if="manualStem"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"

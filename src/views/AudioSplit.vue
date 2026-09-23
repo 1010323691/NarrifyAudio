@@ -378,13 +378,12 @@ function download(path: string) {
           :extensions="['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'webm']"
           :show-default="false"
           v-model="selectedName"
-          label="待分集音频（06_audio_merge/）"
-          empty-hint="06_audio_merge/ 下暂无音频——请先到「音频合并」生成有声书。"
+          label="待分集音频"
+          empty-hint="暂无可分集的音频，请先到「音频合并」生成音频。"
           @scanned="onScanned"
         />
         <div v-if="file" class="flex flex-wrap items-center gap-3 rounded-md bg-muted/50 px-3 py-2 text-sm">
           <span class="font-medium">{{ file.name }}</span>
-          <span class="text-xs text-muted-foreground truncate max-w-[320px]" :title="file.path">{{ file.path }}</span>
         </div>
         <div v-if="probe" class="flex flex-wrap gap-4 rounded-md bg-muted/50 px-3 py-2 text-sm">
           <span>时长 <b>{{ formatDuration(probe.duration) }}</b></span>
@@ -541,7 +540,7 @@ function download(path: string) {
               </TableHeader>
               <TableBody>
                 <TableRow v-for="f in cutResult.files" :key="f.path">
-                  <TableCell class="max-w-[360px] truncate" :title="f.path">{{ f.name }}</TableCell>
+                  <TableCell class="max-w-[360px] truncate">{{ f.name }}</TableCell>
                   <TableCell class="text-right font-mono">{{ formatDuration(f.duration) }}</TableCell>
                   <TableCell class="text-right">{{ formatBytes(f.size) }}</TableCell>
                   <TableCell>

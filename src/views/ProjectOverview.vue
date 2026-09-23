@@ -9,6 +9,7 @@ import { listDir } from '@/api/files'
 import { listDurableTasks, type DurableTask } from '@/api/persistentTasks'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useSettingsStore } from '@/stores/settings'
+import { taskTypeLabel } from '@/utils/taskLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,6 +21,7 @@ const error = ref('')
 const artifactCounts = ref<Record<string, number>>({})
 const tasks = ref<DurableTask[]>([])
 const refreshing = ref(false)
+const SPLIT_VOLUME_NAME = /^第\s+\d+\s+章(?:\s|\.|$)/
 
 const STAGE_DEFS = [
   { key: 'text', label: '排版与分册', path: '/text', dir: '02_split_text', icon: FileText, taskTypes: ['text.', 'book.'] },
@@ -67,9 +69,11 @@ async function load() {
       : []
     const counts: Record<string, number> = {}
     fileResults.forEach((result, index) => {
-      counts[STAGES.value[index].dir] = result.status === 'fulfilled'
-        ? result.value.items.filter((item) => !item.is_dir).length
-        : 0
+      const stage = STAGES.value[index]
+      const files = result.status === 'fulfilled' ? result.value.items.filter((item) => !item.is_dir) : []
+      counts[stage.dir] = stage.key === 'text'
+        ? files.filter((item) => SPLIT_VOLUME_NAME.test(item.name.split('/').pop() || '')).length
+        : files.length
     })
     artifactCounts.value = counts
     if (taskResult.status === 'rejected' && fileResults.every((result) => result.status === 'rejected')) {
@@ -129,7 +133,7 @@ onMounted(load)
         <button v-for="(stage, index) in STAGES" :key="stage.key" type="button" class="stage-card" @click="openStage(stage.path)">
           <div class="stage-card__top"><span class="stage-number">{{ String(index + 1).padStart(2, '0') }}</span><component :is="stage.icon" class="h-4 w-4" /></div>
           <strong>{{ stage.label }}</strong>
-          <div class="stage-card__status"><StatusPill :label="stageStatus(stage).label" :tone="stageStatus(stage).tone" /><span>{{ artifactCounts[stage.dir] || 0 }} 个文件</span></div>
+          <div class="stage-card__status"><StatusPill :label="stageStatus(stage).label" :tone="stageStatus(stage).tone" /><span>{{ artifactCounts[stage.dir] || 0 }} {{ stage.key === 'text' ? '个分册' : '个文件' }}</span></div>
           <ArrowRight class="stage-card__arrow h-4 w-4" />
         </button>
       </div>
@@ -144,7 +148,7 @@ onMounted(load)
       <Card class="attention-card">
         <div class="section-title section-title--compact"><div><h2>最近需要处理</h2><p>仅包含此项目的失败任务。</p></div><CircleAlert class="h-4 w-4" /></div>
         <div v-if="recentFailures.length" class="failure-list">
-          <div v-for="task in recentFailures" :key="task.id" class="failure-row"><div><strong>{{ task.task_type }}</strong><small>{{ task.error_message || '任务失败，请重试或检查输入。' }}</small></div><StatusPill label="失败" tone="negative" /></div>
+          <div v-for="task in recentFailures" :key="task.id" class="failure-row"><div><strong>{{ taskTypeLabel(task.task_type) }}</strong><small>{{ task.error_message || '任务失败，请重试或检查输入。' }}</small></div><StatusPill label="失败" tone="negative" /></div>
         </div>
         <p v-else class="empty-inline">目前没有失败任务。</p>
       </Card>

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, Headphones, FolderOpen,
+  Combine, Music4, ShieldCheck, Headphones, FolderOpen, LogOut,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -15,12 +15,16 @@ const app = useAppStore()
 const settings = useSettingsStore()
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
+const accountMenuOpen = ref(false)
+const accountTrigger = ref<HTMLButtonElement | null>(null)
+const displayName = computed(() => auth.user?.display_name || auth.user?.username || '账户')
+const avatarInitial = computed(() => displayName.value.trim().charAt(0).toUpperCase() || 'U')
 
+const isProjectContext = computed(() => workspace.hasActiveProject && (
+  route.path.startsWith('/projects/') || ['/text', '/script', '/voices', '/batch', '/merge', '/audio', '/bgm'].includes(route.path)
+))
 const USER_ITEMS = [
   { to: '/dashboard', label: '项目', icon: LayoutDashboard },
-  { to: '/resources', label: '我的资源', icon: Layers },
-  { to: '/usage', label: '使用量', icon: AudioLines },
-  { to: '/settings', label: '设置', icon: Settings },
 ]
 
 const PROJECT_STAGES = [
@@ -38,26 +42,38 @@ const ADMIN_ITEMS = [
   { to: '/admin?tab=performance', label: '性能监控', icon: AudioLines, tab: 'performance' },
   { to: '/admin?tab=users', label: '用户管理', icon: Users, tab: 'users' },
   { to: '/admin?tab=resources', label: '资源管理', icon: Layers, tab: 'resources' },
-  { to: '/music', label: '音乐库管理', icon: Music4 },
+  { to: '/admin/music', label: '音乐库管理', icon: Music4 },
   { to: '/admin?tab=settings', label: '系统配置', icon: Settings, tab: 'settings' },
   { to: '/admin?tab=tasks', label: '任务 / 队列', icon: Combine, tab: 'tasks' },
   { to: '/admin?tab=logs', label: '日志 / 异常', icon: ScanText, tab: 'logs' },
 ] as const
 
-const isAdminArea = computed(() => auth.user?.role === 'admin' && ['/admin', '/music'].includes(route.path))
-const isProjectContext = computed(() => workspace.hasActiveProject && (
-  route.path.startsWith('/projects/') || ['/text', '/script', '/voices', '/batch', '/merge', '/audio', '/bgm'].includes(route.path)
-))
+const isAdminArea = computed(() => auth.user?.role === 'admin' && (route.path === '/admin' || route.path.startsWith('/admin/')))
 const visibleStages = computed(() => PROJECT_STAGES.filter((item) => !item.optional || settings.config?.ui.show_audio_split))
+watch(() => route.fullPath, () => { accountMenuOpen.value = false })
 
 function isActive(to: string) {
   return to === '/dashboard' ? route.path === '/dashboard' : route.path === to
 }
 
 function isAdminItemActive(item: (typeof ADMIN_ITEMS)[number]) {
-  if (item.to === '/music') return route.path === '/music'
+  if (item.to === '/admin/music') return route.path === '/admin/music'
   if (route.path !== '/admin') return false
   return 'tab' in item ? route.query.tab === item.tab : !route.query.tab
+}
+
+function closeAccountMenu() {
+  accountMenuOpen.value = false
+  accountTrigger.value?.focus()
+}
+
+async function signOut() {
+  const adminSignOut = isAdminArea.value
+  try {
+    await auth.signOut()
+  } finally {
+    window.location.hash = adminSignOut ? '#/admin/login' : '#/login'
+  }
 }
 
 onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.refresh() })
@@ -69,7 +85,7 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
       <div class="app-brand__mark" aria-hidden="true"><component :is="isAdminArea ? ShieldCheck : Headphones" class="h-5 w-5" /></div>
       <div class="app-brand__copy">
         <div class="app-brand__title">{{ isAdminArea ? '管理控制台' : '有声书工作台' }}</div>
-        <div class="app-brand__subtitle">{{ isAdminArea ? 'ADMIN CONSOLE' : 'AUDIOBOOK WORKSPACE' }}</div>
+        <div class="app-brand__subtitle">{{ isAdminArea ? 'ADMIN CONSOLE' : 'NARRIFY AUDIO WORKSPACE' }}</div>
       </div>
     </RouterLink>
 
@@ -82,7 +98,7 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
       </div>
     </nav>
 
-    <nav v-else class="app-nav" aria-label="Audiobook Production Workspace">
+    <nav v-else class="app-nav" aria-label="Narrify Audio Production Workspace">
       <div class="app-nav__group">
         <div class="app-nav__label">工作台</div>
         <RouterLink v-for="item in USER_ITEMS" :key="item.to" :to="item.to" class="app-nav__item" :class="isActive(item.to) ? 'is-active' : ''">
@@ -90,13 +106,15 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
         </RouterLink>
       </div>
 
-      <div v-if="isProjectContext" class="app-nav__group app-nav__project-nav">
+      <div v-if="workspace.hasActiveProject" class="app-nav__group app-nav__project-nav">
         <RouterLink :to="`/projects/${workspace.activeProjectId}`" class="app-nav__label app-nav__project-title">
-          <FolderOpen class="h-3.5 w-3.5" /><span>{{ workspace.activeProjectName || '当前项目' }}</span>
+          <FolderOpen class="h-3.5 w-3.5" /><span class="app-nav__project-name">{{ workspace.activeProjectName || '当前项目' }}</span>
         </RouterLink>
-        <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
-          <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>
-        </RouterLink>
+        <template v-if="isProjectContext">
+          <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
+            <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>
+          </RouterLink>
+        </template>
       </div>
 
     </nav>
@@ -104,6 +122,41 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
     <div v-if="isAdminArea" class="app-status">
       <div class="app-status__row" :class="app.backendUp ? 'is-online' : 'is-offline'"><span class="app-status__dot" aria-hidden="true" /><span>{{ app.backendUp ? '后端已连接' : '后端未连接' }}</span></div>
       <div v-if="app.lastError" class="app-status__error">{{ app.lastError }}</div>
+    </div>
+    <div
+      class="app-account"
+      @keydown.esc.prevent="closeAccountMenu"
+    >
+      <button
+        ref="accountTrigger"
+        type="button"
+        class="app-account__trigger"
+        :aria-label="`账户菜单：${displayName}`"
+        aria-haspopup="true"
+        :aria-expanded="accountMenuOpen"
+        :title="displayName"
+        @click="accountMenuOpen = !accountMenuOpen"
+      >
+        <span class="app-account__avatar" aria-hidden="true">{{ avatarInitial }}</span>
+      </button>
+
+      <div v-if="accountMenuOpen" class="app-account__menu" role="group" aria-label="账户菜单">
+        <div class="app-account__profile" role="group" aria-label="账户信息">
+          <span class="app-account__avatar app-account__avatar--large" aria-hidden="true">{{ avatarInitial }}</span>
+          <div class="app-account__profile-copy"><strong>{{ displayName }}</strong><small>{{ auth.user?.email }}</small></div>
+        </div>
+        <div class="app-account__menu-list">
+          <template v-if="isAdminArea">
+            <RouterLink to="/admin?tab=settings" class="app-account__menu-item" @click="accountMenuOpen = false"><Settings class="h-4 w-4" />系统配置</RouterLink>
+          </template>
+          <template v-else>
+            <RouterLink to="/usage" class="app-account__menu-item" @click="accountMenuOpen = false"><AudioLines class="h-4 w-4" />使用量</RouterLink>
+            <RouterLink to="/resources" class="app-account__menu-item" @click="accountMenuOpen = false"><Layers class="h-4 w-4" />我的资源</RouterLink>
+            <RouterLink to="/settings" class="app-account__menu-item" @click="accountMenuOpen = false"><Settings class="h-4 w-4" />设置</RouterLink>
+          </template>
+          <button type="button" class="app-account__menu-item app-account__menu-item--logout" @click="signOut"><LogOut class="h-4 w-4" />退出登录</button>
+        </div>
+      </div>
     </div>
   </aside>
 </template>

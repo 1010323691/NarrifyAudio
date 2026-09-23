@@ -11,9 +11,10 @@ import Input from '@/components/ui/Input.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { useToast } from '@/components/ui/toast'
 import * as api from '@/api/admin'
+import Settings from '@/views/Settings.vue'
 
 type Tab = 'overview' | 'performance' | 'users' | 'resources' | 'settings' | 'tasks' | 'logs'
-type SettingsSection = 'general' | 'storage' | 'runtime' | 'llm' | 'tts' | 'audio'
+type SettingsSection = 'text' | 'models' | 'audio' | 'general' | 'storage' | 'runtime'
 const validTabs = new Set<Tab>(['overview', 'performance', 'users', 'resources', 'settings', 'tasks', 'logs'])
 const route = useRoute()
 const tab = computed<Tab>(() => validTabs.has(route.query.tab as Tab) ? route.query.tab as Tab : 'overview')
@@ -30,7 +31,7 @@ const storage = ref<api.StorageSettings | null>(null)
 const quota = ref<api.QuotaSettings | null>(null)
 const registration = ref<api.RegistrationSettings | null>(null)
 const runtime = ref<api.RuntimeSettings | null>(null)
-const settingsSection = ref<SettingsSection>('general')
+const settingsSection = ref<SettingsSection>('text')
 const rootDraft = ref('')
 const quotaDraft = ref('0')
 const registrationDraft = ref(true)
@@ -198,7 +199,7 @@ async function retryTask(task: api.AdminTask) {
 async function cleanupTemp() {
   const candidates = cleanupCandidates.value
   if (!candidates?.count) return
-  if (!window.confirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的 00_temp 普通文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`)) return
+  if (!window.confirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的临时缓存文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`)) return
   try {
     const result = await api.cleanupStaleTemp()
     await load()
@@ -331,7 +332,7 @@ async function cleanupTemp() {
         <tbody><tr v-for="user in shownUsers" :key="user.id"><td><strong>{{ user.display_name || user.username }}</strong><small>{{ user.username }} · {{ user.email }}</small></td>
           <td><div class="badge-stack"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></div></td>
           <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td><td>未配置</td>
-          <td>{{ user.consumed_units ?? 0 }} 已用<small>{{ user.reserved_units ?? 0 }} 预留 · {{ user.available_units ?? 0 }} 可用</small></td>
+          <td>{{ user.consumed_units ?? 0 }} 字已用<small>{{ user.reserved_units ?? 0 }} 字预留 · {{ user.available_units ?? 0 }} 字可用</small></td>
           <td>{{ user.project_count ?? 0 }} 项目<small>{{ user.workspace_count ?? '—' }} 工作空间</small></td>
           <td>{{ bytes(user.storage_bytes) }}<small>{{ user.workspace_file_count ?? '未采集' }} 个目录文件 · {{ user.file_count ?? 0 }} 个已登记</small></td>
           <td class="user-actions"><Button variant="outline" size="sm" @click="selectedUser = user">详情 / 操作</Button></td></tr></tbody></table></div>
@@ -341,9 +342,9 @@ async function cleanupTemp() {
       <Card v-if="selectedUser"><CardHeader><CardTitle>用户详情 · {{ selectedUser.username }}</CardTitle></CardHeader><CardContent class="admin-form">
         <p class="mono">{{ selectedUser.id }}</p><p>{{ selectedUser.email }} · {{ selectedUser.display_name || selectedUser.username }}</p>
         <p>套餐：未配置 · 项目：{{ selectedUser.project_count ?? 0 }} · 工作空间：{{ selectedUser.workspace_count ?? '—' }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
-        <p>额度：{{ selectedUser.consumed_units ?? 0 }} 已用 · {{ selectedUser.reserved_units ?? 0 }} 预留 · {{ selectedUser.available_units ?? 0 }} 可用</p>
+        <p>字数额度：{{ selectedUser.consumed_units ?? 0 }} 字已用 · {{ selectedUser.reserved_units ?? 0 }} 字预留 · {{ selectedUser.available_units ?? 0 }} 字可用</p>
         <div class="controls"><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { role: selectedUser.role === 'admin' ? 'user' : 'admin' })">{{ selectedUser.role === 'admin' ? '移除管理员' : '设为管理员' }}</Button><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { is_active: !selectedUser.is_active })">{{ selectedUser.is_active ? '禁用用户' : '启用用户' }}</Button></div>
-        <div class="controls"><label for="quota-adjust">额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="正数增加 / 负数扣减" class="search" /><Button variant="outline" @click="adjustQuota">确认调整</Button></div>
+        <div class="controls"><label for="quota-adjust">字数额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="填写字数，正数增加 / 负数扣减" class="search" /><Button variant="outline" @click="adjustQuota">确认调整</Button></div>
       </CardContent></Card>
     </section>
 
@@ -367,20 +368,21 @@ async function cleanupTemp() {
         </CardContent></Card>
       </div>
       <Card><CardHeader><CardTitle>临时文件清理</CardTitle></CardHeader><CardContent class="cleanup-row">
-        <div><p><strong>{{ cleanupCandidates?.count ?? '未采集' }}</strong> 个超过 {{ cleanupCandidates?.older_than_days ?? 7 }} 天的临时文件 · {{ bytes(cleanupCandidates?.size_bytes) }}</p><small>仅清理不活跃工作空间的 00_temp 普通文件；跳过符号链接和正在运行任务的工作空间。</small></div>
+        <div><p><strong>{{ cleanupCandidates?.count ?? '未采集' }}</strong> 个超过 {{ cleanupCandidates?.older_than_days ?? 7 }} 天的临时文件 · {{ bytes(cleanupCandidates?.size_bytes) }}</p><small>仅清理不活跃工作空间中的普通临时文件；跳过特殊文件和正在运行任务的工作空间。</small></div>
         <Button variant="outline" :disabled="!cleanupCandidates?.count || loading" @click="cleanupTemp"><Trash2 class="h-4 w-4" />清理过期临时文件</Button>
       </CardContent></Card>
       <p class="admin-muted">扫描范围：{{ resources.root_path }} · 模型或日志位于工作空间以外时，不包含在空间分类中。</p>
     </section>
 
     <section v-if="tab === 'settings'" class="admin-section">
-      <div class="admin-title"><div><h2>系统配置</h2><p>只展示平台级配置；工作空间制作参数和密钥不在此处编辑。</p></div></div>
-      <nav class="settings-nav" aria-label="配置模块">
-        <button v-for="item in ([['general','通用'],['llm','LLM'],['tts','TTS'],['audio','音频 / FFmpeg'],['storage','存储路径'],['runtime','Worker / Queue']] as [SettingsSection,string][])" :key="item[0]" :class="settingsSection === item[0] ? 'active' : ''" @click="settingsSection = item[0]">{{ item[1] }}</button>
+      <div class="admin-title"><div><h2>系统配置</h2><p>管理员统一管理平台功能配置与运行参数。</p></div></div>
+      <nav class="settings-nav" aria-label="系统配置分类">
+        <button v-for="item in ([['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频'],['general','通用'],['storage','存储路径'],['runtime','Worker / Queue']] as [SettingsSection,string][])" :key="item[0]" :class="settingsSection === item[0] ? 'active' : ''" @click="settingsSection = item[0]">{{ item[1] }}</button>
       </nav>
+      <Settings v-if="['text','models','audio'].includes(settingsSection)" :admin-only="true" :admin-section="settingsSection" />
       <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>通用</CardTitle></CardHeader><CardContent class="admin-form">
         <label><input v-model="registrationDraft" type="checkbox" /> 允许新用户注册</label><Button :disabled="!registration" @click="saveRegistration">保存注册设置</Button>
-        <label for="initial-quota">新用户初始额度</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
+        <label for="initial-quota">新用户初始字数额度（字）</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
       </CardContent></Card>
       <Card v-else-if="settingsSection === 'storage'"><CardHeader><CardTitle>存储路径</CardTitle></CardHeader><CardContent class="admin-form">
         <label for="storage-root">工作空间根目录</label><Input id="storage-root" v-model="rootDraft" class="mono" />
@@ -390,21 +392,6 @@ async function cleanupTemp() {
       <Card v-else-if="settingsSection === 'runtime'"><CardHeader><CardTitle>Worker / Queue · 部署运行限制</CardTitle></CardHeader><CardContent class="kv-list">
         <template v-if="runtime"><p><span>任务租约</span><strong>{{ runtime.limits.task_lease_seconds }} 秒</strong></p><p><span>最大重试次数</span><strong>{{ runtime.limits.task_max_attempts }}</strong></p><p><span>上传大小上限</span><strong>{{ bytes(runtime.limits.max_upload_bytes) }}</strong></p><p><span>会话时长</span><strong>{{ runtime.limits.session_ttl_hours }} 小时</strong></p><p><span>Timeout / 并发限制</span><strong>未提供平台级配置接口</strong></p><p><span>配置来源</span><strong>部署环境 · 只读</strong></p></template>
         <p v-else class="admin-muted">此运行环境尚未提供非敏感运行限制数据。</p>
-      </CardContent></Card>
-      <Card v-else-if="settingsSection === 'llm'"><CardHeader><CardTitle>LLM</CardTitle></CardHeader><CardContent class="kv-list">
-        <p><span>配置归属</span><strong>{{ runtime ? (runtime.model_settings_scope === 'workspace' ? '工作空间' : '部署环境') : '未采集' }}</strong></p>
-        <p><span>密钥 / 连接参数</span><strong>不从管理接口回显</strong></p>
-        <p class="admin-muted">当前 Worker、队列和 API 性能见“服务与性能”；Token 与 TTFT 未采集。</p>
-      </CardContent></Card>
-      <Card v-else-if="settingsSection === 'tts'"><CardHeader><CardTitle>TTS</CardTitle></CardHeader><CardContent class="kv-list">
-        <p><span>配置归属</span><strong>{{ runtime ? (runtime.model_settings_scope === 'workspace' ? '工作空间' : '部署环境') : '未采集' }}</strong></p>
-        <p><span>引擎 / Worker 可用性</span><strong>见“服务与性能”监控</strong></p>
-        <p><span>字符用量 / 默认合成参数</span><strong>字符未采集；参数按工作空间管理</strong></p>
-      </CardContent></Card>
-      <Card v-else><CardHeader><CardTitle>音频 / FFmpeg</CardTitle></CardHeader><CardContent class="kv-list">
-        <p><span>服务可用性</span><strong>在服务与性能页读取 FFmpeg 检测结果</strong></p>
-        <p><span>音频默认参数</span><strong>按工作空间保存</strong></p>
-        <p class="admin-muted">此项目没有平台级音频默认值 API；页面不会显示模拟配置。</p>
       </CardContent></Card>
     </section>
 

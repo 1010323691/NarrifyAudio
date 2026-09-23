@@ -1,1 +1,1 @@
-"""HTTP API routers for the AudiobookStudio backend."""
+"""HTTP API routers for the Narrify Audio backend."""

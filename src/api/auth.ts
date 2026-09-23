@@ -18,7 +18,7 @@ export function register(payload: { email: string; password: string; username: s
   return http.post('/api/auth/register', payload)
 }
 
-export function login(payload: { email: string; password: string }): Promise<AuthResponse> {
+export function login(payload: { identifier: string; password: string }): Promise<AuthResponse> {
   return http.post('/api/auth/login', payload)
 }
 

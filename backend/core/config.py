@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,35 @@ TEMPLATE_FILE = PROJECT_ROOT / "app.json"
 
 _lock = threading.RLock()
 _config_cache: dict[str, AppConfig] = {}
+_platform_config_cache: dict[str, Any] = {"expires": 0.0, "value": {}}
+_PLATFORM_CONFIG_TTL = 3.0
+
+
+def _platform_config() -> dict[str, Any]:
+    """Load the administrator-managed feature defaults shared by all workspaces."""
+    now = time.monotonic()
+    with _lock:
+        if now < _platform_config_cache["expires"]:
+            return _platform_config_cache["value"]
+        try:
+            # Lazy imports keep the standalone config engine usable without the
+            # platform database (for example in unit tests and migration tools).
+            from ..platform.database import SessionLocal
+            from ..platform.models import SystemConfig
+
+            with SessionLocal() as db:
+                row = db.get(SystemConfig, "application.features")
+                value = row.value if row and isinstance(row.value, dict) else {}
+        except Exception:
+            value = {}
+        _platform_config_cache.update(value=value, expires=now + _PLATFORM_CONFIG_TTL)
+        return value
+
+
+def set_platform_config_cache(value: dict[str, Any]) -> None:
+    """Update the local effective-config cache after an admin save."""
+    with _lock:
+        _platform_config_cache.update(value=value, expires=time.monotonic() + _PLATFORM_CONFIG_TTL)
 
 
 class WorkspaceNotSetError(RuntimeError):
@@ -329,6 +359,11 @@ def get_config() -> AppConfig:
                 "paths": config.paths.model_copy(update={"working_dir": str(ws)})
             })
             _config_cache[key] = config
+        platform_config = _platform_config()
+        if platform_config:
+            data = config.model_dump()
+            _deep_update(data, platform_config)
+            config = AppConfig.model_validate(data)
         return config
 
 

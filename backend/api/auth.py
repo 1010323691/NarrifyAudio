@@ -22,9 +22,10 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class Credentials(BaseModel):
-    email: str
-    password: str = Field(min_length=12, max_length=256)
-    username: str | None = Field(default=None, min_length=3, max_length=64)
+    email: str | None = None
+    identifier: str | None = Field(default=None, max_length=320)
+    password: str = Field(max_length=256)
+    username: str | None = Field(default=None, min_length=6, max_length=20)
     display_name: str = Field(default="", max_length=120)
 
 
@@ -34,9 +35,14 @@ def _user_json(user: User) -> dict:
 
 def _username(value: str | None, email: str) -> str:
     candidate = (value or email.split("@", 1)[0]).strip().lower()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,63}", candidate):
-        raise HTTPException(422, "用户名只能使用 3-64 位小写字母、数字、点、下划线或连字符")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{5,19}", candidate):
+        raise HTTPException(422, "用户名必须为 6–20 位小写字母、数字、点、下划线或连字符")
     return candidate
+
+
+def _validate_password(password: str) -> None:
+    if not 6 <= len(password) <= 20:
+        raise HTTPException(422, "密码必须为 6–20 个字符")
 
 
 def _set_cookies(response: Response, token: str, csrf: str) -> None:
@@ -48,9 +54,10 @@ def _set_cookies(response: Response, token: str, csrf: str) -> None:
 def register(payload: Credentials, response: Response, db: Session = Depends(get_db)) -> dict:
     if not registration_enabled(db):
         raise HTTPException(403, "当前已关闭注册")
-    email = payload.email.strip().lower()
+    email = (payload.email or "").strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(422, "邮箱格式不正确")
+    _validate_password(payload.password)
     username = _username(payload.username, email)
     if db.scalar(select(User).where(User.email == email)) is not None:
         raise HTTPException(409, "邮箱已注册")
@@ -80,8 +87,11 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
 
 @router.post("/login")
 def login(payload: Credentials, response: Response, db: Session = Depends(get_db)) -> dict:
-    email = payload.email.strip().lower()
-    user = db.scalar(select(User).where(User.email == email))
+    identifier = (payload.identifier or payload.email or "").strip().lower()
+    if EMAIL_RE.match(identifier):
+        user = db.scalar(select(User).where(User.email == identifier))
+    else:
+        user = db.scalar(select(User).where(User.username == identifier))
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(401, "邮箱或密码错误")
     if not user.is_active:
@@ -108,6 +118,7 @@ def logout(response: Response, ctx: AuthContext = Depends(get_auth_context), _: 
 
 @router.post("/password")
 def change_password(payload: Credentials, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    _validate_password(payload.password)
     user.password_hash = hash_password(payload.password)
     for session in user.sessions:
         revoke_session(session)

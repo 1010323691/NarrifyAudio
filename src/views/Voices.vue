@@ -541,7 +541,7 @@ watch(
     <template v-else>
       <Alert v-if="!hasScript" variant="default">
         <Users class="h-4 w-4 shrink-0" />
-        尚未检测到角色——请先在「文本解析」生成解析 JSON（03_parsed_json/）。
+        尚未检测到角色，请先在「文本解析」生成解析结果。
       </Alert>
 
       <!-- 阶段 1 · 生成语音推理基础（LLM only） -->
@@ -663,7 +663,7 @@ watch(
             v-model="scope"
             :show-all="true"
             :all-value="ALL_SCRIPT"
-            label="解析 JSON（03_parsed_json/）"
+            label="解析结果"
           />
         </CardContent>
       </Card>

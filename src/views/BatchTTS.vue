@@ -353,7 +353,7 @@ async function doRunAll() {
   if (busy.value) return
   const names = selectedNames.value
   if (!names.length) return
-  if (!window.confirm('重新全部合成会删除选中文件已合成的音频（05_audio_chunk/ 下对应文件夹，含进度清单），并从头重做全部段落（模型加载一次、耗时较长）。确定继续吗？')) return
+  if (!window.confirm('重新全部合成会删除所选文件已生成的音频和进度记录，并从头重新制作全部段落（模型会重新加载，耗时较长）。确定继续吗？')) return
   busy.value = true
   error.value = ''
   result.value = null
@@ -599,7 +599,7 @@ watch(
                  appears, so the columns can never drift apart. -->
             <div :class="[ROW_GRID, 'sticky top-0 z-10 bg-card py-1 text-xs text-muted-foreground']">
               <span />
-              <span>文件（03_parsed_json/）</span>
+              <span>解析文件</span>
               <span class="text-right">已合成 / 总段落</span>
               <span class="text-right">角色</span>
               <span class="text-right">已就绪声音</span>
@@ -647,7 +647,7 @@ watch(
               </span>
             </label>
             <p v-if="filesLoaded && !rows.length" class="px-2 py-3 text-sm text-muted-foreground">
-              03_parsed_json/ 里没有解析 JSON——请先到「文本解析」生成。
+              暂无可合成的解析结果，请先到「文本解析」完成解析。
             </p>
           </div>
 

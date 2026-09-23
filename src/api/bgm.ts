@@ -63,7 +63,7 @@ export function mixChapters(chapters: string[]): Promise<BgmBatchResult> {
   return http.post<BgmBatchResult>('/api/bgm/mix', { chapters })
 }
 
-/** Package every finished BGM mix into a source-named ZIP through the durable Worker. */
-export function packageMixedAudio(): Promise<BgmPackageResult | { task_id: string }> {
-  return http.post<BgmPackageResult | { task_id: string }>('/api/bgm/package')
+/** Package selected finished BGM mixes into a source-named ZIP through the durable Worker. */
+export function packageMixedAudio(chapters: string[]): Promise<BgmPackageResult | { task_id: string }> {
+  return http.post<BgmPackageResult | { task_id: string }>('/api/bgm/package', { chapters })
 }

@@ -1,1 +1,1 @@
-"""AudiobookStudio backend package."""
+"""Narrify Audio backend package."""

@@ -34,6 +34,7 @@ export interface WorkspaceSummary {
   updated_at: string
   file_count: number
   size_bytes: number
+  split_volume_count: number
   categories: { key: string; label: string; count: number; size_bytes: number }[]
   recent_files: WorkspaceFileSummary[]
   recent_outputs: WorkspaceFileSummary[]
@@ -64,6 +65,10 @@ export function createManagedWorkspace(name: string): Promise<{ id: string; name
 
 export function listManagedProjects(): Promise<ManagedProject[]> {
   return http.get('/api/v1/workspaces')
+}
+
+export function deleteManagedProject(projectId: string): Promise<{ ok: boolean; directory_retained: boolean }> {
+  return http.del(`/api/v1/workspaces/${encodeURIComponent(projectId)}`)
 }
 
 export function getWorkspaceSummary(workspaceId: string): Promise<WorkspaceSummary> {

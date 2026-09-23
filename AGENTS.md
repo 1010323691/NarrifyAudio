@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-AudiobookStudio 是 Vue 3 + TypeScript 前端与 FastAPI/Python 后端组成的应用。
+Narrify Audio 是 Vue 3 + TypeScript 前端与 FastAPI/Python 后端组成的应用。
 
 - `src/`：前端代码；HTTP 客户端放在 `src/api/`，Pinia 状态放在 `src/stores/`，页面模块放在 `src/views/`，通用界面组件放在 `src/components/`。
 - `backend/`：API 路由位于 `backend/api/`，基础设施位于 `backend/core/`，处理逻辑位于 `backend/engines/`，pytest 测试位于 `backend/tests/`。

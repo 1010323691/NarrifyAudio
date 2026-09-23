@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useToast } from '@/components/ui/toast'
 import type { AppConfig, TextToggles } from '@/types'
+import * as adminApi from '@/api/admin'
 
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
@@ -36,6 +37,7 @@ import {
 } from 'lucide-vue-next'
 
 const settings = useSettingsStore()
+const props = withDefaults(defineProps<{ adminOnly?: boolean; adminSection?: string }>(), { adminOnly: false })
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
 const { push: toast } = useToast()
@@ -44,6 +46,11 @@ const draft = ref<AppConfig | null>(null)
 const saving = ref(false)
 const section = ref<'account' | 'appearance' | 'text' | 'models' | 'audio'>('account')
 const workspaceSet = computed(() => workspace.hasActiveProject)
+const settingsTabs = [['account','账号与项目'],['appearance','界面']] as const
+
+watch(() => props.adminSection, (value) => {
+  if (value === 'text' || value === 'models' || value === 'audio') section.value = value
+})
 
 const TOGGLES: { key: keyof TextToggles; label: string }[] = [
   { key: 'sentence_break', label: '断句换段' },
@@ -65,6 +72,16 @@ const THEMES = [
 ]
 
 onMounted(async () => {
+  if (props.adminOnly) {
+    section.value = props.adminSection === 'models' || props.adminSection === 'audio' ? props.adminSection : 'text'
+    try {
+      const result = await adminApi.getApplicationSettings()
+      draft.value = JSON.parse(JSON.stringify(result.config))
+    } catch {
+      draft.value = null
+    }
+    return
+  }
   if (!workspace.loaded) await workspace.refresh()
   if (!settings.loaded) await settings.load()
   if (settings.config) draft.value = JSON.parse(JSON.stringify(settings.config))
@@ -78,40 +95,67 @@ function setTheme(theme: string) {
 
 async function save() {
   if (!draft.value) return
-  const cap = Number(draft.value.tts.batch_concurrency)
-  draft.value.tts.batch_concurrency = Number.isFinite(cap) ? Math.max(1, Math.min(128, Math.trunc(cap))) : 80
   saving.value = true
-  const ok = await settings.save(draft.value)
+  let ok = false
+  if (props.adminOnly) {
+    const config = draft.value
+    try {
+      const result = await adminApi.updateApplicationSettings({
+        text: config.text,
+        audio: config.audio,
+        tts: { ...config.tts, batch_concurrency: Math.max(1, Math.min(128, Math.trunc(Number(config.tts.batch_concurrency) || 80))) },
+        llm: config.llm,
+        prompts: config.prompts,
+        persona_prompts: config.persona_prompts,
+        generation: config.generation,
+        ffmpeg: config.ffmpeg,
+        bgm: config.bgm,
+      })
+      draft.value = result.config
+      settings.config = result.config
+      ok = true
+    } catch {
+      ok = false
+    }
+  } else {
+    ok = await settings.save({ ui: draft.value.ui })
+  }
   saving.value = false
-  if (ok) toast({ title: '设置已保存', variant: 'success', description: '已写入工作空间的 config/app.json，重启后自动恢复。' })
+  if (ok) toast({ title: '设置已保存', variant: 'success', description: props.adminOnly ? '平台功能配置已更新，新启动的任务会使用新配置。' : '界面偏好已保存。' })
   else toast({ title: '保存失败', variant: 'destructive' })
 }
 </script>
 
 <template>
-  <div class="user-settings">
-    <div class="settings-header">
+  <div class="user-settings" :class="{ 'user-settings--admin': adminOnly }">
+    <div v-if="!adminOnly" class="settings-header">
       <div>
         <p class="eyebrow">YOUR PREFERENCES</p>
         <h1 class="page-title">设置</h1>
-        <p class="page-description">账号和界面偏好，以及当前项目的制作参数。</p>
+        <p class="page-description">管理账号信息和个人界面偏好。</p>
       </div>
       <Button v-if="section !== 'account'" @click="save" :disabled="saving || !draft || !workspaceSet">
         <Save class="h-4 w-4" />{{ saving ? '保存中…' : '保存设置' }}
       </Button>
     </div>
 
-    <nav class="settings-tabs" aria-label="用户设置分类">
-      <button v-for="item in ([['account','账号与项目'],['appearance','界面'],['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频']] as const)" :key="item[0]" type="button" :class="section === item[0] ? 'is-active' : ''" @click="section = item[0]">{{ item[1] }}</button>
+    <nav v-if="!adminOnly" class="settings-tabs" aria-label="用户偏好分类">
+      <button v-for="item in settingsTabs" :key="item[0]" type="button" :class="section === item[0] ? 'is-active' : ''" @click="section = item[0]">{{ item[1] }}</button>
     </nav>
 
+    <div v-if="adminOnly" class="settings-actions">
+      <Button @click="save" :disabled="saving || !draft">
+        <Save class="h-4 w-4" />{{ saving ? '保存中…' : '保存设置' }}
+      </Button>
+    </div>
+
     <Alert v-if="!draft" variant="destructive">
-      当前项目设置暂时无法读取。确认项目可用后重试。
+      {{ adminOnly ? '平台功能配置暂时无法读取，请刷新后重试。' : '当前项目设置暂时无法读取。确认项目可用后重试。' }}
     </Alert>
 
     <template v-else>
 
-      <Card v-if="section === 'account'" class="settings-account">
+      <Card v-if="!adminOnly && section === 'account'" class="settings-account">
         <CardHeader><CardTitle class="flex items-center gap-2"><UserRound class="h-5 w-5" />账号</CardTitle></CardHeader>
         <CardContent class="settings-account__body">
           <div><span>显示名称</span><strong>{{ auth.user?.display_name || auth.user?.username || '—' }}</strong></div>
@@ -123,12 +167,12 @@ async function save() {
         </CardContent>
       </Card>
 
-      <Alert v-if="section !== 'account' && !workspaceSet" variant="warning">
+      <Alert v-if="!adminOnly && section !== 'account' && !workspaceSet" variant="warning">
         先在「我的项目」中打开项目，再编辑项目级偏好。<RouterLink to="/dashboard" class="alert-link">选择项目</RouterLink>
       </Alert>
 
       <!-- 外观 -->
-      <Card v-if="section === 'appearance'">
+      <Card v-if="!adminOnly && section === 'appearance'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Palette class="h-5 w-5" />外观主题</CardTitle>
         </CardHeader>
@@ -165,7 +209,7 @@ async function save() {
       </Card>
 
       <!-- 文本排版 -->
-      <Card v-if="section === 'text'">
+      <Card v-if="adminOnly && section === 'text'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Type class="h-5 w-5" />文本排版</CardTitle>
         </CardHeader>
@@ -180,7 +224,7 @@ async function save() {
       </Card>
 
       <!-- LLM 配置 -->
-      <Card v-if="section === 'models'">
+      <Card v-if="adminOnly && section === 'models'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Server class="h-5 w-5" />LLM 配置</CardTitle>
           <CardDescription>
@@ -206,7 +250,7 @@ async function save() {
       </Card>
 
       <!-- 生成参数 -->
-      <Card v-if="section === 'models'">
+      <Card v-if="adminOnly && section === 'models'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><SlidersHorizontal class="h-5 w-5" />生成参数</CardTitle>
           <CardDescription>调整文本解析的分段和采样参数。</CardDescription>
@@ -289,7 +333,7 @@ async function save() {
       </Card>
 
       <!-- Prompt 配置 -->
-      <Card v-if="section === 'models'">
+      <Card v-if="adminOnly && section === 'models'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><MessageSquareText class="h-5 w-5" />Prompt 配置</CardTitle>
           <CardDescription>查看或修改文本解析 Prompt；留空使用默认值。</CardDescription>
@@ -306,7 +350,7 @@ async function save() {
         </CardContent>
       </Card>
 
-      <Card v-if="section === 'audio'">
+      <Card v-if="adminOnly && section === 'audio'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><AudioWaveform class="h-5 w-5" />TTS 批处理</CardTitle>
           <CardDescription>按文本长度排序后组批，仅使用批内上限。</CardDescription>
@@ -327,7 +371,7 @@ async function save() {
       </Card>
 
       <!-- 音频分集 -->
-      <Card v-if="section === 'audio'">
+      <Card v-if="adminOnly && section === 'audio'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><AudioLines class="h-5 w-5" />音频分集</CardTitle>
         </CardHeader>
@@ -360,7 +404,7 @@ async function save() {
       </Card>
 
       <!-- 背景音乐 -->
-      <Card v-if="section === 'audio'">
+      <Card v-if="adminOnly && section === 'audio'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Music4 class="h-5 w-5" />背景音乐</CardTitle>
           <CardDescription>
@@ -408,5 +452,5 @@ async function save() {
 </template>
 
 <style scoped>
-.user-settings{display:grid;gap:14px;max-width:1100px;margin:0 auto;padding-bottom:32px}.settings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.14em;color:hsl(var(--primary))}.settings-header h1{margin-top:5px}.settings-header .page-description{margin-top:4px}.settings-tabs{display:flex;gap:6px;overflow-x:auto;border-bottom:1px solid hsl(var(--border));padding-bottom:8px}.settings-tabs button{white-space:nowrap;border:1px solid transparent;border-radius:8px;padding:8px 11px;color:hsl(var(--muted-foreground));font-size:12px;font-weight:650}.settings-tabs button.is-active{border-color:hsl(var(--border));background:hsl(var(--card));color:hsl(var(--foreground));box-shadow:0 1px 2px hsl(var(--foreground)/.05)}.settings-account__body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 20px}.settings-account__body>div{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;border-bottom:1px solid hsl(var(--border));font-size:12px}.settings-account__body>div>span,.settings-account__body>div>div>span{color:hsl(var(--muted-foreground))}.settings-account__body strong{max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}.settings-current-project{grid-column:1/-1}.settings-current-project>div{display:grid;gap:3px}.settings-current-project a{display:inline-flex;align-items:center;gap:5px;color:hsl(var(--primary));font-size:11px;font-weight:650}.settings-help{grid-column:1/-1;margin-top:10px;color:hsl(var(--muted-foreground));font-size:11px}.alert-link{margin-left:6px;font-weight:700;text-decoration:underline}@media(max-width:600px){.settings-account__body{grid-template-columns:1fr}.settings-current-project{grid-column:auto}.settings-help{grid-column:auto}.settings-tabs button{padding:7px 9px}}
+.user-settings{display:grid;gap:14px;max-width:1100px;margin:0 auto;padding-bottom:32px}.user-settings--admin{max-width:none;margin:0}.settings-header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.settings-actions{display:flex;justify-content:flex-end;margin-top:-6px}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.14em;color:hsl(var(--primary))}.settings-header h1{margin-top:5px}.settings-header .page-description{margin-top:4px}.settings-tabs{display:flex;gap:6px;overflow-x:auto;border-bottom:1px solid hsl(var(--border));padding-bottom:8px}.settings-tabs button{white-space:nowrap;border:1px solid transparent;border-radius:8px;padding:8px 11px;color:hsl(var(--muted-foreground));font-size:12px;font-weight:650}.settings-tabs button.is-active{border-color:hsl(var(--border));background:hsl(var(--card));color:hsl(var(--foreground));box-shadow:0 1px 2px hsl(var(--foreground)/.05)}.settings-account__body{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 20px}.settings-account__body>div{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;border-bottom:1px solid hsl(var(--border));font-size:12px}.settings-account__body>div>span,.settings-account__body>div>div>span{color:hsl(var(--muted-foreground))}.settings-account__body strong{max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}.settings-current-project{grid-column:1/-1}.settings-current-project>div{display:grid;gap:3px}.settings-current-project a{display:inline-flex;align-items:center;gap:5px;color:hsl(var(--primary));font-size:11px;font-weight:650}.settings-help{grid-column:1/-1;margin-top:10px;color:hsl(var(--muted-foreground));font-size:11px}.alert-link{margin-left:6px;font-weight:700;text-decoration:underline}@media(max-width:600px){.settings-account__body{grid-template-columns:1fr}.settings-current-project{grid-column:auto}.settings-help{grid-column:auto}.settings-tabs button{padding:7px 9px}}
 </style>
