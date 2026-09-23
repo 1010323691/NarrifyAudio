@@ -117,6 +117,10 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
     cancelled = client.post(f"/api/v1/admin/tasks/{submitted.json()['id']}/cancel", headers={"X-CSRF-Token": csrf})
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["status"] == "cancelled"
+    metrics = client.get("/api/v1/admin/task-metrics")
+    assert metrics.status_code == 200, metrics.text
+    assert metrics.json()["total"] >= 1
+    assert any(item["task_type"] == "text.format" for item in metrics.json()["by_type"])
     quota = client.get("/api/v1/quota").json()
     assert quota["available_units"] == 3
     assert quota["reserved_units"] == 0

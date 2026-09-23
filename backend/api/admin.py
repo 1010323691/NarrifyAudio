@@ -295,6 +295,46 @@ def list_all_tasks(_: User = Depends(require_admin), db: Session = Depends(get_d
     ]
 
 
+@router.get("/task-metrics")
+def task_metrics(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """Return an aggregate view for the admin operations dashboard.
+
+    This is intentionally separate from the recent-task table: the table is
+    capped for responsiveness, while these grouped counts cover every
+    persisted task type and status.
+    """
+    rows = db.execute(
+        select(Task.task_type, Task.status, func.count())
+        .group_by(Task.task_type, Task.status)
+    ).all()
+    by_type: dict[str, dict[str, int]] = {}
+    status_counts: dict[str, int] = {}
+    for task_type, status, count in rows:
+        typed = by_type.setdefault(str(task_type), {})
+        typed[str(status)] = int(count)
+        status_counts[str(status)] = status_counts.get(str(status), 0) + int(count)
+
+    def count_statuses(*statuses: str) -> int:
+        return sum(status_counts.get(status, 0) for status in statuses)
+
+    return {
+        "total": sum(status_counts.values()),
+        "status_counts": status_counts,
+        "stage_counts": {
+            "production": count_statuses("pending"),
+            "queued": count_statuses("queued", "retrying", "paused"),
+            "consuming": count_statuses("running", "cancelling"),
+            "completed": count_statuses("succeeded"),
+            "attention": count_statuses("failed", "timeout", "cancelled"),
+        },
+        "by_type": [
+            {"task_type": task_type, "total": sum(statuses.values()), "statuses": statuses}
+            for task_type, statuses in sorted(by_type.items())
+        ],
+        "generated_at": utcnow().isoformat(),
+    }
+
+
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     if actor.role != "admin":

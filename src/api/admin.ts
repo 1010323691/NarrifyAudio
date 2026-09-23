@@ -32,7 +32,29 @@ export interface AdminTask {
   status: string
   progress: number
   error_message: string
+  error_code?: string
   created_at: string
+  updated_at: string
+}
+
+export interface TaskTypeMetric {
+  task_type: string
+  total: number
+  statuses: Record<string, number>
+}
+
+export interface TaskMetrics {
+  total: number
+  status_counts: Record<string, number>
+  stage_counts: {
+    production: number
+    queued: number
+    consuming: number
+    completed: number
+    attention: number
+  }
+  by_type: TaskTypeMetric[]
+  generated_at: string
 }
 
 export interface WorkerStatus {
@@ -89,6 +111,10 @@ export function adjustQuota(userId: string, amount: number, idempotency_key: str
 
 export function listTasks(): Promise<AdminTask[]> {
   return http.get('/api/v1/admin/tasks')
+}
+
+export function getTaskMetrics(): Promise<TaskMetrics> {
+  return http.get('/api/v1/admin/task-metrics')
 }
 
 export function cancelTask(id: string): Promise<{ id: string; status: string }> {

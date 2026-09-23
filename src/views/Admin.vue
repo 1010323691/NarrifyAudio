@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { RefreshCw, Save, ShieldCheck, UserCheck, UserX } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
@@ -10,6 +10,7 @@ import CardTitle from '@/components/ui/CardTitle.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
+import TaskOperationsPanel from '@/components/admin/TaskOperationsPanel.vue'
 import { useToast } from '@/components/ui/toast'
 import * as adminApi from '@/api/admin'
 
@@ -25,7 +26,9 @@ const quotaDraft = ref<Record<string, string>>({})
 const tasks = ref<adminApi.AdminTask[]>([])
 const workers = ref<adminApi.WorkerStatus[]>([])
 const queue = ref<adminApi.QueueStatus | null>(null)
+const metrics = ref<adminApi.TaskMetrics | null>(null)
 const busy = ref(false)
+let operationsTimer: ReturnType<typeof setInterval> | null = null
 
 function isLastActiveAdmin(user: adminApi.AdminUser): boolean {
   return user.role === 'admin' && user.is_active && users.value.filter(item => item.role === 'admin' && item.is_active).length <= 1
@@ -34,8 +37,8 @@ function isLastActiveAdmin(user: adminApi.AdminUser): boolean {
 async function load() {
   busy.value = true
   try {
-    const [userRows, storageSettings, quota, registration, taskRows, workerRows, queueStatus] = await Promise.all([
-      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.getQuotaSettings(), adminApi.getRegistrationSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(),
+    const [userRows, storageSettings, quota, registration, taskRows, workerRows, queueStatus, taskSummary] = await Promise.all([
+      adminApi.listUsers(), adminApi.getStorageSettings(), adminApi.getQuotaSettings(), adminApi.getRegistrationSettings(), adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(), adminApi.getTaskMetrics(),
     ])
     users.value = userRows
     storage.value = storageSettings
@@ -47,10 +50,25 @@ async function load() {
     tasks.value = taskRows
     workers.value = workerRows
     queue.value = queueStatus
+    metrics.value = taskSummary
   } catch (error: any) {
     toast({ title: '管理数据加载失败', description: error?.message || String(error), variant: 'destructive' })
   } finally {
     busy.value = false
+  }
+}
+
+async function refreshOperations() {
+  try {
+    const [taskRows, workerRows, queueStatus, taskSummary] = await Promise.all([
+      adminApi.listTasks(), adminApi.listWorkers(), adminApi.getQueueStatus(), adminApi.getTaskMetrics(),
+    ])
+    tasks.value = taskRows
+    workers.value = workerRows
+    queue.value = queueStatus
+    metrics.value = taskSummary
+  } catch {
+    // Keep the last known snapshot visible during a transient polling failure.
   }
 }
 
@@ -125,7 +143,14 @@ async function cancelTask(task: adminApi.AdminTask) {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  operationsTimer = setInterval(() => { void refreshOperations() }, 4000)
+})
+
+onBeforeUnmount(() => {
+  if (operationsTimer) clearInterval(operationsTimer)
+})
 </script>
 
 <template>
@@ -137,6 +162,8 @@ onMounted(load)
       </div>
       <Button variant="outline" :disabled="busy" @click="load"><RefreshCw class="h-4 w-4" />刷新</Button>
     </header>
+
+    <TaskOperationsPanel :tasks="tasks" :workers="workers" :queue="queue" :metrics="metrics" :loading="busy" />
 
     <Card>
       <CardHeader>
