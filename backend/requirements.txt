@@ -13,6 +13,7 @@ SQLAlchemy>=2.0.36
 alembic>=1.14
 psycopg[binary]>=3.2
 redis>=5.2
+psutil>=6.0
 
 # Qwen3-TTS runtime (torch/torchaudio are installed from the CUDA index by the
 # setup script; installing qwen-tts first may temporarily pull a CPU torch wheel).

@@ -401,6 +401,11 @@ function openCreateFolderDialog() {
   folderDialogOpen.value = true
 }
 
+function fileSize(value?: number | null): string {
+  if (value == null) return '未找到文件'
+  return value < 1024 * 1024 ? `${(value / 1024).toFixed(1)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
 function closeCreateFolderDialog() {
   if (folderBusy.value) return
   folderDialogOpen.value = false
@@ -1172,7 +1177,7 @@ onActivated(() => {
           </div>
 
           <!-- 行 = 曲目表 -->
-          <div class="overflow-x-auto overflow-y-visible rounded-lg border"><Table class="min-w-[56rem]">
+          <div class="overflow-x-auto overflow-y-visible rounded-lg border"><Table class="min-w-[60rem]">
             <TableHeader>
               <TableRow>
                 <TableHead class="w-8">
@@ -1188,6 +1193,7 @@ onActivated(() => {
                 <TableHead class="w-24">文件夹</TableHead>
                 <TableHead class="w-14">格式</TableHead>
                 <TableHead class="w-14">时长</TableHead>
+                <TableHead class="w-20">大小</TableHead>
                 <TableHead>标签</TableHead>
                 <TableHead class="w-40">AI 识别</TableHead>
                 <TableHead class="w-16">启用</TableHead>
@@ -1232,6 +1238,7 @@ onActivated(() => {
                 <TableCell class="text-xs tabular-nums text-muted-foreground">
                   {{ formatDuration(tr.duration) }}
                 </TableCell>
+                <TableCell class="text-xs tabular-nums text-muted-foreground">{{ fileSize(tr.size_bytes) }}</TableCell>
                 <TableCell class="w-28">
                   <div
                     v-if="CATEGORIES.some((c) => tr.tags?.[c]?.length)"

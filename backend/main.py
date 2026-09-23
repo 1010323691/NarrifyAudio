@@ -34,6 +34,7 @@ from .api import tts as api_tts
 from .api import workspace as api_workspace
 from .core import config as core_config
 from .core import logging_setup
+from .core.observability import record_api_request
 from .core.request_context import bind_workspace, reset_workspace
 from .core.paths import get_layout
 from .platform.bootstrap import ensure_bootstrap_admin
@@ -45,6 +46,7 @@ from .platform.models import Workspace
 from .platform.security import load_session
 from .platform.storage import user_workspace_root
 from sqlalchemy import select
+from time import monotonic
 
 PORT = 8642
 
@@ -85,6 +87,22 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="NarrifyAudio API", version="0.2.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def collect_api_metrics(request, call_next):
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    started = monotonic()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_name = getattr(route, "path", "unmatched")
+        record_api_request(route_name, status_code, (monotonic() - started) * 1000, request.method)
 
 
 @app.middleware("http")

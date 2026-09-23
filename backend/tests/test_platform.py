@@ -11,6 +11,7 @@ pytest.importorskip("sqlalchemy")
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.core.observability import record_api_request
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import OutboxEvent, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root
@@ -65,6 +66,8 @@ def test_admin_cannot_disable_last_admin(client: TestClient):
     # The test account is a regular user, so it cannot cross the admin path.
     first = _register(client, f"{uuid.uuid4()}@example.com")
     assert client.get("/api/v1/admin/users").status_code == 403
+    assert client.post("/api/music/tags", headers={"X-CSRF-Token": first["csrf_token"]},
+                       json={"category": "scene", "name": "restricted"}).status_code == 403
 
 
 def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestClient):
@@ -121,6 +124,34 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
     assert metrics.status_code == 200, metrics.text
     assert metrics.json()["total"] >= 1
     assert any(item["task_type"] == "text.format" for item in metrics.json()["by_type"])
+    assert metrics.json()["throughput_60s"]["window_seconds"] == 60
+    assert {"online_workers", "total_slots", "active_slots", "idle_slots"} <= metrics.json()["worker_pool"].keys()
+    activity = client.get("/api/v1/admin/task-activity")
+    assert activity.status_code == 200, activity.text
+    assert any(item["event_type"] == "admin_cancel_requested" for item in activity.json())
+    overview = client.get("/api/v1/admin/overview")
+    assert overview.status_code == 200, overview.text
+    assert {item["key"] for item in overview.json()["services"]} >= {"api", "database", "queue", "llm", "tts", "audio", "gpu"}
+    assert overview.json()["tasks"]["queued"] >= 0
+    performance = client.get("/api/v1/admin/performance")
+    assert performance.status_code == 200, performance.text
+    assert performance.json()["system"]["disk_total_bytes"] > 0
+    assert performance.json()["api"]["request_count"] >= 1
+    assert performance.json()["api"]["p95_ms"] is not None
+    record_api_request("/api/test/failure", 500, 3.0, "GET")
+    api_errors = client.get("/api/v1/admin/events?module=api")
+    assert api_errors.status_code == 200, api_errors.text
+    assert any(row["type"] == "HTTP 500" and "/api/test/failure" in row["message"] for row in api_errors.json())
+    overview_errors = client.get("/api/v1/admin/overview")
+    assert any(row["module"] == "api" and row["type"] == "HTTP 500" for row in overview_errors.json()["recent_errors"])
+    resources = client.get("/api/v1/admin/resources")
+    assert resources.status_code == 200, resources.text
+    assert resources.json()["projects"] >= 1
+    assert client.get("/api/v1/admin/events?level=info&limit=2").status_code == 200
+    task_rows = client.get("/api/v1/admin/tasks?status=cancelled&limit=1")
+    assert task_rows.status_code == 200, task_rows.text
+    assert len(task_rows.json()) <= 1
+    assert all(row["status"] == "cancelled" for row in task_rows.json())
     quota = client.get("/api/v1/quota").json()
     assert quota["available_units"] == 3
     assert quota["reserved_units"] == 0
@@ -648,3 +679,23 @@ def test_expired_worker_lease_is_fenced_and_recovery_requeues(client: TestClient
     assert claim_two.attempt_no == 2
     assert heartbeat_claim(claim_one) is False
     assert recover_database_tasks() == 0
+
+
+def test_api_snapshot_p95_uses_request_durations():
+    from backend.core import observability
+
+    with observability._lock:
+        observability._samples.clear()
+    for duration in range(1, 101):
+        observability.record_api_request("/api/test/latency", 200, float(duration))
+    snapshot = observability.api_snapshot()
+    assert snapshot["p95_ms"] == 95
+    assert snapshot["endpoints"][0]["p95_ms"] == 95
+
+
+def test_admin_memory_metrics_use_container_cgroup_limit(tmp_path):
+    from backend.api.admin import _memory_usage
+
+    (tmp_path / "memory.current").write_text("1500000")
+    (tmp_path / "memory.max").write_text("2000000")
+    assert _memory_usage(8_000_000, tmp_path) == (1_500_000, 2_000_000)

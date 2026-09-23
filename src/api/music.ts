@@ -1,7 +1,7 @@
 // Music library API (全局音乐库；后端 /api/music)。
 // 瘦客户端：只做 HTTP 封装，无处理逻辑。
 
-import { API_BASE, ApiError, http } from './client'
+import { API_BASE, http } from './client'
 import type {
   MusicLibrary,
   MusicTrack,
@@ -32,19 +32,7 @@ export async function uploadMusic(file: File, folder?: string): Promise<{ name: 
   const form = new FormData()
   form.append('file', file)
   if (folder) form.append('folder', folder)
-  const res = await fetch(API_BASE + '/api/music/upload', { method: 'POST', body: form })
-  const text = await res.text()
-  let body: unknown
-  try {
-    body = text ? JSON.parse(text) : null
-  } catch {
-    body = text
-  }
-  if (!res.ok) {
-    const detail = (body as any)?.detail ?? (body as any)?.error ?? res.statusText
-    throw new ApiError(res.status, typeof detail === 'string' ? detail : JSON.stringify(detail))
-  }
-  return body as { name: string; track: MusicTrack }
+  return http.upload<{ name: string; track: MusicTrack }>('/api/music/upload', form)
 }
 
 /** Update a track's tags / enabled / description (partial). */

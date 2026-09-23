@@ -32,7 +32,7 @@ from ..engines.script import (
     llm_json_with_retry,
 )
 from ..platform.database import get_db
-from ..platform.deps import AuthContext, get_auth_context
+from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from .bgm import _run_bgm_coordinator
 
@@ -66,6 +66,14 @@ def _track_path(name: str) -> Path:
     if not str(p).startswith(str(d)):
         raise HTTPException(400, "非法路径")
     return p
+
+
+def _track_size(name: str) -> int | None:
+    try:
+        path = _track_path(name)
+        return path.stat().st_size if path.is_file() and not path.is_symlink() else None
+    except OSError:
+        return None
 
 
 def _locked_references(name: str) -> list[str]:
@@ -171,11 +179,13 @@ def get_library() -> dict:
     """
     idx = music_engine.load_index()
     sugg = music_engine.load_suggestions().get("tracks") or {}
-    return {**idx, "folder_counts": music_engine.folder_counts(idx),
+    tracks = {name: {**track, "size_bytes": _track_size(name)}
+              for name, track in idx["tracks"].items()}
+    return {**idx, "tracks": tracks, "folder_counts": music_engine.folder_counts(idx),
             "suggestions": {n: e for n, e in sugg.items() if n in idx["tracks"]}}
 
 
-@router.post("/upload")
+@router.post("/upload", dependencies=[Depends(require_admin)])
 async def upload_track(file: UploadFile = File(...),
                        folder: str = Form("")) -> dict:
     """Upload one music file (mp3/wav/flac). Same name -> 409 (never overwrites).
@@ -257,7 +267,7 @@ def preview_track(name: str):
 # track edits
 # --------------------------------------------------------------------------- #
 
-@router.put("/tracks/{name}")
+@router.put("/tracks/{name}", dependencies=[Depends(require_admin)])
 def update_track(name: str, body: TrackUpdate) -> dict:
     """Update a track's tags / enabled / description. Out-of-vocabulary tags
     are folded into the custom bucket (engines.music.normalize_track_tags)."""
@@ -284,7 +294,7 @@ def update_track(name: str, body: TrackUpdate) -> dict:
     return {"name": name, "track": idx["tracks"][name]}
 
 
-@router.delete("/tracks/{name}")
+@router.delete("/tracks/{name}", dependencies=[Depends(require_admin)])
 def delete_track(name: str) -> dict:
     """Delete one track. Locked chapter references skip it (unlocked ones do
     not block — the chapter degrades to music_missing, re-match self-heals)."""
@@ -294,7 +304,7 @@ def delete_track(name: str) -> dict:
             "missing": []}
 
 
-@router.post("/tracks/batch-enable")
+@router.post("/tracks/batch-enable", dependencies=[Depends(require_admin)])
 def batch_enable(body: BatchNames) -> dict:
     if not body.names:
         raise HTTPException(400, "未选择音乐。")
@@ -313,7 +323,7 @@ def batch_enable(body: BatchNames) -> dict:
             "missing": missing}
 
 
-@router.post("/tracks/batch-tags")
+@router.post("/tracks/batch-tags", dependencies=[Depends(require_admin)])
 def batch_tags(body: BatchTags) -> dict:
     """Add/remove tag names to/from the SELECTED tracks (body.tracks = 选中音乐,
     body.names = 标签名). Out-of-vocabulary tag names are allowed here (the
@@ -350,7 +360,7 @@ def batch_tags(body: BatchTags) -> dict:
             "category": body.category, "names": names, "missing": missing}
 
 
-@router.post("/tracks/batch-delete")
+@router.post("/tracks/batch-delete", dependencies=[Depends(require_admin)])
 def batch_delete(body: BatchNames) -> dict:
     """Delete many tracks with the same locked-reference skip semantics as the
     single delete (shared via _delete_track)."""
@@ -376,7 +386,7 @@ def batch_delete(body: BatchNames) -> dict:
     return {"deleted": deleted, "skipped": skipped, "missing": missing}
 
 
-@router.post("/tracks/apply-suggestions")
+@router.post("/tracks/apply-suggestions", dependencies=[Depends(require_admin)])
 def apply_suggestions(body: ApplySuggestionsReq) -> dict:
     """Adopt the cached AI tag candidates (``music_tag_suggestions.json``) for
     the given tracks — the「AI 推荐采用」one-click confirmation.
@@ -459,7 +469,7 @@ class TrackMove(BaseModel):
     folder: str = ""  # "" = move to uncategorised (library root)
 
 
-@router.post("/folders")
+@router.post("/folders", dependencies=[Depends(require_admin)])
 def create_folder(body: FolderCreate) -> dict:
     """Create a folder (metadata only — no filesystem entity). Duplicate name
     -> 409 (checked under the same index transaction)."""
@@ -477,7 +487,7 @@ def create_folder(body: FolderCreate) -> dict:
     return {"folder": name, "folders": idx["folders"]}
 
 
-@router.put("/folders/{folder}")
+@router.put("/folders/{folder}", dependencies=[Depends(require_admin)])
 def rename_folder(folder: str, body: FolderRename) -> dict:
     """Rename a folder + propagate to every track's ``folder`` field (single
     atomic transaction). 404 source missing / 409 target taken / no-op when
@@ -511,7 +521,7 @@ def rename_folder(folder: str, body: FolderRename) -> dict:
             "folders": idx["folders"]}
 
 
-@router.delete("/folders/{folder}")
+@router.delete("/folders/{folder}", dependencies=[Depends(require_admin)])
 def delete_folder(folder: str) -> dict:
     """Delete a folder. NON-EMPTY -> 409 (tracks must be moved out first —
     music files are never deleted and a non-empty folder is never emptied
@@ -537,7 +547,7 @@ def delete_folder(folder: str) -> dict:
     return {"deleted": [name], "folders": idx["folders"]}
 
 
-@router.post("/tracks/move")
+@router.post("/tracks/move", dependencies=[Depends(require_admin)])
 def move_tracks(body: TrackMove) -> dict:
     """Move tracks to a folder (single or batch — one endpoint; ``folder = ""``
     = uncategorised / library root). Guards: per-name traversal 400 -> empty
@@ -618,7 +628,7 @@ def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> Non
             pass
 
 
-@router.post("/tags")
+@router.post("/tags", dependencies=[Depends(require_admin)])
 def create_tag(body: TagCreate) -> dict:
     name = (body.name or "").strip()
     if not name:
@@ -636,7 +646,7 @@ def _add_tag(idx: dict, category: str, name: str) -> None:
     idx["tags"].setdefault(category, []).append(name)
 
 
-@router.post("/tags/rename")
+@router.post("/tags/rename", dependencies=[Depends(require_admin)])
 def rename_tag(body: TagRename) -> dict:
     old = (body.name or "").strip()
     new = (body.new_name or "").strip()
@@ -672,7 +682,7 @@ def _affected_count(idx: dict, category: str, old: str, new: str) -> int:
     return n
 
 
-@router.delete("/tags/{category}/{name}")
+@router.delete("/tags/{category}/{name}", dependencies=[Depends(require_admin)])
 def delete_tag(category: str, name: str) -> dict:
     if category not in music_engine.TAG_CATEGORIES:
         raise HTTPException(400, f"未知标签分类：{category}")
@@ -692,7 +702,7 @@ def _delete_tag(idx: dict, category: str, name: str) -> None:
 # AI tag recommendation (text-only: filename + description + vocabulary)
 # --------------------------------------------------------------------------- #
 
-@router.post("/suggest-tags")
+@router.post("/suggest-tags", dependencies=[Depends(require_admin)])
 def suggest_tags(
     body: SuggestTagsReq,
     ctx: AuthContext = Depends(get_auth_context),
@@ -738,7 +748,7 @@ def suggest_tags(
     return {"tags": parsed}
 
 
-@router.post("/suggest-tags-durable")
+@router.post("/suggest-tags-durable", dependencies=[Depends(require_admin)])
 def suggest_tags_durable(
     body: SuggestTagsReq,
     ctx: AuthContext = Depends(get_auth_context),
@@ -792,7 +802,7 @@ def _inflight_ai_names() -> set[str]:
     return out
 
 
-@router.post("/suggest-tags-batch")
+@router.post("/suggest-tags-batch", dependencies=[Depends(require_admin)])
 def suggest_tags_batch(
     body: SuggestBatchReq,
     ctx: AuthContext = Depends(get_auth_context),

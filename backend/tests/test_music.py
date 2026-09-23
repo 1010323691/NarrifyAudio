@@ -1392,6 +1392,7 @@ def test_get_library_exposes_folders_and_counts(sandbox):
     assert r["folder_counts"] == {"战斗": 1}
     assert r["tracks"]["a.mp3"]["folder"] == "战斗"
     assert r["tracks"]["b.mp3"]["folder"] == ""
+    assert r["tracks"]["a.mp3"]["size_bytes"] == api_music._track_path("a.mp3").stat().st_size
 
 
 # --------------------------------------------------------------------------- #

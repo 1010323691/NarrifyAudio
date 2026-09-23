@@ -36,18 +36,35 @@ const ALL_ITEMS = [
   { to: '/bgm', label: '背景音乐', icon: Music4 },
   { to: '/settings', label: '设置', icon: Settings },
   // 音乐库 = 全局资源（工作空间外、跨工程共享）——与设置同级、放导航栏最下方。
-  { to: '/music', label: '音乐库', icon: Disc3 },
+  { to: '/music', label: '音乐库管理', icon: Disc3, admin: true },
   { to: '/admin', label: '管理后台', icon: ShieldCheck, admin: true },
 ]
+
+const ADMIN_ITEMS = [
+  { to: '/admin', label: '总览', icon: LayoutDashboard },
+  { to: '/admin?tab=performance', label: '性能监控', icon: AudioLines, tab: 'performance' },
+  { to: '/admin?tab=users', label: '用户管理', icon: Users, tab: 'users' },
+  { to: '/admin?tab=resources', label: '资源管理', icon: Layers, tab: 'resources' },
+  { to: '/music', label: '音乐库管理', icon: Disc3 },
+  { to: '/admin?tab=settings', label: '系统配置', icon: Settings, tab: 'settings' },
+  { to: '/admin?tab=tasks', label: '任务 / 队列', icon: Combine, tab: 'tasks' },
+  { to: '/admin?tab=logs', label: '日志 / 异常', icon: ScanText, tab: 'logs' },
+] as const
 
 // 「音频分集」导航项受设置 ui.show_audio_split 控制（默认关 = 隐藏）。
 // 背景音乐 / 音乐库恒显示（不受 show_audio_split 过滤）。
 const items = computed(() =>
   ALL_ITEMS.filter((it) => (!it.admin || auth.user?.role === 'admin') && (settings.config?.ui.show_audio_split || it.to !== '/audio')),
 )
+const isAdminArea = computed(() => auth.user?.role === 'admin' && ['/admin', '/music'].includes(route.path))
 
 function isActive(to: string) {
   return route.path === to || (to !== '/dashboard' && route.path.startsWith(to))
+}
+function isAdminItemActive(item: (typeof ADMIN_ITEMS)[number]) {
+  if (item.to === '/music') return route.path === '/music'
+  if (route.path !== '/admin') return false
+  return 'tab' in item ? route.query.tab === item.tab : !route.query.tab
 }
 </script>
 
@@ -63,7 +80,17 @@ function isActive(to: string) {
       </div>
     </div>
 
-    <nav class="app-nav" aria-label="主导航">
+    <nav v-if="isAdminArea" class="app-nav" aria-label="系统管理导航">
+      <div class="app-nav__group">
+        <div class="app-nav__label">系统管理</div>
+        <RouterLink v-for="it in ADMIN_ITEMS" :key="it.to" :to="it.to" class="app-nav__item" :class="isAdminItemActive(it) ? 'is-active' : ''">
+          <component :is="it.icon" class="app-nav__icon" aria-hidden="true" />
+          <span>{{ it.label }}</span>
+        </RouterLink>
+      </div>
+    </nav>
+
+    <nav v-else class="app-nav" aria-label="主导航">
       <div class="app-nav__group">
         <div class="app-nav__label">制作流程</div>
         <RouterLink
@@ -81,7 +108,7 @@ function isActive(to: string) {
       <div class="app-nav__group app-nav__group--secondary">
         <div class="app-nav__label">资源与设置</div>
         <RouterLink
-          v-for="it in items.filter((item) => ['/settings', '/music', '/admin'].includes(item.to))"
+          v-for="it in items.filter((item) => item.to === '/settings')"
           :key="it.to"
           :to="it.to"
           class="app-nav__item"
@@ -89,6 +116,13 @@ function isActive(to: string) {
         >
           <component :is="it.icon" class="app-nav__icon" aria-hidden="true" />
           <span>{{ it.label }}</span>
+        </RouterLink>
+      </div>
+
+      <div v-if="auth.user?.role === 'admin'" class="app-nav__group app-nav__group--secondary">
+        <div class="app-nav__label">系统管理</div>
+        <RouterLink v-for="it in items.filter((item) => ['/admin', '/music'].includes(item.to))" :key="it.to" :to="it.to" class="app-nav__item" :class="isActive(it.to) ? 'is-active' : ''">
+          <component :is="it.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ it.label }}</span>
         </RouterLink>
       </div>
     </nav>

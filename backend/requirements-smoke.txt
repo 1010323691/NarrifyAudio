@@ -8,3 +8,4 @@ SQLAlchemy>=2.0.36
 alembic>=1.14
 psycopg[binary]>=3.2
 redis>=5.2
+psutil>=6.0

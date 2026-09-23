@@ -79,7 +79,7 @@ const router = createRouter({
           path: 'music',
           name: 'music',
           component: () => import('@/views/MusicLibrary.vue'),
-          meta: { title: '音乐库' },
+          meta: { title: '音乐库管理', requiresAdmin: true },
         },
       ],
     },

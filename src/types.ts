@@ -649,6 +649,8 @@ export type TrackTags = Record<MusicTagCategory, string[]>
 export interface MusicTrack {
   /** Duration in seconds (0 when the probe failed — non-blocking). */
   duration: number
+  /** Actual on-disk size, or null if the indexed file is missing. */
+  size_bytes?: number | null
   enabled: boolean
   description: string
   tags: TrackTags

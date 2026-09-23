@@ -8,6 +8,36 @@ export interface AdminUser {
   role: 'user' | 'admin'
   is_active: boolean
   created_at: string
+  last_seen_at?: string | null
+  project_count?: number
+  file_bytes?: number
+  consumed_units?: number
+}
+
+export interface ServiceStatus { key: string; name: string; status: 'healthy' | 'warning' | 'error' | 'unknown'; detail: string }
+export interface GpuStatus { index: number; name: string; utilization_percent: number; memory_used_mb: number; memory_total_mb: number; temperature_c: number }
+export interface AdminEvent { id: string; time: string; level: string; module: string; type: string; message: string }
+export interface AdminOverview {
+  generated_at: string; services: ServiceStatus[]; today: { completed: number; failed: number; active_users: number }
+  tasks: { running: number; queued: number }; workers: TaskMetrics['worker_pool']; queue: QueueStatus; api: ApiSnapshot
+  system: { cpu_percent: number | null; ram_used_bytes: number | null; ram_total_bytes: number | null }
+  gpu: GpuStatus[]; user_count: number; recent_errors: AdminEvent[]
+}
+export interface AdminPerformance {
+  generated_at: string
+  system: { disk_total_bytes: number; disk_used_bytes: number; disk_free_bytes: number; cpu_percent: number | null; ram_used_bytes: number | null; ram_total_bytes: number | null; uptime_seconds: number | null; load_average_1m?: number }
+  gpu: GpuStatus[]; tasks: TaskMetrics; workers: WorkerStatus[]; queue: QueueStatus; api: ApiSnapshot; unavailable_metrics: string[]
+}
+export interface ApiSnapshot {
+  window_seconds: number; request_count: number; server_error_count: number; error_rate: number
+  average_ms: number | null; p95_ms: number | null; status_counts: Record<string, number>; scope: string
+  endpoints: { route: string; requests: number; server_errors: number; error_rate: number; average_ms: number; p95_ms: number }[]
+}
+export interface AdminResources {
+  root_path: string; disk_total_bytes: number; disk_used_bytes: number; disk_free_bytes: number
+  workspaces: number; projects: number; files: { kind: string; count: number; size_bytes: number }[]
+  users: { username: string; count: number; size_bytes: number }[]; scope: string
+  music_library: { count: number; size_bytes: number }
 }
 
 export interface StorageSettings {
@@ -35,6 +65,11 @@ export interface AdminTask {
   error_code?: string
   created_at: string
   updated_at: string
+  project_id?: string
+  started_at?: string | null
+  finished_at?: string | null
+  worker_id?: string | null
+  attempt_no?: number
 }
 
 export interface TaskTypeMetric {
@@ -53,8 +88,21 @@ export interface TaskMetrics {
     completed: number
     attention: number
   }
+  throughput_60s: { window_seconds: number; submitted: number; started: number; completed: number; failed: number }
+  worker_pool: { online_workers: number; total_slots: number; active_slots: number; idle_slots: number }
   by_type: TaskTypeMetric[]
   generated_at: string
+}
+
+export interface TaskActivity {
+  task_id: string
+  task_type: string
+  owner_username: string
+  status: string
+  progress: number
+  event_type: string
+  payload: Record<string, unknown>
+  created_at: string
 }
 
 export interface WorkerStatus {
@@ -109,12 +157,25 @@ export function adjustQuota(userId: string, amount: number, idempotency_key: str
   return http.post(`/api/v1/admin/users/${userId}/quota/adjust`, { amount, idempotency_key, note })
 }
 
-export function listTasks(): Promise<AdminTask[]> {
-  return http.get('/api/v1/admin/tasks')
+export function listTasks(status = 'all', search = '', limit = 50): Promise<AdminTask[]> {
+  const query = new URLSearchParams({ status, search, limit: String(limit) })
+  return http.get(`/api/v1/admin/tasks?${query}`)
+}
+
+export function getOverview(): Promise<AdminOverview> { return http.get(`/api/v1/admin/overview?tz_offset_minutes=${new Date().getTimezoneOffset()}`) }
+export function getPerformance(): Promise<AdminPerformance> { return http.get('/api/v1/admin/performance') }
+export function getResources(): Promise<AdminResources> { return http.get('/api/v1/admin/resources') }
+export function getEvents(level = 'all', module = 'all', search = '', sinceHours = 24): Promise<AdminEvent[]> {
+  const query = new URLSearchParams({ level, module, search, since_hours: String(sinceHours) })
+  return http.get(`/api/v1/admin/events?${query}`)
 }
 
 export function getTaskMetrics(): Promise<TaskMetrics> {
   return http.get('/api/v1/admin/task-metrics')
+}
+
+export function getTaskActivity(): Promise<TaskActivity[]> {
+  return http.get('/api/v1/admin/task-activity')
 }
 
 export function cancelTask(id: string): Promise<{ id: string; status: string }> {

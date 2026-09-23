@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -14,13 +16,30 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, Project, QuotaTransaction, SystemConfig, Task, User, UserQuotaAccount, WorkerHeartbeat, Workspace, utcnow
+from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, Workspace, utcnow
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, safe_display_name
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
+from ..core.observability import api_snapshot
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+
+def _memory_usage(host_total_bytes: int, cgroup_root: Path = Path("/sys/fs/cgroup")) -> tuple[int, int]:
+    """Prefer the current container's cgroup memory usage/limit when available."""
+    for current_name, limit_name in (("memory.current", "memory.max"), ("memory/memory.usage_in_bytes", "memory/memory.limit_in_bytes")):
+        try:
+            current = int((cgroup_root / current_name).read_text().strip())
+            raw_limit = (cgroup_root / limit_name).read_text().strip()
+            limit = int(raw_limit) if raw_limit != "max" else host_total_bytes
+            if current >= 0 and 0 < limit < host_total_bytes * 2:
+                return min(current, limit), limit
+        except (OSError, ValueError):
+            continue
+    import psutil
+    memory = psutil.virtual_memory()
+    return memory.used, memory.total
 
 
 class UserState(BaseModel):
@@ -173,7 +192,15 @@ def update_registration_settings(payload: RegistrationUpdate, actor: User = Depe
 @router.get("/users")
 def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
     users = db.scalars(select(User).order_by(User.created_at.desc())).all()
-    return [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name, "role": item.role, "is_active": item.is_active, "created_at": item.created_at.isoformat()} for item in users]
+    projects = dict(db.execute(select(Project.owner_id, func.count()).where(Project.deleted_at.is_(None)).group_by(Project.owner_id)).all())
+    last_seen = dict(db.execute(select(UserSession.user_id, func.max(UserSession.last_seen_at)).group_by(UserSession.user_id)).all())
+    file_sizes = dict(db.execute(select(ProjectFile.owner_id, func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.owner_id)).all())
+    quota_used = dict(db.execute(select(UserQuotaAccount.user_id, UserQuotaAccount.consumed_units)).all())
+    return [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name,
+             "role": item.role, "is_active": item.is_active, "created_at": item.created_at.isoformat(),
+             "last_seen_at": last_seen[item.id].isoformat() if item.id in last_seen else None,
+             "project_count": projects.get(item.id, 0), "file_bytes": file_sizes.get(item.id, 0),
+             "consumed_units": quota_used.get(item.id, 0)} for item in users]
 
 
 @router.patch("/users/{user_id}")
@@ -274,9 +301,21 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
 
 
 @router.get("/tasks")
-def list_all_tasks(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.scalars(select(Task).order_by(Task.created_at.desc()).limit(500)).all()
+def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
+                   _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
+    query = select(Task)
+    if status != "all":
+        query = query.where(Task.status == status)
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.where(Task.id.ilike(term) | Task.task_type.ilike(term) | Task.project_id.ilike(term) |
+                            Task.owner_id.in_(select(User.id).where(User.username.ilike(term))))
+    rows = db.scalars(query.order_by(Task.created_at.desc()).limit(max(1, min(limit, 100)))).all()
     owners = {item.id: item.username for item in db.scalars(select(User)).all()}
+    attempts = {}
+    if rows:
+        for attempt in db.scalars(select(TaskAttempt).where(TaskAttempt.task_id.in_([row.id for row in rows])).order_by(TaskAttempt.attempt_no.desc())).all():
+            attempts.setdefault(attempt.task_id, attempt)
     return [
         {
             "id": item.id,
@@ -292,6 +331,8 @@ def list_all_tasks(_: User = Depends(require_admin), db: Session = Depends(get_d
             "updated_at": item.updated_at.isoformat(),
             "started_at": item.started_at.isoformat() if item.started_at else None,
             "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+            "worker_id": attempts[item.id].worker_id if item.id in attempts else None,
+            "attempt_no": attempts[item.id].attempt_no if item.id in attempts else 0,
         }
         for item in rows
     ]
@@ -319,22 +360,76 @@ def task_metrics(_: User = Depends(require_admin), db: Session = Depends(get_db)
     def count_statuses(*statuses: str) -> int:
         return sum(status_counts.get(status, 0) for status in statuses)
 
+    now = utcnow()
+    window_start = now - timedelta(seconds=60)
+    throughput = {
+        "window_seconds": 60,
+        "submitted": int(db.scalar(select(func.count()).select_from(Task).where(Task.created_at >= window_start)) or 0),
+        "started": int(db.scalar(select(func.count()).select_from(Task).where(Task.started_at >= window_start)) or 0),
+        "completed": int(db.scalar(select(func.count()).select_from(Task).where(Task.finished_at >= window_start, Task.status == "succeeded")) or 0),
+        "failed": int(db.scalar(select(func.count()).select_from(Task).where(Task.finished_at >= window_start, Task.status.in_(("failed", "timeout")))) or 0),
+    }
+    live_workers = [row for row in db.scalars(select(WorkerHeartbeat)).all() if not is_stale(row.last_seen_at)]
+    worker_pool = {"online_workers": len(live_workers), "total_slots": 0, "active_slots": 0, "idle_slots": 0}
+    for worker in live_workers:
+        capabilities = worker.capabilities or {}
+        slots = max(1, int(capabilities.get("slots", 1) or 1))
+        active_slots = min(slots, max(0, int(capabilities.get("active_slots", 1 if worker.current_task_id else 0) or 0)))
+        worker_pool["total_slots"] += slots
+        worker_pool["active_slots"] += active_slots
+    worker_pool["idle_slots"] = max(0, worker_pool["total_slots"] - worker_pool["active_slots"])
+    running_count = count_statuses("running", "cancelling")
+    has_slot_aware_simulator = any((row.capabilities or {}).get("simulation") is True for row in live_workers)
+    consuming_count = min(running_count, worker_pool["active_slots"]) if has_slot_aware_simulator else running_count
+    queued_count = count_statuses("queued", "retrying", "paused")
+    if has_slot_aware_simulator:
+        # The simulator's heartbeat is authoritative about active slots; any
+        # additional running leases are buffered claims and belong in the queue.
+        queued_count += max(0, running_count - consuming_count)
+
     return {
         "total": sum(status_counts.values()),
         "status_counts": status_counts,
         "stage_counts": {
             "production": count_statuses("pending"),
-            "queued": count_statuses("queued", "retrying", "paused"),
-            "consuming": count_statuses("running", "cancelling"),
+            "queued": queued_count,
+            "consuming": consuming_count,
             "completed": count_statuses("succeeded"),
             "attention": count_statuses("failed", "timeout", "cancelled"),
         },
+        "throughput_60s": throughput,
+        "worker_pool": worker_pool,
         "by_type": [
             {"task_type": task_type, "total": sum(statuses.values()), "statuses": statuses}
             for task_type, statuses in sorted(by_type.items())
         ],
         "generated_at": utcnow().isoformat(),
     }
+
+
+@router.get("/task-activity")
+def task_activity(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
+    """Return recent durable task lifecycle events, including terminal outcomes."""
+    rows = db.execute(
+        select(TaskEvent, Task, User.username)
+        .join(Task, Task.id == TaskEvent.task_id)
+        .join(User, User.id == Task.owner_id)
+        .order_by(TaskEvent.created_at.desc(), TaskEvent.sequence.desc())
+        .limit(30)
+    ).all()
+    return [
+        {
+            "task_id": task.id,
+            "task_type": task.task_type,
+            "owner_username": username,
+            "status": task.status,
+            "progress": task.progress,
+            "event_type": event.event_type,
+            "payload": event.payload or {},
+            "created_at": event.created_at.isoformat(),
+        }
+        for event, task, username in rows
+    ]
 
 
 @router.post("/tasks/{task_id}/cancel")
@@ -395,3 +490,153 @@ def queue_status(_: User = Depends(require_admin)) -> dict:
         return {"available": True, "stream": STREAM_NAME, "length": length, "pending": pending}
     except Exception as exc:  # Redis is an operational dependency, not a request crash.
         return {"available": False, "stream": STREAM_NAME, "length": 0, "pending": 0, "error": str(exc)}
+
+
+def _gpu_status() -> list[dict]:
+    binary = shutil.which("nvidia-smi")
+    if not binary:
+        return []
+    try:
+        result = subprocess.run(
+            [binary, "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3, check=True,
+        )
+        return [
+            {"index": int(parts[0]), "name": parts[1], "utilization_percent": int(parts[2]),
+             "memory_used_mb": int(parts[3]), "memory_total_mb": int(parts[4]),
+             "temperature_c": int(parts[5])}
+            for line in result.stdout.splitlines()
+            if len(parts := [part.strip() for part in line.split(",")]) == 6
+        ]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+@router.get("/overview")
+def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    now = utcnow()
+    offset = timedelta(minutes=max(-840, min(tz_offset_minutes, 840)))
+    today = (now - offset).replace(hour=0, minute=0, second=0, microsecond=0) + offset
+    metrics = task_metrics(_, db)
+    queue = queue_status(_)
+    gpu = _gpu_status()
+    workers = list_workers(_, db)
+    live = [worker for worker in workers if worker["status"] != "offline"]
+    def has_worker(prefix: str) -> bool:
+        return any(any(str(kind).startswith(prefix) for kind in worker["capabilities"].get("task_types", [])) for worker in live)
+    from ..engines.tts import resolve_engine
+    try:
+        resolve_engine()
+        tts_installed = True
+    except (OSError, RuntimeError, FileNotFoundError):
+        tts_installed = False
+    services = [
+        {"key": "api", "name": "API", "status": "healthy", "detail": "当前请求已响应"},
+        {"key": "database", "name": "数据库", "status": "healthy", "detail": "查询正常"},
+        {"key": "queue", "name": "Redis / 队列", "status": "healthy" if queue["available"] else "error", "detail": "连接正常" if queue["available"] else queue.get("error", "连接失败")},
+        {"key": "llm", "name": "LLM Worker", "status": "healthy" if has_worker("script.") else "warning", "detail": "在线 Worker 可处理解析任务" if has_worker("script.") else "无可用解析 Worker"},
+        {"key": "tts", "name": "TTS Worker", "status": "healthy" if tts_installed and has_worker("tts.") else "warning", "detail": "引擎与 Worker 可用" if tts_installed and has_worker("tts.") else "引擎或 Worker 未就绪"},
+        {"key": "audio", "name": "FFmpeg", "status": "healthy" if shutil.which("ffmpeg") else "warning", "detail": "命令可用" if shutil.which("ffmpeg") else "未在 PATH 中找到"},
+        {"key": "gpu", "name": "GPU", "status": "healthy" if gpu else "unknown", "detail": "已检测到 GPU" if gpu else "未采集到 GPU 数据"},
+    ]
+    recent_failures = db.scalars(select(Task).where(Task.status.in_(("failed", "timeout"))).order_by(Task.updated_at.desc()).limit(5)).all()
+    api_metrics = api_snapshot()
+    system_metrics = {"cpu_percent": None, "ram_used_bytes": None, "ram_total_bytes": None}
+    try:
+        import psutil
+        ram_used, ram_total = _memory_usage(psutil.virtual_memory().total)
+        system_metrics.update(cpu_percent=psutil.cpu_percent(interval=0.1),
+                              ram_used_bytes=ram_used, ram_total_bytes=ram_total)
+    except ImportError:
+        pass
+    recent_errors = [
+        {"id": task.id, "time": task.updated_at.isoformat(), "module": task.task_type.split(".")[0],
+         "type": task.error_code or task.status, "message": task.error_message or task.status}
+        for task in recent_failures
+    ]
+    recent_errors.extend(
+        {"id": f"api-{index}-{item['time']}", "time": item["time"], "module": "api",
+         "type": f"HTTP {item['status']}", "message": f"{item['method']} {item['route']} 返回 {item['status']}"}
+        for index, item in enumerate(api_metrics["recent_errors"])
+    )
+    return {
+        "generated_at": now.isoformat(), "services": services,
+        "today": {
+            "completed": int(db.scalar(select(func.count()).select_from(Task).where(Task.finished_at >= today, Task.status == "succeeded")) or 0),
+            "failed": int(db.scalar(select(func.count()).select_from(Task).where(Task.finished_at >= today, Task.status.in_(("failed", "timeout")))) or 0),
+            "active_users": int(db.scalar(select(func.count(func.distinct(UserSession.user_id))).where(UserSession.revoked_at.is_(None), UserSession.expires_at > now)) or 0),
+        },
+        "tasks": {"running": metrics["stage_counts"]["consuming"], "queued": metrics["stage_counts"]["production"] + metrics["stage_counts"]["queued"]},
+        "workers": metrics["worker_pool"], "queue": queue, "api": api_metrics, "system": system_metrics,
+        "gpu": gpu, "user_count": int(db.scalar(select(func.count()).select_from(User)) or 0),
+        "recent_errors": sorted(recent_errors, key=lambda item: item["time"], reverse=True)[:5],
+    }
+
+
+@router.get("/performance")
+def performance(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    import os as platform_os
+    disk = shutil.disk_usage(configured_storage_root(db))
+    resource: dict = {"disk_total_bytes": disk.total, "disk_used_bytes": disk.used, "disk_free_bytes": disk.free,
+                      "cpu_percent": None, "ram_used_bytes": None, "ram_total_bytes": None, "uptime_seconds": None}
+    try:
+        import psutil
+        ram_used, ram_total = _memory_usage(psutil.virtual_memory().total)
+        resource.update(cpu_percent=psutil.cpu_percent(interval=0.1), ram_used_bytes=ram_used,
+                        ram_total_bytes=ram_total, uptime_seconds=int(utcnow().timestamp() - psutil.boot_time()))
+    except ImportError:
+        if hasattr(platform_os, "getloadavg"):
+            resource["load_average_1m"] = platform_os.getloadavg()[0]
+    return {"generated_at": utcnow().isoformat(), "system": resource, "gpu": _gpu_status(),
+            "tasks": task_metrics(_, db), "workers": list_workers(_, db), "queue": queue_status(_),
+            "api": api_snapshot(),
+            "unavailable_metrics": ["LLM Token/TTFT/吞吐", "TTS 字符/实时倍率", "磁盘 I/O/网络"]}
+
+
+@router.get("/resources")
+def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    from ..core.paths import MUSIC_LIBRARY_DIR
+    root = configured_storage_root(db)
+    disk = shutil.disk_usage(root)
+    file_rows = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
+    user_rows = db.execute(select(User.username, func.count(ProjectFile.id), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).join(ProjectFile, ProjectFile.owner_id == User.id).where(ProjectFile.deleted_at.is_(None)).group_by(User.username).order_by(func.sum(ProjectFile.size_bytes).desc()).limit(20)).all()
+    music_files = [path for path in MUSIC_LIBRARY_DIR.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".mp3", ".wav", ".flac"}] if MUSIC_LIBRARY_DIR.is_dir() else []
+    return {"root_path": str(root), "disk_total_bytes": disk.total, "disk_used_bytes": disk.used, "disk_free_bytes": disk.free,
+            "workspaces": int(db.scalar(select(func.count()).select_from(Workspace).where(Workspace.deleted_at.is_(None))) or 0),
+            "projects": int(db.scalar(select(func.count()).select_from(Project).where(Project.deleted_at.is_(None))) or 0),
+            "files": [{"kind": kind, "count": count, "size_bytes": size} for kind, count, size in file_rows],
+            "users": [{"username": username, "count": count, "size_bytes": size} for username, count, size in user_rows],
+            "music_library": {"count": len(music_files), "size_bytes": sum(path.stat().st_size for path in music_files)},
+            "scope": "已登记的项目文件；工作空间中未登记的音频、缓存和模型文件暂未计量"}
+
+
+@router.get("/events")
+def admin_events(level: str = "all", module: str = "all", search: str = "", limit: int = 50, since_hours: int = 24,
+                 _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
+    limit = max(1, min(limit, 100))
+    cutoff = utcnow() - timedelta(hours=max(1, min(since_hours, 24 * 30)))
+    task_rows = db.scalars(select(Task).where(Task.status.in_(("failed", "timeout")), Task.updated_at >= cutoff).order_by(Task.updated_at.desc()).limit(100)).all()
+    audit_rows = db.scalars(select(AuditLog).where(AuditLog.created_at >= cutoff).order_by(AuditLog.created_at.desc()).limit(100)).all()
+    def task_module(task_type: str) -> str:
+        prefix = task_type.split(".")[0]
+        if prefix == "script": return "llm"
+        if prefix in {"audio", "bgm"}: return "audio"
+        if prefix == "tts": return "tts"
+        return "worker"
+    rows = ([{"id": task.id, "time": task.updated_at.isoformat(), "level": "error", "module": task_module(task.task_type),
+              "type": task.error_code or task.status, "message": task.error_message or task.status} for task in task_rows] +
+            [{"id": audit.id, "time": audit.created_at.isoformat(), "level": "info", "module": "system",
+              "type": audit.action, "message": f"{audit.target_type} {audit.target_id}"} for audit in audit_rows])
+    rows.extend(
+        {"id": f"api-{item['time']}-{item['route']}", "time": item["time"], "level": "error", "module": "api",
+         "type": f"HTTP {item['status']}", "message": f"{item['method']} {item['route']} 返回 {item['status']}"}
+        for item in api_snapshot(window_seconds=min(300, max(60, since_hours * 60)))["recent_errors"]
+    )
+    if level != "all":
+        rows = [row for row in rows if row["level"] == level]
+    if module != "all":
+        rows = [row for row in rows if row["module"] == module]
+    if search:
+        term = search.casefold()
+        rows = [row for row in rows if term in f'{row["type"]} {row["message"]} {row["id"]}'.casefold()]
+    return sorted(rows, key=lambda row: row["time"], reverse=True)[:limit]
