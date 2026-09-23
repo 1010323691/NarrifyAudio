@@ -10,6 +10,7 @@ import CardContent from '@/components/ui/CardContent.vue'
 import Input from '@/components/ui/Input.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { useToast } from '@/components/ui/toast'
+import { showConfirm } from '@/components/ui/dialog'
 import * as api from '@/api/admin'
 import Settings from '@/views/Settings.vue'
 
@@ -157,7 +158,7 @@ async function saveQuota() {
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function saveRoot() {
-  if (!window.confirm('修改存储根目录会迁移已登记工作空间文件。确认继续？')) return
+  if (!await showConfirm('修改存储根目录会迁移已登记工作空间文件。确认继续？', { title: '修改存储根目录', destructive: true })) return
   try { storage.value = await api.updateStorageRoot(rootDraft.value); toast({ title: '存储根目录已保存', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
@@ -165,7 +166,7 @@ function lastAdmin(user: api.AdminUser) {
   return user.role === 'admin' && user.is_active && users.value.filter(row => row.role === 'admin' && row.is_active).length <= 1
 }
 async function changeUser(user: api.AdminUser, patch: { is_active?: boolean; role?: 'user' | 'admin' }) {
-  if (!window.confirm(`确认更改 ${user.username} 的${patch.role ? '角色' : '状态'}？`)) return
+  if (!await showConfirm(`确认更改 ${user.username} 的${patch.role ? '角色' : '状态'}？`, { title: '确认修改用户' })) return
   try {
     const result = await api.updateUser(user.id, patch)
     user.role = result.role
@@ -177,7 +178,7 @@ async function adjustQuota() {
   const user = selectedUser.value
   const amount = Number(quotaAmount.value)
   if (!user || !Number.isInteger(amount) || amount === 0) { error.value = '请输入非零整数额度'; return }
-  if (!window.confirm(`确认给 ${user.username} 调整 ${amount > 0 ? '+' : ''}${amount} 单位额度？`)) return
+  if (!await showConfirm(`确认给 ${user.username} 调整 ${amount > 0 ? '+' : ''}${amount} 单位额度？`, { title: '调整用户额度', destructive: amount < 0 })) return
   try {
     await api.adjustQuota(user.id, amount, `admin-${user.id}-${Date.now()}`, '管理员后台调整')
     quotaAmount.value = ''
@@ -187,19 +188,19 @@ async function adjustQuota() {
   } catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function cancelTask(task: api.AdminTask) {
-  if (!window.confirm(`确认取消任务 ${task.id}？`)) return
+  if (!await showConfirm(`确认取消任务 ${task.id}？`, { title: '取消任务', destructive: true })) return
   try { await api.cancelTask(task.id); selectedTask.value = null; await load(); toast({ title: '取消请求已提交', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function retryTask(task: api.AdminTask) {
-  if (!window.confirm(`将任务 ${task.id} 重新放入队列。确认重试？`)) return
+  if (!await showConfirm(`将任务 ${task.id} 重新放入队列。确认重试？`, { title: '重新排入任务' })) return
   try { await api.retryTask(task.id); selectedTask.value = null; await load(); toast({ title: '任务已重新排队', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function cleanupTemp() {
   const candidates = cleanupCandidates.value
   if (!candidates?.count) return
-  if (!window.confirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的临时缓存文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`)) return
+  if (!await showConfirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的临时缓存文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`, { title: '清理临时缓存', destructive: true })) return
   try {
     const result = await api.cleanupStaleTemp()
     await load()

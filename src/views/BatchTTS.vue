@@ -5,6 +5,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
+import { showConfirm } from '@/components/ui/dialog'
 import { listDir } from '@/api/files'
 import { batchStatusFiles, listVoices, resetBatch, runBatch, runStressTest, ttsStatus } from '@/api/tts'
 import { waitForDurableTask } from '@/api/persistentTasks'
@@ -353,7 +354,7 @@ async function doRunAll() {
   if (busy.value) return
   const names = selectedNames.value
   if (!names.length) return
-  if (!window.confirm('重新全部合成会删除所选文件已生成的音频和进度记录，并从头重新制作全部段落（模型会重新加载，耗时较长）。确定继续吗？')) return
+  if (!await showConfirm('重新全部合成会删除所选文件已生成的音频和进度记录，并从头重新制作全部段落（模型会重新加载，耗时较长）。确定继续吗？', { title: '重新全部合成', destructive: true })) return
   busy.value = true
   error.value = ''
   result.value = null
@@ -467,8 +468,8 @@ async function openStress() {
   }
 }
 
-function closeStress() {
-  if (stressActive.value && !window.confirm('压测任务仍在进行。关闭窗口后任务会继续运行（重新打开可看日志 / 取消）。确定关闭？')) return
+async function closeStress() {
+  if (stressActive.value && !await showConfirm('压测任务仍在进行。关闭窗口后任务会继续运行（重新打开可看日志 / 取消）。确定关闭？', { title: '关闭压测窗口' })) return
   stressOpen.value = false
 }
 

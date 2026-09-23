@@ -3,6 +3,7 @@
 // 批量操作 / 标签管理。页面不经 WorkspaceGateAlert（与工作空间无关）。
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useToast } from '@/components/ui/toast'
+import { showConfirm, showPrompt } from '@/components/ui/dialog'
 import { useTaskStore } from '@/stores/task'
 import {
   applySuggestions,
@@ -371,7 +372,7 @@ async function toggleEnabled(name: string, value: boolean) {
 }
 
 async function doDeleteOne(name: string) {
-  if (!window.confirm(`删除音乐「${name}」？（音乐文件与索引条目都会被删除）`)) return
+  if (!await showConfirm(`删除音乐「${name}」？（音乐文件与索引条目都会被删除）`, { title: '删除音乐', destructive: true })) return
   try {
     const r = await deleteTrack(name)
     if (r.skipped.length) {
@@ -433,7 +434,7 @@ async function doCreateFolder() {
 }
 
 async function doRenameFolder(name: string) {
-  const v = window.prompt(`把文件夹「${name}」改名为：`, name)
+  const v = await showPrompt(`把文件夹「${name}」改名为：`, name, { title: '重命名收藏集', inputLabel: '收藏集名称' })
   if (v == null) return
   const nv = v.trim()
   if (!nv || nv === name) return
@@ -560,7 +561,7 @@ async function doBatchEnable(enabled: boolean) {
 async function doBatchDelete() {
   const names = selectedNames.value
   if (batchBusy.value || !names.length) return
-  if (!window.confirm(`删除选中的 ${names.length} 首音乐？`)) return
+  if (!await showConfirm(`删除选中的 ${names.length} 首音乐？`, { title: '批量删除音乐', destructive: true })) return
   batchBusy.value = true
   try {
     const r = await batchDelete(names)
@@ -821,7 +822,7 @@ async function doAddTag(cat: MusicTagCategory) {
 }
 
 async function doRenameTag(cat: MusicTagCategory, name: string) {
-  const v = window.prompt(`把「${name}」改名为：`, name)
+  const v = await showPrompt(`把「${name}」改名为：`, name, { title: '重命名标签', inputLabel: '标签名称' })
   if (v == null) return
   const nv = v.trim()
   if (!nv) return
@@ -836,7 +837,7 @@ async function doRenameTag(cat: MusicTagCategory, name: string) {
 }
 
 async function doDeleteTag(cat: MusicTagCategory, name: string) {
-  if (!window.confirm(`删除标签「${name}」？\n仅移除标签（注册表 + 全部音乐 + 章节分析缓存），不删除音乐文件。`)) return
+  if (!await showConfirm(`删除标签「${name}」？\n仅移除标签（注册表 + 全部音乐 + 章节分析缓存），不删除音乐文件。`, { title: '删除标签', destructive: true })) return
   try {
     const r = await deleteTag(cat, name)
     if (lib.value) lib.value.tags = r.tags

@@ -7,6 +7,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import { cleanupWorkspaceTemp, getWorkspaceSummary, type WorkspaceFileSummary, type WorkspaceSummary } from '@/api/workspace'
 import { listProjectFiles } from '@/api/projects'
 import { useToast } from '@/components/ui/toast'
+import { showConfirm } from '@/components/ui/dialog'
 
 interface ResourceProject {
   id: string
@@ -131,7 +132,7 @@ async function cleanup(record: ResourceProject) {
   const candidate = record.summary.cleanup_candidates
   if (!candidate.count || candidate.blocked_by_active_tasks || cleaningId.value) return
   const message = `将清理「${record.name}」中超过 ${candidate.older_than_days} 天的 ${candidate.count} 个临时缓存文件（${formatBytes(candidate.size_bytes)}）。不会删除原文、章节、角色或成品。继续吗？`
-  if (!window.confirm(message)) return
+  if (!await showConfirm(message, { title: '清理项目缓存', destructive: true })) return
   cleaningId.value = record.id
   try {
     const result = await cleanupWorkspaceTemp(record.id)

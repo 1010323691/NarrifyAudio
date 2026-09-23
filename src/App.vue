@@ -2,6 +2,7 @@
 import { onMounted } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import Toaster from '@/components/ui/Toaster.vue'
+import DialogHost from '@/components/ui/DialogHost.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const settings = useSettingsStore()
@@ -18,4 +19,5 @@ onMounted(() => {
 <template>
   <router-view />
   <Toaster />
+  <DialogHost />
 </template>
