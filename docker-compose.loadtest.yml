@@ -1,0 +1,39 @@
+services:
+  load-sim-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: smoke-api
+    environment:
+      NARRIFY_DATABASE_URL: postgresql+psycopg://narrify:${POSTGRES_PASSWORD}@postgres:5432/narrify
+      NARRIFY_REDIS_URL: redis://redis:6379/0
+      NARRIFY_AUTO_CREATE_SCHEMA: "false"
+      NARRIFY_STORAGE_ROOT: /var/lib/narrify/storage
+      NARRIFY_LOAD_SIMULATION_ENABLED: "true"
+      PYTHONPATH: /app
+    volumes:
+      - narrify-storage:/var/lib/narrify/storage
+    command: ["python", "scripts/load_sim_worker.py", "--llm-slots", "4", "--llm-seconds", "10", "--tts-slots", "96", "--tts-seconds", "50"]
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles: ["loadtest"]
+
+  load-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: smoke-api
+    environment:
+      NARRIFY_DATABASE_URL: postgresql+psycopg://narrify:${POSTGRES_PASSWORD}@postgres:5432/narrify
+      NARRIFY_AUTO_CREATE_SCHEMA: "false"
+      PYTHONPATH: /app
+      LOAD_TEST_BASE_URL: http://api:8642
+      LOAD_TEST_USERS: "100"
+      LOAD_TEST_TASKS_PER_TYPE: "5000"
+      LOAD_TEST_SUBMIT_SECONDS: "60"
+    command: ["python", "scripts/load_test.py"]
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles: ["loadtest"]

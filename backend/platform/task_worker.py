@@ -273,7 +273,12 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
         )
 
 
-def claim_fair_task(worker_id: str, *, lease_seconds: int | None = None) -> TaskClaim | None:
+def claim_fair_task(
+    worker_id: str,
+    *,
+    lease_seconds: int | None = None,
+    task_types: tuple[str, ...] | None = None,
+) -> TaskClaim | None:
     """Claim the next task using a persistent per-user round-robin cursor.
 
     The account row is locked before selecting a task, so multiple Worker
@@ -284,10 +289,13 @@ def claim_fair_task(worker_id: str, *, lease_seconds: int | None = None) -> Task
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
     with SessionLocal() as db:
+        eligible_tasks = Task.status.in_(["pending", "queued", "retrying"])
+        if task_types:
+            eligible_tasks = eligible_tasks & Task.task_type.in_(task_types)
         account = db.scalar(
             select(UserQuotaAccount)
             .join(Task, Task.owner_id == UserQuotaAccount.user_id)
-            .where(Task.status.in_(["pending", "queued", "retrying"]))
+            .where(eligible_tasks)
             .order_by(
                 UserQuotaAccount.last_scheduled_at.asc(),
                 Task.created_at.asc(),
@@ -299,12 +307,12 @@ def claim_fair_task(worker_id: str, *, lease_seconds: int | None = None) -> Task
         if account is None:
             db.rollback()
             return None
+        user_tasks = (Task.owner_id == account.user_id) & Task.status.in_(["pending", "queued", "retrying"])
+        if task_types:
+            user_tasks = user_tasks & Task.task_type.in_(task_types)
         task_id = db.scalar(
             select(Task.id)
-            .where(
-                Task.owner_id == account.user_id,
-                Task.status.in_(["pending", "queued", "retrying"]),
-            )
+            .where(user_tasks)
             .order_by(Task.created_at.asc(), Task.id.asc())
             .limit(1)
         )
@@ -723,8 +731,50 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
     )
 
 
+def _execute_load_simulation(claim: TaskClaim) -> TaskOutcome:
+    if os.getenv("NARRIFY_LOAD_SIMULATION_ENABLED", "false").lower() != "true":
+        raise TaskExecutionError("simulation_disabled", "当前 worker 未启用负载模拟")
+    if claim.task_type not in {"script.parse", "tts.batch"}:
+        raise TaskExecutionError("invalid_simulation_type", "负载模拟任务类型无效")
+
+    expected_kind = "llm" if claim.task_type == "script.parse" else "tts"
+    if claim.payload.get("_simulation_kind") != expected_kind:
+        raise TaskExecutionError("invalid_simulation_kind", "负载模拟任务配置无效")
+    duration = max(0.0, min(float(claim.payload.get("_simulation_seconds", 0)), 3600.0))
+    started = time.monotonic()
+    next_progress = 1
+    while True:
+        if cancellation_requested(claim):
+            raise TaskCancelledError()
+        elapsed = time.monotonic() - started
+        if elapsed >= duration:
+            break
+        fraction = elapsed / duration if duration else 1.0
+        progress_step = min(3, int(fraction * 4))
+        if progress_step >= next_progress:
+            update_progress(claim, progress_step * 25, f"模拟 {expected_kind.upper()} 处理")
+            next_progress = progress_step + 1
+        time.sleep(min(0.5, duration - elapsed))
+
+    metadata = {
+        "engine": claim.task_type,
+        "simulated": True,
+        "simulation_kind": expected_kind,
+        "duration_seconds": duration,
+    }
+    return _write_outcome(
+        claim,
+        f"load-simulation-{claim.task_id}.json",
+        "application/json",
+        json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
+        metadata,
+    )
+
+
 def execute_claim(claim: TaskClaim) -> TaskOutcome:
     """Execute one real deterministic engine behind the durable worker boundary."""
+    if claim.payload.get("_load_simulation") is True:
+        return _execute_load_simulation(claim)
     legacy_engine_tasks = {
         "voices.foundation",
         "voices.clone",
