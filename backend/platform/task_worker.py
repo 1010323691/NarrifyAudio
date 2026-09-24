@@ -1512,7 +1512,12 @@ def _process_claim(claim: TaskClaim) -> str:
             if cancellation_requested(claim):
                 _cleanup_outcome(outcome)
                 raise TaskCancelledError()
-            if complete_claim(claim, outcome):
+            try:
+                completed = complete_claim(claim, outcome)
+            except Exception:
+                _cleanup_outcome(outcome)
+                raise
+            if completed:
                 return "succeeded"
             fail_claim(claim, TaskCancelledError())
             return "cancelled"
