@@ -3,7 +3,8 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
-import { submitDurableTask, waitForDurableTask } from '@/api/persistentTasks'
+import { submitDurableTask } from '@/api/persistentTasks'
+import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import { downloadFile, pickFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
 import type {
@@ -38,6 +39,7 @@ const router = useRouter()
 const settings = useSettingsStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
+const waitForTask = useDurableTaskWait()
 
 const file = ref<{ path: string; name: string; size?: number; file_id?: string; project_id?: string } | null>(null)
 const toggles = reactive<TextToggles>({
@@ -151,7 +153,7 @@ async function run(auto = false) {
       estimated_units: 0,
       idempotency_key: `text-format:${file.value.file_id}:${crypto.randomUUID()}`,
     })
-    const task = await waitForDurableTask(submitted.id)
+    const task = await waitForTask(submitted.id)
     if (task.status !== 'succeeded' || !task.result) {
       throw new Error(task.error_message || '持久化排版任务失败')
     }
@@ -167,8 +169,9 @@ async function run(auto = false) {
       project_id: file.value.project_id,
     }
     if (!auto) toast({ title: '排版完成', variant: 'success', description: formatResult.value.output_path })
-    await analyzeAfterFormat(auto)
+    await analyzeAfterFormat()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '排版失败'
     if (!auto) toast({ title: '排版失败', variant: 'destructive', description: error.value })
   } finally {
@@ -176,7 +179,7 @@ async function run(auto = false) {
   }
 }
 
-async function analyzeAfterFormat(auto: boolean) {
+async function analyzeAfterFormat() {
   if (!formatResult.value?.file_id || !formatResult.value.project_id) {
     error.value = '排版产物未建立项目归属，无法提交章节分析。'
     return
@@ -192,7 +195,7 @@ async function analyzeAfterFormat(auto: boolean) {
       estimated_units: 0,
       idempotency_key: `book-analyze:${formatResult.value.file_id}:${crypto.randomUUID()}`,
     })
-    const task = await waitForDurableTask(submitted.id)
+    const task = await waitForTask(submitted.id)
     if (task.status !== 'succeeded' || !task.result?.analysis) {
       throw new Error(task.error_message || '持久化章节分析任务失败')
     }
@@ -202,6 +205,7 @@ async function analyzeAfterFormat(auto: boolean) {
     }
     // 零章节的 error 是「提示」而非失败——由整本/重传提示条承接，不进 error。
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '章节分析失败'
     toast({ title: '章节分析失败', variant: 'destructive', description: error.value })
   } finally {
@@ -257,6 +261,7 @@ async function split() {
     if (r.chapters?.length) applyFinalAnalysis(r.chapters, r.files.map((f) => f.name))
     toast({ title: '分册完成', variant: 'success', description: `已按智能识别结果生成 ${r.file_count} 个分册文件` })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '分册失败'
     toast({ title: '分册失败', variant: 'destructive', description: error.value })
   } finally {
@@ -274,6 +279,7 @@ async function runWholeBook() {
     splitResult.value = r
     toast({ title: '整本分册完成', variant: 'success', description: `已生成整本文件 ${r.files[0]?.name ?? ''}` })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '整本分册失败'
     toast({ title: '整本分册失败', variant: 'destructive', description: error.value })
   } finally {
@@ -311,6 +317,7 @@ async function runSmart() {
         : `生成 ${r.file_count} 个文件`,
     })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '智能识别失败'
     toast({ title: '智能识别失败', variant: 'destructive', description: error.value })
   } finally {
@@ -338,7 +345,7 @@ async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) 
     estimated_units: 0,
     idempotency_key: `book-split:${formatResult.value.file_id}:${payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
   })
-  const task = await waitForDurableTask(submitted.id)
+  const task = await waitForTask(submitted.id)
   if (task.status !== 'succeeded' || !task.result) {
     throw new Error(task.error_message || '持久化分册任务失败')
   }

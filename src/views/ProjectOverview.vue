@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, ArrowRight, AudioLines, CircleAlert, Clock3, FileAudio2, FileText, LoaderCircle, RefreshCw, Upload } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, AudioLines, CircleAlert, FileAudio2, FileText, LoaderCircle, RefreshCw, Upload } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'

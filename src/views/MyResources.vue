@@ -100,7 +100,7 @@ async function load() {
           scope: 'registered',
           summary: {
             workspace_id: project.id, name: project.name, updated_at: project.updated_at,
-            file_count: summaryFiles.length, size_bytes: summaryFiles.reduce((sum, file) => sum + file.size_bytes, 0),
+            file_count: summaryFiles.length, size_bytes: summaryFiles.reduce((sum, file) => sum + file.size_bytes, 0), split_volume_count: 0,
           categories: Array.from(totals, ([key, value]) => ({ key, label: MODULE_LABELS[key] || '其他文件', ...value })),
             recent_files: summaryFiles, recent_outputs: audio,
             cleanup_candidates: { count: 0, size_bytes: 0, older_than_days: 7, blocked_by_active_tasks: false },
@@ -114,7 +114,7 @@ async function load() {
           scope: 'registered',
           summary: {
             workspace_id: project.id, name: project.name, updated_at: project.updated_at,
-            file_count: 0, size_bytes: 0, categories: [], recent_files: [], recent_outputs: [],
+            file_count: 0, size_bytes: 0, split_volume_count: 0, categories: [], recent_files: [], recent_outputs: [],
             cleanup_candidates: { count: 0, size_bytes: 0, older_than_days: 7, blocked_by_active_tasks: false },
           },
           error: cause?.message || '无法读取此项目资源',

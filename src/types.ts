@@ -444,6 +444,10 @@ export type TaskControl = 'cancel' | 'pause' | 'resume' | 'retry'
 export interface AppConfig {
   paths: { working_dir: string }
   text: TextToggles
+  ffmpeg: {
+    ffmpeg_path: string
+    ffprobe_path: string
+  }
   audio: {
     target_duration: string
     naming_format: string

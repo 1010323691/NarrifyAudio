@@ -18,7 +18,7 @@ import {
   updateChapter,
 } from '@/api/bgm'
 import { downloadFile } from '@/utils/fileops'
-import { waitForDurableTask } from '@/api/persistentTasks'
+import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import { getLibrary, musicPreviewUrl } from '@/api/music'
 import type {
   BgmChapterRow,
@@ -66,10 +66,11 @@ const settings = useSettingsStore()
 const taskStore = useTaskStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
+const waitForTask = useDurableTaskWait()
 
 async function resolveDurable<T>(response: T | { task_id: string }): Promise<T> {
   if (!('task_id' in (response as object))) return response as T
-  const task = await waitForDurableTask((response as { task_id: string }).task_id)
+  const task = await waitForTask((response as { task_id: string }).task_id)
   if (task.status !== 'succeeded') throw new Error(task.error_message || '任务执行失败')
   return (task.result ?? {}) as T
 }
@@ -163,7 +164,6 @@ const rows = computed<BgmRow[]>(() => {
     const missing = d.music_missing
     const segMode = !!asg?.segment
     const segmentView = mode.value === 'segment'
-    const tl = d.timeline
     const timelineReady = segmentTimelineReady(d)
     let label: string
     let variant: RowVariant
@@ -296,6 +296,7 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
       if (!rowsData.value.some((r) => r.stem === k)) delete selected[k]
     }
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     loadError.value = e?.message || '加载失败'
   } finally {
     loading.value = false
@@ -345,6 +346,7 @@ async function doAnalyze() {
     await analyzeChapters(selectedNames.value)
     await taskStore.refresh()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
   } finally {
     submitting.value = false
@@ -359,6 +361,7 @@ async function doSegmentAnalyze() {
     await analyzeSegmentChapters(selectedNames.value)
     await taskStore.refresh()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
   } finally {
     submitting.value = false
@@ -373,6 +376,7 @@ async function doMix() {
     await mixChapters(selectedNames.value)
     await taskStore.refresh()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     const msg = e?.message || '启动失败'
     error.value = msg
     if (msg.includes('在途')) toast({ title: '提交被拒绝', variant: 'destructive', description: msg })
@@ -386,6 +390,7 @@ async function doMixRow(stem: string) {
     await mixChapters([stem])
     await taskStore.refresh()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '混音启动失败', variant: 'destructive', description: e?.message })
   }
 }
@@ -409,6 +414,7 @@ async function doAnalyzeRow(stem: string) {
     await analyzeChapters([stem])
     await taskStore.refresh()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '分析启动失败', variant: 'destructive', description: e?.message })
   }
 }
@@ -418,6 +424,7 @@ async function doSegmentAnalyzeRow(stem: string) {
     await analyzeSegmentChapters([stem])
     await taskStore.refresh()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '段落分析启动失败', variant: 'destructive', description: e?.message })
   }
 }
@@ -454,6 +461,7 @@ async function doPackageDownload(chapters: string[]) {
       description: `${result.base}.zip（${result.file_count} 个音频文件）`,
     })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '打包下载失败'
     toast({ title: '打包下载失败', variant: 'destructive', description: error.value })
   } finally {
@@ -519,6 +527,7 @@ async function doRematch(stem: string) {
     toast({ title: '重匹配完成', variant: 'success', description: `${stem}（${r.matched} 命中 / ${r.no_bgm} 无 BGM）` })
     await refreshRows()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '匹配失败', variant: 'destructive', description: e?.message })
   } finally {
     matching.value = false
@@ -552,6 +561,7 @@ async function switchMode(m: string) {
     await nextTick()
     await refreshRows({ reloadLibrary: false })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     pendingMode.value = null
     matchNote.value = '匹配失败，已保持原有匹配模式。'
     toast({ title: '匹配失败', variant: 'destructive', description: e?.message })
@@ -567,6 +577,7 @@ async function doLock(stem: string, locked: boolean) {
     toast({ title: locked ? '已锁定' : '已解锁', variant: 'default', description: stem })
     await refreshRows()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '操作失败', variant: 'destructive', description: e?.message })
   }
 }
@@ -605,6 +616,7 @@ async function saveManual() {
     manualStem.value = null
     await refreshRows()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '保存失败', variant: 'destructive', description: e?.message })
   } finally {
     manualBusy.value = false
@@ -649,6 +661,7 @@ async function saveEdit() {
     editStem.value = null
     await refreshRows()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '保存失败', variant: 'destructive', description: e?.message })
   } finally {
     editBusy.value = false
@@ -661,11 +674,6 @@ async function saveEdit() {
 const timelineStem = ref<string | null>(null)
 const timelineData = ref<BgmTimeline | null>(null)
 const timelineBusy = ref(false)
-// v2 时间轴携带 LLM 场景描述；v1 文件无此字段 → 「场景」列整列隐藏
-const timelineHasScene = computed(() =>
-  (timelineData.value?.timeline ?? []).some((sp) => !!(sp.scene_desc || sp.mood_desc)),
-)
-
 async function openTimeline(row: BgmRow) {
   if (timelineBusy.value) return
   timelineStem.value = row.stem
@@ -675,6 +683,7 @@ async function openTimeline(row: BgmRow) {
     const r = await getTimeline(row.stem)
     timelineData.value = r.timeline
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '时间轴加载失败', variant: 'destructive', description: e?.message })
     timelineStem.value = null
   } finally {
@@ -721,6 +730,7 @@ async function saveParams() {
     paramsSaved.value = true
     setTimeout(() => (paramsSaved.value = false), 2000)
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     toast({ title: '保存失败', variant: 'destructive', description: e?.message })
   } finally {
     paramsSaving.value = false

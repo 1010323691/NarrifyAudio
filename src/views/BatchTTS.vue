@@ -7,7 +7,7 @@ import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import { listDir } from '@/api/files'
 import { batchStatusFiles, resetBatch, runBatch, ttsStatus } from '@/api/tts'
-import { waitForDurableTask } from '@/api/persistentTasks'
+import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import type { BatchFileStatus, BatchResult, FileItem, TTSStatus } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -40,6 +40,7 @@ const project = useProjectStore()
 const taskStore = useTaskStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
+const waitForTask = useDurableTaskWait()
 
 const status = ref<TTSStatus | null>(null)
 
@@ -286,6 +287,7 @@ async function doRun() {
     startStatusPolling()
     // Completion is handled by the watcher on task.status.
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
     busy.value = false
   }
@@ -308,7 +310,7 @@ async function doRunAll() {
     // Clear the completion state (the package folders) first …
     const reset = await resetBatch(names)
     if ('task_id' in reset) {
-      const resetTask = await waitForDurableTask(reset.task_id)
+      const resetTask = await waitForTask(reset.task_id)
       if (resetTask.status !== 'succeeded') {
         throw new Error(resetTask.error_message || '重置合成包失败')
       }
@@ -319,6 +321,7 @@ async function doRunAll() {
     await taskStore.refresh()
     startStatusPolling()
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
     busy.value = false
   }

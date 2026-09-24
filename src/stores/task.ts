@@ -24,6 +24,7 @@ export const useTaskStore = defineStore('task', () => {
   // release their connection) and is (re)opened by refresh() / control() / init
   // whenever work starts.
   let allStream: (() => void) | null = null
+  let generation = 0
 
   function isActive(s: TaskStatus) {
     return ACTIVE.includes(s)
@@ -129,9 +130,13 @@ export const useTaskStore = defineStore('task', () => {
 
   function ensureStream() {
     if (allStream) return
+    const streamGeneration = generation
     allStream = streamAllTasks(
-      (e) => applyEvent(String(e.task_id ?? ''), e),
+      (e) => {
+        if (streamGeneration === generation) applyEvent(String(e.task_id ?? ''), e)
+      },
       () => {
+        if (streamGeneration !== generation) return
         // The connection ended (server closed / abort): resync the list and, if
         // work is still in flight, reopen the stream.
         allStream = null
@@ -148,13 +153,16 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   async function refresh() {
+    const requestGeneration = generation
     loading.value = true
     try {
-      tasks.value = await listTasks()
+      const loadedTasks = await listTasks()
+      if (requestGeneration !== generation) return
+      tasks.value = loadedTasks
       // Keep the (single, multiplexed) live stream up while any task is in flight.
       if (hasActive()) ensureStream()
     } finally {
-      loading.value = false
+      if (requestGeneration === generation) loading.value = false
     }
   }
 
@@ -169,6 +177,13 @@ export const useTaskStore = defineStore('task', () => {
     closeStream()
   }
 
+  function reset() {
+    generation += 1
+    closeStream()
+    tasks.value = []
+    loading.value = false
+  }
+
   // Legacy alias (the per-task stream design): the multiplexed stream already
   // covers every task, so opening "a stream for id" just ensures the app stream.
   function startStream(_id: string) {
@@ -177,5 +192,5 @@ export const useTaskStore = defineStore('task', () => {
 
   refresh()
 
-  return { tasks, loading, refresh, startStream, control, stopAll, activeTasks }
+  return { tasks, loading, refresh, startStream, control, stopAll, reset, activeTasks }
 })

@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/project'
 import { useToast } from '@/components/ui/toast'
 import { cutAudio, detectSilences, exportAudio, planAudio, probeAudio, zipAudio } from '@/api/audio'
-import { cancelDurableTask, getDurableTask, listDurableTasks, waitForDurableTask } from '@/api/persistentTasks'
+import { cancelDurableTask, getDurableTask, listDurableTasks } from '@/api/persistentTasks'
+import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import type { DurableTask } from '@/api/persistentTasks'
 import { downloadFile } from '@/utils/fileops'
 import { formatBytes, formatDuration } from '@/utils/format'
@@ -52,10 +53,11 @@ const settings = useSettingsStore()
 const project = useProjectStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
+const waitForTask = useDurableTaskWait()
 
 async function resolveAudioTask(response: { task_id: string } | Record<string, any>): Promise<Record<string, any>> {
   if (!('task_id' in response)) return response
-  const task = await waitForDurableTask(response.task_id)
+  const task = await waitForTask(response.task_id)
   if (task.status !== 'succeeded') throw new Error(task.error_message || '任务执行失败')
   return task.result ?? {}
 }
@@ -97,11 +99,22 @@ const planTaskId = ref<string | null>(null)
 const cutTaskId = ref<string | null>(null)
 const planTask = ref<DurableTask | null>(null)
 const cutTask = ref<DurableTask | null>(null)
+let trackingController = new AbortController()
+onDeactivated(() => trackingController.abort())
+onUnmounted(() => trackingController.abort())
+onActivated(() => {
+  if (trackingController.signal.aborted) {
+    trackingController = new AbortController()
+    reattachTasks()
+  }
+})
 
 // 刷新恢复：页面重载后本地 taskId 丢失，但后端持久化任务仍在跑。
 // 按持久化 task_type 区分两种在途任务重新挂接。
 function reattachTasks() {
+  const signal = trackingController.signal
   void listDurableTasks().then((tasks) => {
+    if (signal.aborted) return
     const active = tasks.filter((t) => ['pending', 'queued', 'running', 'cancelling', 'retrying'].includes(t.status))
     const planning = active.find((t) => t.task_type === 'audio.silences')
     const cutting = active.find((t) => t.task_type === 'audio.cut')
@@ -121,15 +134,19 @@ function reattachTasks() {
 }
 
 async function trackTask(id: string, kind: 'plan' | 'cut') {
+  const signal = trackingController.signal
   try {
     while (true) {
-      const task = await getDurableTask(id)
+      signal.throwIfAborted()
+      const task = await getDurableTask(id, signal)
+      signal.throwIfAborted()
       if (kind === 'plan') planTask.value = task
       else cutTask.value = task
       if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)) return
       await new Promise((resolve) => window.setTimeout(resolve, 500))
     }
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '持久化任务状态读取失败'
     if (kind === 'plan') {
       busyPlan.value = false
@@ -180,6 +197,7 @@ async function doProbe() {
   try {
     probe.value = await probeAudio(file.value.path)
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '无法读取音频'
     probe.value = null
   } finally {
@@ -224,6 +242,7 @@ async function buildPlan() {
       rememberParams()
     }
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '生成方案失败'
     planTaskId.value = null
     busyPlan.value = false
@@ -273,6 +292,7 @@ async function doCut() {
     rememberParams()
     // Completion is handled by the watcher on cutTask.status.
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '启动切割失败'
     cutTaskId.value = null
     busyCut.value = false
@@ -325,6 +345,7 @@ async function doZip() {
     download(r.path || r.zip_path)
     toast({ title: '打包已开始下载', variant: 'success', description: `打包 ${r.file_count} 个文件` })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '打包失败'
     toast({ title: '打包失败', variant: 'destructive', description: error.value })
   } finally {
@@ -342,6 +363,7 @@ async function doExport() {
     // 文件已落到磁盘——这本身就是成功。
     toast({ title: '已输出到源文件夹', variant: 'success', description: `${r.file_count} 个文件 → ${r.dest_dir}` })
   } catch (e: any) {
+    if (e?.name === 'AbortError') return
     error.value = e?.message || '输出失败'
     toast({ title: '输出失败', variant: 'destructive', description: error.value })
   } finally {

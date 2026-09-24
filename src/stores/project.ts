@@ -52,6 +52,15 @@ export const useProjectStore = defineStore('project', () => {
     audioOutputs.value = r.files.map((f) => f.path)
   }
 
+  function reset() {
+    activeScript.value = ''
+    voiceResult.value = null
+    batchResult.value = null
+    mergeResult.value = null
+    audioOutputs.value = []
+    audioResult.value = null
+  }
+
   return {
     activeScript,
     voiceResult,
@@ -65,5 +74,6 @@ export const useProjectStore = defineStore('project', () => {
     recordBatch,
     recordMerge,
     recordAudio,
+    reset,
   }
 })

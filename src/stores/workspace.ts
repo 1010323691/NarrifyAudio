@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import * as workspaceApi from '@/api/workspace'
 import type { WorkspaceInfo } from '@/types'
 import { useSettingsStore } from '@/stores/settings'
+import { useProjectStore } from '@/stores/project'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const current = ref<WorkspaceInfo | null>(null)
@@ -11,6 +12,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const loading = ref(false)
   const busy = ref(false)
   const error = ref('')
+  let generation = 0
 
   const activeProjectId = computed(() => current.value?.workspace_id || current.value?.project_id || '')
   const activeProject = computed(() => projects.value.find((item) => item.id === activeProjectId.value) ?? null)
@@ -18,12 +20,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const hasActiveProject = computed(() => !!current.value?.set && !!activeProjectId.value)
 
   async function refresh() {
+    const requestGeneration = generation
     loading.value = true
     error.value = ''
     const [activeResult, projectsResult] = await Promise.allSettled([
       workspaceApi.getWorkspace(),
       workspaceApi.listManagedProjects(),
     ])
+    if (requestGeneration !== generation) return current.value
     if (activeResult.status === 'fulfilled') current.value = activeResult.value
     else error.value = activeResult.reason?.message || '无法读取当前项目'
     if (projectsResult.status === 'fulfilled') projects.value = projectsResult.value
@@ -35,19 +39,28 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function select(projectId: string) {
     if (busy.value) return null
+    generation += 1
     busy.value = true
     error.value = ''
+    const requestGeneration = generation
     try {
-      current.value = await workspaceApi.selectWorkspace(projectId)
+      const previousProjectId = activeProjectId.value
+      const selected = await workspaceApi.selectWorkspace(projectId)
+      if (requestGeneration !== generation) return null
+      current.value = selected
+      if (activeProjectId.value !== previousProjectId) useProjectStore().reset()
       const settings = useSettingsStore()
       await settings.load()
       return current.value
     } catch (cause: any) {
-      error.value = cause?.message || '无法打开此项目'
+      if (requestGeneration === generation) error.value = cause?.message || '无法打开此项目'
       throw cause
     } finally {
-      busy.value = false
-      loaded.value = true
+      if (requestGeneration === generation) {
+        busy.value = false
+        loading.value = false
+        loaded.value = true
+      }
     }
   }
 
@@ -59,13 +72,27 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function setCurrent(value: WorkspaceInfo) {
+    generation += 1
+    if ((value.workspace_id || value.project_id || '') !== activeProjectId.value) useProjectStore().reset()
     current.value = value
+    loading.value = false
     loaded.value = true
+  }
+
+  function reset() {
+    generation += 1
+    current.value = null
+    projects.value = []
+    loaded.value = false
+    loading.value = false
+    busy.value = false
+    error.value = ''
+    useProjectStore().reset()
   }
 
   return {
     current, projects, loaded, loading, busy, error,
     activeProjectId, activeProject, activeProjectName, hasActiveProject,
-    refresh, select, create, setCurrent,
+    refresh, select, create, setCurrent, reset,
   }
 })

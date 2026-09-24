@@ -33,8 +33,8 @@ export function submitDurableTask(payload: {
   return http.post('/api/v1/tasks', payload)
 }
 
-export function getDurableTask(taskId: string): Promise<DurableTask> {
-  return http.get(`/api/v1/tasks/${taskId}`)
+export function getDurableTask(taskId: string, signal?: AbortSignal): Promise<DurableTask> {
+  return http.get(`/api/v1/tasks/${taskId}`, { signal })
 }
 
 export function listDurableTasks(): Promise<DurableTask[]> {
@@ -45,10 +45,23 @@ export function cancelDurableTask(taskId: string): Promise<DurableTask> {
   return http.post(`/api/v1/tasks/${taskId}/cancel`, {})
 }
 
-export async function waitForDurableTask(taskId: string, intervalMs = 500): Promise<DurableTask> {
+export async function waitForDurableTask(taskId: string, intervalMs = 500, signal?: AbortSignal): Promise<DurableTask> {
   while (true) {
-    const task = await getDurableTask(taskId)
+    signal?.throwIfAborted()
+    const task = await getDurableTask(taskId, signal)
+    signal?.throwIfAborted()
     if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)) return task
-    await new Promise((resolve) => window.setTimeout(resolve, intervalMs))
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }, intervalMs)
+      const abort = () => {
+        window.clearTimeout(timer)
+        reject(signal?.reason ?? new DOMException('Task wait cancelled', 'AbortError'))
+      }
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
+    })
   }
 }
