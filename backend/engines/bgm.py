@@ -51,10 +51,10 @@ from backend.engines.book import decode_buffer
 from backend.engines import music as music_engine
 from backend.engines import tts_batch
 from backend.engines.merge import boundary_gap_ms, collect_segments, thread_budget
+from backend.engines.llm_transport import request_chat_completion as _llm_chat_completion
 from backend.engines.script import (
     LLMJSONRetryExhausted,
     ParseRejected,
-    _llm_chat_completion,
     llm_json_with_retry,
 )
 from backend.engines.voices import extract_json_object

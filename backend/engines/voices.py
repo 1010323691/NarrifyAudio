@@ -255,7 +255,7 @@ def _sanitize(name):
 def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
     """Ask the LLM for a character's voice ``description`` + a ``ref_text`` seed.
 
-    Reuses the stdlib-urllib LLM channel from ``engines/script.py``. The prompt feeds the
+    Uses the shared stdlib-urllib LLM transport. The prompt feeds the
     character's own lines sampled across the book (front / middle / back) with each line's
     ±window local context (see :func:`_select_target_bands` / :func:`_window_block`), so
     the model judges the voice from the character's full range of delivery, not just the
@@ -264,7 +264,7 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
     (unknown): the explicit ``gender`` key wins, else the description's own gender words
     (a prompt without the key still states it there).
     """
-    from .script import _llm_chat_completion
+    from .llm_transport import request_chat_completion as _llm_chat_completion
 
     if not (llm.model_name or "").strip():
         raise RuntimeError("未配置 LLM 模型名称（在「文本解析」页填写模型）。")

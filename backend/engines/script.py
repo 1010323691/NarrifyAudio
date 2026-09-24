@@ -7,7 +7,7 @@ consumes directly. The JSON clean / repair / salvage / chunk-splitting logic is 
 faithful 1:1 port (sliced byte-for-byte from the source); the only adaptation is the
 transport: the source called an OpenAI-compatible endpoint via the ``openai`` SDK,
 which the backend does not need as a dependency, so the request is issued with
-stdlib ``urllib`` — a byte-identical body and headers (see ``_llm_chat_completion``).
+stdlib ``urllib`` in :mod:`backend.engines.llm_transport`.
 
 ``generate`` is a Task worker (first arg is a :class:`TaskHandle`); it streams
 per-chunk progress and logs over SSE and honours cooperative cancel between chunks.
@@ -32,12 +32,12 @@ from ..core.concurrency import gate
 from ..core.paths import get_layout
 from ..core.tasks import TaskCancelled
 from .book import decode_buffer
+from .llm_transport import HTTP_TIMEOUT, LLMHTTPError, request_chat_completion as _llm_chat_completion
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 from .text import ends_sentence, is_chapter_title
 
 IMPLEMENTED = True
 
-HTTP_TIMEOUT = 300  # seconds — LLM calls can be slow on large chunks / CPU models
 
 log = logging.getLogger("audiobook.script")
 
@@ -420,106 +420,6 @@ def split_into_chunks(text, max_size=3000):
         chunks.append(carry)
 
     return chunks
-
-
-# ---------------------------------------------------------------------------
-# LLM transport (stdlib urllib — no third-party HTTP client required).
-# ---------------------------------------------------------------------------
-
-class LLMHTTPError(RuntimeError):
-    """Transport-level HTTP failure from :func:`_llm_chat_completion`.
-
-    The message keeps the historical ``"LLM HTTP {code}: {detail}"`` wording;
-    ``status`` carries the HTTP code so the caller can tell a strict gateway's
-    400/422 (unknown-parameter rejection) from any other failure.
-    """
-
-    def __init__(self, status: int, detail: str):
-        self.status = status
-        super().__init__(f"LLM HTTP {status}: {detail}")
-
-
-def _llm_chat_completion(base_url, api_key, model, messages,
-                         temperature, top_p, presence_penalty, max_tokens,
-                         top_k=0, min_p=0, banned_tokens=None,
-                         extra_body: dict | None = None):
-    """Issue an OpenAI-compatible ``chat/completions`` POST with stdlib ``urllib``.
-
-    Sends the same body/headers the ``openai`` SDK would for
-    ``client.chat.completions.create(...)``: ``Authorization: Bearer <api_key>``, a JSON
-    body of ``model`` / ``messages`` / sampling params, plus any non-zero ``extra_body``
-    keys (``top_k`` / ``min_p`` / ``banned_tokens``) merged at the top level. Returns
-    ``(content, finish_reason, usage)`` where ``usage`` is a dict
-    ``{"prompt_tokens", "completion_tokens"}`` (or ``None``). Raises on HTTP / network /
-    parse failure — the caller's retry loop handles it.
-
-    ``extra_body`` = additional top-level body keys (openai-SDK ``extra_body`` parity),
-    e.g. ``{"enable_thinking": False}`` for thinking-model servers (LM Studio / vLLM /
-    Ollama) so the model's reasoning trace does not consume the ``max_tokens`` budget
-    that the actual answer needs. If the server rejects the request with HTTP 400/422
-    while extra keys are in flight, the call is transparently re-issued ONCE without
-    the extra keys — strict gateways (e.g. the real OpenAI API) reject unknown
-    parameters, and the plain request still works there.
-    """
-    from ..platform.quota import require_quota
-    require_quota("LLM", "llm.operation")
-    url = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": top_p,
-        "presence_penalty": presence_penalty,
-        "max_tokens": max_tokens,
-    }
-    # openai ``extra_body`` keys go at the top level, only when set (non-zero).
-    if top_k:
-        body["top_k"] = top_k
-    if min_p:
-        body["min_p"] = min_p
-    if banned_tokens:
-        body["banned_tokens"] = banned_tokens
-    if extra_body:
-        for k, v in extra_body.items():
-            body[k] = v
-
-    def _post(b):
-        data = json.dumps(b, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8", "replace"))
-        except urllib.error.HTTPError as e:
-            # Surface the server's message (rate limit, auth, model-not-found, ...) in the log.
-            detail = e.read().decode("utf-8", "replace")[:300]
-            raise LLMHTTPError(e.code, detail) from e
-
-    try:
-        payload = _post(body)
-    except LLMHTTPError as e:
-        # Strict gateway rejected the extra keys → transparent one-shot retry
-        # WITHOUT them. No extra keys → nothing to fall back to.
-        if not extra_body or e.status not in (400, 422):
-            raise
-        payload = _post({k: v for k, v in body.items() if k not in extra_body})
-
-    choices = payload.get("choices") or []
-    if not choices:
-        raise ValueError("LLM 响应缺少 choices。")
-    first = choices[0]
-    message = first.get("message") or {}
-    content = (message.get("content") or "").strip()
-    finish_reason = first.get("finish_reason")
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        usage = None
-    return content, finish_reason, usage
 
 
 # ---------------------------------------------------------------------------

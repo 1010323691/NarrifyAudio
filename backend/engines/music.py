@@ -39,9 +39,9 @@ from backend.core import paths as core_paths
 from backend.core.concurrency import gate
 from backend.core.file_lock import exclusive_file_lock
 from backend.core.tasks import TaskCancelled
+from backend.engines.llm_transport import request_chat_completion as _llm_chat_completion
 from backend.engines.script import (
     LLMJSONRetryExhausted,
-    _llm_chat_completion,
     llm_json_with_retry,
 )
 from backend.engines.voices import extract_json_object

@@ -1484,7 +1484,7 @@ def test_list_voices_includes_gender(clone_ws):
 def _stub_persona_llm(monkeypatch, reply):
     """Point the persona LLM channel at a canned reply (``_llm_persona`` imports the
     function at call time, so patching the module attribute is enough)."""
-    from backend.engines import script as script_eng
+    from backend.engines import llm_transport
 
     calls = []
 
@@ -1492,7 +1492,7 @@ def _stub_persona_llm(monkeypatch, reply):
         calls.append(kwargs)
         return reply, "stop", {}
 
-    monkeypatch.setattr(script_eng, "_llm_chat_completion", fake)
+    monkeypatch.setattr(llm_transport, "request_chat_completion", fake)
     return calls
 
 
