@@ -113,17 +113,6 @@ export interface TaskMetrics {
   generated_at: string
 }
 
-export interface TaskActivity {
-  task_id: string
-  task_type: string
-  owner_username: string
-  status: string
-  progress: number
-  event_type: string
-  payload: Record<string, unknown>
-  created_at: string
-}
-
 export interface WorkerStatus {
   worker_id: string
   status: string
@@ -205,10 +194,6 @@ export function getTaskMetrics(): Promise<TaskMetrics> {
   return http.get('/api/v1/admin/task-metrics')
 }
 
-export function getTaskActivity(): Promise<TaskActivity[]> {
-  return http.get('/api/v1/admin/task-activity')
-}
-
 export function cancelTask(id: string): Promise<{ id: string; status: string }> {
   return http.post(`/api/v1/admin/tasks/${id}/cancel`)
 }
@@ -219,12 +204,4 @@ export function retryTask(id: string): Promise<{ id: string; status: string; att
 
 export function cleanupStaleTemp(): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {
   return http.post('/api/v1/admin/resources/cleanup-temp')
-}
-
-export function listWorkers(): Promise<WorkerStatus[]> {
-  return http.get('/api/v1/admin/workers')
-}
-
-export function getQueueStatus(): Promise<QueueStatus> {
-  return http.get('/api/v1/admin/queue')
 }

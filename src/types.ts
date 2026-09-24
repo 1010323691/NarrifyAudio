@@ -342,11 +342,6 @@ export interface BatchStatusFiles {
   files: BatchFileStatus[]
 }
 /** Synthesis progress for the 待合成 card's 【已合成 / 总段落】 (``GET /api/tts/batch-status``). */
-export interface BatchStatus {
-  total: number
-  completed: number
-  remaining: number
-}
 export interface MergeResult {
   file: string
   path: string
@@ -368,18 +363,6 @@ export interface MergeStatusPackages {
 }
 
 // ------------------------------ script (LLM -> JSON) ------------------------------
-export interface ScriptEntry {
-  speaker: string
-  text: string
-  instruct: string
-}
-export interface ScriptGenerateResult {
-  entries: ScriptEntry[]
-  output_path: string
-  output_name?: string
-  count: number
-  speakers: string[]
-}
 /** Response of ``POST /api/script/generate-files``: one independent task per file. */
 export interface GenerateFilesResult {
   task_ids: string[]
@@ -628,10 +611,6 @@ export interface MusicDeleteResult {
   deleted: string[]
   skipped: { name: string; reason: string }[]
   missing: string[]
-}
-/** Response of ``POST /api/music/suggest-tags`` (AI candidate tags, text-only). */
-export interface SuggestTagsResult {
-  tags: Record<MusicTagCategory, string[]>
 }
 /** Response of ``POST /api/music/suggest-tags-batch`` (one Task per track). */
 export interface SuggestBatchResult {

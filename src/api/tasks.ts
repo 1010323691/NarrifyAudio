@@ -11,16 +11,13 @@ export function controlTask(id: string, action: TaskControl): Promise<TaskSnapsh
   return http.post<TaskSnapshot>(`/api/tasks/${id}/${action}`)
 }
 
-// Shared EventSource plumbing for both SSE endpoints. The backend emits every
+// Shared EventSource plumbing. The backend emits every
 // frame as a plain `data:` line (no `event:` field), so the browser delivers
 // them all as `message` events — dispatch on the JSON `type` field rather than
 // named event types.
 function openSse(
   url: string,
   onEvent: (e: { type: string; [k: string]: any }) => void,
-  /** Per-task streams end with a `final` event; the multiplexed stream never
-   * ends on its own (tasks keep being created), so no final-driven teardown. */
-  endsOnFinal: boolean,
   onDone?: () => void,
 ): () => void {
   const es = new EventSource(url)
@@ -34,11 +31,6 @@ function openSse(
       return
     }
     onEvent(e)
-    if (endsOnFinal && e.type === 'final' && !finished) {
-      finished = true
-      teardown()
-      onDone?.()
-    }
   }
 
   function teardown() {
@@ -78,20 +70,5 @@ export function streamAllTasks(
   onEvent: (e: { type: string; [k: string]: any }) => void,
   onDone?: () => void,
 ): () => void {
-  return openSse(`${API_BASE}/api/tasks/stream`, onEvent, false, onDone)
-}
-
-/**
- * Subscribe to a single task's live SSE stream (progress + logs + status). The
- * backend replays the current snapshot on connect, then forwards events until
- * the task reaches a terminal state (the `final` event). Returns an abort
- * function. Superseded by :func:`streamAllTasks` for in-app UI (connection
- * economy); kept for one-off consumers.
- */
-export function streamTask(
-  id: string,
-  onEvent: (e: { type: string; [k: string]: any }) => void,
-  onDone?: () => void,
-): () => void {
-  return openSse(`${API_BASE}/api/tasks/${id}/stream`, onEvent, true, onDone)
+  return openSse(`${API_BASE}/api/tasks/stream`, onEvent, onDone)
 }

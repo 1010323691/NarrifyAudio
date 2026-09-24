@@ -1,17 +1,6 @@
 import { http } from './client'
 import type { WorkspaceInfo } from '@/types'
 
-export interface RecentWorkspace {
-  path: string
-  workspace_id?: string
-  name?: string
-  display_name?: string
-  last_used_at?: string
-  created_at?: string
-  exists: boolean
-  is_current: boolean
-}
-
 export interface ManagedProject {
   id: string
   name: string
@@ -51,10 +40,6 @@ export function getWorkspace(): Promise<WorkspaceInfo> {
  * path clears it, which re-locks the pipeline. Existing files are never moved
  * or deleted.
  */
-export function setWorkspace(path: string): Promise<WorkspaceInfo> {
-  return http.put<WorkspaceInfo>('/api/workspace', { path })
-}
-
 export function selectWorkspace(workspaceId: string): Promise<WorkspaceInfo> {
   return http.put<WorkspaceInfo>('/api/workspace', { workspace_id: workspaceId })
 }
@@ -77,12 +62,4 @@ export function getWorkspaceSummary(workspaceId: string): Promise<WorkspaceSumma
 
 export function cleanupWorkspaceTemp(workspaceId: string): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {
   return http.post(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cleanup-temp`, {})
-}
-
-export function getRecentWorkspaces(): Promise<{ workspaces: RecentWorkspace[] }> {
-  return http.get('/api/workspace/recent')
-}
-
-export function removeRecentWorkspace(path: string): Promise<{ workspaces: RecentWorkspace[] }> {
-  return http.del('/api/workspace/recent', { path })
 }

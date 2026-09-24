@@ -8,7 +8,6 @@ import type {
   MusicDeleteResult,
   MusicTagCategory,
   TrackTags,
-  SuggestTagsResult,
   SuggestBatchResult,
   ApplySuggestionsResult,
 } from '@/types'
@@ -115,11 +114,6 @@ export function deleteTag(category: MusicTagCategory, name: string): Promise<{ t
 
 /** AI-recommended tags (filename + description + vocabulary; the LLM never
  *  reads the audio). Results are in-vocabulary candidates for user confirmation. */
-export function suggestTags(name: string, description?: string): Promise<SuggestTagsResult> {
-  return http.post<SuggestTagsResult>('/api/music/suggest-tags', { name, description })
-}
-
-/** Durable single-track AI recommendation; the result is exposed through the task centre. */
 export function suggestTagsDurable(name: string, description?: string): Promise<{ task_id: string }> {
   return http.post<{ task_id: string }>('/api/music/suggest-tags-durable', { name, description })
 }
