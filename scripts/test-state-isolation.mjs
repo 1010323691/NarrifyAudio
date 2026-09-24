@@ -19,6 +19,11 @@ function harness(overrides = {}) {
   setActivePinia(createPinia())
   const api = {
     '@/api/config': { getConfig: async () => ({ ui: { theme: 'light' } }), patchConfig: async () => ({}) },
+    '@/api/tasks': {
+      controlTask: async () => ({}),
+      listTasks: async () => [],
+      streamAllTasks: () => () => {},
+    },
     '@/api/workspace': {},
     ...overrides,
   }
