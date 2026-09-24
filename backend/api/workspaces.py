@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
-from ..platform.deps import require_csrf, require_user
+from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, Task, User, Workspace
 from ..services.projects import ActiveProjectTasksError, create_project_workspace, soft_delete_workspace
 from ..platform.storage import configured_storage_root, safe_display_name, user_workspace_root
@@ -141,7 +141,7 @@ def _workspace_summary(root: Path, *, active: bool) -> dict:
 
 
 @router.get("")
-def list_workspaces(user: User = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_workspaces(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(Workspace).where(Workspace.owner_id == user.id, Workspace.deleted_at.is_(None)).order_by(Workspace.updated_at.desc())).all()
     return [_json(item) for item in rows]
 
@@ -176,7 +176,7 @@ def delete_workspace(workspace_id: str, user: User = Depends(require_csrf), db: 
 
 
 @router.get("/{workspace_id}/summary")
-def get_workspace_summary(workspace_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def get_workspace_summary(workspace_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, workspace_id)
     active = db.scalar(select(Task.id).where(
         Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(_ACTIVE_TASKS)

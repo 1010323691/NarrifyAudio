@@ -145,56 +145,31 @@ def consume_tts_input(char_count: int, operation_type: str, idempotency_key: str
     return True
 
 
-def release_tts_quota(operation_type: str) -> None:
-    context = _context.get()
-    if context is None:
-        return
-    _release_holds(context.task_id, context.attempt_id, operation_type)
-
-
 def release_attempt_holds(task_id: str, attempt_id: str, *, db: Session) -> None:
-    _release_holds(task_id, attempt_id, None, db=db)
-
-
-def _release_holds(task_id: str, attempt_id: str, operation_type: str | None, *, db: Session | None = None) -> None:
-    own_session = db is None
-    db = db or SessionLocal()
-    try:
-        statement = select(QuotaHold).where(
-            QuotaHold.task_id == task_id, QuotaHold.attempt_id == attempt_id, QuotaHold.status == "held",
-        )
-        if operation_type:
-            statement = statement.where(QuotaHold.operation_type == operation_type)
-        for hold in db.scalars(statement.with_for_update()).all():
-            account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == hold.user_id).with_for_update())
-            if account is None:
-                continue
-            amount = hold.units
-            if not amount:
-                hold.status = "released"
-                continue
-            before_available, before_reserved = account.available_units, account.reserved_units
-            account.available_units += amount
-            account.reserved_units -= amount
-            hold.units = 0
+    statement = select(QuotaHold).where(
+        QuotaHold.task_id == task_id, QuotaHold.attempt_id == attempt_id, QuotaHold.status == "held",
+    )
+    for hold in db.scalars(statement.with_for_update()).all():
+        account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == hold.user_id).with_for_update())
+        if account is None:
+            continue
+        amount = hold.units
+        if not amount:
             hold.status = "released"
-            db.add(QuotaTransaction(
-                user_id=hold.user_id, task_id=task_id, amount=amount, kind="release",
-                idempotency_key=f"release:{hold.id}", note=f"{hold.operation_type} 未执行字数退回",
-                resource_type="TTS", operation_type=hold.operation_type, char_count=amount,
-                available_before=before_available, available_after=account.available_units,
-                reserved_before=before_reserved, reserved_after=account.reserved_units,
-                consumed_before=account.consumed_units, consumed_after=account.consumed_units,
-            ))
-        if own_session:
-            db.commit()
-    except Exception:
-        if own_session:
-            db.rollback()
-        raise
-    finally:
-        if own_session:
-            db.close()
+            continue
+        before_available, before_reserved = account.available_units, account.reserved_units
+        account.available_units += amount
+        account.reserved_units -= amount
+        hold.units = 0
+        hold.status = "released"
+        db.add(QuotaTransaction(
+            user_id=hold.user_id, task_id=task_id, amount=amount, kind="release",
+            idempotency_key=f"release:{hold.id}", note=f"{hold.operation_type} 未执行字数退回",
+            resource_type="TTS", operation_type=hold.operation_type, char_count=amount,
+            available_before=before_available, available_after=account.available_units,
+            reserved_before=before_reserved, reserved_after=account.reserved_units,
+            consumed_before=account.consumed_units, consumed_after=account.consumed_units,
+        ))
 
 
 def check_quota_available(user_id: str, *, db: Session | None = None) -> bool:
@@ -223,7 +198,7 @@ def consume_quota(
     user_id = user_id or (context.user_id if context else None)
     task_id = task_id or (context.task_id if context else None)
     if not user_id or resource_type not in {"LLM", "TTS"}:
-        return False  # non-user maintenance/benchmark invocation
+        return False  # non-user maintenance invocation
     key = idempotency_key or f"{task_id or 'direct'}:{resource_type}:{new_id()}"
     with SessionLocal() as db:
         prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))

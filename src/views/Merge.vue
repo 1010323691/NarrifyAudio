@@ -2,7 +2,7 @@
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
-import { useProjectStore } from '@/stores/project'
+import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { mergeStatusPackages, runMerge, ttsStatus } from '@/api/tts'
@@ -39,7 +39,7 @@ import {
 
 const router = useRouter()
 const settings = useSettingsStore()
-const project = useProjectStore()
+const project = usePipelineStateStore()
 const taskStore = useTaskStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()

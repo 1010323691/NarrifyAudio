@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 import * as workspaceApi from '@/api/workspace'
 import type { WorkspaceInfo } from '@/types'
 import { useSettingsStore } from '@/stores/settings'
-import { useProjectStore } from '@/stores/project'
+import { usePipelineStateStore } from '@/stores/pipelineState'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const current = ref<WorkspaceInfo | null>(null)
@@ -48,7 +48,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       const selected = await workspaceApi.selectWorkspace(projectId)
       if (requestGeneration !== generation) return null
       current.value = selected
-      if (activeProjectId.value !== previousProjectId) useProjectStore().reset()
+      if (activeProjectId.value !== previousProjectId) usePipelineStateStore().reset()
       const settings = useSettingsStore()
       await settings.load()
       return current.value
@@ -73,7 +73,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function setCurrent(value: WorkspaceInfo) {
     generation += 1
-    if ((value.workspace_id || value.project_id || '') !== activeProjectId.value) useProjectStore().reset()
+    if ((value.workspace_id || value.project_id || '') !== activeProjectId.value) usePipelineStateStore().reset()
     current.value = value
     loading.value = false
     loaded.value = true
@@ -87,7 +87,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     loading.value = false
     busy.value = false
     error.value = ''
-    useProjectStore().reset()
+    usePipelineStateStore().reset()
   }
 
   return {

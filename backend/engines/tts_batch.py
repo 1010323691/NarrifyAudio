@@ -710,7 +710,7 @@ def _settle_pool(handle, files) -> dict:
             })
             continue
         done = count_completion(
-            f.all_segments, load_manifest(f.out_dir),
+            f.all_segments, migrate_manifest(f.out_dir),
             expected_voice_signatures=f.voice_signatures,
             expected_voice_params=f.voice_params,
         )
@@ -807,9 +807,12 @@ def read_manifest(out_dir) -> dict:
     return _load_manifest(out_dir, persist_migration=False)
 
 
-def load_manifest(out_dir) -> dict:
+def migrate_manifest(out_dir) -> dict:
     """Read and persist legacy manifest migrations for a write operation."""
     return _load_manifest(out_dir, persist_migration=True)
+
+
+load_manifest = migrate_manifest  # compatibility for existing Python callers
 
 
 def _load_manifest(out_dir, *, persist_migration: bool) -> dict:
@@ -1159,7 +1162,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         if vc_path.exists() else None
     )
     all_indices = {s["index"] for s in all_segments}
-    old_entries = load_manifest(out_dir)
+    old_entries = migrate_manifest(out_dir)
     _restore_cached_voice_versions(
         old_entries, voice_params_by_index, voice_signatures, ws,
     )
@@ -1457,7 +1460,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             failed.append({"index": s["index"], "speaker": s["speaker"],
                            "reason": (r or {}).get("reason") or "（引擎未返回结果）"})
 
-    done = count_completion(all_segments, load_manifest(out_dir),
+    done = count_completion(all_segments, migrate_manifest(out_dir),
                             expected_voice_signatures=voice_signatures,
                             expected_voice_params=voice_params_by_index)
     handle.log(
@@ -1574,7 +1577,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 segment_voice_params(f.all_segments, voice_config)
                 if vc_path.exists() else None
             )
-            f.old_entries = load_manifest(f.out_dir)
+            f.old_entries = migrate_manifest(f.out_dir)
             all_indices = {s["index"] for s in f.all_segments}
             _restore_cached_voice_versions(
                 f.old_entries, f.voice_params, f.voice_signatures, ws,

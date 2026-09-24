@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..platform.database import SessionLocal, get_db
-from ..platform.deps import require_csrf, require_user
+from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, User, utcnow
 from ..platform.config import settings
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
@@ -32,13 +32,13 @@ def _task_json(task: Task) -> dict:
 
 
 @router.get("")
-def list_tasks(user: User = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_tasks(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(Task).where(Task.owner_id == user.id).order_by(Task.created_at.desc()).limit(200)).all()
     return [_task_json(row) for row in rows]
 
 
 @router.get("/{task_id}")
-def get_task(task_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def get_task(task_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id))
     if task is None:
         raise HTTPException(404, "任务不存在")
@@ -49,7 +49,7 @@ def get_task(task_id: str, user: User = Depends(require_user), db: Session = Dep
 def stream_task_events(
     task_id: str,
     request: Request,
-    user: User = Depends(require_user),
+    user: User = Depends(require_authenticated_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     try:

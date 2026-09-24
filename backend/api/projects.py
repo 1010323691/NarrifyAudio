@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..platform.config import settings
 from ..platform.database import get_db
-from ..platform.deps import require_csrf, require_user
+from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.file_response import file_response
 from ..platform.models import Project, ProjectFile, User, new_id
 from ..services.projects import ActiveProjectTasksError, create_project_workspace, rename_project, soft_delete_project
@@ -41,7 +41,7 @@ def _owned_project(db: Session, user: User, project_id: str) -> Project:
 
 
 @router.get("")
-def list_projects(user: User = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     return [_project_json(item, user) for item in db.scalars(select(Project).where(Project.owner_id == user.id, Project.deleted_at.is_(None)).order_by(Project.updated_at.desc())).all()]
 
 
@@ -65,7 +65,7 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
 
 
 @router.get("/{project_id}")
-def get_project(project_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def get_project(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     return _project_json(_owned_project(db, user, project_id), user)
 
 
@@ -104,7 +104,7 @@ def _file_json(item: ProjectFile) -> dict:
 
 
 @router.get("/{project_id}/files")
-def list_files(project_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_files(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     _owned_project(db, user, project_id)
     rows = db.scalars(select(ProjectFile).where(ProjectFile.project_id == project_id, ProjectFile.owner_id == user.id, ProjectFile.deleted_at.is_(None)).order_by(ProjectFile.created_at.desc())).all()
     return [_file_json(row) for row in rows]
@@ -138,7 +138,7 @@ async def upload_file(project_id: str, upload: UploadFile = File(...), user: Use
 
 
 @router.get("/{project_id}/files/{file_id}")
-def download_file(project_id: str, file_id: str, request: Request, user: User = Depends(require_user), db: Session = Depends(get_db)):
+def download_file(project_id: str, file_id: str, request: Request, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)):
     _owned_project(db, user, project_id)
     item = db.scalar(select(ProjectFile).where(ProjectFile.id == file_id, ProjectFile.project_id == project_id, ProjectFile.owner_id == user.id, ProjectFile.deleted_at.is_(None)))
     if item is None:

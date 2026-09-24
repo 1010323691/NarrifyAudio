@@ -48,11 +48,14 @@ def get_auth_context(request: Request, db: Session = Depends(get_db)) -> AuthCon
     return AuthContext(user=session.user, session=session)
 
 
-def require_user(ctx: AuthContext = Depends(get_auth_context)) -> User:
+def require_authenticated_user(ctx: AuthContext = Depends(get_auth_context)) -> User:
     return ctx.user
 
 
-def require_admin(user: User = Depends(require_user)) -> User:
+require_user = require_authenticated_user  # compatibility for direct Python imports
+
+
+def require_admin(user: User = Depends(require_authenticated_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user

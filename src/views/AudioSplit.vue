@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
-import { useProjectStore } from '@/stores/project'
+import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useToast } from '@/components/ui/toast'
 import { cutAudio, detectSilences, exportAudio, planAudio, probeAudio, zipAudio } from '@/api/audio'
 import { cancelDurableTask, getDurableTask, listDurableTasks } from '@/api/persistentTasks'
@@ -50,7 +50,7 @@ import {
 } from 'lucide-vue-next'
 
 const settings = useSettingsStore()
-const project = useProjectStore()
+const project = usePipelineStateStore()
 const { workspaceSet } = useWorkspaceGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()

@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
-from ..platform.deps import require_user
+from ..platform.deps import require_authenticated_user
 from ..platform.models import QuotaTransaction, User, UserQuotaAccount
 
 router = APIRouter(prefix="/api/v1/quota", tags=["quota"])
@@ -22,7 +22,7 @@ def _account_json(account: UserQuotaAccount) -> dict:
 
 
 @router.get("")
-def get_quota(user: User = Depends(require_user), db: Session = Depends(get_db)) -> dict:
+def get_quota(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     account = db.get(UserQuotaAccount, user.id)
     if account is None:
         return {"available_units": 0, "reserved_units": 0, "frozen_units": 0, "consumed_units": 0, "unit": "字"}
@@ -30,7 +30,7 @@ def get_quota(user: User = Depends(require_user), db: Session = Depends(get_db))
 
 
 @router.get("/transactions")
-def list_quota_transactions(user: User = Depends(require_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_quota_transactions(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(
         select(QuotaTransaction)
         .where(QuotaTransaction.user_id == user.id)
