@@ -72,6 +72,36 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     assert all(item["id"] != workspace_id for item in client.get("/api/v1/workspaces").json())
 
 
+def test_script_batch_http_routes_use_persistent_tasks(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    workspace = Path(client.get("/api/workspace").json()["path"])
+    source = workspace / "02_split_text" / "chapter.txt"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("A short chapter.", encoding="utf-8")
+    with SessionLocal.begin() as db:
+        account = db.get(UserQuotaAccount, first["user"]["id"])
+        assert account is not None
+        account.available_units = 1000
+
+    submitted = client.post(
+        "/api/script/generate-files", headers={"X-CSRF-Token": csrf},
+        json={"files": [source.name]},
+    )
+    assert submitted.status_code == 200, submitted.text
+    task_id = submitted.json()["task_ids"][0]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None and task.task_type == "script.parse"
+
+    cancelled = client.post(
+        "/api/script/cancel-batch", headers={"X-CSRF-Token": csrf},
+        json={"task_ids": [task_id]},
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["cancelled"][0]["id"] == task_id
+
+
 def test_idempotent_task_submission_and_quota_guard(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
@@ -515,7 +545,7 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
             "output_path": str(output_path),
         }
 
-    monkeypatch.setattr("backend.platform.task_worker.script_engine.generate_file", fake_generate)
+    monkeypatch.setattr("backend.platform.task_worker.script_engine.parse_script_file", fake_generate)
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},

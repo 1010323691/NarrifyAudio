@@ -587,7 +587,7 @@ def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
     token = bind_workspace(workspace)
     try:
         try:
-            result = script_engine.generate_file(
+            result = script_engine.parse_script_file(
                 handle,
                 source_path,
                 llm,

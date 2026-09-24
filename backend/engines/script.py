@@ -3133,7 +3133,7 @@ def delete_pure_saying_tags(entries, title_test) -> tuple:
     return kept, deleted, deleted_texts
 
 
-def generate_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, generation: GenerationConfig,
+def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, generation: GenerationConfig,
                   rng: "random.Random" | None = None, *, output_path: Path | None = None,
                   spot_history_path: Path | None = None) -> dict:
     """Task worker: turn one ``02_split_text`` file into its ``{speaker, text, instruct}``
@@ -3524,3 +3524,6 @@ def generate_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, generati
         # the prep-stage failures never took a slot and must not release.
         if not slot_released:
             gate().release()
+
+
+generate_file = parse_script_file  # compatibility for direct Python callers
