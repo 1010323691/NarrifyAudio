@@ -50,6 +50,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
+from pathlib import Path
 
 from ..core import pathio
 from ..core.config import get_config
@@ -645,8 +646,13 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     def persist():
         # Single-threaded incremental persist: every finished character is written back the
         # moment it completes, so the 角色配音 list (status / preview) refreshes in real time.
-        vc_path.parent.mkdir(parents=True, exist_ok=True)
-        vc_path.write_bytes(json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8"))
+        data = json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8")
+        stage_workspace_file = getattr(handle, "stage_workspace_file", None)
+        if callable(stage_workspace_file):
+            stage_workspace_file(vc_path, data)
+        else:
+            vc_path.parent.mkdir(parents=True, exist_ok=True)
+            vc_path.write_bytes(data)
 
     ex = ThreadPoolExecutor(max_workers=max_workers)
     futs = {ex.submit(copy_context().run, gen_one, sp): sp for sp in unique_speakers}
@@ -679,7 +685,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
                 entry["gender"] = r["gender"]
             voice_config[sp] = entry
             persist()
-            invalidate_speaker_outputs([sp], layout)
+            invalidate_speaker_outputs([sp], layout, handle=handle)
             results.append({"speaker": r["speaker"], "ok": r["ok"], "type": r["type"],
                             "description": r["description"]})
             done += 1
@@ -817,9 +823,13 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
             ref_text = pick_ref_text([t for _i, t in samples.get(sp, [])]) \
                 or f"{sp} speaks in a clear, natural voice."
         for k in range(1, _target(sp) + 1):
-            jobs.append({"sp": sp, "k": k, "description": description, "ref_text": ref_text,
-                         "out": str(layout.voice_profiles / "designed_voices" /
-                                    f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav")})
+            final_out = layout.voice_profiles / "designed_voices" / f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav"
+            allocate_workspace_stage = getattr(handle, "allocate_workspace_stage", None)
+            staged_out = allocate_workspace_stage(final_out) if callable(allocate_workspace_stage) else final_out
+            job = {"sp": sp, "k": k, "description": description, "ref_text": ref_text, "out": str(staged_out)}
+            if callable(allocate_workspace_stage):
+                job["final_out"] = str(final_out)
+            jobs.append(job)
 
     results = []
     ok = failed = 0
@@ -831,8 +841,13 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
         # Single-writer persist: the whole file is written the moment a character's full
         # candidate set settles, so the 角色配音 list (status / preview / candidates)
         # refreshes in real time.
-        vc_path.parent.mkdir(parents=True, exist_ok=True)
-        vc_path.write_bytes(json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8"))
+        data = json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8")
+        stage_workspace_file = getattr(handle, "stage_workspace_file", None)
+        if callable(stage_workspace_file):
+            stage_workspace_file(vc_path, data)
+        else:
+            vc_path.parent.mkdir(parents=True, exist_ok=True)
+            vc_path.write_bytes(data)
 
     def _settle(sp):
         # All of this character's candidates have settled: apply them as ONE unit on the
@@ -842,6 +857,16 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
         entry = voice_config.get(sp, {})
         good = sorted((r for r in pending[sp].values() if r["ok"]), key=lambda r: r["k"])
         if good:
+            jobs_by_candidate = {(job["sp"], job["k"]): job for job in jobs}
+            publish_workspace_stage = getattr(handle, "publish_workspace_stage", None)
+            if callable(publish_workspace_stage) and all(jobs_by_candidate[(sp, r["k"])].get("final_out") for r in good):
+                for result in good:
+                    job = jobs_by_candidate[(sp, result["k"])]
+                    staged_out = Path(job["out"])
+                    final_out = Path(job["final_out"])
+                    if staged_out.exists():
+                        publish_workspace_stage(final_out, staged_out)
+                    result["preview"] = str(final_out)
             cands = [{"id": str(i),
                       "ref_audio": pathio.to_workspace_relative(r["preview"], ws) or r["preview"],
                       "seed": r["seed"]}
@@ -864,7 +889,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
             })
             voice_config[sp] = entry
             persist()
-            invalidate_speaker_outputs([sp], layout)
+            invalidate_speaker_outputs([sp], layout, handle=handle)
             results.append({"speaker": sp, "ok": True, "type": "clone",
                             "preview": good[0]["preview"], "candidates": len(good)})
             ok += 1
@@ -877,12 +902,17 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
                           "clone_status": "failed"})
             voice_config[sp] = entry
             persist()
-            invalidate_speaker_outputs([sp], layout)
+            invalidate_speaker_outputs([sp], layout, handle=handle)
             first_reason = next((r["reason"] for r in pending[sp].values() if not r["ok"]), "")
             results.append({"speaker": sp, "ok": False, "type": "design", "preview": "",
                             "candidates": 0, "reason": first_reason})
             failed += 1
             handle.log(f"  ✗ {num} {sp} 候选全部生成失败（{first_reason}），改用 design 兜底。", "ERROR")
+        discard_workspace_stage = getattr(handle, "discard_workspace_stage", None)
+        if callable(discard_workspace_stage):
+            for job in jobs:
+                if job["sp"] == sp and job.get("final_out"):
+                    discard_workspace_stage(Path(job["out"]))
         settled.add(sp)
 
     # Breakpoint adoption: a candidate WAV already on disk (rendered by an earlier

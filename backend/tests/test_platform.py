@@ -19,7 +19,7 @@ from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, sha256_file, task_attempt_path, user_workspace_root
-from backend.platform.task_worker import TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
 from backend.platform.legacy_tasks import estimate_legacy_units
 
 
@@ -942,6 +942,52 @@ def test_failed_result_commit_restores_previous_workspace_file(client: TestClien
     assert not (staged.parent / "publication.json").exists()
     with original_factory() as db:
         assert db.get(Task, claim.task_id).status == "running"
+
+
+def test_incremental_legacy_workspace_write_rolls_back_with_task_commit(client: TestClient, monkeypatch):
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Incremental journal"}).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
+              "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    claim = claim_task(submitted.json()["id"], "incremental-journal-worker")
+    assert claim is not None
+    with SessionLocal() as db:
+        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        staged = task_attempt_path(db, first["user"]["username"], project["id"], claim.task_id, claim.attempt_id, "result.json")
+    final = workspace / "04_voice_profiles" / "voice_config.json"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"old config")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(b"task result")
+
+    handle = PersistentTaskHandle(claim)
+    handle.stage_workspace_file(final, b"new config")
+    assert final.read_bytes() == b"new config"
+    outcome = TaskOutcome(
+        temp_path=staged, output_name="result.json", content_type="application/json",
+        size_bytes=staged.stat().st_size, sha256=sha256_file(staged), metadata={},
+        publication_journal=handle.publication_journal,
+    )
+
+    original_factory = task_worker.SessionLocal
+
+    def failing_session():
+        session = original_factory()
+        session.commit = lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
+        return session
+
+    monkeypatch.setattr(task_worker, "SessionLocal", failing_session)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        complete_claim(claim, outcome)
+    assert final.read_bytes() == b"old config"
+    assert not (staged.parent / "publication.json").exists()
 
 
 def test_expired_attempt_restores_interrupted_publication(client: TestClient):

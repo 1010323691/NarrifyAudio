@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import logging
 import mimetypes
 import os
 import secrets
@@ -145,6 +146,7 @@ class TaskOutcome:
     additional_outputs: tuple[TaskFileOutcome, ...] = field(default_factory=tuple)
     side_effect_outputs: tuple[TaskSideEffectOutput, ...] = field(default_factory=tuple)
     side_effect_deletes: tuple[Path, ...] = field(default_factory=tuple)
+    publication_journal: PublicationJournal | None = None
 
 
 class PersistentTaskHandle:
@@ -156,6 +158,8 @@ class PersistentTaskHandle:
         self._rate_total = 0
         self._rate_samples: deque[tuple[float, int]] = deque()
         self._last_rate_event = 0.0
+        self._publication_journal: PublicationJournal | None = None
+        self._staged_workspace_paths: set[Path] = set()
 
     @property
     def cancelled(self) -> bool:
@@ -201,6 +205,101 @@ class PersistentTaskHandle:
             "done": max(0, int(done)), "total": max(0, int(total)),
             "chars_done": max(0, int(chars_done)), "chars_total": max(0, int(chars_total)),
         })
+
+    @property
+    def publication_journal(self) -> PublicationJournal | None:
+        return self._publication_journal
+
+    def _ensure_publication_journal(self) -> PublicationJournal:
+        if self._publication_journal is None:
+            with SessionLocal() as db:
+                user = db.get(User, self.claim.owner_id)
+                if user is None:
+                    raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+                journal = PublicationJournal(
+                    configured_storage_root(db),
+                    task_attempt_path(
+                        db, user.username, self.claim.project_id,
+                        self.claim.task_id, self.claim.attempt_id, "publication.json",
+                    ),
+                )
+            journal.prepare()
+            self._publication_journal = journal
+        return self._publication_journal
+
+    def _workspace_stage_path(self, final_path: Path) -> Path:
+        with SessionLocal() as db:
+            user = db.get(User, self.claim.owner_id)
+            if user is None:
+                raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+            return task_attempt_path(
+                db, user.username, self.claim.project_id, self.claim.task_id,
+                self.claim.attempt_id, f"workspace-{secrets.token_hex(12)}-{safe_display_name(final_path.name)}",
+            )
+
+    def allocate_workspace_stage(self, final_path: Path) -> Path:
+        staged = self._workspace_stage_path(final_path)
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        self._staged_workspace_paths.add(staged)
+        return staged
+
+    def _publish_staged_workspace_file(self, final_path: Path, staged: Path) -> None:
+        with SessionLocal() as db:
+            user = db.get(User, self.claim.owner_id)
+            if user is None:
+                raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+            attempt_root = task_attempt_path(
+                db, user.username, self.claim.project_id, self.claim.task_id,
+                self.claim.attempt_id, "publication-check",
+            ).parent.resolve()
+        if not staged.resolve().is_relative_to(attempt_root):
+            raise ValueError("Staged workspace output is outside the active task attempt")
+        journal = self._ensure_publication_journal()
+        try:
+            journal.publish(journal.add(final_path), staged)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            self._staged_workspace_paths.discard(staged)
+            raise
+        self._staged_workspace_paths.discard(staged)
+
+    def publish_workspace_stage(self, final_path: Path, staged: Path) -> None:
+        self._publish_staged_workspace_file(final_path, staged)
+
+    def discard_workspace_stage(self, staged: Path) -> None:
+        staged.unlink(missing_ok=True)
+        self._staged_workspace_paths.discard(staged)
+
+    def stage_workspace_file(self, final_path: Path, data: bytes) -> None:
+        """Journal and publish one legacy workspace file while preserving live updates."""
+        staged = self._workspace_stage_path(final_path)
+        try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(data)
+            self._publish_staged_workspace_file(final_path, staged)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+
+    def stage_workspace_copy(self, final_path: Path, source_path: Path) -> None:
+        staged = self._workspace_stage_path(final_path)
+        try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, staged)
+            self._publish_staged_workspace_file(final_path, staged)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+
+    def defer_workspace_delete(self, final_path: Path) -> None:
+        self._ensure_publication_journal().remove(final_path)
+
+    def rollback_publications(self) -> None:
+        for staged in self._staged_workspace_paths:
+            staged.unlink(missing_ok=True)
+        self._staged_workspace_paths.clear()
+        if self._publication_journal is not None:
+            self._publication_journal.rollback()
 
     def check(self) -> None:
         if self.cancelled:
@@ -1012,6 +1111,11 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
 
 
 def _cleanup_outcome(outcome: TaskOutcome) -> None:
+    if outcome.publication_journal is not None:
+        try:
+            outcome.publication_journal.rollback()
+        except Exception:
+            logging.getLogger(__name__).exception("Could not roll back attempt artifact publication")
     outcome.temp_path.unlink(missing_ok=True)
     for extra in outcome.additional_outputs:
         extra.temp_path.unlink(missing_ok=True)
@@ -1268,13 +1372,15 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
         except TaskCancelled as exc:
             for item in side_effect_outputs:
                 item.temp_path.unlink(missing_ok=True)
+            handle.rollback_publications()
             raise TaskCancelledError() from exc
         except BaseException:
             for item in side_effect_outputs:
                 item.temp_path.unlink(missing_ok=True)
+            handle.rollback_publications()
             raise
     if isinstance(result, TaskOutcome):
-        return result
+        return replace(result, publication_journal=handle.publication_journal)
     handle.progress_percent(100, "完成")
     try:
         outcome = _legacy_result_outcome(claim, result)
@@ -1286,6 +1392,7 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
         outcome,
         side_effect_outputs=tuple(side_effect_outputs),
         side_effect_deletes=tuple(side_effect_deletes),
+        publication_journal=handle.publication_journal,
     )
 
 
@@ -1336,11 +1443,11 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
                         continue
                     existing.deleted_at = utcnow()
                     legacy_module_paths.append((module, object_path(existing.object_key, configured_storage_root(db))))
-        journal = PublicationJournal(
+        journal = outcome.publication_journal or PublicationJournal(
             configured_storage_root(db),
             task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json"),
         )
-        with publication_transaction(journal):
+        with publication_transaction(journal, prepared=outcome.publication_journal is not None):
             published: list[dict[str, Any]] = []
             for item in outputs:
                 file_record = None

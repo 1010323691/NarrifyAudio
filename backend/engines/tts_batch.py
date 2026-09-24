@@ -167,7 +167,7 @@ def _resolved_existing_path(value, workspace):
         return None
 
 
-def _archive_voice_version(entry: dict, workspace) -> bool:
+def _archive_voice_version(entry: dict, workspace, handle=None) -> bool:
     """Keep the current generated file under a voice-specific name before invalidating it."""
     path = _resolved_existing_path(entry.get("path"), workspace)
     signature = entry.get("voice_signature") or ""
@@ -193,7 +193,11 @@ def _archive_voice_version(entry: dict, workspace) -> bool:
     archived = path.with_name(f"{path.stem}.voice-{token}{path.suffix}")
     try:
         if not archived.exists():
-            shutil.copy2(path, archived)
+            stage_workspace_copy = getattr(handle, "stage_workspace_copy", None)
+            if callable(stage_workspace_copy):
+                stage_workspace_copy(archived, path)
+            else:
+                shutil.copy2(path, archived)
     except OSError:
         return False
     versions.append({
@@ -249,7 +253,7 @@ def _merged_output_paths(layout, package: str):
     return [layout.audio_merge / f"{safe}.mp3", layout.audio_merge / f"{safe}.wav"]
 
 
-def invalidate_speaker_outputs(speakers, layout=None) -> int:
+def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
     """Mark old per-segment audio for changed speakers as stale and drop merged output.
 
     This is intentionally limited to generated ``05_audio_chunk/<package>`` manifests
@@ -274,19 +278,30 @@ def invalidate_speaker_outputs(speakers, layout=None) -> int:
         for entry in data:
             if isinstance(entry, dict) and (entry.get("speaker") or "").strip() in names:
                 if entry.get("voice_used") != {} or entry.get("voice_signature") != "":
-                    _archive_voice_version(entry, layout.workspace)
+                    _archive_voice_version(entry, layout.workspace, handle)
                     entry["voice_used"] = {}
                     entry["voice_signature"] = ""
                     touched = True
                     changed += 1
         if touched:
-            pathio.rewrite_json_file(manifest_path, data)
+            stage_workspace_file = getattr(handle, "stage_workspace_file", None)
+            if callable(stage_workspace_file):
+                stage_workspace_file(
+                    manifest_path,
+                    json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            else:
+                pathio.rewrite_json_file(manifest_path, data)
             outputs = _merged_output_paths(layout, manifest_path.parent.name)
             if layout.bgm is not None:
                 safe = "".join("_" if c in '\\/:*?"<>|' else c
                                 for c in manifest_path.parent.name).strip() or "audiobook"
                 outputs.append(layout.bgm / f"{safe}.mp3")
             for output in outputs:
+                defer_workspace_delete = getattr(handle, "defer_workspace_delete", None)
+                if callable(defer_workspace_delete):
+                    defer_workspace_delete(output)
+                    continue
                 try:
                     output.unlink()
                 except FileNotFoundError:

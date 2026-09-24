@@ -264,7 +264,10 @@ def run(handle, m4b: bool = False, package: str | None = None) -> dict:
         seg_file.write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
         tmp_dir = layout.temp / f"merge_tmp_{uuid.uuid4().hex[:12]}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
-        out_path = layout.audio_merge / _output_name(manifest_path, layout)
+        final_out_path = layout.audio_merge / _output_name(manifest_path, layout)
+        allocate_workspace_stage = getattr(handle, "allocate_workspace_stage", None)
+        durable_stage = callable(allocate_workspace_stage)
+        out_path = allocate_workspace_stage(final_out_path) if durable_stage else final_out_path
 
         python, worker = resolve_engine()
         cmd = [
@@ -299,9 +302,15 @@ def run(handle, m4b: bool = False, package: str | None = None) -> dict:
         if result_path and tmp_dir is not None:
             kept = Path(result_path)
             if kept.is_file() and str(kept).startswith(str(tmp_dir) + os.sep):
-                target = layout.audio_merge / kept.name
-                kept.replace(target)
-                result_path = str(target)
+                final_target = layout.audio_merge / kept.name
+                if durable_stage:
+                    staged_target = allocate_workspace_stage(final_target)
+                    kept.replace(staged_target)
+                    handle.publish_workspace_stage(final_target, staged_target)
+                    result_path = str(final_target)
+                else:
+                    kept.replace(final_target)
+                    result_path = str(final_target)
         # The backend owns the staging dir's cleanup on every exit path
         # (success / failure / cancel-kill of the child).
         if tmp_dir is not None:
@@ -310,6 +319,9 @@ def run(handle, m4b: bool = False, package: str | None = None) -> dict:
     produced = Path(result_path or out_path)
     if not produced.exists():
         raise RuntimeError(f"引擎报告成功，但未找到输出文件：{produced}")
+    if durable_stage and produced == out_path:
+        handle.publish_workspace_stage(final_out_path, produced)
+        produced = final_out_path
     size = produced.stat().st_size
 
     handle.log(f"Merge 完成 → {produced}（{size / 1024 / 1024:.1f} MB）")

@@ -2035,7 +2035,16 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
         raise RuntimeError("该章从未匹配，请先匹配。")
     music_name = entry.get("music")
 
-    out = layout.bgm / f"{stem}.mp3"
+    final_out = layout.bgm / f"{stem}.mp3"
+    allocate_workspace_stage = getattr(handle, "allocate_workspace_stage", None)
+    durable_stage = callable(allocate_workspace_stage)
+    out = allocate_workspace_stage(final_out) if durable_stage else final_out
+
+    def publish_output() -> Path:
+        if durable_stage:
+            handle.publish_workspace_stage(final_out, out)
+            return final_out
+        return out
     requested_music_name = music_name
     cfg_now = get_config()
     pause_ms = cfg_now.tts.pause_between_speakers_ms or 500
@@ -2081,7 +2090,8 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
                 handle, layout, stem, out, ffmpeg_cfg, tl, pause_ms, same_ms,
             )
             handle.progress(1.0, "完成")
-            return {"stem": stem, "file": out.name, "path": str(out),
+            published = publish_output()
+            return {"stem": stem, "file": published.name, "path": str(published),
                     "duration": None, "music": None}
         cmd = build_timeline_mix_cmd(
             ffmpeg_cfg.ffmpeg_path or "ffmpeg", narration, out, spans, lib_dir,
@@ -2097,7 +2107,8 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
             handle, layout, stem, out, ffmpeg_cfg, tl, pause_ms, same_ms,
         )
         handle.progress(1.0, "完成")
-        return {"stem": stem, "file": out.name, "path": str(out),
+        published = publish_output()
+        return {"stem": stem, "file": published.name, "path": str(published),
                 "duration": None, "music": None}
 
     if cmd is None:
@@ -2154,7 +2165,8 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
                 layout.bgm.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(narration, out)
                 handle.progress(1.0, "完成")
-                return {"stem": stem, "file": out.name, "path": str(out),
+                published = publish_output()
+                return {"stem": stem, "file": published.name, "path": str(published),
                         "duration": None, "music": None}
             lib_dir = core_paths.MUSIC_LIBRARY_DIR
             for span in spans:
@@ -2242,7 +2254,8 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
                 f"混音输出异常（缺失或小于 1KiB）：{stderr_tail.strip()[-300:]}"
             )
         handle.progress(1.0, "完成")
-        return {"stem": stem, "file": out.name, "path": str(out),
+        published = publish_output()
+        return {"stem": stem, "file": published.name, "path": str(published),
                 "duration": round(dur, 3), "music": music_name}
     finally:
         if proc is not None:

@@ -753,6 +753,29 @@ class _CancelHandle:
         raise TaskCancelled("cancelled")
 
 
+class _StagingHandle(_Handle):
+    def __init__(self, workspace):
+        super().__init__()
+        self.stage_root = workspace / ".tasks" / "test-attempt"
+        self.published = []
+
+    def stage_workspace_file(self, final_path, data):
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(data)
+
+    def allocate_workspace_stage(self, final_path):
+        self.stage_root.mkdir(parents=True, exist_ok=True)
+        return self.stage_root / final_path.name
+
+    def publish_workspace_stage(self, final_path, staged_path):
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.replace(final_path)
+        self.published.append(final_path)
+
+    def discard_workspace_stage(self, staged_path):
+        staged_path.unlink(missing_ok=True)
+
+
 def test_make_clones_fixed_two_candidates(clone_ws, monkeypatch):
     _seed_script(clone_ws, {"A": 3, "B": 2})
     _seed_foundations(clone_ws, ["A", "B"])
@@ -778,6 +801,22 @@ def test_make_clones_fixed_two_candidates(clone_ws, monkeypatch):
         assert (clone_ws / e["candidates"][1]["ref_audio"]).exists()
         # Candidate k is seeded base+k: adjacent candidates differ by exactly one.
         assert e["candidates"][1]["seed"] - e["candidates"][0]["seed"] == 1
+
+
+def test_make_clones_publishes_staged_candidates_to_final_paths(clone_ws, monkeypatch):
+    _seed_script(clone_ws, {"A": 3})
+    _seed_foundations(clone_ws, ["A"])
+    _stub_design_engine(monkeypatch, clone_ws)
+    handle = _StagingHandle(clone_ws)
+
+    result = V.make_clones(handle, concurrency=2, candidate_count=2)
+
+    voice = _load_vc(clone_ws)["A"]
+    assert result["ok"] == 1
+    assert len(handle.published) == 2
+    assert all(path.is_file() for path in handle.published)
+    assert all(".tasks" not in candidate["ref_audio"] for candidate in voice["candidates"])
+    assert not list(handle.stage_root.glob("*.wav"))
 
 
 def test_make_clones_auto_counts_follow_ladder(clone_ws, monkeypatch):

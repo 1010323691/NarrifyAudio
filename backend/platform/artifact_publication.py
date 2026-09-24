@@ -16,6 +16,7 @@ class PublicationJournal:
         if not self.path.is_relative_to(self.root):
             raise ValueError("Publication journal is outside the storage root")
         self.entries: list[tuple[Path, Path, bool]] = []
+        self._closed = False
 
     def _under_root(self, relative: str) -> Path:
         candidate = (self.root / relative).resolve()
@@ -80,17 +81,23 @@ class PublicationJournal:
             path.unlink(missing_ok=True)
 
     def rollback(self) -> None:
+        if self._closed:
+            return
         for final, backup, had_original in reversed(self.entries):
             if backup.exists():
                 os.replace(backup, final)
             elif not had_original:
                 final.unlink(missing_ok=True)
         self.path.unlink(missing_ok=True)
+        self._closed = True
 
     def finish(self) -> None:
+        if self._closed:
+            return
         for _, backup, _ in self.entries:
             self._remove_backup(backup)
         self.path.unlink(missing_ok=True)
+        self._closed = True
 
     @classmethod
     def reconcile(cls, root: Path, path: Path, *, committed: bool) -> bool:
@@ -114,8 +121,9 @@ class PublicationJournal:
 
 
 @contextmanager
-def publication_transaction(journal: PublicationJournal):
-    journal.prepare()
+def publication_transaction(journal: PublicationJournal, *, prepared: bool = False):
+    if not prepared:
+        journal.prepare()
     try:
         yield journal
     except BaseException:

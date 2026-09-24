@@ -49,3 +49,18 @@ def test_committed_attempt_keeps_new_artifact_and_removes_backup(tmp_path):
     assert final.read_text("utf-8") == "new"
     assert not journal.path.exists()
     assert not list(journal.path.parent.glob("publication-backup-*"))
+
+
+def test_rollback_is_idempotent_after_later_writer_creates_target(tmp_path):
+    final = tmp_path / "new.json"
+    staged = tmp_path / "attempt.json"
+    staged.write_text("attempt output", encoding="utf-8")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final), staged)
+    journal.rollback()
+    final.write_text("later writer", encoding="utf-8")
+
+    journal.rollback()
+
+    assert final.read_text("utf-8") == "later writer"
