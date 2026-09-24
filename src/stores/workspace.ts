@@ -4,6 +4,7 @@ import * as workspaceApi from '@/api/workspace'
 import type { WorkspaceInfo } from '@/types'
 import { useSettingsStore } from '@/stores/settings'
 import { usePipelineStateStore } from '@/stores/pipelineState'
+import { useTaskStore } from '@/stores/task'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const current = ref<WorkspaceInfo | null>(null)
@@ -24,8 +25,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (changed) {
       usePipelineStateStore().reset()
       useSettingsStore().reset()
+      useTaskStore().reset()
     }
     current.value = value
+    if (changed) void useTaskStore().refresh().catch(() => undefined)
     return changed
   }
 
