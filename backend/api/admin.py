@@ -22,7 +22,7 @@ from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
-from ..services.tasks import cancel_task_record
+from ..services.tasks import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
 
@@ -708,23 +708,11 @@ def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = 
     attempts = int(db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0)
     if attempts >= settings.task_max_attempts:
         raise HTTPException(409, "任务已达到最大尝试次数")
-    if task.result is not None:
-        db.delete(task.result)
     previous_status = task.status
-    task.status = "pending"
-    task.progress = 0
-    task.error_code = ""
-    task.error_message = ""
-    task.started_at = None
-    task.finished_at = None
-    task.updated_at = utcnow()
-    append_task_event(db, task.id, "admin_retry_requested", {"actor_user_id": actor.id, "status": "pending"})
-    db.add(OutboxEvent(
-        aggregate_type="task",
-        aggregate_id=task.id,
-        event_type="task.submitted",
-        payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
-    ))
+    requeue_task_record(
+        db, task, event_type="admin_retry_requested",
+        event_payload={"actor_user_id": actor.id, "status": "pending"},
+    )
     db.add(AuditLog(actor_user_id=actor.id, action="admin.task_retried", target_type="task",
                     target_id=task.id, metadata_json={"previous_status": previous_status, "attempts": attempts}))
     db.commit()

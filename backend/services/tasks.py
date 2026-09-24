@@ -48,6 +48,26 @@ def cancel_task_record(
     return True
 
 
+def requeue_task_record(
+    db: Session, task: Task, *, event_type: str, event_payload: dict,
+) -> None:
+    """Reset a validated terminal task and add its durable submission event."""
+    if task.result is not None:
+        db.delete(task.result)
+    task.status = "pending"
+    task.progress = 0
+    task.error_code = ""
+    task.error_message = ""
+    task.started_at = None
+    task.finished_at = None
+    task.updated_at = utcnow()
+    append_task_event(db, task.id, event_type, event_payload)
+    db.add(OutboxEvent(
+        aggregate_type="task", aggregate_id=task.id, event_type="task.submitted",
+        payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
+    ))
+
+
 def task_dict(task: Task) -> dict:
     result = task.result.result if task.result is not None else None
     return {

@@ -14,7 +14,7 @@ from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, User, utcnow
 from ..platform.config import settings
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
-from ..services.tasks import TaskSubmissionError, cancel_task_record, submit_task_record, task_dict
+from ..services.tasks import TaskSubmissionError, cancel_task_record, requeue_task_record, submit_task_record, task_dict
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 
@@ -136,23 +136,6 @@ def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = D
     attempts = db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0
     if attempts >= settings.task_max_attempts:
         raise HTTPException(409, "任务已达到最大尝试次数")
-    if task.result is not None:
-        db.delete(task.result)
-    task.status = "pending"
-    task.progress = 0
-    task.error_code = ""
-    task.error_message = ""
-    task.started_at = None
-    task.finished_at = None
-    task.updated_at = utcnow()
-    append_task_event(db, task.id, "retry_requested", {"status": "pending"})
-    db.add(
-        OutboxEvent(
-            aggregate_type="task",
-            aggregate_id=task.id,
-            event_type="task.submitted",
-            payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
-        )
-    )
+    requeue_task_record(db, task, event_type="retry_requested", event_payload={"status": "pending"})
     db.commit()
     return _task_json(task)
