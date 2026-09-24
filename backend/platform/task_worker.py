@@ -22,6 +22,7 @@ from sqlalchemy import func, or_, select
 
 from ..core.config import TextConfig
 from ..core import config as core_config
+from ..core.file_lock import exclusive_file_lock
 from ..core.paths import WORKSPACE_DIRS, get_layout
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.tasks import TaskCancelled
@@ -77,6 +78,10 @@ from .task_state import (
 
 
 WORKER_GROUP = os.getenv("NARRIFY_TASK_GROUP", "narrify-workers")
+WORKSPACE_MUTATING_TASK_TYPES = {
+    "voices.foundation", "voices.clone", "tts.batch", "tts.merge", "tts.reset",
+    "bgm.analysis", "bgm.segment", "bgm.mix", "bgm.match", "audio.export",
+}
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -218,6 +223,29 @@ def _attempt_is_current(db, claim: TaskClaim) -> tuple[Task | None, TaskAttempt 
     if task.status in TERMINAL_TASK_STATUSES:
         return task, None
     return task, attempt
+
+
+@contextmanager
+def _workspace_engine_lock(claim: TaskClaim):
+    """Serialize legacy engine mutations and publication within one project."""
+    if claim.task_type not in WORKSPACE_MUTATING_TASK_TYPES:
+        yield True
+        return
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        if user is None:
+            raise TaskExecutionError("owner_not_found", "Task owner is missing")
+        workspace = user_workspace_root(db, user.username, claim.project_id)
+    lock_path = workspace / ".tasks" / "workspace-engine.lock"
+    try:
+        with exclusive_file_lock(lock_path):
+            with SessionLocal() as db:
+                task, attempt = _attempt_is_current(db, claim)
+                active = task is not None and attempt is not None and task.status != "cancelling"
+                db.rollback()
+            yield active
+    except TimeoutError as exc:
+        raise TaskExecutionError("workspace_busy", str(exc), retryable=True) from exc
 
 
 def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None:
@@ -420,7 +448,17 @@ def _append_claim_event(claim: TaskClaim, event_type: str, payload: dict[str, An
 def cancellation_requested(claim: TaskClaim) -> bool:
     with SessionLocal() as db:
         task = db.get(Task, claim.task_id)
-        return task is None or task.status == "cancelling"
+        attempt = db.get(TaskAttempt, claim.attempt_id)
+        if task is None or task.status == "cancelling":
+            return True
+        return (
+            attempt is None
+            or attempt.task_id != claim.task_id
+            or attempt.status != "running"
+            or attempt.lease_token != claim.lease_token
+            or _as_utc(attempt.lease_expires_at) is None
+            or _as_utc(attempt.lease_expires_at) <= utcnow()
+        )
 
 
 def _input_file(db, claim: TaskClaim) -> tuple[User, Project, ProjectFile, Path]:
@@ -1423,13 +1461,20 @@ def _process_claim(claim: TaskClaim) -> str:
     heartbeat = threading.Thread(target=renew, name=f"lease-{claim.task_id[:8]}", daemon=True)
     heartbeat.start()
     try:
-        outcome = execute_claim(claim)
-        if cancellation_requested(claim):
-            raise TaskCancelledError()
-        if complete_claim(claim, outcome):
-            return "succeeded"
-        fail_claim(claim, TaskCancelledError())
-        return "cancelled"
+        with _workspace_engine_lock(claim) as active:
+            if not active:
+                if cancellation_requested(claim):
+                    fail_claim(claim, TaskCancelledError())
+                    return "cancelled"
+                return "skipped"
+            outcome = execute_claim(claim)
+            if cancellation_requested(claim):
+                _cleanup_outcome(outcome)
+                raise TaskCancelledError()
+            if complete_claim(claim, outcome):
+                return "succeeded"
+            fail_claim(claim, TaskCancelledError())
+            return "cancelled"
     except TaskExecutionError as exc:
         fail_claim(claim, exc)
         return exc.code

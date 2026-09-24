@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 import shutil
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, sha256_file, task_attempt_path, user_workspace_root
-from backend.platform.task_worker import TaskOutcome, claim_fair_task, claim_task, complete_claim, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.task_worker import TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, heartbeat_claim, process_task_message, recover_database_tasks
 from backend.platform.legacy_tasks import estimate_legacy_units
 
 
@@ -70,6 +71,72 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     assert cancelled.status_code == 200
     assert client.delete(f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
     assert all(item["id"] != workspace_id for item in client.get("/api/v1/workspaces").json())
+
+
+def test_workspace_engine_lock_serializes_project_writers(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Serialized writers"},
+    ).json()
+    claims = []
+    for suffix in ("one", "two"):
+        task = client.post(
+            "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+            json={
+                "project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
+                "estimated_units": 0, "idempotency_key": f"writer-lock-{suffix}-{uuid.uuid4().hex}",
+            },
+        ).json()
+        claim = claim_task(task["id"], f"lock-test-{suffix}")
+        assert claim is not None
+        claims.append(claim)
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    failures: list[BaseException] = []
+
+    def hold_first():
+        try:
+            with _workspace_engine_lock(claims[0]) as active:
+                assert active
+                first_entered.set()
+                assert release_first.wait(3)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def hold_second():
+        try:
+            with _workspace_engine_lock(claims[1]) as active:
+                assert active
+                second_entered.set()
+        except BaseException as exc:
+            failures.append(exc)
+
+    first_thread = threading.Thread(target=hold_first)
+    second_thread = threading.Thread(target=hold_second)
+    first_thread.start()
+    try:
+        assert first_entered.wait(3)
+        second_thread.start()
+        assert not second_entered.wait(0.15)
+    finally:
+        release_first.set()
+    first_thread.join(3)
+    second_thread.join(3)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not failures
+    assert second_entered.is_set()
+    with SessionLocal.begin() as db:
+        for claim in claims:
+            task = db.get(Task, claim.task_id)
+            attempt = db.get(TaskAttempt, claim.attempt_id)
+            assert task is not None and attempt is not None
+            task.status = "cancelled"
+            attempt.status = "cancelled"
+            task.finished_at = attempt.finished_at = utcnow()
 
 
 def test_script_batch_http_routes_use_persistent_tasks(client: TestClient):
@@ -771,6 +838,7 @@ def test_expired_worker_lease_is_fenced_and_recovery_requeues(client: TestClient
     assert claim_two is not None
     assert claim_two.attempt_no == 2
     assert heartbeat_claim(claim_one) is False
+    assert cancellation_requested(claim_one) is True
     recover_database_tasks()
     with SessionLocal() as db:
         task = db.get(Task, task_id)
