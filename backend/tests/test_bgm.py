@@ -391,6 +391,27 @@ def test_analysis_save_roundtrip_no_crlf(sandbox):
     assert again["model"] == "test-model"
 
 
+def test_analysis_cache_update_uses_task_publication_handle(sandbox):
+    layout = core_paths.get_layout()
+    staged = []
+
+    class _JournalHandle:
+        def stage_workspace_file(self, final_path, data):
+            staged.append((final_path, json.loads(data)))
+
+    bgm_engine.update_analysis(
+        layout,
+        lambda data: data["chapters"].update({STEM: {"scene": ["test"]}}),
+        handle=_JournalHandle(),
+    )
+
+    assert staged == [(
+        sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME,
+        {"version": 1, "model": "", "chapters": {STEM: {"scene": ["test"]}}},
+    )]
+    assert not staged[0][0].exists()
+
+
 def test_list_chapter_stems(sandbox):
     layout = core_paths.get_layout()
     assert bgm_engine.list_chapter_stems(layout) == [STEM, STEM2]

@@ -1273,10 +1273,12 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                         same_ms=cfg.tts.pause_same_speaker_ms or 250,
                         volume_base=cfg.bgm.volume,
                         volume_tiers=cfg.bgm.segment_volume_tiers,
+                        handle=handle,
                     )
                 else:
                     result = bgm_engine.match_stems(
                         get_layout(), stems, mode, cfg.bgm.min_match_score,
+                        handle=handle,
                     )
             elif claim.task_type == "bgm.package":
                 layout = get_layout()

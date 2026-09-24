@@ -787,9 +787,13 @@ def _default_segment_analysis() -> dict:
     return {"version": 1, "model": "", "chapters": {}}
 
 
-def _atomic_write_json(p: Path, data: dict) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
+def _atomic_write_json(p: Path, data: dict, handle=None) -> None:
     payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    stage_file = getattr(handle, "stage_workspace_file", None)
+    if callable(stage_file):
+        stage_file(p, payload)
+        return
+    p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".bgm_", suffix=".tmp", dir=str(p.parent))
     try:
         with os.fdopen(fd, "wb") as f:
@@ -984,22 +988,22 @@ def _copy_narration_after_merge_gate(handle, layout, stem: str, out: Path,
         merge_gate().release()
 
 
-def save_analysis(layout, data: dict) -> None:
+def save_analysis(layout, data: dict, handle=None) -> None:
     with _BGMS_LOCK:
-        _atomic_write_json(_bgm_dir(layout) / ANALYSIS_NAME, data)
+        _atomic_write_json(_bgm_dir(layout) / ANALYSIS_NAME, data, handle)
 
 
-def save_assignments(layout, data: dict) -> None:
+def save_assignments(layout, data: dict, handle=None) -> None:
     with _BGMS_LOCK:
-        _atomic_write_json(_bgm_dir(layout) / ASSIGNMENTS_NAME, data)
+        _atomic_write_json(_bgm_dir(layout) / ASSIGNMENTS_NAME, data, handle)
 
 
-def save_segment_analysis(layout, data: dict) -> None:
+def save_segment_analysis(layout, data: dict, handle=None) -> None:
     with _BGMS_LOCK:
-        _atomic_write_json(_bgm_dir(layout) / SEGMENT_ANALYSIS_NAME, data)
+        _atomic_write_json(_bgm_dir(layout) / SEGMENT_ANALYSIS_NAME, data, handle)
 
 
-def update_analysis(layout, mutator) -> dict:
+def update_analysis(layout, mutator, handle=None) -> dict:
     """Atomic read → mutate → write on the analysis cache.
 
     Mirrors :func:`backend.engines.music.update_index`: the module lock is
@@ -1010,29 +1014,29 @@ def update_analysis(layout, mutator) -> dict:
     with _BGMS_LOCK:
         data = load_analysis(layout)
         mutator(data)
-        save_analysis(layout, data)
+        save_analysis(layout, data, handle)
         return data
 
 
-def update_assignments(layout, mutator) -> dict:
+def update_assignments(layout, mutator, handle=None) -> dict:
     """Atomic read → mutate → write on the assignments file (same pattern as
     :func:`update_analysis` — concurrent matches on disjoint stems can't
     lose each other's entries)."""
     with _BGMS_LOCK:
         data = load_assignments(layout)
         mutator(data)
-        save_assignments(layout, data)
+        save_assignments(layout, data, handle)
         return data
 
 
-def update_segment_analysis(layout, mutator) -> dict:
+def update_segment_analysis(layout, mutator, handle=None) -> dict:
     """Atomic read → mutate → write on the segment-analysis cache (same pattern
     as :func:`update_analysis` — parallel paragraph-analysis tasks on disjoint
     chapters can't lose each other's entries)."""
     with _BGMS_LOCK:
         data = load_segment_analysis(layout)
         mutator(data)
-        save_segment_analysis(layout, data)
+        save_segment_analysis(layout, data, handle)
         return data
 
 
@@ -1328,12 +1332,13 @@ def analyze_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
         update_analysis(layout, lambda d: (
             d.update({"model": llm_cfg.model_name}),
             d["chapters"].__setitem__(stem, entry),
-        ))
+        ), handle=handle)
 
         handle.progress(0.9, "匹配音乐")
         mode = load_assignments(layout).get("mode") or "llm"
         mres = match_stems(
             layout, [stem], mode, max(1, int(bgm_cfg.min_match_score)),
+            handle=handle,
         )
         match_entry = mres["assignments"]["chapters"].get(stem)
         skipped_locked = mres["skipped_locked"] > 0
@@ -1539,11 +1544,11 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
         update_segment_analysis(layout, lambda d: (
             d.update({"model": llm_cfg.model_name}),
             d["chapters"].__setitem__(stem, entry),
-        ))
+        ), handle=handle)
         handle.log(f"段落分析完成：{n} 段（{total_batches} 批）")
 
         handle.progress(0.95, "生成时间轴")
-        timeline_ok, timeline_note = _try_auto_timeline(layout, stem, bgm_cfg)
+        timeline_ok, timeline_note = _try_auto_timeline(layout, stem, bgm_cfg, handle)
         if timeline_ok:
             handle.log("时间轴已生成（05 实测时长 + 停顿规则，零 LLM）")
         handle.progress(1.0, "完成")
@@ -1558,7 +1563,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
         gate().release()  # acquire 成功才进入 try——排队中被取消的路径未取槽、不到这里
 
 
-def _try_auto_timeline(layout, stem: str, bgm_cfg) -> tuple[bool, str]:
+def _try_auto_timeline(layout, stem: str, bgm_cfg, handle=None) -> tuple[bool, str]:
     """Best-effort timeline recompute at the tail of a paragraph analysis (the
     task STILL SUCCEEDS when 05/06 are missing — the timeline is a derived,
     zero-LLM artifact). Returns ``(ok, note)``."""
@@ -1571,6 +1576,7 @@ def _try_auto_timeline(layout, stem: str, bgm_cfg) -> tuple[bool, str]:
             same_ms=cfg.tts.pause_same_speaker_ms or 250,
             volume_base=cfg.bgm.volume,
             volume_tiers=cfg.bgm.segment_volume_tiers,
+            handle=handle,
         )
         return True, ""
     except Exception as e:  # noqa: BLE001 — a timeline hiccup never fails the analysis
@@ -1588,6 +1594,7 @@ def recompute_segment_timelines(
     volume_base: float = 0.18,
     volume_tiers: list | None = None,
     rng: random.Random | None = None,
+    handle=None,
 ) -> dict:
     """Regenerate the paragraph-level timelines for the given chapters — PURE
     (synchronous, LLM-free): the cached LLM scene blocks + the REAL 05
@@ -1979,8 +1986,8 @@ def recompute_segment_timelines(
     )
     if timeline_writes:
         for stem, tl in timeline_writes:
-            _atomic_write_json(_timeline_path(layout, stem), tl)
-        update_assignments(layout, _mutate)
+            _atomic_write_json(_timeline_path(layout, stem), tl, handle)
+        update_assignments(layout, _mutate, handle=handle)
     return {"mode": "segment", "matched": matched, "no_bgm": no_bgm,
             "skipped_locked": skipped_locked}
 
@@ -2276,6 +2283,7 @@ def match_stems(
     mode: str,
     min_score: int,
     rng: random.Random | None = None,
+    handle=None,
 ) -> dict:
     """Re-match the given chapters (sorted), writing the assignments file ONCE.
 
@@ -2360,6 +2368,6 @@ def match_stems(
         data["updated_at"] = now
         counts.update(matched=matched, no_bgm=no_bgm, skipped_locked=skipped_locked)
 
-    data = update_assignments(layout, _mutate)
+    data = update_assignments(layout, _mutate, handle=handle)
     return {"mode": mode, "matched": counts["matched"], "no_bgm": counts["no_bgm"],
             "skipped_locked": counts["skipped_locked"], "assignments": data}
