@@ -19,7 +19,7 @@ from ..platform.database import get_db
 from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, OutboxEvent, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, Workspace, utcnow
 from ..platform.outbox import STREAM_NAME
-from ..platform.storage import configured_storage_root, safe_display_name
+from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
 from ..core.observability import api_requests_today, api_snapshot
@@ -176,9 +176,9 @@ def get_application_settings(_: User = Depends(require_admin), db: Session = Dep
 @router.patch("/settings/application")
 def update_application_settings(payload: dict, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     if actor.role != "admin":
-        raise HTTPException(403, "闇€瑕佺鐞嗗憳鏉冮檺")
+        raise HTTPException(403, "需要管理员权限")
     if not isinstance(payload, dict) or not payload or not set(payload).issubset(_FEATURE_CONFIG_SECTIONS):
-        raise HTTPException(422, "鍙兘鏇存柊鍔熻兘閰嶇疆鍒嗘")
+        raise HTTPException(422, "只能更新功能配置分段")
     try:
         # Validate the submitted sections against the canonical schema, then
         # persist only those sections so platform defaults remain independent
@@ -212,7 +212,11 @@ def get_storage_settings(_: User = Depends(require_admin), db: Session = Depends
     source = "admin"
     if config is None:
         source = "deployment-default"
-    return {"root_path": str(configured_storage_root(db)), "source": source}
+    migration = storage_migration(db)
+    return {
+        "root_path": str(configured_storage_root(db)), "source": source,
+        "migration": migration.value if migration is not None else None,
+    }
 
 
 @router.patch("/settings/storage")
@@ -224,12 +228,27 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
     if not path.is_absolute():
         raise HTTPException(422, "存储根目录必须是绝对路径")
     resolved = path.resolve()
+    lock_storage_migration(db)
     previous = configured_storage_root(db)
     existing_config = db.get(SystemConfig, "storage.root")
-    if resolved == previous and existing_config is not None:
+    migration = storage_migration(db)
+    if migration is not None:
+        details = migration.value if isinstance(migration.value, dict) else {}
+        if details.get("source") != str(previous) or details.get("target") != str(resolved):
+            raise HTTPException(409, f"已有未完成的存储迁移，请先恢复至 {details.get('target') or '原目标'}")
+    if resolved == previous and existing_config is not None and migration is None:
         return {"root_path": str(resolved), "source": "admin" if db.get(SystemConfig, "storage.root") else "deployment-default"}
     if resolved.is_relative_to(previous) or previous.is_relative_to(resolved):
         raise HTTPException(422, "新旧存储根目录不能互相嵌套")
+    if migration is None:
+        active_task = db.scalar(select(Task.id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).limit(1))
+        if active_task is not None:
+            raise HTTPException(409, "仍有未完成任务，存储迁移需在任务排空后进行")
+        migration = SystemConfig(
+            key="storage.migration", value={"source": str(previous), "target": str(resolved)},
+        )
+        db.add(migration)
+        db.commit()
     try:
         resolved.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -276,7 +295,16 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
     else:
         config.value = {"path": str(resolved)}
     db.add(AuditLog(actor_user_id=actor.id, action="admin.storage_root_changed", target_type="system_config", target_id="storage.root", metadata_json={"path": str(resolved)}))
-    db.commit()
+    db.delete(migration)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        for source, target in reversed(moved):
+            if target.exists() and not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+        raise
     return {"root_path": str(resolved), "source": "admin"}
 
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import asyncio
 
@@ -12,9 +11,10 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_csrf, require_user
-from ..platform.models import OutboxEvent, Project, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, TaskResult, User, UserQuotaAccount, utcnow
+from ..platform.models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, User, utcnow
 from ..platform.config import settings
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
+from ..services.tasks import TaskSubmissionError, submit_task_record, task_dict
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 
@@ -28,8 +28,7 @@ class TaskSubmit(BaseModel):
 
 
 def _task_json(task: Task) -> dict:
-    result = task.result.result if task.result is not None else None
-    return {"id": task.id, "project_id": task.project_id, "task_type": task.task_type, "status": task.status, "progress": task.progress, "error_code": task.error_code, "error_message": task.error_message, "result": result, "created_at": task.created_at.isoformat(), "updated_at": task.updated_at.isoformat()}
+    return task_dict(task)
 
 
 @router.get("")
@@ -95,41 +94,14 @@ def stream_task_events(
 
 @router.post("", status_code=201)
 def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    # Task counts are not billable. Engines meter successful model output/input chars.
-    estimated_units = 0
-    project = db.scalar(select(Project).where(Project.id == payload.project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)))
-    if project is None:
-        raise HTTPException(404, "项目不存在")
-    request_hash = hashlib.sha256(json.dumps(payload.model_dump(exclude={"idempotency_key"}), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    existing = db.scalar(select(Task).where(Task.owner_id == user.id, Task.idempotency_key == payload.idempotency_key))
-    if existing is not None:
-        if existing.payload.get("_request_hash") != request_hash:
-            raise HTTPException(409, "幂等键对应的请求内容不同")
-        return _task_json(existing)
-    account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
-    if account is None:
-        account = UserQuotaAccount(user_id=user.id, available_units=0)
-        db.add(account)
-        db.flush()
-    if payload.task_type in {"script.parse", "voices.foundation", "voices.clone", "tts.batch", "bgm.analysis", "bgm.segment", "music.suggest_tags"} and account.available_units <= 0:
-        raise HTTPException(409, "额度不足")
-    if account.available_units < estimated_units:
-        raise HTTPException(409, "额度不足")
-    # The account row lock serializes submissions for one user. Re-check the
-    # idempotency key after acquiring it so concurrent identical requests do
-    # not race into the unique constraint.
-    existing = db.scalar(select(Task).where(Task.owner_id == user.id, Task.idempotency_key == payload.idempotency_key))
-    if existing is not None:
-        if existing.payload.get("_request_hash") != request_hash:
-            raise HTTPException(409, "幂等键对应的请求内容不同")
-        db.rollback()
-        return _task_json(existing)
-    task = Task(owner_id=user.id, project_id=project.id, task_type=payload.task_type, payload={**payload.payload, "_request_hash": request_hash}, idempotency_key=payload.idempotency_key)
-    db.add(task)
-    db.flush()
-    append_task_event(db, task.id, "submitted", {"status": "pending", "estimated_units": estimated_units})
-    db.add(OutboxEvent(aggregate_type="task", aggregate_id=task.id, event_type="task.submitted", payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id}))
-    db.commit()
+    try:
+        task = submit_task_record(
+            db, user, project_id=payload.project_id, task_type=payload.task_type,
+            payload=payload.payload, estimated_units=payload.estimated_units,
+            idempotency_key=payload.idempotency_key,
+        )
+    except TaskSubmissionError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
     return _task_json(task)
 
 

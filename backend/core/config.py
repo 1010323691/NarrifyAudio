@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,16 @@ TEMPLATE_FILE = PROJECT_ROOT / "app.json"
 
 _lock = threading.RLock()
 _config_cache: dict[str, AppConfig] = {}
+_task_config: ContextVar[AppConfig | None] = ContextVar("task_config", default=None)
+
+
+def bind_task_config(config: AppConfig):
+    """Use the submitted task's immutable settings during engine execution."""
+    return _task_config.set(config)
+
+
+def reset_task_config(token) -> None:
+    _task_config.reset(token)
 _platform_config_cache: dict[str, Any] = {"expires": 0.0, "value": {}}
 _PLATFORM_CONFIG_TTL = 3.0
 
@@ -347,6 +358,9 @@ def get_config() -> AppConfig:
     must not leak into the UI. The next settings save rewrites it persistently
     (``update_config`` already forces the field to the live workspace).
     """
+    task_config = _task_config.get()
+    if task_config is not None:
+        return task_config
     with _lock:
         ws = _workspace_path()
         key = str(ws.resolve()) if ws is not None else "<template>"

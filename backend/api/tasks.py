@@ -81,12 +81,13 @@ def _durable_label(task: DurableTask) -> str:
 
 
 def _durable_events(db, task_id: str) -> list[TaskEvent]:
-    return db.scalars(
+    latest = db.scalars(
         select(TaskEvent)
         .where(TaskEvent.task_id == task_id)
-        .order_by(TaskEvent.sequence)
+        .order_by(TaskEvent.sequence.desc())
         .limit(1000)
     ).all()
+    return list(reversed(latest))
 
 
 def _durable_snapshot(db, task: DurableTask) -> dict:
@@ -94,6 +95,7 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
     logs = []
     current = ""
     phase = ""
+    metrics: dict[str, dict] = {}
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.event_type == "progress":
@@ -108,6 +110,36 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
                     "t": _epoch(event.created_at),
                 }
             )
+        elif event.event_type in {"llm_rate", "llm_chars", "segments"}:
+            metrics[event.event_type] = payload
+    for metric_type in ("llm_rate", "llm_chars", "segments"):
+        if metric_type not in metrics:
+            latest_metric = db.scalar(
+                select(TaskEvent)
+                .where(TaskEvent.task_id == task.id, TaskEvent.event_type == metric_type)
+                .order_by(TaskEvent.sequence.desc())
+                .limit(1)
+            )
+            if latest_metric is not None and isinstance(latest_metric.payload, dict):
+                metrics[metric_type] = latest_metric.payload
+    if not phase:
+        last_phase = db.scalar(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id, TaskEvent.event_type == "phase")
+            .order_by(TaskEvent.sequence.desc())
+            .limit(1)
+        )
+        if last_phase is not None:
+            phase = str((last_phase.payload or {}).get("phase") or "")
+    if not current:
+        last_progress = db.scalar(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id, TaskEvent.event_type == "progress")
+            .order_by(TaskEvent.sequence.desc())
+            .limit(1)
+        )
+        if last_progress is not None:
+            current = str((last_progress.payload or {}).get("current") or "")
     result = task.result.result if task.result is not None else {}
     return {
         "id": task.id,
@@ -120,14 +152,14 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
         "current": current,
         "logs": logs,
         "llm_stream": "",
-        "llm_cps": 0,
-        "llm_cps_10s": 0,
-        "llm_chars": 0,
-        "llm_secs": 0,
-        "seg_done": 0,
-        "seg_total": 0,
-        "seg_chars_done": 0,
-        "seg_chars_total": 0,
+        "llm_cps": float(metrics.get("llm_rate", {}).get("cps") or 0),
+        "llm_cps_10s": float(metrics.get("llm_rate", {}).get("cps10") or 0),
+        "llm_chars": int(metrics.get("llm_chars", {}).get("chars") or 0),
+        "llm_secs": float(metrics.get("llm_chars", {}).get("secs") or 0),
+        "seg_done": int(metrics.get("segments", {}).get("done") or 0),
+        "seg_total": int(metrics.get("segments", {}).get("total") or 0),
+        "seg_chars_done": int(metrics.get("segments", {}).get("chars_done") or 0),
+        "seg_chars_total": int(metrics.get("segments", {}).get("chars_total") or 0),
         "result": result,
         "error": task.error_message or "",
         "created": _epoch(task.created_at),
@@ -192,6 +224,8 @@ def _durable_event_payload(db, task: DurableTask, event: TaskEvent) -> dict | No
             "msg": payload.get("msg") or "",
             "t": _epoch(event.created_at),
         }
+    if event.event_type in {"llm_rate", "llm_chars", "segments"}:
+        return {"type": event.event_type, **payload}
     if event.event_type in {"succeeded", "failed", "cancelled"}:
         status = _legacy_status("cancelled" if event.event_type == "cancelled" else event.event_type)
         return {"type": "status", "status": status, "task": _durable_snapshot(db, task)}

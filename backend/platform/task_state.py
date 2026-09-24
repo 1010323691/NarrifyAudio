@@ -21,6 +21,9 @@ def append_task_event(db: Session, task_id: str, event_type: str, payload: dict)
         payload=payload,
     )
     db.add(event)
+    # SessionLocal disables autoflush. Recovery can append multiple events in
+    # one transaction, so persist this sequence before the next max() lookup.
+    db.flush()
     return event
 
 

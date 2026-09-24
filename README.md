@@ -170,3 +170,9 @@ npm.cmd run build:all           # 前端构建和后端编译检查
 ```
 
 后端监听 `127.0.0.1:8642`。本地 API 文档可在启动后访问 <http://127.0.0.1:8642/docs>。
+
+生产前端默认向当前页面的同源 `/api` 发请求，适用于由 FastAPI 提供构建文件或反向代理统一入口的部署。若前端与 API 分域，在构建前设置 `VITE_API_BASE`；若后端修改了 `NARRIFY_CSRF_COOKIE`，同时设置 `VITE_CSRF_COOKIE_NAME`。这些 `VITE_` 值会写入前端构建结果，变更后需要重新构建；分域部署还需配置后端允许的来源和 Cookie 策略。
+
+## 项目数据升级
+
+升级到最新数据库 revision 时，迁移会为旧版 `/api/v1/projects` 创建的孤立 Project 补建同 ID 的 Workspace，也会为孤立 Workspace 补建同 ID 的 Project。迁移只修复数据库记录，不删除或移动用户工作空间文件。升级前仍应按部署流程备份数据库与工作空间。

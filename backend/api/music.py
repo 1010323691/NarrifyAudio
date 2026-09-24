@@ -37,7 +37,7 @@ from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Workspace
 from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from ..platform.storage import configured_storage_root, safe_display_name
-from .bgm import _run_bgm_coordinator
+from ..services.legacy_batch import run_bounded_task_coordinator
 
 router = APIRouter(prefix="/api/music", tags=["music"])
 
@@ -907,7 +907,7 @@ def suggest_tags_batch(
         for n in names
     ]
     threading.Thread(
-        target=_run_bgm_coordinator,
+        target=run_bounded_task_coordinator,
         args=([c["task_id"] for c in created], gate), daemon=True,
     ).start()
     return {"task_ids": [c["task_id"] for c in created], "tracks": created}

@@ -795,7 +795,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     segs = Batch._build_segments(data)
     pkg_dir = out_dir or layout.audio_chunk / Batch.package_for(src)
     expected_params = _expected_voice_params(layout, segs, voice_config)
-    manifest = Batch.load_manifest(pkg_dir)
+    manifest = Batch.read_manifest(pkg_dir)
     c = Batch.count_completion(
         segs, manifest, out_dir=pkg_dir,
         expected_voice_params=expected_params,
@@ -886,7 +886,7 @@ def batch_status(script: str | None = None,
     out_dir = layout.audio_chunk / Batch.package_for(src)
     segs = Batch._build_segments(data)
     return Batch.count_completion(
-        segs, Batch.load_manifest(out_dir), out_dir=out_dir,
+        segs, Batch.read_manifest(out_dir), out_dir=out_dir,
         expected_voice_params=_expected_voice_params(
             layout, segs, _read_voice_config(layout),
         ),
@@ -1052,7 +1052,7 @@ def _package_merge_status(name: str, layout) -> dict:
     the 已就绪 badge.
     """
     out = {"name": name, "total": 0, "completed": 0, "remaining": 0, "complete": False}
-    manifest = Batch.load_manifest(layout.audio_chunk / name)
+    manifest = Batch.read_manifest(layout.audio_chunk / name)
     src = layout.parsed_json / f"{name}.json"
     if src.exists():
         try:

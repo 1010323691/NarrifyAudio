@@ -1,3 +1,4 @@
+"""Frozen ORM schema from the initial platform migration (f79a78a)."""
 from __future__ import annotations
 
 import uuid
@@ -7,7 +8,10 @@ from typing import Any
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .database import Base
+from sqlalchemy.orm import DeclarativeBase
+
+class Base(DeclarativeBase):
+    pass
 
 
 def new_id() -> str:
@@ -51,9 +55,6 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    active_workspace_id: Mapped[str | None] = mapped_column(
-        ForeignKey("workspaces.id", name="fk_user_sessions_active_workspace_id", ondelete="SET NULL"), index=True
-    )
 
     user: Mapped[User] = relationship(back_populates="sessions")
     __table_args__ = (Index("ix_sessions_active_token", "token_hash", "revoked_at", "expires_at"),)
@@ -117,7 +118,6 @@ class Task(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     project: Mapped[Project] = relationship(back_populates="tasks")
     attempts: Mapped[list["TaskAttempt"]] = relationship(back_populates="task")
@@ -182,13 +182,10 @@ class UserQuotaAccount(Base):
     available_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     reserved_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     frozen_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    consumed_units: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    # Persistent round-robin cursor for fair scheduling across users.
-    last_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="quota_account")
-    __table_args__ = (CheckConstraint("available_units >= 0 and reserved_units >= 0 and frozen_units >= 0 and consumed_units >= 0", name="ck_quota_nonnegative"),)
+    __table_args__ = (CheckConstraint("available_units >= 0 and reserved_units >= 0 and frozen_units >= 0", name="ck_quota_nonnegative"),)
 
 
 class QuotaReservation(Base):
@@ -203,44 +200,16 @@ class QuotaReservation(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class QuotaHold(Base):
-    __tablename__ = "quota_holds"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
-    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True, nullable=False)
-    attempt_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    operation_type: Mapped[str] = mapped_column(String(80), nullable=False)
-    units: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="held", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
-
-    __table_args__ = (
-        Index("uq_quota_hold_attempt_operation", "attempt_id", "operation_type", unique=True),
-    )
-
-
 class QuotaTransaction(Base):
     __tablename__ = "quota_transactions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True)
-    reservation_id: Mapped[str | None] = mapped_column(ForeignKey("quota_reservations.id", name="fk_quota_transactions_reservation_id", ondelete="RESTRICT"), index=True)
-    actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", name="fk_quota_transactions_actor_user_id", ondelete="SET NULL"), index=True)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False)
     note: Mapped[str] = mapped_column(String(500), default="", nullable=False)
-    available_before: Mapped[int | None] = mapped_column(Integer)
-    available_after: Mapped[int | None] = mapped_column(Integer)
-    reserved_before: Mapped[int | None] = mapped_column(Integer)
-    reserved_after: Mapped[int | None] = mapped_column(Integer)
-    consumed_before: Mapped[int | None] = mapped_column(Integer)
-    consumed_after: Mapped[int | None] = mapped_column(Integer)
-    resource_type: Mapped[str | None] = mapped_column(String(10))
-    operation_type: Mapped[str | None] = mapped_column(String(80))
-    char_count: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -263,18 +232,6 @@ class SystemConfig(Base):
 
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
-
-
-class WorkerHeartbeat(Base):
-    __tablename__ = "worker_heartbeats"
-
-    worker_id: Mapped[str] = mapped_column(String(160), primary_key=True)
-    status: Mapped[str] = mapped_column(String(30), default="starting", nullable=False)
-    capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    current_task_id: Mapped[str | None] = mapped_column(String(36), index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 

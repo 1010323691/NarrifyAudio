@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +24,7 @@ from ..core import paths as core_paths
 from ..core.config import get_config
 from ..core.concurrency import gate, merge_gate, set_concurrency, set_merge_concurrency
 from ..core.paths import get_layout
-from ..core.tasks import TERMINAL, TaskStatus, get_task_manager
+from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import bgm as Bgm
 from ..engines import merge as Merge
 from ..engines import music as music_engine
@@ -34,12 +33,14 @@ from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
+from ..services.legacy_batch import PREFETCH_DEPTH, run_bounded_task_coordinator
 from . import _common
 
 router = APIRouter(prefix="/api/bgm", tags=["bgm"])
 
 # Same prefetch invariant as the merge batch: tasks waiting for a slot stay ≤ 4.
-BGM_PREFETCH_DEPTH = 4
+BGM_PREFETCH_DEPTH = PREFETCH_DEPTH
+_run_bgm_coordinator = run_bounded_task_coordinator
 
 ANALYSIS_MODULE = "bgm-analysis"
 MIX_MODULE = "bgm-mix"
@@ -112,46 +113,6 @@ def _inflight_audio_stems(stems: list[str]) -> list[str]:
                 stem for package, stem in wanted.items() if package in targets
             )
     return sorted(conflicts)
-
-
-def _run_bgm_coordinator(ordered: list[str], gate_fn) -> None:
-    """Dispatch a batch's PENDING shells in order, keeping the prefetch bounded.
-
-    Invariant maintained each round: the number of batch tasks *waiting for a
-    slot* is < BGM_PREFETCH_DEPTH. Slot holders are read from the process-wide
-    gate (``gate()`` for analysis — only analysis workers hold LLM slots here —
-    or ``merge_gate()`` for mix), so the gate is the hard cap and this thread
-    only paces the start-ups.
-    """
-    mgr = get_task_manager()
-    while True:
-        tasks = [mgr.get(tid) for tid in ordered]
-        if all(t is None or t.status in TERMINAL for t in tasks):
-            return
-        no_slot = sum(
-            1 for t in tasks
-            if t is not None and t.status in (TaskStatus.RUNNING, TaskStatus.PAUSED)
-        )
-        waiting = max(0, no_slot - gate_fn().active)
-        while waiting < BGM_PREFETCH_DEPTH:
-            next_tid = next(
-                (tid for tid, t in zip(ordered, tasks)
-                 if t is not None and t.status is TaskStatus.PENDING),
-                None,
-            )
-            if next_tid is None:
-                break
-            try:
-                mgr.start(next_tid)
-            except (ValueError, KeyError):
-                break  # raced with a cancel — it will no longer be PENDING
-            tasks = [mgr.get(tid) for tid in ordered]
-            no_slot = sum(
-                1 for t in tasks
-                if t is not None and t.status in (TaskStatus.RUNNING, TaskStatus.PAUSED)
-            )
-            waiting = max(0, no_slot - gate_fn().active)
-        time.sleep(0.2)
 
 
 def _validated_stems(layout, stems: list[str]) -> list[str]:

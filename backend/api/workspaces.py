@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_user
-from ..platform.models import Project, Task, User, Workspace, new_id, utcnow
+from ..platform.models import Project, Task, User, Workspace
+from ..services.projects import ActiveProjectTasksError, create_project_workspace, soft_delete_workspace
 from ..platform.storage import configured_storage_root, safe_display_name, user_workspace_root
 
 router = APIRouter(prefix="/api/v1/workspaces", tags=["workspaces"])
@@ -150,12 +151,12 @@ def create_workspace(payload: WorkspaceCreate, user: User = Depends(require_csrf
     name = payload.name.strip()
     if db.scalar(select(Workspace).where(Workspace.owner_id == user.id, Workspace.name == name, Workspace.deleted_at.is_(None))) is not None:
         raise HTTPException(409, "工作空间名称已存在")
-    workspace_id = new_id()
-    item = Workspace(id=workspace_id, owner_id=user.id, name=name, directory_key=f"{user.username}/{workspace_id}")
-    db.add(item)
-    db.add(Project(id=workspace_id, owner_id=user.id, name=name, description="工作空间对应项目"))
+    project, item = create_project_workspace(
+        db, owner_id=user.id, username=user.username,
+        name=name, description="工作空间对应项目",
+    )
     try:
-        user_workspace_root(db, user.username, workspace_id).mkdir(parents=True, exist_ok=True)
+        user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
         db.commit()
     except OSError as exc:
         db.rollback()
@@ -166,22 +167,10 @@ def create_workspace(payload: WorkspaceCreate, user: User = Depends(require_csrf
 @router.delete("/{workspace_id}")
 def delete_workspace(workspace_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, workspace_id)
-    active_task = db.scalar(select(Task.id).where(
-        Task.owner_id == user.id,
-        Task.project_id == item.id,
-        Task.status.in_(_ACTIVE_TASKS),
-    ).limit(1))
-    if active_task is not None:
-        raise HTTPException(409, "项目仍有未完成任务，请先等待任务完成或取消任务后再删除。")
-
-    item.deleted_at = utcnow()
-    project = db.scalar(select(Project).where(
-        Project.id == item.id,
-        Project.owner_id == user.id,
-        Project.deleted_at.is_(None),
-    ))
-    if project is not None:
-        project.deleted_at = item.deleted_at
+    try:
+        soft_delete_workspace(db, item)
+    except ActiveProjectTasksError as exc:
+        raise HTTPException(409, str(exc)) from exc
     db.commit()
     return {"ok": True, "directory_retained": True}
 

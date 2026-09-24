@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import zipfile
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import redis
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ..core.config import TextConfig
 from ..core import config as core_config
@@ -40,6 +41,7 @@ from ..engines.text import format_text
 from ..engines import script as script_engine
 from ..engines import audio as audio_engine
 from .config import settings
+from .artifact_publication import PublicationJournal, publication_transaction
 from .database import SessionLocal
 from .models import (
     OutboxEvent,
@@ -62,12 +64,15 @@ from .storage import (
     sha256_file,
     task_attempt_path,
     user_workspace_root,
+    lock_storage_migration,
+    storage_migration,
 )
 from .task_state import (
     TERMINAL_TASK_STATUSES,
     append_task_event,
     release_reservation,
     settle_reservation,
+    suppress_pending_dispatch,
 )
 
 
@@ -134,13 +139,20 @@ class PersistentTaskHandle:
 
     def __init__(self, claim: TaskClaim):
         self.claim = claim
+        self._rate_lock = threading.Lock()
+        self._rate_total = 0
+        self._rate_samples: deque[tuple[float, int]] = deque()
+        self._last_rate_event = 0.0
 
     @property
     def cancelled(self) -> bool:
         return cancellation_requested(self.claim)
 
     def progress(self, fraction: float, current: str = "") -> None:
-        update_progress(self.claim, round(max(0.0, min(1.0, fraction)) * 100), current)
+        self.progress_percent(fraction * 100, current)
+
+    def progress_percent(self, percent: float, current: str = "") -> None:
+        update_progress(self.claim, round(max(0.0, min(100.0, percent))), current)
 
     def phase(self, name: str) -> None:
         _append_claim_event(self.claim, "phase", {"phase": name})
@@ -153,14 +165,29 @@ class PersistentTaskHandle:
         # The durable result is the published JSON artifact.
         return
 
-    def llm_rate(self, _chars: int, _cps: float) -> None:
-        return
+    def llm_rate(self, chars: int, cps: float) -> None:
+        now = time.monotonic()
+        with self._rate_lock:
+            self._rate_total += max(0, int(chars))
+            self._rate_samples.append((now, self._rate_total))
+            while self._rate_samples and self._rate_samples[0][0] < now - 10:
+                self._rate_samples.popleft()
+            first_time, first_total = self._rate_samples[0]
+            span = now - first_time
+            cps10 = max(0.0, (self._rate_total - first_total) / span) if span > 0.001 else 0.0
+            if cps > 0 and now - self._last_rate_event < 1.0:
+                return
+            self._last_rate_event = now
+        _append_claim_event(self.claim, "llm_rate", {"cps": max(0.0, float(cps)), "cps10": cps10})
 
-    def llm_chars(self, _chars: int, _secs: float) -> None:
-        return
+    def llm_chars(self, chars: int, secs: float) -> None:
+        _append_claim_event(self.claim, "llm_chars", {"chars": max(0, int(chars)), "secs": max(0.0, float(secs))})
 
-    def segment_stats(self, _done: int, _total: int, _chars_done: int, _chars_total: int) -> None:
-        return
+    def segment_stats(self, done: int, total: int, chars_done: int, chars_total: int) -> None:
+        _append_claim_event(self.claim, "segments", {
+            "done": max(0, int(done)), "total": max(0, int(total)),
+            "chars_done": max(0, int(chars_done)), "chars_total": max(0, int(chars_total)),
+        })
 
     def check(self) -> None:
         if self.cancelled:
@@ -193,13 +220,29 @@ def _attempt_is_current(db, claim: TaskClaim) -> tuple[Task | None, TaskAttempt 
     return task, attempt
 
 
+def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None:
+    user = db.get(User, task.owner_id)
+    if user is None:
+        raise RuntimeError(f"Task owner is missing: {task.owner_id}")
+    root = configured_storage_root(db)
+    path = task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json")
+    PublicationJournal.reconcile(root, path, committed=task.status == "succeeded")
+
+
 def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None) -> TaskClaim | None:
     """Atomically create one fenced attempt for a submitted task."""
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
     with SessionLocal() as db:
+        lock_storage_migration(db, shared=True)
+        if storage_migration(db) is not None:
+            db.rollback()
+            return None
         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
         if task is None or task.status in TERMINAL_TASK_STATUSES:
+            return None
+        if task.status == "retrying" and _as_utc(task.next_attempt_at) and _as_utc(task.next_attempt_at) > now:
+            db.rollback()
             return None
 
         active = db.scalar(
@@ -212,10 +255,13 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
             if _as_utc(active.lease_expires_at) is not None and _as_utc(active.lease_expires_at) > now:
                 db.rollback()
                 return None
+            _reconcile_attempt_publication(db, task, active)
             active.status = "expired"
             active.finished_at = now
             active.error_message = "worker lease expired"
             append_task_event(db, task.id, "attempt_expired", {"attempt_id": active.id})
+            from .quota import release_attempt_holds
+            release_attempt_holds(task.id, active.id, db=db)
 
         if task.status == "cancelling":
             task.status = "cancelled"
@@ -249,6 +295,7 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
         db.add(attempt)
         db.flush()
         task.status = "running"
+        task.next_attempt_at = None
         task.started_at = task.started_at or now
         task.updated_at = now
         task.error_code = ""
@@ -289,7 +336,8 @@ def claim_fair_task(
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
     with SessionLocal() as db:
-        eligible_tasks = Task.status.in_(["pending", "queued", "retrying"])
+        retry_ready = or_(Task.next_attempt_at.is_(None), Task.next_attempt_at <= now)
+        eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         if task_types:
             eligible_tasks = eligible_tasks & Task.task_type.in_(task_types)
         account = db.scalar(
@@ -307,7 +355,7 @@ def claim_fair_task(
         if account is None:
             db.rollback()
             return None
-        user_tasks = (Task.owner_id == account.user_id) & Task.status.in_(["pending", "queued", "retrying"])
+        user_tasks = (Task.owner_id == account.user_id) & eligible_tasks
         if task_types:
             user_tasks = user_tasks & Task.task_type.in_(task_types)
         task_id = db.scalar(
@@ -584,7 +632,7 @@ def _execute_audio_silences(claim: TaskClaim) -> TaskOutcome:
         ffmpeg = core_config.get_config().ffmpeg
     finally:
         reset_workspace(token)
-    handle.progress(2, "读取时长")
+    handle.progress_percent(2, "读取时长")
     duration, err = audio_engine.probe_duration(source_path, ffmpeg.ffprobe_path)
     if err or not (duration > 0):
         raise TaskExecutionError("probe_failed", f"无法读取音频时长：{err}")
@@ -593,7 +641,7 @@ def _execute_audio_silences(claim: TaskClaim) -> TaskOutcome:
             source_path,
             duration,
             ffmpeg.ffmpeg_path,
-            on_progress=lambda value: handle.progress(5 + value * 85, "检测停顿"),
+            on_progress=lambda value: handle.progress_percent(5 + value * 85, "检测停顿"),
             should_cancel=lambda: handle.cancelled,
             on_log=handle.log,
         )
@@ -615,7 +663,7 @@ def _execute_audio_silences(claim: TaskClaim) -> TaskOutcome:
         "aligned": plan.get("aligned", False),
         "shifts": plan.get("shifts", []),
     }
-    handle.progress(100, "完成")
+    handle.progress_percent(100, "完成")
     output_name = safe_display_name(f"{Path(item.original_name).stem}_silences.json")
     return _write_outcome(
         claim,
@@ -646,7 +694,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
     start_number = str(claim.payload.get("start_number") or "1")
     segments = claim.payload.get("segments")
     try:
-        handle.progress(2, "读取时长")
+        handle.progress_percent(2, "读取时长")
         duration, err = audio_engine.probe_duration(source_path, ffmpeg.ffprobe_path)
         if err or not (duration > 0):
             raise TaskExecutionError("probe_failed", f"无法读取音频时长：{err}")
@@ -656,7 +704,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
                     source_path,
                     duration,
                     ffmpeg.ffmpeg_path,
-                    on_progress=lambda value: handle.progress(5 + value * 25, "检测停顿"),
+                    on_progress=lambda value: handle.progress_percent(5 + value * 25, "检测停顿"),
                     should_cancel=lambda: handle.cancelled,
                     on_log=handle.log,
                 )
@@ -680,7 +728,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
             start_number,
             ffmpeg.ffmpeg_path,
             audio_engine.get_extension(item.original_name),
-            on_progress=lambda value: handle.progress(32 + value * 66, "切割"),
+            on_progress=lambda value: handle.progress_percent(32 + value * 66, "切割"),
             should_cancel=lambda: handle.cancelled,
             on_log=handle.log,
         )
@@ -697,7 +745,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
         }
         for file in files
     ]
-    handle.progress(100, "完成")
+    handle.progress_percent(100, "完成")
     first = outputs[0]
     additional: list[TaskFileOutcome] = []
     for index, (file, path) in enumerate(zip(files[1:], outputs[1:]), 1):
@@ -940,26 +988,16 @@ def _legacy_engine_context(claim: TaskClaim):
             raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
         workspace = user_workspace_root(db, user.username, claim.project_id)
     snapshot = claim.payload.get("config")
-    key = str(workspace.resolve())
-    previous = None
-    had_previous = False
+    config_token = None
     if isinstance(snapshot, dict):
-        config = core_config.AppConfig.model_validate(snapshot)
-        with core_config._lock:
-            had_previous = key in core_config._config_cache
-            previous = core_config._config_cache.get(key)
-            core_config._config_cache[key] = config
+        config_token = core_config.bind_task_config(core_config.AppConfig.model_validate(snapshot))
     token = bind_workspace(workspace)
     try:
         yield workspace
     finally:
         reset_workspace(token)
-        if isinstance(snapshot, dict):
-            with core_config._lock:
-                if had_previous:
-                    core_config._config_cache[key] = previous
-                else:
-                    core_config._config_cache.pop(key, None)
+        if config_token is not None:
+            core_config.reset_task_config(config_token)
 
 
 def _legacy_result_outcome(claim: TaskClaim, result: Any) -> TaskOutcome:
@@ -1092,7 +1130,7 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                     {"engine": "bgm.package", "base": base, "file_count": len(stems)},
                     publish_module="08_bgm",
                 )
-                handle.progress(100, "完成")
+                handle.progress_percent(100, "完成")
                 return result
             elif claim.task_type == "audio.zip":
                 workspace = get_layout().workspace
@@ -1122,7 +1160,7 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                     {"engine": "audio.zip", "file_count": len(files)},
                     publish_module="07_output",
                 )
-                handle.progress(100, "完成")
+                handle.progress_percent(100, "完成")
                 return result
             elif claim.task_type == "audio.export":
                 workspace = get_layout().workspace
@@ -1173,7 +1211,7 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
             raise TaskCancelledError() from exc
     if isinstance(result, TaskOutcome):
         return result
-    handle.progress(100, "完成")
+    handle.progress_percent(100, "完成")
     return _legacy_result_outcome(claim, result)
 
 
@@ -1224,75 +1262,79 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
                         continue
                     existing.deleted_at = utcnow()
                     legacy_module_paths.append((module, object_path(existing.object_key, configured_storage_root(db))))
-        published: list[dict[str, Any]] = []
-        for item in outputs:
-            file_record = None
-            if item.publish_module:
-                object_key = f"{safe_display_name(user.username)}/{task.project_id}/{item.publish_module}/{safe_display_name(item.output_name)}"
-                file_record = db.scalar(select(ProjectFile).where(ProjectFile.object_key == object_key))
-                output_id = file_record.id if file_record is not None else new_id()
-            else:
-                output_id = new_id()
-                object_key = project_object_key(user.username, task.project_id, output_id, item.output_name)
-            final_path = object_path(object_key, configured_storage_root(db))
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(item.temp_path, final_path)
-            if item.publish_module and file_record is not None:
-                file_record.original_name = item.output_name
-                file_record.content_type = item.content_type
-                file_record.size_bytes = item.size_bytes
-                file_record.sha256 = item.sha256
-                file_record.kind = "artifact"
-                file_record.deleted_at = None
-            else:
-                db.add(
-                    ProjectFile(
-                        id=output_id,
-                        project_id=task.project_id,
-                        owner_id=task.owner_id,
-                        original_name=item.output_name,
-                        object_key=object_key,
-                        content_type=item.content_type,
-                        size_bytes=item.size_bytes,
-                        sha256=item.sha256,
-                        kind="artifact",
+        journal = PublicationJournal(
+            configured_storage_root(db),
+            task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json"),
+        )
+        with publication_transaction(journal):
+            published: list[dict[str, Any]] = []
+            for item in outputs:
+                file_record = None
+                if item.publish_module:
+                    object_key = f"{safe_display_name(user.username)}/{task.project_id}/{item.publish_module}/{safe_display_name(item.output_name)}"
+                    file_record = db.scalar(select(ProjectFile).where(ProjectFile.object_key == object_key))
+                    output_id = file_record.id if file_record is not None else new_id()
+                else:
+                    output_id = new_id()
+                    object_key = project_object_key(user.username, task.project_id, output_id, item.output_name)
+                final_path = object_path(object_key, configured_storage_root(db))
+                journal.publish(journal.add(final_path), item.temp_path)
+                if item.publish_module and file_record is not None:
+                    file_record.original_name = item.output_name
+                    file_record.content_type = item.content_type
+                    file_record.size_bytes = item.size_bytes
+                    file_record.sha256 = item.sha256
+                    file_record.kind = "artifact"
+                    file_record.deleted_at = None
+                else:
+                    db.add(
+                        ProjectFile(
+                            id=output_id,
+                            project_id=task.project_id,
+                            owner_id=task.owner_id,
+                            original_name=item.output_name,
+                            object_key=object_key,
+                            content_type=item.content_type,
+                            size_bytes=item.size_bytes,
+                            sha256=item.sha256,
+                            kind="artifact",
+                        )
                     )
+                published.append(
+                    {
+                        "file_id": output_id,
+                        "object_key": object_key,
+                        "name": item.output_name,
+                        "path": str(final_path) if item.publish_module else None,
+                    }
                 )
-            published.append(
-                {
-                    "file_id": output_id,
-                    "object_key": object_key,
-                    "name": item.output_name,
-                    "path": str(final_path) if item.publish_module else None,
-                }
-            )
-        result_payload = {
-            "file_id": published[0]["file_id"],
-            "object_key": published[0]["object_key"],
-            "name": published[0]["name"],
-            **outcome.metadata,
-        }
-        if outcome.publish_module:
-            result_payload["path"] = published[0]["path"]
-        if len(published) > 1 or isinstance(outcome.metadata.get("files"), list):
-            described = outcome.metadata.get("files") if isinstance(outcome.metadata.get("files"), list) else []
-            result_payload["files"] = [
-                {**published[index], **(described[index] if index < len(described) and isinstance(described[index], dict) else {})}
-                for index in range(len(published))
-            ]
-        db.add(TaskResult(task_id=task.id, result=result_payload))
-        attempt.status = "succeeded"
-        attempt.finished_at = utcnow()
-        attempt.lease_expires_at = None
-        task.status = "succeeded"
-        task.progress = 100
-        task.finished_at = utcnow()
-        task.updated_at = utcnow()
-        from .quota import release_attempt_holds
-        release_attempt_holds(task.id, attempt.id, db=db)
-        settle_reservation(db, task, note=f"{claim.task_type} completed")
-        append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
-        db.commit()
+            result_payload = {
+                "file_id": published[0]["file_id"],
+                "object_key": published[0]["object_key"],
+                "name": published[0]["name"],
+                **outcome.metadata,
+            }
+            if outcome.publish_module:
+                result_payload["path"] = published[0]["path"]
+            if len(published) > 1 or isinstance(outcome.metadata.get("files"), list):
+                described = outcome.metadata.get("files") if isinstance(outcome.metadata.get("files"), list) else []
+                result_payload["files"] = [
+                    {**published[index], **(described[index] if index < len(described) and isinstance(described[index], dict) else {})}
+                    for index in range(len(published))
+                ]
+            db.add(TaskResult(task_id=task.id, result=result_payload))
+            attempt.status = "succeeded"
+            attempt.finished_at = utcnow()
+            attempt.lease_expires_at = None
+            task.status = "succeeded"
+            task.progress = 100
+            task.finished_at = utcnow()
+            task.updated_at = utcnow()
+            from .quota import release_attempt_holds
+            release_attempt_holds(task.id, attempt.id, db=db)
+            settle_reservation(db, task, note=f"{claim.task_type} completed")
+            append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
+            db.commit()
         storage_root = configured_storage_root(db) / safe_display_name(user.username) / task.project_id
         for module, legacy_path in legacy_module_paths:
             try:
@@ -1335,13 +1377,14 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
         if error.retryable and attempt.attempt_no < settings.task_max_attempts:
             task.status = "retrying"
             delay = min(300, 2 ** max(0, attempt.attempt_no - 1))
+            task.next_attempt_at = utcnow() + timedelta(seconds=delay)
             db.add(
                 OutboxEvent(
                     aggregate_type="task",
                     aggregate_id=task.id,
                     event_type="task.retry",
                     payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
-                    available_at=utcnow() + timedelta(seconds=delay),
+                    available_at=task.next_attempt_at,
                 )
             )
             append_task_event(db, task.id, "retry_scheduled", {"attempt_id": attempt.id, "delay_seconds": delay})
@@ -1357,15 +1400,26 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
 
 def _process_claim(claim: TaskClaim) -> str:
     from .quota import reset_quota_context, set_quota_context
+    from .worker_registry import heartbeat as worker_heartbeat
 
     quota_token = set_quota_context(claim.owner_id, claim.task_id, claim.attempt_id)
     stop = threading.Event()
 
+    def report_worker(status: str, task_id: str | None) -> None:
+        try:
+            worker_heartbeat(claim.worker_id, status=status, current_task_id=task_id)
+        except Exception:
+            # A registry update must not prevent the fenced attempt from running.
+            pass
+
+    report_worker("running", claim.task_id)
+
     def renew() -> None:
-        interval = max(1.0, settings.task_lease_seconds / 3)
+        interval = max(1.0, min(10.0, settings.task_lease_seconds / 3))
         while not stop.wait(interval):
             if not heartbeat_claim(claim):
                 return
+            report_worker("running", claim.task_id)
 
     heartbeat = threading.Thread(target=renew, name=f"lease-{claim.task_id[:8]}", daemon=True)
     heartbeat.start()
@@ -1390,6 +1444,7 @@ def _process_claim(claim: TaskClaim) -> str:
     finally:
         stop.set()
         heartbeat.join(timeout=2)
+        report_worker("idle", None)
         reset_quota_context(quota_token)
 
 
@@ -1426,7 +1481,7 @@ def recover_database_tasks(limit: int = 100) -> int:
     with SessionLocal() as db:
         tasks = db.scalars(
             select(Task)
-            .where(Task.status.in_(["pending", "queued", "retrying", "running"]))
+            .where(Task.status.in_(["pending", "queued", "retrying", "running", "cancelling"]))
             .order_by(Task.updated_at)
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -1438,13 +1493,25 @@ def recover_database_tasks(limit: int = 100) -> int:
                 .order_by(TaskAttempt.attempt_no.desc())
                 .with_for_update()
             )
-            if task.status == "running" and attempt is not None and _as_utc(attempt.lease_expires_at) and _as_utc(attempt.lease_expires_at) > now:
+            if task.status in {"running", "cancelling"} and attempt is not None and _as_utc(attempt.lease_expires_at) and _as_utc(attempt.lease_expires_at) > now:
                 continue
             if attempt is not None and attempt.status == "running":
+                _reconcile_attempt_publication(db, task, attempt)
                 attempt.status = "expired"
                 attempt.finished_at = now
                 attempt.error_message = "worker lease expired during recovery"
                 append_task_event(db, task.id, "attempt_expired", {"attempt_id": attempt.id, "recovered": True})
+                from .quota import release_attempt_holds
+                release_attempt_holds(task.id, attempt.id, db=db)
+            if task.status == "cancelling":
+                task.status = "cancelled"
+                task.finished_at = now
+                task.next_attempt_at = None
+                release_reservation(db, task, note="cancelled during recovery")
+                suppress_pending_dispatch(db, task.id)
+                append_task_event(db, task.id, "cancelled", {"reason": "worker lease expired"})
+                continue
+            if attempt is not None and attempt.status == "expired":
                 if attempt.attempt_no >= settings.task_max_attempts:
                     task.status = "failed"
                     task.error_code = "lease_expired"
@@ -1454,6 +1521,7 @@ def recover_database_tasks(limit: int = 100) -> int:
                     append_task_event(db, task.id, "failed", {"code": task.error_code})
                     continue
                 task.status = "retrying"
+                task.next_attempt_at = now
 
             pending_event = db.scalar(
                 select(OutboxEvent.id)
@@ -1478,6 +1546,7 @@ def recover_database_tasks(limit: int = 100) -> int:
                         aggregate_id=task.id,
                         event_type="task.recovered",
                         payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
+                        available_at=task.next_attempt_at or now,
                     )
                 )
                 append_task_event(db, task.id, "dispatch_recovered", {"attempt_no": attempt_number})

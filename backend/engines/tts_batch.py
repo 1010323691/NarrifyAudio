@@ -29,9 +29,9 @@ from pathlib import Path
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.paths import get_layout, resolve_parsed_json
+from ..core.paths import get_layout, peek_layout, resolve_parsed_json
 from ..core.tasks import TaskCancelled
-from .tts import DEFAULT_LANGUAGE, DEFAULT_MODEL, WorkerWatchdogTimeout, resolve_engine, run_worker
+from .tts import DEFAULT_LANGUAGE, WorkerWatchdogTimeout, resolve_engine, run_worker
 
 IMPLEMENTED = True
 
@@ -802,7 +802,17 @@ def _migrate_legacy_voice_used(data: list, layout) -> int:
     return migrated
 
 
+def read_manifest(out_dir) -> dict:
+    """Read a manifest with legacy entries normalized in memory, without writing it."""
+    return _load_manifest(out_dir, persist_migration=False)
+
+
 def load_manifest(out_dir) -> dict:
+    """Read and persist legacy manifest migrations for a write operation."""
+    return _load_manifest(out_dir, persist_migration=True)
+
+
+def _load_manifest(out_dir, *, persist_migration: bool) -> dict:
     """The package's cumulative manifest as ``{index: entry}`` (``{}`` if absent / unreadable).
 
     One entry per segment the batch has ever reported — the source of truth for what is already
@@ -822,7 +832,7 @@ def load_manifest(out_dir) -> dict:
     # relative form and rewrite the file, so the project keeps working after the workspace
     # moves. ``migrate_entries`` + ``rewrite_json_file`` on the already-parsed list is the
     # in-memory form of ``migrate_entries_in`` (which would re-read the same file).
-    layout = get_layout()
+    layout = get_layout() if persist_migration else peek_layout()
     n = pathio.migrate_entries(data, layout.workspace, ("path",))
     voice_migrated = _migrate_legacy_voice_used(data, layout)
     by_index = {}
@@ -849,7 +859,7 @@ def load_manifest(out_dir) -> dict:
     restored = _restore_cached_voice_versions(
         by_index, expected_params or None, expected_signatures or None, layout.workspace,
     )
-    if n or voice_migrated or restored:
+    if persist_migration and (n or voice_migrated or restored):
         pathio.rewrite_json_file(p, data)
     return by_index
 

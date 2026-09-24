@@ -35,17 +35,21 @@ def reset_quota_context(token) -> None:
     _llm_sequence.set(0)
 
 
-def consume_llm_output(output: str, operation_type: str = "llm.operation") -> bool:
+def consume_llm_output(
+    output: str, operation_type: str = "llm.operation", *, operation_key: str | None = None,
+) -> bool:
     """Charge one accepted business response; malformed retry responses are excluded."""
     context = _context.get()
     if context is None:
         return True
-    sequence = _llm_sequence.get() + 1
-    _llm_sequence.set(sequence)
+    if operation_key is None:
+        sequence = _llm_sequence.get() + 1
+        _llm_sequence.set(sequence)
+        operation_key = str(sequence)
     require_quota("LLM", operation_type)
     charged = consume_quota(
         "LLM", operation_type, len(output or ""),
-        idempotency_key=f"{context.task_id}:llm:{sequence}",
+        idempotency_key=f"{context.task_id}:llm:{operation_key}",
     )
     if not charged:
         raise QuotaInsufficientError(f"字数额度不足，无法结算{operation_type}（LLM）")

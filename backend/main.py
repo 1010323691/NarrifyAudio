@@ -44,7 +44,7 @@ from .platform.database import SessionLocal
 from .platform.deps import require_legacy_access
 from .platform.models import Workspace
 from .platform.security import load_session
-from .platform.storage import user_workspace_root
+from .platform.storage import lock_storage_migration, storage_migration, user_workspace_root
 from sqlalchemy import select
 from time import monotonic
 
@@ -87,6 +87,19 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="NarrifyAudio API", version="0.2.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def block_writes_during_storage_migration(request, call_next):
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    if request.url.path in {"/api/v1/admin/settings/storage", "/api/auth/login", "/api/auth/logout"}:
+        return await call_next(request)
+    with SessionLocal() as db:
+        lock_storage_migration(db, shared=True)
+        if storage_migration(db) is not None:
+            return JSONResponse(status_code=409, content={"detail": "存储根目录正在迁移，写入操作暂时不可用"})
+        return await call_next(request)
 
 
 @app.middleware("http")

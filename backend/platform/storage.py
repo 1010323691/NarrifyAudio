@@ -4,6 +4,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -11,6 +12,17 @@ from .models import SystemConfig
 
 
 _SAFE_NAME = re.compile(r"[^\w.()\- ]+", re.UNICODE)
+
+
+def lock_storage_migration(db: Session, *, shared: bool = False) -> None:
+    """Serialize task admission with an administrator storage-root migration."""
+    if db.get_bind().dialect.name == "postgresql":
+        function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+        db.execute(text(f"SELECT {function}(7526202601)"))
+
+
+def storage_migration(db: Session) -> SystemConfig | None:
+    return db.get(SystemConfig, "storage.migration")
 
 
 def safe_display_name(name: str) -> str:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
@@ -12,7 +11,8 @@ from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_user
 from ..platform.file_response import file_response
-from ..platform.models import Project, ProjectFile, User, new_id, utcnow
+from ..platform.models import Project, ProjectFile, User, new_id
+from ..services.projects import ActiveProjectTasksError, create_project_workspace, rename_project, soft_delete_project
 from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, user_workspace_root
 from ..core.paths import WORKSPACE_DIRS
 
@@ -50,9 +50,10 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
     name = payload.name.strip()
     if db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.deleted_at.is_(None))) is not None:
         raise HTTPException(409, "项目名称已存在")
-    project = Project(owner_id=user.id, name=name, description=payload.description.strip())
-    db.add(project)
-    db.flush()
+    project, _workspace = create_project_workspace(
+        db, owner_id=user.id, username=user.username,
+        name=name, description=payload.description.strip(),
+    )
     try:
         user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
         db.commit()
@@ -76,7 +77,7 @@ def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends
         duplicate = db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.id != project.id, Project.deleted_at.is_(None)))
         if duplicate is not None:
             raise HTTPException(409, "项目名称已存在")
-        project.name = name
+        rename_project(db, project, name)
     if payload.description is not None:
         project.description = payload.description.strip()
     db.commit()
@@ -87,7 +88,10 @@ def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     project = _owned_project(db, user, project_id)
-    project.deleted_at = utcnow()
+    try:
+        soft_delete_project(db, project)
+    except ActiveProjectTasksError as exc:
+        raise HTTPException(409, str(exc)) from exc
     db.commit()
     return {"ok": True}
 

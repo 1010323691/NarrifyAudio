@@ -867,7 +867,7 @@ def _segment_audio_inputs(layout, stem: str, ffprobe_path: str):
     expected = tts_batch._build_segments(entries)
     expected_indices = {s["index"] for s in expected}
     package = tts_batch.package_for(Path(f"{stem}.json"))
-    manifest = tts_batch.load_manifest(layout.audio_chunk / package)
+    manifest = tts_batch.read_manifest(layout.audio_chunk / package)
     if not manifest:
         raise RuntimeError(
             f"{stem}：未找到合成结果清单（05_audio_chunk/{package}/manifest.json）——"
@@ -1639,7 +1639,7 @@ def recompute_segment_timelines(
         # core merge.run feeds the worker (missing segments are skipped; the
         # cursor walk spans across them, exactly like the merged audio does).
         package = tts_batch.package_for(Path(f"{stem}.json"))
-        manifest = tts_batch.load_manifest(layout.audio_chunk / package)
+        manifest = tts_batch.read_manifest(layout.audio_chunk / package)
         if not manifest:
             raise RuntimeError(
                 f"{stem}：未找到合成结果清单（05_audio_chunk/{package}/manifest.json）"
@@ -2350,29 +2350,3 @@ def match_stems(
     data = update_assignments(layout, _mutate)
     return {"mode": mode, "matched": counts["matched"], "no_bgm": counts["no_bgm"],
             "skipped_locked": counts["skipped_locked"], "assignments": data}
-
-
-def _next_stem_key(stem: str, layout) -> str:
-    """The next chapter (sorted 02 files) after ``stem`` — its EXISTING
-    assignment constrains this chapter's pick (adjacent de-dup)."""
-    stems = list_chapter_stems(layout)
-    try:
-        i = stems.index(stem)
-    except ValueError:
-        return ""
-    if i + 1 >= len(stems):
-        return ""
-    return stems[i + 1]
-
-
-def _prev_stem_key(stem: str, layout) -> str:
-    """The previous chapter (sorted 02 files) before ``stem`` — its music
-    (fresh when it is part of this call, else existing) constrains the pick."""
-    stems = list_chapter_stems(layout)
-    try:
-        i = stems.index(stem)
-    except ValueError:
-        return ""
-    if i <= 0:
-        return ""
-    return stems[i - 1]

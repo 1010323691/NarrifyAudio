@@ -901,6 +901,28 @@ def test_legacy_signature_manifest_migrates_used_voice_json(workspace):
     assert persisted[0]["voice_used"] == expected[0]
 
 
+def test_read_manifest_normalizes_legacy_data_without_rewriting(workspace):
+    out_dir = workspace / "05_audio_chunk" / "s"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    audio = out_dir / "0001.mp3"
+    audio.write_bytes(b"audio")
+    config = {"A": {"type": "clone", "ref_audio": "04_voice_profiles/a.wav"}}
+    _seed_voice_config(workspace, config)
+    entry = {
+        "index": 0, "speaker": "A", "text": "a", "path": str(audio),
+        "ok": True, "voice_signature": tts_batch.voice_signature("A", config),
+    }
+    manifest_path = out_dir / "manifest.json"
+    original = json.dumps([entry])
+    manifest_path.write_text(original, encoding="utf-8")
+
+    loaded = tts_batch.read_manifest(out_dir)
+
+    assert loaded[0]["voice_used"] == tts_batch.voice_params("A", config)
+    assert loaded[0]["path"] != str(audio)
+    assert manifest_path.read_text(encoding="utf-8") == original
+
+
 def test_hash_only_manifest_is_stale_when_voice_json_is_required(workspace):
     out_dir = workspace / "05_audio_chunk" / "s"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2123,11 +2145,11 @@ def test_run_batch_dispatches_multi(workspace, monkeypatch):
     from backend.api.tts import BatchRequest, run_batch
 
     mgr = _stub_manager(monkeypatch)
-    run_batch(BatchRequest(scripts=["s.json", "t.json"], concurrency=4, seed=7))
+    run_batch(BatchRequest(scripts=["s.json", "t.json"]))
     module, label, func, args = mgr.created[0]
     assert module == "tts-batch"
     assert func is tts_batch.synthesize_multi
-    assert args == (["s.json", "t.json"], 4, 7)
+    assert args == (["s.json", "t.json"],)
     assert "2 个文件" in label and "续合" in label
 
 
@@ -2135,10 +2157,10 @@ def test_run_batch_single_file_via_scripts_uses_legacy_path(workspace, monkeypat
     from backend.api.tts import BatchRequest, run_batch
 
     mgr = _stub_manager(monkeypatch)
-    run_batch(BatchRequest(scripts=["s.json"], concurrency=4))
+    run_batch(BatchRequest(scripts=["s.json"]))
     module, label, func, args = mgr.created[0]
     assert func is tts_batch.synthesize
-    assert args == (None, "s.json", 4, None)  # the byte-identical legacy call
+    assert args == (None, "s.json")
     assert "· s.json" in label
 
 
@@ -2153,15 +2175,19 @@ def test_run_batch_scripts_with_indices_rejected(workspace, monkeypatch):
     assert ei.value.status_code == 400
 
 
-def test_run_batch_auto_concurrency_is_forwarded(workspace, monkeypatch):
+def test_run_batch_legacy_flags_do_not_override_configured_settings(workspace, monkeypatch):
     from backend.api.tts import BatchRequest, run_batch
 
     mgr = _stub_manager(monkeypatch)
-    run_batch(BatchRequest(scripts=["s.json"], auto_concurrency=True))
+    request = BatchRequest(scripts=["s.json"], auto_concurrency=True, concurrency=4, seed=7)
+    assert "auto_concurrency" not in request.model_dump()
+    assert "concurrency" not in request.model_dump()
+    assert "seed" not in request.model_dump()
+    run_batch(request)
     _module, label, func, args = mgr.created[0]
     assert func is tts_batch.synthesize
-    assert args == (None, "s.json", None, None, True)
-    assert "自动批量" in label
+    assert args == (None, "s.json")
+    assert "续合" in label
 
 
 def test_run_batch_scripts_reject_all(workspace, monkeypatch):

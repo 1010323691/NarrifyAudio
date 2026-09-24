@@ -49,10 +49,12 @@ import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 
 from ..core import pathio
 from ..core.config import get_config
 from ..core.paths import ALL_PARSED_JSON, get_layout, resolve_parsed_json, resolve_parsed_json_all
+from ..platform.quota import QuotaInsufficientError
 from .persona_prompts import PERSONA_SYSTEM_PROMPT, PERSONA_USER_PROMPT
 from .tts import WorkerWatchdogTimeout, resolve_engine, run_worker
 from .tts_batch import (
@@ -314,7 +316,7 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
             ref = str(parsed.get("ref_text", "") or "").strip()
             if desc:
                 from ..platform.quota import consume_llm_output
-                consume_llm_output(text, "voices.foundation")
+                consume_llm_output(text, "voices.foundation", operation_key=f"voices.foundation:{speaker}")
                 gender = _normalize_gender(parsed.get("gender")) or _gender_from_description(desc)
                 return desc, ref, gender
         handle.log(f"  LLM 响应无法解析为 persona（第 {attempt + 1} 次）", "WARNING")
@@ -597,9 +599,8 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     done = 0
 
     def gen_one(sp):
-        # Pure: compute the foundation and return it. The single-threaded coordinator below
-        # applies it to the shared ``voice_config`` and persists, so workers never mutate it
-        # (no lock needed, and no "dict changed size" hazard with the list-polling reader).
+        # Generate the foundation and charge its accepted LLM output. The coordinator
+        # alone updates the shared voice_config, so worker results cannot race on it.
         handle.log(f"[{sp}] 开始生成语音推理基础（LLM 推理）…")
         pairs = samples.get(sp, [])
         lines = [t for _i, t in pairs]  # texts only, for ref-text selection / fallback
@@ -620,6 +621,8 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
                 description, ref_text, gender = _llm_persona(
                     handle, llm, persona_system, persona_user, sp, script, bands,
                 )
+            except QuotaInsufficientError:
+                raise
             except Exception as e:  # noqa: BLE001
                 handle.log(f"  [{sp}] LLM 生成描述失败：{e}（改用兜底）", "WARNING")
                 description, ref_text, gender = "", "", ""
@@ -646,14 +649,18 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         vc_path.write_bytes(json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8"))
 
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(gen_one, sp): sp for sp in unique_speakers}
+    futs = {ex.submit(copy_context().run, gen_one, sp): sp for sp in unique_speakers}
     cancelled = False
+    quota_failed = False
     try:
         handle.progress(0.02, "启动 LLM（并行）")
         for fut in as_completed(futs):
             sp = futs[fut]
             try:
                 r = fut.result()
+            except QuotaInsufficientError:
+                quota_failed = True
+                raise
             except Exception as e:  # noqa: BLE001 — a per-char error never aborts the run
                 handle.log(f"  {sp} 生成基础失败：{e}", "ERROR")
                 r = {"speaker": sp, "ok": False, "type": "foundation", "description": "",
@@ -688,7 +695,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     finally:
         # On cancel, don't wait for in-flight (uninterruptible) LLM calls — drop them.
         if cancelled:
-            ex.shutdown(wait=False, cancel_futures=True)
+            ex.shutdown(wait=quota_failed, cancel_futures=True)
         else:
             ex.shutdown(wait=True)
 

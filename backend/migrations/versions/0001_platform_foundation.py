@@ -15,18 +15,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # The declarative metadata is the source for the full schema.  The first
-    # migration is intentionally generated from it so an empty PostgreSQL
-    # database and local auto-create mode have the same contract.
-    from backend.platform.database import Base
-    from backend.platform import models  # noqa: F401
+    # Historical revisions must not change when the live ORM grows new tables.
+    from backend.migrations.foundation_schema import Base
     bind = op.get_bind()
     Base.metadata.create_all(bind=bind)
 
 
 def downgrade() -> None:
-    from backend.platform.database import Base
-    from backend.platform import models  # noqa: F401
+    from backend.migrations.foundation_schema import Base
     bind = op.get_bind()
     Base.metadata.drop_all(bind=bind)
-

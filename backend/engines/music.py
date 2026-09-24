@@ -37,6 +37,7 @@ from pathlib import Path
 
 from backend.core import paths as core_paths
 from backend.core.concurrency import gate
+from backend.core.file_lock import exclusive_file_lock
 from backend.core.tasks import TaskCancelled
 from backend.engines.script import (
     LLMJSONRetryExhausted,
@@ -447,10 +448,11 @@ def update_index(mutator) -> dict:
     Returns the (saved) index.
     """
     with _INDEX_LOCK:
-        idx = load_index()
-        mutator(idx)
-        save_index(idx)
-        return idx
+        with exclusive_file_lock(_library_dir() / ".music_index.lock"):
+            idx = load_index()
+            mutator(idx)
+            save_index(idx)
+            return idx
 
 
 # --------------------------------------------------------------------------- #
@@ -551,10 +553,11 @@ def update_suggestions(mutator) -> dict:
     (parallel AI tasks each rewrite the whole file — the voice_config.json /
     08_bgm analysis precedent)."""
     with _SUGGESTIONS_LOCK:
-        data = load_suggestions()
-        mutator(data)
-        save_suggestions(data)
-        return data
+        with exclusive_file_lock(_library_dir() / ".music_suggestions.lock"):
+            data = load_suggestions()
+            mutator(data)
+            save_suggestions(data)
+            return data
 
 
 def clear_suggestion(name: str) -> None:

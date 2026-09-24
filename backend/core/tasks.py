@@ -17,7 +17,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from .request_context import _UNSET, bind_workspace, bound_workspace, reset_workspace
 

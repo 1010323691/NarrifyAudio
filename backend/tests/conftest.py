@@ -6,6 +6,7 @@ analogue of how ``engine.test.js`` loads the engine — now a plain import.)
 """
 import os
 import sys
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
 # backend/tests/conftest.py -> parents[2] == project root (Narrify Audio/)
@@ -13,7 +14,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Application deployments use PostgreSQL. Tests opt into a disposable local
-# SQLite database explicitly so the suite remains runnable without services.
-os.environ.setdefault("NARRIFY_DATABASE_URL", "sqlite://")
-os.environ.setdefault("NARRIFY_AUTO_CREATE_SCHEMA", "true")
+# Override inherited deployment settings before importing the application. A
+# developer's shell must never make the suite connect to a live database or
+# write under the configured production storage root.
+_test_storage = TemporaryDirectory(prefix="narrify-pytest-")
+os.environ["NARRIFY_DATABASE_URL"] = "sqlite://"
+os.environ["NARRIFY_AUTO_CREATE_SCHEMA"] = "true"
+os.environ["NARRIFY_STORAGE_ROOT"] = _test_storage.name

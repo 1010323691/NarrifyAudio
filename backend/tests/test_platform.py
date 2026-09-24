@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+import shutil
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -13,9 +15,10 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.core.observability import record_api_request
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import OutboxEvent, Task, TaskAttempt, User, UserQuotaAccount, utcnow
-from backend.platform.storage import configured_storage_root
-from backend.platform.task_worker import claim_fair_task, claim_task, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.artifact_publication import PublicationJournal
+from backend.platform.models import OutboxEvent, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
+from backend.platform.storage import configured_storage_root, sha256_file, task_attempt_path, user_workspace_root
+from backend.platform.task_worker import TaskOutcome, claim_fair_task, claim_task, complete_claim, heartbeat_claim, process_task_message, recover_database_tasks
 from backend.platform.legacy_tasks import estimate_legacy_units
 
 
@@ -39,10 +42,34 @@ def test_session_cookie_and_project_scope(client: TestClient):
     assert response.status_code == 201, response.text
     project = response.json()
     assert client.get("/api/v1/projects").json()[0]["id"] == project["id"]
+    assert any(item["id"] == project["id"] for item in client.get("/api/v1/workspaces").json())
     assert client.post("/api/v1/projects", json={"name": "No CSRF"}).status_code == 403
 
     client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
     assert client.get("/api/v1/projects").status_code == 401
+
+
+def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    created = client.post("/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "Original"})
+    assert created.status_code == 201, created.text
+    workspace_id = created.json()["id"]
+    renamed = client.patch(
+        f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}, json={"name": "Renamed"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert any(item["name"] == "Renamed" for item in client.get("/api/v1/workspaces").json())
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": workspace_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    assert client.delete(f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}).status_code == 409
+    cancelled = client.post(f"/api/v1/tasks/{submitted.json()['id']}/cancel", headers={"X-CSRF-Token": csrf})
+    assert cancelled.status_code == 200
+    assert client.delete(f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
+    assert all(item["id"] != workspace_id for item in client.get("/api/v1/workspaces").json())
 
 
 def test_idempotent_task_submission_and_quota_guard(client: TestClient):
@@ -81,6 +108,11 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
         user = db.get(User, first["user"]["id"])
         assert user is not None
         user.role = "admin"
+        # The module-scoped database retains tasks submitted by earlier tests;
+        # this case exercises an intentionally drained storage migration.
+        for task in db.scalars(select(Task).where(Task.status.in_(("pending", "queued", "running", "paused", "cancelling", "retrying")))).all():
+            task.status = "cancelled"
+            task.finished_at = utcnow()
         account = db.get(UserQuotaAccount, user.id)
         assert account is not None
         account.available_units = 3
@@ -167,7 +199,7 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
     assert reset_setting.status_code == 200, reset_setting.text
 
 
-def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client: TestClient):
+def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client: TestClient, tmp_path):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     created = client.post("/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "My workspace"})
@@ -184,7 +216,7 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
         assert user is not None
         user.role = "admin"
 
-    root = (Path(".narrify") / "admin-selected-root").resolve()
+    root = (tmp_path / "admin-selected-root").resolve()
     updated = client.patch("/api/v1/admin/settings/storage", headers={"X-CSRF-Token": csrf}, json={"root_path": str(root)})
     assert updated.status_code == 200, updated.text
     assert Path(updated.json()["root_path"]) == root
@@ -715,6 +747,162 @@ def test_expired_worker_lease_is_fenced_and_recovery_requeues(client: TestClient
         attempt = db.get(TaskAttempt, claim_two.attempt_id)
         assert task is not None and task.status == "running"
         assert attempt is not None and attempt.status == "running"
+
+
+def test_retry_deadline_applies_to_direct_and_fair_claims(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Backoff book"}).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "backoff.test", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+    with SessionLocal.begin() as db:
+        task = db.get(Task, task_id)
+        task.status = "retrying"
+        task.next_attempt_at = utcnow() + timedelta(minutes=1)
+    assert claim_task(task_id, "direct-worker") is None
+    assert claim_fair_task("fair-worker", task_types=("backoff.test",)) is None
+    with SessionLocal.begin() as db:
+        db.get(Task, task_id).next_attempt_at = utcnow() - timedelta(seconds=1)
+    claim = claim_fair_task("fair-worker", task_types=("backoff.test",))
+    assert claim is not None and claim.task_id == task_id
+
+
+def test_expired_cancelling_attempt_releases_tts_hold(client: TestClient):
+    from backend.platform.quota import reserve_tts_quota, reset_quota_context, set_quota_context
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Cancel recovery"}).json()
+    with SessionLocal.begin() as db:
+        db.get(UserQuotaAccount, first["user"]["id"]).available_units = 10
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+    claim = claim_task(task_id, "cancel-recovery-worker", lease_seconds=60)
+    assert claim is not None
+    token = set_quota_context(first["user"]["id"], task_id, claim.attempt_id)
+    try:
+        assert reserve_tts_quota(5, "test.hold")
+    finally:
+        reset_quota_context(token)
+    with SessionLocal.begin() as db:
+        db.get(Task, task_id).status = "cancelling"
+        db.get(TaskAttempt, claim.attempt_id).lease_expires_at = utcnow() - timedelta(seconds=1)
+    recover_database_tasks()
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "cancelled"
+        assert db.get(TaskAttempt, claim.attempt_id).status == "expired"
+        account = db.get(UserQuotaAccount, first["user"]["id"])
+        assert account.available_units == 10
+        assert account.reserved_units == 0
+
+
+def test_failed_result_commit_restores_previous_workspace_file(client: TestClient, monkeypatch):
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Publish rollback"}).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    claim = claim_task(submitted.json()["id"], "publish-rollback-worker")
+    assert claim is not None
+    with SessionLocal() as db:
+        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        staged = task_attempt_path(db, first["user"]["username"], project["id"], claim.task_id, claim.attempt_id, "staged.txt")
+    final = workspace / "01_input" / "chapter.txt"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_text("original", encoding="utf-8")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("replacement", encoding="utf-8")
+    outcome = TaskOutcome(
+        temp_path=staged, output_name="chapter.txt", content_type="text/plain",
+        size_bytes=staged.stat().st_size, sha256=sha256_file(staged), metadata={},
+        publish_module="01_input",
+    )
+    original_factory = task_worker.SessionLocal
+
+    def failing_session():
+        session = original_factory()
+        session.commit = lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
+        return session
+
+    monkeypatch.setattr(task_worker, "SessionLocal", failing_session)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        complete_claim(claim, outcome)
+    assert final.read_text("utf-8") == "original"
+    assert not (staged.parent / "publication.json").exists()
+    with original_factory() as db:
+        assert db.get(Task, claim.task_id).status == "running"
+
+
+def test_expired_attempt_restores_interrupted_publication(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Interrupted publish"}).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    claim = claim_task(submitted.json()["id"], "interrupted-publish-worker")
+    assert claim is not None
+    with SessionLocal() as db:
+        root = configured_storage_root(db)
+        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        journal_path = task_attempt_path(db, first["user"]["username"], project["id"], claim.task_id, claim.attempt_id, "publication.json")
+    final = workspace / "01_input" / "chapter.txt"
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_text("old", encoding="utf-8")
+    staged = journal_path.parent / "staged.txt"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_text("new", encoding="utf-8")
+    journal = PublicationJournal(root, journal_path)
+    journal.prepare()
+    journal.publish(journal.add(final), staged)
+    with SessionLocal.begin() as db:
+        db.get(TaskAttempt, claim.attempt_id).lease_expires_at = utcnow() - timedelta(seconds=1)
+    recover_database_tasks()
+    assert final.read_text("utf-8") == "old"
+    assert not journal_path.exists()
+
+
+def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestClient, tmp_path):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    workspace = client.post("/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "Storage resume"}).json()
+    with SessionLocal.begin() as db:
+        db.get(User, first["user"]["id"]).role = "admin"
+        for task in db.scalars(select(Task).where(Task.status.in_(("pending", "queued", "running", "paused", "cancelling", "retrying")))).all():
+            task.status = "cancelled"
+            task.finished_at = utcnow()
+        source_root = configured_storage_root(db)
+        target_root = (tmp_path / "resumed-root").resolve()
+        db.add(SystemConfig(key="storage.migration", value={"source": str(source_root), "target": str(target_root)}))
+    source = source_root / workspace["directory_key"]
+    target = target_root / workspace["directory_key"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    blocked = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": workspace["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert blocked.status_code == 409
+    resumed = client.patch("/api/v1/admin/settings/storage", headers={"X-CSRF-Token": csrf}, json={"root_path": str(target_root)})
+    assert resumed.status_code == 200, resumed.text
+    assert target.is_dir()
+    with SessionLocal() as db:
+        assert configured_storage_root(db) == target_root
+        assert db.get(SystemConfig, "storage.migration") is None
 
 
 def test_api_snapshot_p95_uses_request_durations():

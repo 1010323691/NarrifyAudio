@@ -197,6 +197,18 @@ def get_layout() -> Layout:
     return layout
 
 
+def peek_layout() -> Layout:
+    """Resolve the current layout without creating workspace directories."""
+    scoped = bound_workspace()
+    if scoped is _UNSET:
+        from .config import _workspace_path
+
+        workspace = _workspace_path()
+    else:
+        workspace = scoped
+    return Layout(workspace)
+
+
 def reset_layout_cache() -> None:
     """Drop the memoized layout; the next ``get_layout()`` re-reads the pointer.
 

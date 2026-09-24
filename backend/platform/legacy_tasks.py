@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..api.platform_tasks import TaskSubmit, submit_task
+from ..services.tasks import TaskSubmissionError, submit_task_record, task_dict
 from .deps import AuthContext
 from .legacy_workspace import active_workspace, ensure_project
 from .models import Task
@@ -45,17 +45,16 @@ def submit_legacy_engine_task(
         project = ensure_project(db, ctx.user, workspace)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return submit_task(
-        TaskSubmit(
-            project_id=project.id,
-            task_type=task_type,
+    try:
+        task = submit_task_record(
+            db, ctx.user, project_id=project.id, task_type=task_type,
             payload={"label": label, **payload},
             estimated_units=estimate_legacy_units(task_type, payload),
             idempotency_key=f"{idempotency_prefix}:{uuid.uuid4()}",
-        ),
-        user=ctx.user,
-        db=db,
-    )
+        )
+    except TaskSubmissionError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+    return task_dict(task)
 
 
 def active_durable_targets(
