@@ -922,6 +922,8 @@ def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestCli
     target = target_root / workspace["directory_key"]
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(target))
+    assert client.get("/api/workspace").status_code == 409
+    assert not source.exists()
     blocked = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
         json={"project_id": workspace["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},

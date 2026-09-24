@@ -14,11 +14,17 @@ from .models import SystemConfig
 _SAFE_NAME = re.compile(r"[^\w.()\- ]+", re.UNICODE)
 
 
-def lock_storage_migration(db: Session, *, shared: bool = False) -> None:
-    """Serialize task admission with an administrator storage-root migration."""
+def lock_storage_migration(db: Session, *, shared: bool = False) -> bool:
+    """Try to enter storage operations without queuing behind another request.
+
+    HTTP middleware and task admission can hold shared locks on separate
+    connections. A blocking exclusive waiter between them would deadlock.
+    Callers must reject/retry when the lock is unavailable.
+    """
     if db.get_bind().dialect.name == "postgresql":
-        function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
-        db.execute(text(f"SELECT {function}(7526202601)"))
+        function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
+        return bool(db.scalar(text(f"SELECT {function}(7526202601)")))
+    return True
 
 
 def storage_migration(db: Session) -> SystemConfig | None:

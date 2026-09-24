@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from .api import audio as api_audio
 from .api import admin as api_admin
@@ -90,19 +91,6 @@ app = FastAPI(title="NarrifyAudio API", version="0.2.0", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def block_writes_during_storage_migration(request, call_next):
-    if request.method not in {"POST", "PUT", "PATCH", "DELETE"} or not request.url.path.startswith("/api/"):
-        return await call_next(request)
-    if request.url.path in {"/api/v1/admin/settings/storage", "/api/auth/login", "/api/auth/logout"}:
-        return await call_next(request)
-    with SessionLocal() as db:
-        lock_storage_migration(db, shared=True)
-        if storage_migration(db) is not None:
-            return JSONResponse(status_code=409, content={"detail": "存储根目录正在迁移，写入操作暂时不可用"})
-        return await call_next(request)
-
-
-@app.middleware("http")
 async def collect_api_metrics(request, call_next):
     if not request.url.path.startswith("/api/"):
         return await call_next(request)
@@ -158,6 +146,36 @@ async def bind_authenticated_workspace(request, call_next):
     finally:
         if token is not None:
             reset_workspace(token)
+
+@app.middleware("http")
+async def protect_storage_during_migration(request, call_next):
+    # Register outside workspace binding: resolving a root before acquiring
+    # the lock could bind a request to the old root after a migration finishes.
+    # Legacy GET handlers may prepare directories, so protect reads as well.
+    if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    if request.url.path in {"/api/health", "/api/v1/admin/settings/storage", "/api/auth/login", "/api/auth/logout"}:
+        return await call_next(request)
+
+    def enter_storage():
+        db = SessionLocal()
+        try:
+            if lock_storage_migration(db, shared=True) and storage_migration(db) is None:
+                return db
+        except BaseException:
+            db.close()
+            raise
+        db.close()
+        return None
+
+    db = await run_in_threadpool(enter_storage)
+    if db is None:
+        return JSONResponse(status_code=409, content={"detail": "存储根目录正在迁移，工作空间暂时不可用"})
+    try:
+        return await call_next(request)
+    finally:
+        await run_in_threadpool(db.close)
+
 
 # Local client on this machine; origins are loopback addresses.
 app.add_middleware(

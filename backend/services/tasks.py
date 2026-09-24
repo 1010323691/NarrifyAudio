@@ -34,8 +34,7 @@ def submit_task_record(
     db: Session, user: User, *, project_id: str, task_type: str,
     payload: dict, estimated_units: int, idempotency_key: str,
 ) -> Task:
-    lock_storage_migration(db, shared=True)
-    if storage_migration(db) is not None:
+    if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
         raise TaskSubmissionError(409, "存储根目录正在迁移，暂时无法提交任务")
     # Estimated task size remains part of the historical idempotency contract;
     # actual model output/input characters are metered by the engines.

@@ -234,8 +234,7 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
     with SessionLocal() as db:
-        lock_storage_migration(db, shared=True)
-        if storage_migration(db) is not None:
+        if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
             db.rollback()
             return None
         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())

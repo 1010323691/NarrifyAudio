@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..platform.config import settings
-from ..platform.database import get_db
+from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, OutboxEvent, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, Workspace, utcnow
 from ..platform.outbox import STREAM_NAME
@@ -223,32 +223,35 @@ def get_storage_settings(_: User = Depends(require_admin), db: Session = Depends
 def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     if actor.role != "admin":
         raise HTTPException(403, "需要管理员权限")
+    # Keep this transaction independent from the durable migration marker's
+    # commits: only one administrator may move/compensate directories at a time.
+    with SessionLocal() as guard:
+        if not lock_storage_migration(guard):
+            raise HTTPException(409, "存储正在使用或迁移，请稍后重试")
+        return _update_storage_settings(payload, actor, db)
+
+
+def _update_storage_settings(payload: StorageRootUpdate, actor: User, db: Session) -> dict:
     raw = payload.root_path.strip()
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise HTTPException(422, "存储根目录必须是绝对路径")
     resolved = path.resolve()
-    lock_storage_migration(db)
     previous = configured_storage_root(db)
-    existing_config = db.get(SystemConfig, "storage.root")
     migration = storage_migration(db)
     if migration is not None:
         details = migration.value if isinstance(migration.value, dict) else {}
         if details.get("source") != str(previous) or details.get("target") != str(resolved):
             raise HTTPException(409, f"已有未完成的存储迁移，请先恢复至 {details.get('target') or '原目标'}")
-    if resolved == previous and existing_config is not None and migration is None:
+    if resolved == previous and migration is None:
         return {"root_path": str(resolved), "source": "admin" if db.get(SystemConfig, "storage.root") else "deployment-default"}
     if resolved.is_relative_to(previous) or previous.is_relative_to(resolved):
         raise HTTPException(422, "新旧存储根目录不能互相嵌套")
-    if migration is None:
+    new_migration = migration is None
+    if new_migration:
         active_task = db.scalar(select(Task.id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).limit(1))
         if active_task is not None:
             raise HTTPException(409, "仍有未完成任务，存储迁移需在任务排空后进行")
-        migration = SystemConfig(
-            key="storage.migration", value={"source": str(previous), "target": str(resolved)},
-        )
-        db.add(migration)
-        db.commit()
     try:
         resolved.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -261,6 +264,35 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
             select(Project, User.username).join(User, User.id == Project.owner_id)
         ).all()
     )
+    # Validate all paths before making the migration durable. A typo or a
+    # conflicting target must not leave every write endpoint disabled.
+    for directory_key in directory_keys:
+        source = (previous / directory_key).resolve()
+        target = (resolved / directory_key).resolve()
+        if not source.is_relative_to(previous) or not target.is_relative_to(resolved):
+            raise HTTPException(422, "工作空间目录键越界")
+        if source.exists() and (source.is_symlink() or target.exists()):
+            raise HTTPException(409, f"工作空间目录迁移冲突：{directory_key}")
+    if new_migration:
+        migration = SystemConfig(
+            key="storage.migration", value={"source": str(previous), "target": str(resolved)},
+        )
+        db.add(migration)
+        db.commit()
+
+    def compensate():
+        db.rollback()
+        for source, target in reversed(moved):
+            if target.exists() and not source.exists():
+                source.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(source))
+        # Retain the marker if a cross-volume move left a partial target, or
+        # this request resumed moves performed by an earlier process.
+        if new_migration and all(not (resolved / key).exists() for key in directory_keys):
+            marker = storage_migration(db)
+            if marker is not None:
+                db.delete(marker)
+                db.commit()
     try:
         for directory_key in directory_keys:
             source = (previous / directory_key).resolve()
@@ -277,16 +309,10 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
             shutil.move(str(source), str(target))
             moved.append((source, target))
     except HTTPException:
-        for source, target in reversed(moved):
-            if target.exists() and not source.exists():
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(target), str(source))
+        compensate()
         raise
     except OSError as exc:
-        for source, target in reversed(moved):
-            if target.exists() and not source.exists():
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(target), str(source))
+        compensate()
         raise HTTPException(422, f"工作空间目录迁移失败：{exc}") from exc
     config = db.get(SystemConfig, "storage.root")
     if config is None:
@@ -299,11 +325,7 @@ def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(re
     try:
         db.commit()
     except Exception:
-        db.rollback()
-        for source, target in reversed(moved):
-            if target.exists() and not source.exists():
-                source.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(target), str(source))
+        compensate()
         raise
     return {"root_path": str(resolved), "source": "admin"}
 
