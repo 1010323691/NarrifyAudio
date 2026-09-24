@@ -13,7 +13,7 @@ Ported (minimal core, not the whole app) from ``alexandria-audiobook``:
   - clone inference           (tts.py  _get_clone_prompt / _local_generate_clone)
   - design inference          (tts.py  generate_voice_design / generate_design_voice)
   - WAV save                  (tts.py  _save_wav)  + WAV->MP3 (project.py, via pydub)
-  - merge timeline + combine  (tts.py  compute_timeline / combine_audio_with_pauses)
+  - merge timeline + combine  (combine_audio_with_pauses)
 
 Modes (``--mode``)
 ------------------
@@ -89,9 +89,8 @@ DEFAULT_LANGUAGE = "chinese"
 
 SUPPORTED_TYPES = ("custom", "clone", "design")
 
-# Batch-mode guards (see ``plan_sub_batches`` / ``estimate_batch_vram`` below):
-MAX_NEW_TOKENS = 2048  # per-row generation cap (the decode length the VRAM budget plans for)
-MAX_SEQ_CHARS = 2500   # a row longer than this never shares a batch with shorter rows
+# Per-row generation cap used by the production TTS modes.
+MAX_NEW_TOKENS = 2048
 
 # Length-proportional decode cap (``max_new_tokens_for_chars``). This qwen_tts build's
 # talker does NOT stop individual rows early in a multi-row tensor batch: the per-row
@@ -113,57 +112,12 @@ def max_new_tokens_for_chars(chars: int) -> int:
     """The decode cap for a sub-batch whose longest row is ``chars`` chars long."""
     return min(MAX_NEW_TOKENS, max(FRAME_CAP_FLOOR, int(chars) * FRAME_CAP_PER_CHAR))
 
-# Length homogeneity inside one tensor batch (``plan_sub_batches``): longest/shortest may
-# differ by at most this factor. The decode cap scales with the batch's LONGEST row
-# (``max_new_tokens_for_chars``), and batch mode does not stop short rows at EOS — so every
-# row in a length-mixed batch runs the long row's full cap (the 2026-09-17 "几十字 + 几个字
-# 同批" slowdown). Tightened from 5 to 3: a 3x spread keeps the shared cap close to the
-# shorter rows' natural length (a 2-char line next to a 6-char one still batches; 2 next to
-# 7 splits), so the per-role, length-sorted queues stay fast in practice.
-LENGTH_RATIO = 3
-
-# Fixed input tokens a row carries BEYOND its target text (role marker + codec prefill + tts
-# structural tokens). The O(L^2) attention term is sized by the row's FULL input length, so the
-# VRAM budget must count these or every sub-batch is under-sized (see ``plan_row_tokens``).
-ROW_STRUCTURAL_OVERHEAD = 16
-# A clone (ICL) row also carries the reference: one frame per ref_code row on the talker's main
-# stream plus the ref_text tokens. That is measured per speaker from the built prompt (no GPU
-# forward); this conservative total stands in when the prompt is missing or the measurement faults.
-CLONE_FALLBACK_OVERHEAD = 140
-
-# Char counts are the SOLE length metric in the planning path (no tokenizer: pricing every
-# segment's tokens up-front is slow, and chars x 1.2 is a conservative over-estimate for
-# Chinese — it keeps the VRAM budget honest without a tokenizer round-trip).
-CHAR_TOKENS_PER_CHAR = 1.2
-
-# Length-class concurrency bands: (class ceiling in chars, fraction of the manual cap).
-# A batch is left-padded to its longest row and the O(L^2) attention term is quadratic in that
-# length, so long rows must run in smaller batches than short ones; beyond the last band a row
-# runs solo. The manual --concurrency value is only a CEILING — the real per-batch size is
-# min(length band, the measured VramGovernor cap, the VRAM estimate, the char caps). The
-# fractions are deliberately conservative (code predictors + the WDDM driver reservation sit on
-# top of the modelled terms); the VramGovernor below corrects the static guess with per-batch
-# measurements, so a wrong fraction self-corrects within a few batches of the run.
-LENGTH_BANDS = (
-    (64, 1.0),    # very short -> full manual cap
-    (256, 0.75),  # short
-    (512, 0.5),   # medium
-    (1024, 0.4),  # long
-    (2048, 0.2),  # very long
-)  # > 2048 chars -> solo (1)
-
 # Production auto-batch safety tiers measured on the RTX 5090 reference workload.
 # The longest row in a candidate batch selects the first tier whose character
 # ceiling is at least that row length; rows are already sorted by length, so this
 # keeps padding and the batch cap aligned without interpolation.
 AUTO_BATCH_POINTS = ((5, 340), (20, 272), (50, 224), (100, 128), (150, 96), (200, 80))
 AUTO_BATCH_MAX = 340
-
-# VramGovernor reaction thresholds — all against MEASURED numbers (see VramGovernor):
-PEAK_PRESSURE_FRAC = 0.9   # a batch consumed >= 90% of the available pool -> shrink
-PEAK_GROW_FRAC = 0.55      # consumed < 55% and healthy -> may grow
-FREE_FLOOR_GB = 1.0        # free VRAM under this absolute floor -> shrink
-VRAM_SCALE_MIN, VRAM_SCALE_MAX = 0.5, 4.0  # trust range for the static L^2 estimate
 
 # Live "still generating" heartbeat (see run_with_watchdog): the first line ~FIRST seconds in,
 # then one every INTERVAL seconds while a sub-batch decodes. It reports *measured* elapsed time
@@ -600,6 +554,8 @@ def fixed_batches(rows, max_batch):
         yield rows[start:start + size]
 
 
+
+
 def next_fixed_batch(remaining, max_batch, restore_stack, restore_successes=None):
     """Plan one fixed batch and restore a demoted level after two successes.
 
@@ -619,82 +575,6 @@ def next_fixed_batch(remaining, max_batch, restore_stack, restore_successes=None
     return rows, remaining[len(rows):], max_batch, restored
 
 
-def plan_sub_batches(char_lens, *, max_batch, max_batch_chars, max_seq_chars=0,
-                     length_ratio=LENGTH_RATIO, min_ratio_size=2, vram_ok=None, tokens=None,
-                     band_cap=None, first_only=False):
-    """Split rows (sorted by length ASCENDING) into tensor sub-batches, greedily (pure).
-
-    Returns a list of sub-batches; each is a list of positions into ``char_lens``. Every row
-    lands in exactly one batch and the smallest batch is always 1 — no row is ever skipped.
-    A new batch opens when adding the next row would break any constraint:
-
-      * at most ``max_batch`` rows (the caller's row cap — the governor's current adaptive cap);
-      * ``band_cap`` (optional callable chars -> rows): the length-class cap (see
-        ``band_cap_for_chars``) — the batch may never exceed the band of its LONGEST row (rows
-        are ascending, so the row being added is the longest), which keeps short rows out of
-        long-row batches even beyond the ratio rule;
-      * batch total chars ``<= max_batch_chars`` (guards an oversized prefill / a TDR hang);
-      * a row over ``max_seq_chars`` (if > 0) never mixes with the shorter rows already in the
-        open batch (it opens its own batch; its size is then governed by ``vram_ok``);
-      * length ratio: with ``>= min_ratio_size`` rows (default 2 — even a two-row batch must
-        stay within the ratio), longest/shortest ``> length_ratio`` (default ``LENGTH_RATIO``
-        = 3 — the decode cap follows the batch's longest row, so a wider spread makes the
-        short rows run the long rows' full cap) splits (rows are left-padded to the longest,
-        so a wide spread wastes compute);
-      * ``vram_ok(tokens)`` (optional callable) returns False for the candidate batch.
-
-    ``tokens`` is the per-row *input* token count (aligned with ``char_lens``); it is what
-    ``vram_ok`` is fed (the VRAM budget is token-based, the char caps a coarser backstop).
-    """
-    char_lens = [max(0, int(c)) for c in char_lens]
-    n = len(char_lens)
-    if n == 0:
-        return []
-    if tokens is None:
-        tokens = [0] * n
-    max_batch = max(1, int(max_batch))
-
-    def _ratio_ok(start, j):
-        # Adding position j to the (ascending) batch [start, j): is the spread within ratio?
-        if j - start + 1 < min_ratio_size:
-            return True
-        if start >= j:  # first row of the batch
-            return True
-        shortest = char_lens[start]  # ascending -> the batch's first row is the shortest
-        if shortest <= 0:
-            return True
-        return char_lens[j] / shortest <= length_ratio
-
-    batches = []
-    start = 0
-    while start < n:
-        j = start
-        batch_chars = 0
-        batch_tokens = []
-        while j < n:
-            overlong = max_seq_chars > 0 and char_lens[j] > max_seq_chars
-            if overlong and j > start:
-                break  # never mix an overlong row with the shorter rows already batched
-            if (j - start) >= max_batch:
-                break
-            if band_cap is not None and (j - start) >= band_cap(char_lens[j]):
-                break
-            if batch_chars + char_lens[j] > max_batch_chars:
-                break
-            if not _ratio_ok(start, j):
-                break
-            if vram_ok is not None and not vram_ok(batch_tokens + [tokens[j]]):
-                break
-            batch_chars += char_lens[j]
-            batch_tokens.append(tokens[j])
-            j += 1
-        if j == start:
-            j = start + 1  # a row that fits no batch still gets a solo batch (min size 1)
-        batches.append(list(range(start, j)))
-        start = j
-        if first_only:
-            break
-    return batches
 
 
 def sub_batch_timeout_seconds(device, total_chars, vtype="custom", speaker_count=1):
@@ -748,40 +628,8 @@ def watchdog_timeout_reason(elapsed, normal_timeout, forced_timeout, vram_usage)
     return "wait"
 
 
-def estimate_batch_vram(num_rows, heads, kv_per_token, seq_tokens, max_new):
-    """Estimated peak VRAM (bytes) a tensor batch of ``num_rows`` rows needs (pure).
-
-    Two terms (the reference project counted only the second — exactly why its auto-batches
-    OOM'd):
-      1. the hand-written O(L^2) attention peak: one fp32 matrix per head, sized by the
-         LONGEST row in the batch (rows are left-padded to it):
-         ``num_rows * heads * (max(seq_tokens) + max_new)^2 * 4``;
-      2. the KV cache (+ ~1.5x headroom for activations), summed per row:
-         ``sum(seq_tokens[i] + max_new) * kv_per_token * 1.5``.
-
-    When ``heads`` is unknown (``<= 0``) only the (still real) KV term is usable.
-    """
-    kv = sum(t + max_new for t in seq_tokens) * kv_per_token * 1.5
-    if not heads or heads <= 0:
-        return kv
-    l_max = max(seq_tokens) if seq_tokens else 0
-    attn = num_rows * heads * (l_max + max_new) ** 2 * 4
-    return attn + kv
 
 
-def band_cap_for_chars(n_chars, manual_cap):
-    """The effective per-batch row cap for a row of ``n_chars`` chars (pure, char-based).
-
-    Short text pays little padding and a small L^2 term, so it may run at the full manual cap;
-    long text inflates every row's padded length (the O(L^2) term is quadratic in it), so its
-    cap steps down class by class; beyond the last band a row runs solo. ``manual_cap`` is a
-    ceiling the result can never exceed — never a fixed size.
-    """
-    cap = max(1, int(manual_cap))
-    for limit, frac in LENGTH_BANDS:
-        if n_chars <= limit:
-            return max(1, int(cap * frac))
-    return 1
 
 
 def auto_batch_cap_for_chars(n_chars):
@@ -814,7 +662,7 @@ def _take_auto_batch(remaining, max_batch):
 
 
 def next_auto_batch(remaining, max_batch, restore_stack, restore_successes=None):
-    """Auto-tier counterpart of :func:`next_fixed_batch`."""
+    """Choose the next auto-tier batch, preserving watchdog recovery state."""
     rows = _take_auto_batch(remaining, max_batch)
     restored = None
     if restore_stack and restore_successes and restore_successes[-1] >= RESTORE_AFTER_SUCCESSFUL_BATCHES:
@@ -833,11 +681,10 @@ def order_speaker_groups(classified):
     Returns ``[(key, rows), ...]``:
 
       * queues are ordered by row count DESCENDING — the biggest queue runs first (the
-        heaviest share of the run starts immediately: fastest visible progress, and the
-        governor's measured cap settles while most rows are still to do); ties keep
+        heaviest share of the run starts immediately: fastest visible progress); ties keep
         first-seen order (deterministic for a given input file);
       * each queue's rows are sorted by character count ascending, so a role's short rows
-        run first and a normal sub-batch stays length-homogeneous (``LENGTH_RATIO``). Only
+        run first and a normal sub-batch stays close in length. Only
         an explicitly collected tail candidate may add rows from another role.
     """
     groups = [(key, sorted(rows, key=lambda r: r["chars"]))
@@ -852,8 +699,8 @@ def collect_mergeable_role_tails(queues, start, max_batch):
     The first queue is always the next role to process. Once it has fewer rows than the
     current planned cap, take only enough prefixes from later same-type queues to fill one
     planned batch. Later queues may be larger — only the current role must be at its tail.
-    A merged candidate is sorted by length again so the planner's length-ratio assumptions
-    remain valid; ordinary (non-tail) processing never crosses role boundaries.
+    A merged candidate is sorted by length again; ordinary (non-tail) processing
+    never crosses role boundaries.
     """
     cap = max(1, int(max_batch))
     if not 0 <= int(start) < len(queues):
@@ -890,113 +737,6 @@ def planned_concurrency_for_rows(rows):
     return max(1, planned // 2) if count_batch_speakers(rows) > 1 else planned
 
 
-class VramGovernor:
-    """Runtime concurrency governor: adapts the per-batch row cap to MEASURED VRAM behaviour.
-
-    The static plan (length bands + the L^2 VRAM estimate) is a guess made before any batch
-    runs; the governor is the feedback loop that corrects it as the run goes. After every
-    sub-batch the caller reports a conservative peak reservation estimate — the pool's free VRAM before and
-    after (the difference is the batch's true working set; Windows WDDM starts paging that
-    working set to system memory exactly when it eats the pool), the measured throughput, and
-    the static estimate the planner used. The governor then:
-
-      * shrinks the cap (halving, floor 1) when the batch consumed most of the available pool,
-        left the pool nearly empty, or throughput collapsed while VRAM ran hot;
-      * grows the cap (toward the manual ceiling) when the batch stayed well under the pool and
-        throughput held;
-      * re-calibrates its trust in the static L^2 estimate (``vram_scale``, bounded to
-        ``[VRAM_SCALE_MIN, VRAM_SCALE_MAX]``) so the planner's VRAM check follows measured
-        reality instead of a fixed guess.
-
-    The manual cap is a ceiling the governor can never cross, and the length bands always apply
-    on top (``row_cap_for``) — so the configured 32/64 can only ever be a maximum, never a
-    fixed size. Pure arithmetic (no torch): the caller measures, the governor decides — which
-    keeps the rules unit-testable in the lean backend venv.
-    """
-
-    def __init__(self, manual_cap, *, device="cuda", total_vram=0.0):
-        self.manual_cap = max(1, int(manual_cap))
-        self.device = device
-        self.total_vram = max(0.0, float(total_vram))
-        self.cap = self.manual_cap  # the adaptive part (starts at the ceiling, stays within it)
-        self.vram_scale = 1.0       # trust factor applied to the static L^2 estimate
-        self.rate_ema = None        # measured chars/sec (exponential moving average)
-        self.events = []            # (action, detail) — most recent last (fed to the run log)
-
-    @property
-    def cuda(self) -> bool:
-        return "cuda" in str(self.device)
-
-    def row_cap_for(self, n_chars: int) -> int:
-        """The row cap a new sub-batch of this length class may use (adaptive cap ∩ band)."""
-        return min(self.cap, band_cap_for_chars(n_chars, self.manual_cap))
-
-    def observe_success(self, *, free_before, free_after, rows, chars, elapsed,
-                        static_est=0):
-        """Feed one completed sub-batch's measured numbers; returns the action taken (or None).
-
-        ``free_before`` / ``free_after`` are the pool's free VRAM in bytes before the batch and
-        at peak allocator reservation (combined with the end reading). ``static_est`` is
-        the planner's L^2 estimate for the same batch (0 = the VRAM term was inactive, so calibration is skipped).
-        """
-        if not self.cuda or free_before is None or free_after is None:
-            return None
-        free_before, free_after = float(free_before), float(free_after)
-        if free_before <= 0:
-            return None  # a degenerate reading: don't act on it
-        rows = max(1, int(rows))
-        consumed = max(0.0, free_before - free_after)  # peak reservation growth, not post-clear delta
-        frac = consumed / free_before
-
-        # Throughput (chars/sec) against its moving average — the "throughput collapsing"
-        # signal (a paging / contended GPU shows it here long before an outright fault).
-        rate = max(0.0, float(chars)) / max(1e-6, float(elapsed))
-        prev_ema = self.rate_ema
-        self.rate_ema = rate if self.rate_ema is None else 0.5 * self.rate_ema + 0.5 * rate
-
-        # Re-calibrate trust in the static estimate against the measured working set.
-        static_beaten = False
-        if static_est and static_est > 0:
-            r = consumed / float(static_est)
-            if r < 0.6:
-                self.vram_scale = min(VRAM_SCALE_MAX, self.vram_scale * 1.5)
-            elif r > 1.0:
-                self.vram_scale = max(VRAM_SCALE_MIN, self.vram_scale / 1.5)
-                static_beaten = True  # the guess was beaten: treat as pressure too
-
-        floor = FREE_FLOOR_GB * (2 ** 30)
-        pressured = (
-            frac >= PEAK_PRESSURE_FRAC
-            or free_after < floor
-            or (frac >= 0.7 and prev_ema is not None and rate < 0.5 * prev_ema)
-            or static_beaten
-        )
-        if pressured:
-            new = max(1, self.cap // 2)
-            if new < self.cap:
-                self.cap = new
-                self.events.append(
-                    ("shrink", f"峰值占用 {frac:.0%}、剩余 {free_after / 2 ** 30:.1f}GB"))
-                return "shrink"
-            return None
-        if (frac < PEAK_GROW_FRAC and self.cap < self.manual_cap
-                and self.rate_ema is not None and rate >= 0.8 * self.rate_ema):
-            new = min(self.manual_cap, self.cap + max(1, self.cap // 4))
-            if new > self.cap:
-                self.cap = new
-                self.events.append(("grow", f"峰值占用 {frac:.0%}、余量充足"))
-                return "grow"
-        return None
-
-    def observe_fault(self, rows) -> str | None:
-        """A sub-batch of ``rows`` rows faulted (e.g. OOM): the cap can never propose that size
-        again (it drops to the half the in-process retry will run)."""
-        new = max(1, min(self.cap, max(1, int(rows) // 2)))
-        if new < self.cap:
-            self.cap = new
-            self.events.append(("fault", f"{rows} 段子批失败"))
-            return "fault"
-        return None
 
 
 def run_with_watchdog(fn, timeout_s, batch_label, indices, *, n_rows=None, device=None,
@@ -1076,21 +816,6 @@ def _start_vram_peak(device):
         return None
 
 
-def _peak_free_vram(device, free_before, reserved_before):
-    """Conservative free-memory equivalent at peak, including allocator workspace.
-
-    Allocator measurements do not include all driver / external allocations; keep
-    the actual end reading too. Never infer a peak from post-empty_cache alone.
-    """
-    current = _free_vram(device)
-    if reserved_before is None or free_before is None:
-        return current
-    try:
-        import torch
-        estimated = max(0, free_before - max(0, torch.cuda.max_memory_reserved() - reserved_before))
-        return min(current, estimated) if current is not None else estimated
-    except Exception:
-        return current
 
 
 @contextlib.contextmanager
@@ -1134,43 +859,6 @@ def bounded_vocoder(model, batch_size=0):
 
 
 @contextlib.contextmanager
-def profile_stages(model, enabled=False):
-    """Optional, synchronized diagnostic hooks; restored even after an exception."""
-    patched = []
-    def wrap(obj, name, stage):
-        original = getattr(obj, name, None)
-        if not callable(original):
-            return
-        own = name in getattr(obj, "__dict__", {})
-        def measured(*a, **kw):
-            import torch
-            def sync():
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-            print("[perf] " + json.dumps({"stage": stage, "event": "start"}), flush=True)
-            sync()
-            started = time.perf_counter()
-            try:
-                return original(*a, **kw)
-            finally:
-                sync()
-                print("[perf] " + json.dumps({"stage": stage, "event": "end",
-                      "seconds": time.perf_counter() - started}), flush=True)
-        setattr(obj, name, measured)
-        patched.append((obj, name, original, own))
-    try:
-        if enabled:
-            wrap(model, "_tokenize_texts", "tokenizer")
-            inner = getattr(model, "model", None)
-            wrap(inner, "generate", "model_inference")
-            wrap(getattr(inner, "speech_tokenizer", None), "decode", "vocoder")
-        yield
-    finally:
-        for obj, name, original, own in reversed(patched):
-            if own:
-                setattr(obj, name, original)
-            else:
-                delattr(obj, name)
 
 
 def _clear_gpu_cache(device) -> None:
@@ -1188,104 +876,10 @@ def _clear_gpu_cache(device) -> None:
             pass
 
 
-def plan_row_tokens(texts, instructs, overhead):
-    """Per-row input token counts for the VRAM budget, from char counts alone (no tokenizer).
-
-    ``chars x CHAR_TOKENS_PER_CHAR`` (a conservative over-estimate for Chinese) over the row's
-    target text + instruct, plus the per-row ``overhead`` a row carries BEYOND its target text
-    (structural markers, and for clone the reference frames + ref_text — see
-    ``_clone_input_overhead``). ``overhead`` may be a scalar (applied to every row) or a
-    per-row list: a cross-character clone sub-batch carries each character's measured
-    reference overhead on its own rows (different references have different frame counts),
-    so the budget prices every row against its TRUE sequence length. A mismatched list
-    falls back to its max — the conservative (over-estimating, batch-shrinking) direction.
-    The O(L^2) attention term is sized by the longest row's full input length, so dropping
-    the overhead systematically under-sizes the budget and admits oversized batches.
-    """
-    if instructs is None:
-        instructs = [""] * len(texts)
-    if isinstance(overhead, (list, tuple)):
-        per_row = [max(0, int(o)) for o in overhead]
-        if len(per_row) != len(texts):
-            per_row = [max(per_row, default=0)] * len(texts)
-    else:
-        per_row = [max(0, int(overhead))] * len(texts)
-    return [max(1, int((len(t) + len(i)) * CHAR_TOKENS_PER_CHAR)) + o
-            for t, i, o in zip(texts, instructs, per_row)]
-
-
-def _clone_input_overhead(prompt, voice_data):
-    """Fixed per-row input tokens a clone row adds beyond its target text (measured, no GPU
-    forward, no tokenizer).
-
-    A clone (ICL) row's talker input is: target text + the reference frames (one per ``ref_code``
-    row, on the talker's main stream) + the ref_text + structural markers (see
-    ``modeling_qwen3_tts.generate``, ICL branch). The frame count is read from the already-built
-    prompt's ``ref_code`` shape; the ref_text is priced in chars (``CHAR_TOKENS_PER_CHAR``).
-    Falls back to a conservative ``CLONE_FALLBACK_OVERHEAD`` when the prompt is missing /
-    unreadable.
-    """
-    if prompt is None:
-        return CLONE_FALLBACK_OVERHEAD
-    try:
-        item = prompt[0] if isinstance(prompt, (list, tuple)) else prompt
-        rc = getattr(item, "ref_code", None)
-        shape = getattr(rc, "shape", None)
-        ref_frames = int(shape[0]) if (rc is not None and shape) else 0
-        ref_text = getattr(item, "ref_text", None) or (voice_data or {}).get("ref_text") or ""
-        ref_text = str(ref_text).strip()
-        return (ROW_STRUCTURAL_OVERHEAD + ref_frames
-                + int(len(ref_text) * CHAR_TOKENS_PER_CHAR))
-    except Exception:  # noqa: BLE001 — a measurement hiccup -> the conservative constant
-        return CLONE_FALLBACK_OVERHEAD
-
-
-def _talker_vram_params(model):
-    """The attention/KV params for the L^2 VRAM budget, read from ``model.model.talker.config``.
-
-    Returns ``{"heads": int, "kv_per_token": int}`` or ``None`` (unreadable -> the VRAM term is
-    skipped and the char caps govern). ``kv_per_token`` = K+V, bf16 (2B), all layers:
-    ``2 * num_key_value_heads * head_dim * 2 * num_hidden_layers``.
-    """
-    try:
-        cfg = model.model.talker.config
-        hidden = int(getattr(cfg, "hidden_size", 0) or 0)
-        layers = int(getattr(cfg, "num_hidden_layers", 0) or 0)
-        heads = int(getattr(cfg, "num_attention_heads", 0) or 0)
-        kv_heads = int(getattr(cfg, "num_key_value_heads", 0) or 0) or heads
-        if not (hidden and layers and heads):
-            return None
-        head_dim = hidden // heads
-        return {"heads": heads, "kv_per_token": 2 * kv_heads * head_dim * 2 * layers}
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _free_vram_budget(device):
-    """The VRAM a new batch may use: 80% of the currently-free GPU memory, or ``None`` off CUDA.
-
-    ``None`` means the VRAM term doesn't participate (the char + manual caps still bound the
-    batch). ``mem_get_info`` also reports memory this process already holds, so the budget
-    naturally shrinks as the model + KV cache accumulate.
-    """
-    if "cuda" not in device:
-        return None
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return None
-        free, _total = torch.cuda.mem_get_info()
-        return int(free * 0.8)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _free_vram(device):
-    """The pool's currently-free VRAM in bytes, or ``None`` off CUDA / on any torch fault.
-
-    (Unlike ``_free_vram_budget`` this is the RAW free figure — the number the VramGovernor
-    measures a batch's working set against.)
-    """
+    """Currently free VRAM in bytes, or ``None`` off CUDA / on a torch fault."""
     if "cuda" not in device:
         return None
     try:
@@ -1298,7 +892,7 @@ def _free_vram(device):
 
 
 def _total_vram(device):
-    """The GPU's total VRAM in bytes (0 off CUDA / on fault) — sizes the governor's free floor."""
+    """The GPU's total VRAM in bytes (0 off CUDA / on fault) for watchdog pressure checks."""
     if "cuda" not in device:
         return 0
     try:
@@ -1312,7 +906,7 @@ def _total_vram(device):
 
 def _warmup(model, vtype, language, device) -> None:
     """One tiny generation before the first real batch (CUDA only) to absorb first-call
-    overhead (kernels / allocator warm-up) so the first measured batch is fair. Clone is
+    overhead (kernels / allocator warm-up). Clone is
     skipped (it needs a prompt); a warm on any loaded model warms the shared GPU kernels."""
     if "cuda" not in device or vtype not in ("custom", "design"):
         return
@@ -1441,30 +1035,6 @@ def combine_audio_with_pauses(audio_segments, speakers, pause_ms=500,
     return combined
 
 
-def compute_timeline(chunks_with_audio, pause_ms=500, same_speaker_pause_ms=250):
-    """Compute ``(chunk, segment, abs_start_ms)`` tuples (port of ``tts.py``)."""
-    timeline = []
-    cursor_ms = 0
-    prev_speaker = None
-    prev_chunk = None
-
-    for chunk, segment in chunks_with_audio:
-        if prev_speaker is not None:
-            override = prev_chunk.get("pause_after")
-            if override is not None:
-                gap = int(override)
-            elif chunk["speaker"] == prev_speaker:
-                gap = same_speaker_pause_ms
-            else:
-                gap = pause_ms
-            cursor_ms += gap
-
-        timeline.append((chunk, segment, cursor_ms))
-        cursor_ms += len(segment)
-        prev_speaker = chunk["speaker"]
-        prev_chunk = chunk
-
-    return timeline
 
 
 # ---------------------------------------------------------------------------
@@ -1897,13 +1467,13 @@ def _save_one_with_retry(save_fn, row, result, out_dir, width, batch_seed):
 
 
 def _synth_sub_batch(model, vtype, rows, *, args, clone_prompts, device, seed, sub_counter,
-                     out_dir, width, report, gov=None, save=None, force_do_sample=False,
+                     out_dir, width, report, save=None, force_do_sample=False,
                      pipeline=None):
     """Generate + save + report a sub-batch, under its watchdog, with in-process halving retry.
 
     ``sub_counter`` is a mutable ``[int]`` (a global sequence shared across every sub-batch, so a
     fixed seed + fixed layout reproduces). On a non-timeout fault (e.g. OOM) the GPU cache is
-    cleared, the governor is told (so no later batch re-proposes a failing size), the batch split
+    cleared and the batch split
     in half, and each half retried recursively (each under its own watchdog) down to size 1. A
     size-1 fault hands off to the backend (``os._exit(124)``) so the specific segment can be
     struck / isolated. Timeouts never retry in-process (a hang means the GPU context is suspect)
@@ -1927,13 +1497,11 @@ def _synth_sub_batch(model, vtype, rows, *, args, clone_prompts, device, seed, s
     speaker_count = count_batch_speakers(rows)
 
     def _gen():
-        with bounded_vocoder(model, getattr(args, "vocoder_batch_size", 0)), profile_stages(
-                model, getattr(args, "profile_stages", False)):
+        with bounded_vocoder(model, getattr(args, "vocoder_batch_size", 0)):
             return _generate_rows(model, vtype, rows, args, clone_prompts, batch_seed,
                                   force_do_sample=force_do_sample)
 
-    if gov is None:
-        _start_vram_peak(device)
+    _start_vram_peak(device)
     started = time.perf_counter()
     print("[perf] " + json.dumps({"stage": "batch", "event": "start", "batch": label,
           "rows": len(rows), "chars": total_chars,
@@ -1948,25 +1516,23 @@ def _synth_sub_batch(model, vtype, rows, *, args, clone_prompts, device, seed, s
     except Exception as e:  # noqa: BLE001 — a fault (e.g. OOM), not a timeout
         print("[perf] " + json.dumps({"stage": "batch", "event": "error",
               "batch": label, "error": str(e), "oom": "out of memory" in str(e).lower()}), flush=True)
-        if getattr(args, "benchmark_strict", False) or getattr(args, "fixed_batch", False):
+        if getattr(args, "fixed_batch", False):
             raise
         if len(rows) == 1:
             # even a lone row failed -> hand off to the backend to strike / isolate it
             log(f"段 {indices[0] + 1} 生成失败（{e}）——交由后端隔离")
             _clear_gpu_cache(device)
             os._exit(124)
-        if gov is not None:
-            gov.observe_fault(len(rows))  # no later batch may re-propose a failing size
         log(f"子批 {label}（{len(rows)} 段）生成失败（{e}）——清空显存缓存并对半拆分重试")
         _clear_gpu_cache(device)
         mid = len(rows) // 2
         _synth_sub_batch(model, vtype, rows[:mid], args=args, clone_prompts=clone_prompts,
                          device=device, seed=seed, sub_counter=sub_counter,
-                         out_dir=out_dir, width=width, report=report, gov=gov, save=save,
+                         out_dir=out_dir, width=width, report=report, save=save,
                          force_do_sample=force_do_sample, pipeline=pipeline)
         _synth_sub_batch(model, vtype, rows[mid:], args=args, clone_prompts=clone_prompts,
                          device=device, seed=seed, sub_counter=sub_counter,
-                         out_dir=out_dir, width=width, report=report, gov=gov, save=save,
+                         out_dir=out_dir, width=width, report=report, save=save,
                          force_do_sample=force_do_sample, pipeline=pipeline)
         return
 
@@ -2002,27 +1568,6 @@ def _synth_sub_batch(model, vtype, rows, *, args, clone_prompts, device, seed, s
           **cuda_peaks}), flush=True)
 
 
-PLANNER_CHECK_NAMES = ("length_bands", "batch_chars", "seq_chars",
-                       "length_ratio", "vram")
-
-
-def parse_disabled_checks(raw: str) -> frozenset:
-    """``--disabled-checks`` -> frozenset of canonical planner check names (pure).
-
-    Empty / omitted = every check on (the default). Whitespace-tolerant, order-insensitive,
-    duplicates collapse. An unknown name raises ``ValueError`` (the caller turns it into
-    ``TTS_WORKER_ERROR`` + exit 2) — a typo must never silently run a whole book with the
-    wrong gate closed.
-    """
-    names = {n.strip() for n in (raw or "").split(",") if n.strip()}
-    unknown = names - set(PLANNER_CHECK_NAMES)
-    if unknown:
-        raise ValueError(
-            f"unknown check(s) in --disabled-checks: {', '.join(sorted(unknown))}"
-            f" (valid: {', '.join(PLANNER_CHECK_NAMES)})")
-    return frozenset(names)
-
-
 def parse_restore_stack(raw: str) -> list:
     """``--restore-stack`` -> list of ``(timeout_chars, cap)`` pairs, oldest first (pure).
 
@@ -2052,126 +1597,12 @@ def parse_restore_stack(raw: str) -> list:
     return out
 
 
-def _plan_cap_terms(disabled, band_label):
-    """The still-active static caps for the '实际每批条数 = min(…)' log line: one term per
-    check that is on. 动态调节 (the measured VramGovernor cap) is never closable, so it is
-    always listed. A single remaining term should print bare (no ``min(…)`` wrapper)."""
-    terms = []
-    if "length_bands" not in disabled:
-        terms.append(band_label)  # 段长分档 (batch) / 行长按分档 (design-batch)
-    terms.append("动态调节")
-    if "vram" not in disabled:
-        terms.append("显存估算")
-    if "batch_chars" not in disabled or "seq_chars" not in disabled:
-        terms.append("字符上限")
-    return terms
 
 
-def _log_disabled_checks(disabled) -> None:
-    """One '…已关闭（配置）' line per closed check (the 解析内三阶段 logging convention) —
-    a silently skipped gate would be misread as a missing stage."""
-    for name, label in (("length_bands", "段长分档"),
-                        ("batch_chars", "单批字符上限"),
-                        ("seq_chars", "超长行独批"),
-                        ("length_ratio", "批内长度比限制")):
-        if name in disabled:
-            log(f"{label}已关闭（配置）")
-    if "vram" in disabled:
-        log("显存静态估算已关闭（配置）——实测显存的动态调节（VramGovernor）仍生效")
 
 
-def plan_next_sub_batch(remaining, *, vtype, overhead, params, budget, gov,
-                        max_batch, max_batch_chars, force_rows_cap=None,
-                        disabled: frozenset = frozenset()):
-    """One lazy planning round (pure): the next sub-batch + the rows left after it.
-
-    The round's row cap is the governor's current adaptive cap (1 for design rows in batch
-    mode — there each design row is a book segment and runs solo); ``force_rows_cap``
-    overrides it — the design-batch mode passes the governor's cap so its candidates (each
-    with its own description) DO share a tensor sub-batch, which is the point of that mode.
-    The length bands apply on top (a batch may never exceed the band of its longest row),
-    as do the char caps and the (trust-scaled) VRAM estimate. A ``disabled`` check name
-    (see ``PLANNER_CHECK_NAMES``) drops its constraint out of the round; the measured
-    VramGovernor cap is never closable and always applies. The planner's first batch is
-    always a prefix of the (ascending) rows, so the remainder is well defined. Returns
-    ``(batch_rows, remaining_rows)``.
-
-    ``overhead`` is the per-row input overhead for the VRAM budget: a scalar (every row the
-    same — custom / design rows, or a single-character clone run) or a per-row list (a
-    cross-character clone round, where each row carries its own character's measured
-    reference overhead).
-    """
-    # Only the next prefix can run before the governor changes. Do not tokenize or
-    # plan every remaining row again for every batch of a long book.
-    rows_cap = (force_rows_cap if force_rows_cap is not None
-                else (1 if vtype == "design" else gov.cap))
-    candidates = remaining[:max(1, rows_cap)]
-    candidate_overhead = overhead[:len(candidates)] if isinstance(overhead, (list, tuple)) else overhead
-    tokens = plan_row_tokens([r["text"] for r in candidates],
-                            [_effective_instruct(r, vtype) for r in candidates], candidate_overhead)
-    vram_ok = None
-    if "vram" not in disabled and params is not None and budget is not None:
-        heads, kvt = params["heads"], params["kv_per_token"]
-
-        def vram_ok(toks, _h=heads, _k=kvt, _b=budget):
-            # the static L^2 estimate, scaled by the governor's measured trust
-            return (estimate_batch_vram(len(toks), _h, _k, toks, MAX_NEW_TOKENS)
-                    <= _b * gov.vram_scale)
-    batches = plan_sub_batches(
-        [r["chars"] for r in candidates],
-        max_batch=rows_cap,
-        band_cap=None if "length_bands" in disabled
-        else (lambda c: band_cap_for_chars(c, max_batch)),
-        max_batch_chars=10 ** 9 if "batch_chars" in disabled else max_batch_chars,
-        max_seq_chars=0 if "seq_chars" in disabled else MAX_SEQ_CHARS,
-        length_ratio=float("inf") if "length_ratio" in disabled else getattr(gov, "length_ratio", LENGTH_RATIO),
-        vram_ok=vram_ok, tokens=tokens, first_only=True)
-    pos = batches[0]  # always a prefix of the ascending rows
-    return remaining[:len(pos)], remaining[len(pos):]
 
 
-def plan_next_sub_batch_with_restore(remaining, restore_stack, *, vtype, overhead,
-                                     params, budget, gov, max_batch, max_batch_chars,
-                                     disabled: frozenset = frozenset()):
-    """One planning round that honours the newest pending demotion record (pure).
-
-    ``restore_stack`` is the LIFO list of ``(threshold_chars, cap)`` pairs the backend
-    recorded when it demoted the per-batch cap (``--restore-stack``, oldest first). The
-    round plans ONCE at the current (demoted) gear; if that batch's total chars sit below
-    the newest record's threshold, a TRIAL plan is taken at the record's original gear
-    (the governor's live cap bumped for the trial and the manual cap raised, so the
-    length bands re-derive from it). The restore is confirmed only if the trial ALSO fits
-    under the threshold — a full-size batch that would still overshoot must not run at
-    the old gear — in which case the governor stays at the restored gear (the
-    fresh-process-at-that-gear state; the caller pops the record and emits the ``[restore]``
-    line) and the trial's rows are the batch. On rejection the trial's cap bump is reverted
-    and the demoted batch runs (the record stays pending for later rounds). Only the
-    newest record is consulted (LIFO: levels come back one demotion at a time); every
-    other planning check (bands / char caps / overlong solo / length ratio / static VRAM)
-    and the governor's measured ``vram_scale`` apply to the trial unchanged — a restore
-    raises the manual ceiling only.
-
-    Returns ``(rows, remaining, new_max_batch, restored_cap)`` — ``restored_cap`` is the
-    restored gear when the restore was confirmed, else ``None`` (and ``new_max_batch`` is
-    the input ``max_batch`` unchanged).
-    """
-    rows_b, remaining_b = plan_next_sub_batch(
-        remaining, vtype=vtype, overhead=overhead, params=params, budget=budget,
-        gov=gov, max_batch=max_batch, max_batch_chars=max_batch_chars, disabled=disabled)
-    if not restore_stack:
-        return rows_b, remaining_b, max_batch, None
-    threshold, cap = restore_stack[-1]
-    if cap <= max_batch or sum(r["chars"] for r in rows_b) >= threshold:
-        return rows_b, remaining_b, max_batch, None
-    saved = gov.cap
-    gov.cap = cap  # the trial sees the restored gear; reverted on rejection
-    rows_big, remaining_big = plan_next_sub_batch(
-        remaining, vtype=vtype, overhead=overhead, params=params, budget=budget,
-        gov=gov, max_batch=cap, max_batch_chars=max_batch_chars, disabled=disabled)
-    if sum(r["chars"] for r in rows_big) < threshold:
-        return rows_big, remaining_big, cap, cap  # confirmed — gov.cap stays restored
-    gov.cap = saved
-    return rows_b, remaining_b, max_batch, None
 
 
 def _run_batch(args) -> int:
@@ -2180,10 +1611,9 @@ def _run_batch(args) -> int:
     Loads only the models the batch needs, once; then runs the segments as **native tensor
     batches** (the model's list API pads a group of rows into one forward, so the GPU truly
     processes several segments at once) instead of the old one-segment-per-thread pool.
-    ``--concurrency`` is only a ceiling: the real per-batch size follows the length bands
-    (short rows run at the full cap, long rows step down, extreme rows run solo) and a measured
-    VramGovernor that shrinks / grows it batch by batch from the GPU's actual VRAM consumption
-    and throughput (never chasing 100% VRAM).
+    ``--concurrency`` is the fixed batch ceiling. With ``--auto-batch``, the longest
+    row selects a measured safety tier. A watchdog can temporarily halve a batch
+    after a timeout and later restore its previous ceiling.
 
     Rows run in **per-role queues** keyed by ``(voice_type, canonical_speaker)``. The role
     with the most useful rows starts first, and each role's rows are sorted by character
@@ -2254,8 +1684,8 @@ def _run_batch(args) -> int:
 
     # -- classify every segment: immediate errors, then per-role queues ------------------
     # The classification key is PER ROLE, (vtype, canonical): a role's rows share one voice
-    # config entry, so its clone prompt is built once and its measured input overhead is
-    # stamped onto each row. Scheduling keeps role queues separate except for tail filling.
+    # config entry, so its clone prompt is built once and reused across batches.
+    # Scheduling keeps role queues separate except for tail filling.
     total = len(segments)
     # The backend precomputes the width from the LARGEST package's FULL segment count and
     # hands it via --width, so every package in a run shares one digit count and a resume /
@@ -2314,7 +1744,7 @@ def _run_batch(args) -> int:
                "file_index": int(seg.get("file_index", index))}
         classified.setdefault((vtype, canonical), []).append(row)
 
-    # -- per-character setup: clone prompts + per-row VRAM overhead ----------------------
+    # -- per-character setup: clone prompts ----------------------
     # (classification stays per character — see the comment above the loop)
     for (vtype, canonical), rows in classified.items():
         if vtype == "clone":
@@ -2334,16 +1764,6 @@ def _run_batch(args) -> int:
                 for r in rows:
                     report_result(r["index"], False, f"克隆提示构建失败：{e}")
                 continue
-            # Measure this character's fixed per-row input overhead (reference frames +
-            # ref_text + structural) from the prompt just built and stamp it onto every row
-            # of the character, so a tail sub-batch that mixes roles still prices each row's
-            # VRAM budget against its TRUE sequence length (not just the target text).
-            overhead = _clone_input_overhead(clone_prompts[canonical],
-                                             voice_config[canonical])
-        else:
-            overhead = ROW_STRUCTURAL_OVERHEAD  # custom / design rows carry no reference
-        for r in rows:
-            r["overhead"] = overhead
 
     # -- the execution queues: roles with more useful rows first, each role shortest first
     # Different roles stay separate until a role's remaining tail is smaller than the current
@@ -2481,11 +1901,9 @@ def _run_design_batch(args) -> int:
     The 角色配音·克隆 stage's counterpart of ``_run_batch``: the VoiceDesign model is loaded
     ONCE, then every candidate (short ref text + its own voice description) runs as native
     tensor sub-batches — unlike batch mode's design rows (book segments, one per sub-batch),
-    candidates DO share a sub-batch (``force_rows_cap`` = the governor's cap), which is the
-    point of this mode. The per-batch size follows the length bands + the measured
-    VramGovernor; ``--concurrency`` is only the ceiling. All candidates run from ONE unified
-    length-ascending queue across characters — a sub-batch stays length-homogeneous (the
-    length bands + the ≤3 ratio apply to the merged stream), so same-length candidates of
+    candidates DO share a sub-batch, which is the point of this mode. The configured
+    batch ceiling bounds one unified length-ascending queue across characters, so
+    same-length candidates of
     different characters fill the cap together (short rows first: early progress + crash
     resilience); each row keeps its backend identity (``index`` = position in the jobs file)
     so the ``[design]`` lines and the watchdog's ``indices=`` map back after the sorting.
@@ -3019,15 +2437,6 @@ def main() -> int:
     ap.add_argument("--auto-batch", action="store_true",
                     help="select each batch cap by upward matching the longest row to measured safety tiers")
     ap.add_argument("--vocoder-batch-size", type=int, default=0, help="opt-in decoder chunk size; 0 keeps native decode")
-    ap.add_argument("--length-ratio", type=float, default=LENGTH_RATIO)
-    ap.add_argument("--profile-stages", action="store_true")
-    ap.add_argument("--benchmark-strict", action="store_true", help="fail without split retries")
-    ap.add_argument("--max-batch-chars", type=int, default=12000,
-                    help="max total chars in one sub-batch (batch / design-batch; guards an oversized prefill)")
-    ap.add_argument("--disabled-checks", default="",
-                    help="comma list of sub-batch planning checks to disable (batch / design-batch): "
-                         "length_bands, batch_chars, seq_chars, length_ratio, vram "
-                         "(empty = all on; an unknown name is a setup error)")
     ap.add_argument("--restore-stack", default="",
                     help="pending watchdog-demotion records '<chars>:<cap>,…', oldest first (batch): "
                          "each is the timed-out sub-batch's total chars + the pre-demotion per-batch "
@@ -3053,13 +2462,8 @@ def main() -> int:
                          "0/omitted = ffmpeg's own default (manual/legacy runs)")
     args = ap.parse_args()
 
-    # The planner-check switches are only meaningful to the two tensor-batch modes; the other
-    # modes synthesize per segment and never plan sub-batches, so the flag is ignored there
-    # (same convention as the other mode-specific flags).
-    args.disabled = frozenset()
     if args.mode in ("batch", "design-batch"):
         try:
-            args.disabled = parse_disabled_checks(args.disabled_checks)
             args.restore_stack = parse_restore_stack(args.restore_stack)
         except ValueError as e:
             print(f"TTS_WORKER_ERROR: {e}", file=sys.stderr, flush=True)

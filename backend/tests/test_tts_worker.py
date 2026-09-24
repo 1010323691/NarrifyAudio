@@ -1,13 +1,7 @@
-"""Offline tests for the batch worker's pure planning logic (``tts-engine/tts_worker.py``).
+"""Offline tests for production TTS batching, watchdog recovery, and audio output.
 
-The old ``run_bounded`` thread-pool scheduler is gone (replaced by native tensor-batch
-planning), so these tests now pin the *pure* functions that decide how segments are padded
-into GPU tensor batches and how long a hung batch may run before the watchdog kills the
-process: ``plan_sub_batches`` (the greedy batcher), ``estimate_batch_vram`` (the VRAM budget,
-including the L^2 attention peak the reference project omitted), and
-``sub_batch_timeout_seconds`` (the device-scaled watchdog budget). They are pure stdlib (no
-torch), so they run in the backend suite via ``importlib`` — the worker module's
-top-level imports are stdlib-only, so loading it never pulls in the ML stack.
+The worker imports without the ML stack, so pure helpers and protocol behavior can be
+checked from the backend suite.
 """
 from __future__ import annotations
 
@@ -33,439 +27,10 @@ def _load_worker():
     return mod
 
 
-# --------------------------------------------------------------------------- #
-# plan_sub_batches — the greedy tensor-batch planner
-# --------------------------------------------------------------------------- #
-
-def test_plan_sub_batches_manual_cap():
-    tw = _load_worker()
-    # a manual cap of 2 over 5 equal rows -> batches of 2, 2, 1
-    assert tw.plan_sub_batches([10] * 5, max_batch=2, max_batch_chars=1000) == [[0, 1], [2, 3], [4]]
-
-
-def test_plan_sub_batches_char_cap_limits_batch():
-    tw = _load_worker()
-    # 600-char rows under a 1000-char batch cap -> only one row fits per batch
-    assert tw.plan_sub_batches([600] * 3, max_batch=4, max_batch_chars=1000) == [[0], [1], [2]]
-
-
-def test_plan_sub_batches_length_ratio_splits():
-    tw = _load_worker()
-    # a row > 3x (LENGTH_RATIO) the batch's shortest row opens a new batch
-    assert tw.plan_sub_batches([10, 11, 12, 100], max_batch=8, max_batch_chars=10000) == [[0, 1, 2], [3]]
-
-
-def test_plan_sub_batches_overlong_row_is_solo():
-    tw = _load_worker()
-    # a row over the per-row char cap never mixes with the shorter rows already batched
-    assert tw.plan_sub_batches([10, 20, 3000], max_batch=8, max_batch_chars=100000,
-                               max_seq_chars=1000) == [[0, 1], [2]]
-
-
-def test_plan_sub_batches_vram_ok_limits_batch():
-    tw = _load_worker()
-    # a vram_ok that only allows 1 row forces single-row batches
-    r = tw.plan_sub_batches([10, 10, 10], max_batch=4, max_batch_chars=1000,
-                            vram_ok=lambda tokens: len(tokens) <= 1, tokens=[5, 5, 5])
-    assert r == [[0], [1], [2]]
-
-
-def test_plan_sub_batches_never_skips_a_row():
-    tw = _load_worker()
-    # even a row the budget rejects still gets a solo batch (min size 1)
-    assert tw.plan_sub_batches([10], max_batch=4, max_batch_chars=1000,
-                               vram_ok=lambda tokens: False, tokens=[5]) == [[0]]
-
-
-def test_plan_sub_batches_covers_every_row_exactly_once():
-    tw = _load_worker()
-    lengths = [7, 9, 14, 20, 33, 61, 120, 300, 700]
-    batches = tw.plan_sub_batches(lengths, max_batch=3, max_batch_chars=400,
-                                  max_seq_chars=2500, vram_ok=lambda t: sum(t) <= 400,
-                                  tokens=lengths)
-    assert sorted(i for b in batches for i in b) == list(range(len(lengths)))  # every row once
-
-
-def test_plan_sub_batches_empty():
-    tw = _load_worker()
-    assert tw.plan_sub_batches([], max_batch=2, max_batch_chars=1000) == []
-
-
-# --------------------------------------------------------------------------- #
-# estimate_batch_vram — the VRAM budget (L^2 attention peak + KV cache)
-# --------------------------------------------------------------------------- #
-
-def test_estimate_batch_vram_has_both_terms():
-    tw = _load_worker()
-    heads, kvt = 32, 24000
-    v = tw.estimate_batch_vram(1, heads, kvt, [100], 2048)
-    assert v == 1 * heads * (100 + 2048) ** 2 * 4 + (100 + 2048) * kvt * 1.5
-
-
-def test_estimate_batch_vram_scales_with_batch_size():
-    tw = _load_worker()
-    heads, kvt = 32, 24000
-    v1 = tw.estimate_batch_vram(1, heads, kvt, [100], 2048)
-    v8 = tw.estimate_batch_vram(8, heads, kvt, [100] * 8, 2048)
-    assert v8 > v1  # a bigger batch costs more VRAM (the whole point of real GPU parallelism)
-
-
-def test_estimate_batch_vram_unknown_heads_kv_only():
-    tw = _load_worker()
-    kvt = 24000
-    assert tw.estimate_batch_vram(4, 0, kvt, [100] * 4, 2048) == \
-        sum(100 + 2048 for _ in range(4)) * kvt * 1.5
-
-
-# ---------------------------------------------------------------------------
-# plan_row_tokens / _clone_input_overhead — honest per-row input lengths
-# ---------------------------------------------------------------------------
-
-def test_plan_row_tokens_prices_text_and_instruct_in_chars():
-    tw = _load_worker()
-    # char-based pricing (no tokenizer): (text + instruct) chars x CHAR_TOKENS_PER_CHAR + overhead
-    toks = tw.plan_row_tokens(["abc", "abcdefghij"], ["xy", ""], 16)
-    assert toks == [int(5 * tw.CHAR_TOKENS_PER_CHAR) + 16,
-                    int(10 * tw.CHAR_TOKENS_PER_CHAR) + 16]
-    assert toks[0] != toks[1]  # longer input is priced higher
-
-
-def test_plan_row_tokens_empty():
-    tw = _load_worker()
-    assert tw.plan_row_tokens([], [], 16) == []
-
-
-def test_clone_input_overhead_measured_from_prompt():
-    tw = _load_worker()
-
-    class _RC:
-        shape = (81, 16)  # 81 reference frames x 16 codebooks
-
-    class _Item:
-        ref_code = _RC()
-        ref_text = "你好，我是参考文本。"  # 10 chars
-
-    overhead = tw._clone_input_overhead([_Item()], {})
-    # structural markers + 81 ref frames + 10 ref-text chars priced at CHAR_TOKENS_PER_CHAR
-    assert overhead == tw.ROW_STRUCTURAL_OVERHEAD + 81 + int(10 * tw.CHAR_TOKENS_PER_CHAR)
-
-
-def test_clone_input_overhead_xvec_only_is_structural_only():
-    tw = _load_worker()
-
-    class _Item:
-        ref_code = None
-        ref_text = None
-
-    # no ref frames, no ref text -> only the structural markers are owed
-    assert tw._clone_input_overhead([_Item()], {}) == tw.ROW_STRUCTURAL_OVERHEAD
-
-
-def test_clone_input_overhead_fallback_when_prompt_missing():
-    tw = _load_worker()
-    assert tw._clone_input_overhead(None, None) == tw.CLONE_FALLBACK_OVERHEAD
-
-
-def test_clone_input_overhead_ref_text_from_voice_config():
-    tw = _load_worker()
-
-    class _Item:
-        ref_code = None
-        ref_text = None
-
-    # the prompt item carries no ref_text -> price the voice config's transcript in chars
-    assert tw._clone_input_overhead([_Item()], {"ref_text": "参考文本十"}) == \
-        tw.ROW_STRUCTURAL_OVERHEAD + int(5 * tw.CHAR_TOKENS_PER_CHAR)
-
-
-def test_clone_overhead_shrinks_the_admitted_batch():
-    """The fix pinned end-to-end: under one VRAM budget, honest clone tokens admit FEWER rows
-    than the old target-only tokens did (the L^2 term is sized by the rows' full input length).
-    """
-    tw = _load_worker()
-    heads, kvt, max_new = 8, 1000, 256
-    budget = 40_000_000  # a fixed VRAM budget (bytes)
-
-    def vram_ok(tokens):
-        return tw.estimate_batch_vram(len(tokens), heads, kvt, tokens, max_new) <= budget
-
-    char_lens = [80] * 8
-    custom_tokens = tw.plan_row_tokens(["t" * 80] * 8, [""] * 8, tw.ROW_STRUCTURAL_OVERHEAD)
-    clone_tokens = tw.plan_row_tokens(["t" * 80] * 8, [""] * 8, tw.CLONE_FALLBACK_OVERHEAD)
-    # both lists share the same (char-fallback) base; they differ only by the overhead delta
-    delta = tw.CLONE_FALLBACK_OVERHEAD - tw.ROW_STRUCTURAL_OVERHEAD
-    assert clone_tokens == [c + delta for c in custom_tokens]
-    first_custom = tw.plan_sub_batches(char_lens, max_batch=32, max_batch_chars=100000,
-                                       vram_ok=vram_ok, tokens=custom_tokens)[0]
-    first_clone = tw.plan_sub_batches(char_lens, max_batch=32, max_batch_chars=100000,
-                                      vram_ok=vram_ok, tokens=clone_tokens)[0]
-    assert len(first_clone) < len(first_custom)  # the same budget admits fewer clone rows
-    assert len(first_clone) == 4 and len(first_custom) == 8  # the exact shrink, pinned
-
-
-# ---------------------------------------------------------------------------
-# band_cap_for_chars — the length-class concurrency bands
-# ---------------------------------------------------------------------------
-
-def test_band_cap_pinned_values():
-    tw = _load_worker()
-    caps = {n: tw.band_cap_for_chars(n, 16) for n in
-            (10, 64, 65, 256, 257, 512, 513, 1024, 1025, 2048, 2049, 99999)}
-    assert caps == {10: 16, 64: 16, 65: 12, 256: 12, 257: 8, 512: 8,
-                    513: 6, 1024: 6, 1025: 3, 2048: 3, 2049: 1, 99999: 1}
-
-
-def test_band_cap_monotonic_nonincreasing():
-    tw = _load_worker()
-    caps = [tw.band_cap_for_chars(n, 32) for n in
-            (10, 64, 100, 256, 300, 512, 600, 1024, 1100, 2048, 3000)]
-    assert all(a >= b for a, b in zip(caps, caps[1:]))
-
-
-def test_band_cap_never_exceeds_manual_cap():
-    tw = _load_worker()
-    for n in (1, 10, 100, 300, 3000):
-        assert tw.band_cap_for_chars(n, 1) == 1
-    for n in (10, 100, 300, 3000):
-        assert tw.band_cap_for_chars(n, 3) <= 3
-
-
-# ---------------------------------------------------------------------------
-# VramGovernor — the measured VRAM / throughput feedback loop
-# ---------------------------------------------------------------------------
-
-GB = 2 ** 30
-
-
-def _gov(cap=16, **kw):
-    tw = _load_worker()
-    return tw, tw.VramGovernor(cap, device="cuda",
-                               total_vram=kw.pop("total_vram", 8 * GB), **kw)
-
-
-def test_governor_shrinks_on_high_peak_frac():
-    tw, gov = _gov()
-    # the batch consumed 7.5 of the 8GB pool (94%) -> pressure -> halve the cap
-    action = gov.observe_success(free_before=8 * GB, free_after=0.5 * GB, rows=8,
-                                 chars=1600, elapsed=20, static_est=4 * GB)
-    assert action == "shrink"
-    assert gov.cap == 8
-    # the measured working set (7.5GB) beat the static estimate (4GB) -> distrust it
-    assert gov.vram_scale < 1.0
-
-
-def test_governor_grows_back_after_pressure_clears():
-    tw, gov = _gov()
-    gov.observe_success(free_before=8 * GB, free_after=0.5 * GB, rows=8,
-                        chars=1600, elapsed=20, static_est=4 * GB)  # -> cap 8
-    assert gov.cap == 8
-    # a later batch stays well under the pool with steady throughput -> grow toward the ceiling
-    action = gov.observe_success(free_before=8 * GB, free_after=7 * GB, rows=4,
-                                 chars=800, elapsed=10, static_est=2 * GB)
-    assert action == "grow"
-    assert gov.cap == 10  # 8 + max(1, 8 // 4)
-    assert gov.cap <= gov.manual_cap
-
-
-def test_governor_never_exceeds_manual_cap():
-    tw, gov = _gov(4)
-    for _ in range(6):
-        gov.observe_success(free_before=8 * GB, free_after=7.9 * GB, rows=1,
-                            chars=100, elapsed=1, static_est=1 * GB)
-    assert gov.cap <= 4
-
-
-def test_governor_floor_is_one():
-    tw, gov = _gov(2)
-    assert gov.observe_fault(2) == "fault"
-    assert gov.cap == 1
-    # pressure at the floor is a no-op (the cap is already minimal)
-    assert gov.observe_success(free_before=8 * GB, free_after=0.1 * GB, rows=1,
-                               chars=10, elapsed=1, static_est=0) is None
-    assert gov.cap == 1
-
-
-def test_governor_fault_halves_to_retry_size():
-    tw, gov = _gov()
-    assert gov.observe_fault(6) == "fault"
-    assert gov.cap == 3  # no later batch may re-propose a 6-row size
-    assert gov.observe_fault(2) == "fault"
-    assert gov.cap == 1
-
-
-def test_governor_row_cap_is_band_limited():
-    tw, gov = _gov()
-    assert gov.row_cap_for(10) == 16     # short class -> full cap
-    assert gov.row_cap_for(3000) == 1    # extreme class -> solo, whatever the adaptive cap is
-    assert gov.observe_fault(1) == "fault"
-    assert gov.cap == 1
-    assert gov.row_cap_for(10) == 1      # the shrunk cap also binds the short class
-
-
-def test_governor_off_cuda_is_inert():
-    tw, gov = _gov()
-    gov.device = "cpu"
-    assert gov.observe_success(free_before=8 * GB, free_after=0, rows=4,
-                               chars=1000, elapsed=5, static_est=1 * GB) is None
-    assert gov.cap == 16
-
-
-def test_governor_calibration_learns_estimate_bias():
-    tw, gov = _gov()
-    # measured working set (2GB) far below the static estimate (4GB) -> the estimate is
-    # conservative: trust it more (later batches may be admitted bigger)
-    gov.observe_success(free_before=8 * GB, free_after=6 * GB, rows=8,
-                        chars=1600, elapsed=20, static_est=4 * GB)
-    assert gov.vram_scale > 1.0
-
-    _tw2, gov2 = _gov()
-    # measured (3GB) above the static (2GB) -> the guess was beaten: distrust + pressure
-    action = gov2.observe_success(free_before=8 * GB, free_after=5 * GB, rows=8,
-                                  chars=1600, elapsed=20, static_est=2 * GB)
-    assert gov2.vram_scale < 1.0
-    assert action == "shrink"
-    assert gov2.cap < 16
-
-
-# ---------------------------------------------------------------------------
-# plan_sub_batches — the length bands + tightened ratio as planner constraints
-# ---------------------------------------------------------------------------
-
-def test_plan_sub_batches_band_cap_limits_batch_size():
-    tw = _load_worker()
-    # 20 medium rows: the length band (8 of 16) closes each batch before the row cap would
-    batches = tw.plan_sub_batches([300] * 20, max_batch=16, max_batch_chars=100000,
-                                  band_cap=lambda c: tw.band_cap_for_chars(c, 16))
-    assert [len(b) for b in batches] == [8, 8, 4]
-
-
-def test_plan_sub_batches_band_keeps_short_rows_out_of_long_batches():
-    tw = _load_worker()
-    lens = [10] * 12 + [300] * 4
-    batches = tw.plan_sub_batches(lens, max_batch=16, max_batch_chars=100000,
-                                  band_cap=lambda c: tw.band_cap_for_chars(c, 16))
-    assert batches[0] == list(range(12))       # the short rows fill their own batches
-    assert batches[1] == list(range(12, 16))   # the long rows batch together
-
-
-def test_plan_sub_batches_ratio_splits_even_two_row_batches():
-    tw = _load_worker()
-    # with min_ratio_size=2 a 10x spread splits even a two-row batch (no padding waste)
-    assert tw.plan_sub_batches([10, 100], max_batch=8, max_batch_chars=10000) == [[0], [1]]
-
-
-def test_plan_sub_batches_ratio_three_boundaries():
-    tw = _load_worker()
-    # exactly 3x (the tightened LENGTH_RATIO) still shares a batch; just over 3x splits —
-    # the decode cap scales with the batch's longest row, so a 5x spread (the old ratio)
-    # made a 2-char line run a 10-char line's full cap
-    assert tw.plan_sub_batches([2, 6], max_batch=8, max_batch_chars=10000) == [[0, 1]]
-    assert tw.plan_sub_batches([2, 7], max_batch=8, max_batch_chars=10000) == [[0], [1]]
-
-
-# ---------------------------------------------------------------------------
-# plan_next_sub_batch — the lazy planning round the run loop drives
-# ---------------------------------------------------------------------------
-
 def _row(chars, **kw):
     base = {"chars": chars, "text": "字" * chars, "instruct": "", "vd": {}}
     base.update(kw)
     return base
-
-
-def test_lazy_rounds_cover_every_row_and_follow_bands():
-    tw = _load_worker()
-    # 40 short rows (10 chars) + 20 medium rows (300 chars), a healthy GPU throughout
-    rows = [_row(c) for c in [10] * 40 + [300] * 20]
-    gov = tw.VramGovernor(16, device="cuda", total_vram=8 * GB)
-    remaining = rows
-    sizes = []
-    while remaining:
-        rows_b, remaining = tw.plan_next_sub_batch(
-            remaining, vtype="custom", overhead=16, params=None, budget=None,
-            gov=gov, max_batch=16, max_batch_chars=12000)
-        sizes.append(len(rows_b))
-        # healthy batch: the pool barely moves, steady throughput -> no adjustment
-        gov.observe_success(free_before=8 * GB, free_after=7.5 * GB, rows=len(rows_b),
-                            chars=sum(r["chars"] for r in rows_b), elapsed=10, static_est=0)
-    assert sum(sizes) == 60  # every row scheduled exactly once
-    # short rows ran at the full manual cap; medium rows were band-limited (8 of 16)
-    assert sizes == [16, 16, 8, 8, 8, 4]
-
-
-def test_lazy_rounds_shrink_and_replan_under_pressure():
-    tw = _load_worker()
-    rows = [_row(10) for _ in range(64)]
-    gov = tw.VramGovernor(16, device="cuda", total_vram=8 * GB)
-    remaining = rows
-    sizes = []
-    for i in range(10):
-        if not remaining:
-            break
-        rows_b, remaining = tw.plan_next_sub_batch(
-            remaining, vtype="custom", overhead=16, params=None, budget=None,
-            gov=gov, max_batch=16, max_batch_chars=12000)
-        sizes.append(len(rows_b))
-        if i == 0:
-            # the first round is healthy (the full cap is kept)
-            gov.observe_success(free_before=8 * GB, free_after=7.5 * GB, rows=len(rows_b),
-                                chars=sum(r["chars"] for r in rows_b), elapsed=10, static_est=0)
-        else:
-            # the pool runs dry -> the cap halves and the remainder is re-planned smaller
-            gov.observe_success(free_before=8 * GB, free_after=0.3 * GB, rows=len(rows_b),
-                                chars=sum(r["chars"] for r in rows_b), elapsed=10, static_est=0)
-    # the first round planned at the old cap; every re-plan used the halved cap
-    assert sizes[:5] == [16, 16, 8, 4, 2]
-    assert all(s == 1 for s in sizes[5:])
-
-
-# ---------------------------------------------------------------------------
-# --disabled-checks — the settings-page planner switches
-# ---------------------------------------------------------------------------
-
-def test_parse_disabled_checks_empty_and_valid():
-    tw = _load_worker()
-    assert tw.parse_disabled_checks("") == frozenset()
-    assert tw.parse_disabled_checks(None) == frozenset()
-    assert tw.parse_disabled_checks("vram") == frozenset({"vram"})
-    # whitespace-tolerant, order-insensitive, duplicates collapse
-    assert tw.parse_disabled_checks(" vram , length_bands ,vram") == \
-        frozenset({"vram", "length_bands"})
-    assert tw.parse_disabled_checks("length_bands,batch_chars,seq_chars,length_ratio,vram") \
-        == frozenset(tw.PLANNER_CHECK_NAMES)
-
-
-def test_parse_disabled_checks_unknown_name_raises():
-    tw = _load_worker()
-    with pytest.raises(ValueError) as exc:
-        tw.parse_disabled_checks("vram,bogus")
-    # the error names the offender AND the valid set (the caller surfaces it as
-    # TTS_WORKER_ERROR + exit 2 — a typo must never silently close a gate)
-    assert "bogus" in str(exc.value)
-    assert "length_bands" in str(exc.value)
-
-
-def test_plan_next_sub_batch_disabled_vram_user_scenario():
-    tw = _load_worker()
-    # The real 2026-09-17 stress case: 32 x 50-char rows, manual cap 32. The static
-    # VRAM estimate prices every row at the worst-case 2048-frame decode (per row =
-    # 8 heads x 2124^2 x 4 + 2124 x 1000 x 1.5 = 147,550,032 B), so a 400 MB budget
-    # fits exactly 2 rows; with the estimate closed the manual cap governs -> all 32
-    # in one batch. Bands (50 chars -> full cap), ratio (1:1) and char caps (1600 <=
-    # 12000) are non-binding in both arms, so the VRAM gate is the sole constraint.
-    rows = [_row(50) for _ in range(32)]
-    params = {"heads": 8, "kv_per_token": 1000}
-    budget = 400_000_000
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=params, budget=budget,
-        gov=tw.VramGovernor(32, device="cuda", total_vram=8 * GB),
-        max_batch=32, max_batch_chars=12000)
-    assert len(rows_b) == 2 and len(remaining) == 30
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=params, budget=budget,
-        gov=tw.VramGovernor(32, device="cuda", total_vram=8 * GB),
-        max_batch=32, max_batch_chars=12000, disabled=frozenset({"vram"}))
-    assert len(rows_b) == 32 and remaining == []
 
 
 # ---------------------------------------------------------------------------
@@ -492,170 +57,6 @@ def test_parse_restore_stack_malformed_raises():
         # the error names the offender (the caller surfaces it as TTS_WORKER_ERROR +
         # exit 2 — a typo must never silently drop a pending restore)
         assert bad in str(exc.value)
-
-
-def test_plan_next_sub_batch_with_restore_empty_stack_is_plain_planning():
-    tw = _load_worker()
-    rows = [_row(10) for _ in range(6)]
-    gov = tw.VramGovernor(4, device="cuda", total_vram=8 * GB)
-    plain, rem_plain = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=gov, max_batch=4, max_batch_chars=12000)
-    rows_b, remaining, new_mb, restored = tw.plan_next_sub_batch_with_restore(
-        rows, [], vtype="custom", overhead=16, params=None, budget=None,
-        gov=gov, max_batch=4, max_batch_chars=12000)
-    # field-for-field the plain round
-    assert (rows_b, remaining) == (plain, rem_plain)
-    assert new_mb == 4 and restored is None
-
-
-def test_plan_next_sub_batch_with_restore_confirms_when_trial_fits():
-    tw = _load_worker()
-    # demoted gear 2 (cap 2), a pending record "threshold 100 chars restores cap 4";
-    # three short rows: the demoted batch is 20 chars, the trial (cap 4) is 30 — both
-    # under 100, so the restore is confirmed and the trial's rows become the batch
-    rows = [_row(10) for _ in range(3)]
-    gov = tw.VramGovernor(2, device="cuda", total_vram=8 * GB)
-    assert gov.cap == 2
-    rows_b, remaining, new_mb, restored = tw.plan_next_sub_batch_with_restore(
-        rows, [(100, 4)], vtype="custom", overhead=16, params=None, budget=None,
-        gov=gov, max_batch=2, max_batch_chars=12000)
-    assert [r["chars"] for r in rows_b] == [10, 10, 10]  # the trial's rows, not the demoted batch
-    assert remaining == [] and new_mb == 4 and restored == 4
-    # the governor sits at the restored gear (the fresh-process-at-that-gear state)...
-    assert gov.cap == 4
-    # ...but the manual cap is left to the driver (it sets it, pops the record, emits [restore])
-    assert gov.manual_cap == 2
-
-
-def test_plan_next_sub_batch_with_restore_rejected_when_trial_overshoots():
-    tw = _load_worker()
-    # threshold 25: the demoted batch (2 rows = 20 chars) fits, but the trial (3 rows =
-    # 30 chars) would still overshoot -> the restore is refused, the demoted batch runs,
-    # the trial's cap bump is reverted, and the record stays pending
-    rows = [_row(10) for _ in range(3)]
-    gov = tw.VramGovernor(2, device="cuda", total_vram=8 * GB)
-    rows_b, remaining, new_mb, restored = tw.plan_next_sub_batch_with_restore(
-        rows, [(25, 4)], vtype="custom", overhead=16, params=None, budget=None,
-        gov=gov, max_batch=2, max_batch_chars=12000)
-    assert [r["chars"] for r in rows_b] == [10, 10]  # the demoted batch
-    assert [r["chars"] for r in remaining] == [10]
-    assert new_mb == 2 and restored is None
-    assert gov.cap == 2  # the trial's cap bump was reverted
-
-
-def test_plan_next_sub_batch_with_restore_skips_record_not_above_current_cap():
-    tw = _load_worker()
-    rows = [_row(10) for _ in range(3)]
-    gov = tw.VramGovernor(4, device="cuda", total_vram=8 * GB)
-    # the record's cap is not above the current cap: there is nothing to restore to
-    rows_b, remaining, new_mb, restored = tw.plan_next_sub_batch_with_restore(
-        rows, [(100, 4)], vtype="custom", overhead=16, params=None, budget=None,
-        gov=gov, max_batch=4, max_batch_chars=12000)
-    assert [r["chars"] for r in rows_b] == [10, 10, 10]
-    assert new_mb == 4 and restored is None and gov.cap == 4
-
-
-def test_plan_next_sub_batch_with_restore_consults_only_stack_top():
-    tw = _load_worker()
-    rows = [_row(10) for _ in range(3)]
-    gov = tw.VramGovernor(2, device="cuda", total_vram=8 * GB)
-    stack = [(100, 8), (25, 4)]
-    # the BOTTOM record (100, 8) would confirm (30 < 100); the TOP (25, 4) rejects
-    # (30 >= 25) — LIFO: only the top is consulted, so no restore this round...
-    rows_b, remaining, new_mb, restored = tw.plan_next_sub_batch_with_restore(
-        rows, stack, vtype="custom", overhead=16, params=None, budget=None,
-        gov=gov, max_batch=2, max_batch_chars=12000)
-    assert restored is None and new_mb == 2 and gov.cap == 2
-    assert [r["chars"] for r in rows_b] == [10, 10]  # the demoted batch ran
-    # ...and the helper never mutates the stack (the driver pops on confirmation)
-    assert stack == [(100, 8), (25, 4)]
-
-
-def test_plan_next_sub_batch_disabled_bands():
-    tw = _load_worker()
-    # 300-char rows: the length band (8 of 16) binds while on; closed, the manual
-    # cap (16) governs — 16 x 300 = 4800 chars still fits the batch char cap.
-    rows = [_row(300) for _ in range(20)]
-    rows_b, _rem = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(16, device="cuda", total_vram=8 * GB),
-        max_batch=16, max_batch_chars=120000)
-    assert len(rows_b) == 8
-    rows_b, _rem = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(16, device="cuda", total_vram=8 * GB),
-        max_batch=16, max_batch_chars=120000, disabled=frozenset({"length_bands"}))
-    assert len(rows_b) == 16
-
-
-def test_plan_next_sub_batch_disabled_batch_chars():
-    tw = _load_worker()
-    rows = [_row(50) for _ in range(30)]
-    rows_b, _rem = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(32, device="cuda", total_vram=8 * GB),
-        max_batch=32, max_batch_chars=60)
-    assert len(rows_b) == 1  # 2 x 50 = 100 > 60 -> one row per batch
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(32, device="cuda", total_vram=8 * GB),
-        max_batch=32, max_batch_chars=60, disabled=frozenset({"batch_chars"}))
-    # 30 x 50 = 1500 chars; the bands are the full cap for 50-char rows, so the
-    # manual cap (32) admits every row in one batch
-    assert len(rows_b) == 30 and remaining == []
-
-
-def test_plan_next_sub_batch_disabled_seq_chars_interaction():
-    tw = _load_worker()
-    rows = [_row(30), _row(30), _row(3000)]
-    # Only seq_chars closed: the 3000-char row is STILL solo — the >2048 band forces
-    # size 1 and the 100x ratio splits it from its 30-char neighbours. The checks
-    # interact: closing one does not guarantee the expected merge while a neighbour
-    # still forces splits (pinned so this is never misread as a regression).
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(8, device="cuda", total_vram=8 * GB),
-        max_batch=8, max_batch_chars=120000, disabled=frozenset({"seq_chars"}))
-    assert len(rows_b) == 2 and len(remaining) == 1
-    # All three closed: nothing splits the rows -> one batch of 3.
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(8, device="cuda", total_vram=8 * GB),
-        max_batch=8, max_batch_chars=120000,
-        disabled=frozenset({"length_bands", "seq_chars", "length_ratio"}))
-    assert len(rows_b) == 3 and remaining == []
-
-
-def test_plan_next_sub_batch_disabled_ratio():
-    tw = _load_worker()
-    rows = [_row(10), _row(100)]
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(8, device="cuda", total_vram=8 * GB),
-        max_batch=8, max_batch_chars=120000)
-    assert len(rows_b) == 1 and len(remaining) == 1  # 10x spread > 3 -> split
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=None, budget=None,
-        gov=tw.VramGovernor(8, device="cuda", total_vram=8 * GB),
-        max_batch=8, max_batch_chars=120000, disabled=frozenset({"length_ratio"}))
-    assert len(rows_b) == 2 and remaining == []
-
-
-def test_plan_next_sub_batch_disabled_all_governed_by_manual_cap():
-    tw = _load_worker()
-    rows = [_row(50) for _ in range(32)]
-    params = {"heads": 8, "kv_per_token": 1000}
-    budget = 400_000_000
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="custom", overhead=16, params=params, budget=budget,
-        gov=tw.VramGovernor(32, device="cuda", total_vram=8 * GB),
-        max_batch=32, max_batch_chars=12000,
-        disabled=frozenset(tw.PLANNER_CHECK_NAMES))
-    # The VRAM estimate alone would cap this at 2 rows; every static check closed ->
-    # the manual cap (32) is the only constraint left (the VramGovernor's measured
-    # cap starts at the manual cap, so it agrees).
-    assert len(rows_b) == 32 and remaining == []
 
 
 # --------------------------------------------------------------------------- #
@@ -993,29 +394,6 @@ def test_encode_mp3_streaming_threads_flag(tmp_path, monkeypatch):
 # design-batch — the 角色配音·克隆 stage (shared planning / generate / save path)
 # --------------------------------------------------------------------------- #
 
-def test_design_rows_run_solo_by_default_but_share_with_force_rows_cap():
-    tw = _load_worker()
-    rows = [_row(10) for _ in range(4)]  # four identical short design rows
-    gov = tw.VramGovernor(8, device="cuda", total_vram=8 * GB)
-    # Default (batch mode's design rows = book segments): one row per sub-batch...
-    remaining = rows
-    sizes = []
-    while remaining:
-        rows_b, remaining = tw.plan_next_sub_batch(
-            remaining, vtype="design", overhead=16, params=None, budget=None,
-            gov=gov, max_batch=8, max_batch_chars=12000)
-        sizes.append(len(rows_b))
-    assert sizes == [1, 1, 1, 1]
-    # ...design-batch forces the governor's cap: the candidates share a tensor sub-batch.
-    remaining = rows
-    sizes = []
-    while remaining:
-        rows_b, remaining = tw.plan_next_sub_batch(
-            remaining, vtype="design", overhead=16, params=None, budget=None,
-            gov=gov, max_batch=8, max_batch_chars=12000, force_rows_cap=gov.cap)
-        sizes.append(len(rows_b))
-    assert sizes == [4]
-
 
 def test_generate_rows_design_uses_per_row_instruct_and_do_sample_switch():
     tw = _load_worker()
@@ -1077,66 +455,6 @@ def test_generate_rows_clone_passes_per_row_prompt_items():
     # a single-character batch passes the same item on every row (the old broadcast)
     tw._generate_rows(model, "clone", [rows[0], rows[2]], args, prompts, None)
     assert model.calls[1]["voice_clone_prompt"] == ["prompt-甲", "prompt-甲"]
-
-
-def test_plan_row_tokens_accepts_per_row_overhead():
-    tw = _load_worker()
-    texts = ["一" * 10, "一" * 20]
-    # a scalar is shorthand for "every row the same" (the legacy call shape)
-    assert tw.plan_row_tokens(texts, None, 16) == \
-        tw.plan_row_tokens(texts, None, [16, 16])
-    # a per-row list prices each row at its own overhead (a cross-character clone round:
-    # different references have different frame counts)
-    per_row = tw.plan_row_tokens(texts, None, [10, 100])
-    base = tw.plan_row_tokens(texts, None, 0)
-    assert per_row == [base[0] + 10, base[1] + 100]
-    # a mismatched list falls back to its max (the conservative, batch-shrinking direction)
-    assert tw.plan_row_tokens(texts, None, [7]) == tw.plan_row_tokens(texts, None, 7)
-    # negative overheads clamp to 0
-    assert tw.plan_row_tokens(["x"], None, [-5]) == tw.plan_row_tokens(["x"], None, 0)
-
-
-def test_unified_queue_fills_the_cap_across_characters():
-    tw = _load_worker()
-    # The user's incident shape: three characters with 2 + 3 + 1 rows, all in the same
-    # length band (40-45 chars, ratio 45/40 < 3). The merged length-ascending queue
-    # fills the 6-row cap in ONE sub-batch — under the old per-character queues the
-    # 2-row and 1-row characters stranded 4 of the 6 cap slots.
-    rows = (
-        [_row(40, speaker="A"), _row(42, speaker="A")]
-        + [_row(41, speaker="B"), _row(43, speaker="B"), _row(44, speaker="B")]
-        + [_row(45, speaker="C")]
-    )
-    rows.sort(key=lambda r: r["chars"])
-    gov = tw.VramGovernor(6, device="cuda", total_vram=8 * GB)
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="clone",
-        overhead=[10, 10, 16, 16, 16, 100],  # per-character reference overheads
-        params=None, budget=None,
-        gov=gov, max_batch=6, max_batch_chars=12000)
-    assert len(rows_b) == 6
-    assert [r["speaker"] for r in rows_b] == ["A", "B", "A", "B", "B", "C"]
-    assert remaining == []
-
-
-def test_unified_queue_keeps_length_homogeneity_across_characters():
-    tw = _load_worker()
-    # A cross-character batch may not re-create the 2026-09-17 failure: a 2-char row
-    # next to a 40-char row (20x > the ratio 3) must split, even across characters.
-    rows = sorted([_row(40, speaker="A"), _row(2, speaker="B")],
-                  key=lambda r: r["chars"])
-    gov = tw.VramGovernor(6, device="cuda", total_vram=8 * GB)
-    rows_b, remaining = tw.plan_next_sub_batch(
-        rows, vtype="clone", overhead=[16, 16], params=None, budget=None,
-        gov=gov, max_batch=6, max_batch_chars=12000)
-    # the short row batches first (it leads the ascending stream) and the 20x longer
-    # row of the OTHER character starts the next sub-batch
-    assert [r["speaker"] for r in rows_b] == ["B"]
-    rows_b2, remaining2 = tw.plan_next_sub_batch(
-        remaining, vtype="clone", overhead=[16], params=None, budget=None,
-        gov=gov, max_batch=6, max_batch_chars=12000)
-    assert [r["speaker"] for r in rows_b2] == ["A"]
-    assert remaining2 == []
 
 
 class TestLengthProportionalDecodeCap:
@@ -1413,32 +731,21 @@ def test_mechanical_pipeline_is_bounded_and_retries_save_faults(capsys):
 def test_worker_module_loads_without_torch():
     # The worker's top level is stdlib-only, so it imports without loading torch.
     tw = _load_worker()
-    # The batch planner / bands / governor / watchdog / VRAM-budget helpers are all present...
-    for name in ("plan_sub_batches", "order_speaker_groups", "estimate_batch_vram",
+    # Production batching and watchdog helpers remain importable.
+    for name in ("order_speaker_groups", "next_fixed_batch",
                  "sub_batch_timeout_seconds", "forced_sub_batch_timeout_seconds",
                  "watchdog_timeout_reason", "_vram_usage_fraction",
-                 "run_with_watchdog", "_clear_gpu_cache", "_talker_vram_params",
-                 "_free_vram_budget", "_free_vram", "_total_vram", "_warmup",
-                 "_synth_sub_batch", "plan_next_sub_batch", "plan_row_tokens",
+                 "run_with_watchdog", "_clear_gpu_cache", "_free_vram", "_total_vram", "_warmup",
+                 "_synth_sub_batch",
                  "_run_design_batch", "_save_and_report_design", "_generate_rows",
                  "_row_output_paths", "_save_and_report",
-                 "_clone_input_overhead", "band_cap_for_chars", "VramGovernor",
                  "plan_merge_batches", "normalize_pause_ms", "boundary_gap_ms",
                  "merge_stage1_frac", "merge_stage2_frac", "merge_encode_frac",
-                 "parse_restore_stack", "plan_next_sub_batch_with_restore",
+                 "parse_restore_stack",
                  "mechanical_worker_count", "_MechanicalPipeline"):
         assert callable(getattr(tw, name)), f"missing {name}"
-    for const in ("ROW_STRUCTURAL_OVERHEAD", "CLONE_FALLBACK_OVERHEAD",
-                  "CHAR_TOKENS_PER_CHAR", "LENGTH_RATIO", "PEAK_PRESSURE_FRAC",
-                  "PEAK_GROW_FRAC",
-                  "FREE_FLOOR_GB", "VRAM_SCALE_MIN", "VRAM_SCALE_MAX",
-                  "GPU_TIMEOUT_CHARS_PER_SEC", "GPU_TIMEOUT_FLOOR_S"):
+    for const in ("GPU_TIMEOUT_CHARS_PER_SEC", "GPU_TIMEOUT_FLOOR_S"):
         assert getattr(tw, const) > 0, f"missing {const}"
-    # the length bands: non-empty, ascending ceilings, fractions in (0, 1]
-    bands = tw.LENGTH_BANDS
-    assert bands and all(0 < f <= 1 for _limit, f in bands)
-    ceilings = [limit for limit, _f in bands]
-    assert all(a < b for a, b in zip(ceilings, ceilings[1:]))
     # ...and the tokenizer is OUT of the planning path (char counts are the length metric)...
     assert not hasattr(tw, "_row_tokens")
     assert not hasattr(tw, "_tensor_tokens")
@@ -1447,64 +754,6 @@ def test_worker_module_loads_without_torch():
     # ...with its stdlib dependencies intact (no concurrent.futures).
     assert tw.threading is not None
     assert not hasattr(tw, "ThreadPoolExecutor")
-
-
-def test_lazy_planner_only_prices_next_candidate_prefix(monkeypatch):
-    tw = _load_worker()
-    rows = [dict(index=i, chars=20, text='x' * 20, instruct='', vd={}) for i in range(10000)]
-    original = tw.plan_row_tokens
-    seen = []
-    def priced(texts, instructs, overhead):
-        seen.append(len(texts))
-        assert len(overhead) == len(texts)
-        return original(texts, instructs, overhead)
-    monkeypatch.setattr(tw, 'plan_row_tokens', priced)
-    batch, remaining = tw.plan_next_sub_batch(rows, vtype='custom', overhead=[16]*len(rows),
-        params=None, budget=None, gov=tw.VramGovernor(32), max_batch=32, max_batch_chars=6400)
-    assert seen == [32]
-    assert batch + remaining == rows
-
-
-def test_first_only_matches_full_plan_for_boundaries():
-    tw = _load_worker()
-    for lengths in ([20, 30, 40, 190], [1, 2, 3, 4], [200]*100, [50, 51, 100, 101, 150, 200]):
-        options = dict(max_batch=32, max_batch_chars=6400, length_ratio=1.5)
-        assert tw.plan_sub_batches(lengths, first_only=True, **options) == tw.plan_sub_batches(lengths, **options)[:1]
-
-
-def test_peak_memory_survives_cache_clear(monkeypatch):
-    tw = _load_worker()
-    cuda = SimpleNamespace(max_memory_reserved=lambda: 800)
-    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(cuda=cuda))
-    monkeypatch.setattr(tw, '_free_vram', lambda device: 950)
-    assert tw._peak_free_vram('cuda', 1000, 200) == 400
-    # External pressure must not be hidden by the allocator estimate.
-    monkeypatch.setattr(tw, '_free_vram', lambda device: 100)
-    assert tw._peak_free_vram('cuda', 1000, 200) == 100
-
-
-def test_profile_restores_methods_after_failure(monkeypatch):
-    tw = _load_worker()
-    monkeypatch.setitem(sys.modules, 'torch', SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)))
-    class Model:
-        def _tokenize_texts(self, texts):
-            raise ValueError('bad text')
-    model = Model()
-    with pytest.raises(ValueError), tw.profile_stages(model, True):
-        model._tokenize_texts([])
-    assert '_tokenize_texts' not in model.__dict__
-
-
-def test_benchmark_recommendation_excludes_failure_and_prefers_larger_batch():
-    spec = importlib.util.spec_from_file_location('benchmark_test', PROJECT_ROOT / 'tts-engine/benchmark.py')
-    bm = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bm)
-    runs = [dict(size=s, chars_per_second=rate, status='ok') for s,rate in [(32,100),(48,150),(52,152)] for _ in range(3)]
-    runs += [dict(size=64, chars_per_second=200, status='oom') for _ in range(3)]
-    assert bm.recommend(runs, 3) == 52
-    assert bm.recommend(runs[:2], 3) is None
-    assert bm.memory_pressure_full(32607, 31600)
-    assert not bm.memory_pressure_full(32607, 30000)
 
 
 def test_bounded_vocoder_preserves_order_and_restores_on_failure(monkeypatch):
@@ -1531,45 +780,6 @@ def test_bounded_vocoder_preserves_order_and_restores_on_failure(monkeypatch):
     assert 'decode' not in tokenizer.__dict__
 
 
-def test_benchmark_strict_never_hides_fault_by_splitting(monkeypatch):
-    tw = _load_worker()
-    calls = []
-    def fail(*args, **kwargs):
-        calls.append(1)
-        raise RuntimeError('CUDA out of memory')
-    monkeypatch.setattr(tw, '_generate_rows', fail)
-    monkeypatch.setattr(tw, 'run_with_watchdog', lambda fn, *a, **kw: fn())
-    with pytest.raises(RuntimeError, match='out of memory'):
-        tw._synth_sub_batch(object(), 'clone', [dict(index=i, chars=20) for i in range(32)],
-            args=SimpleNamespace(benchmark_strict=True), clone_prompts={}, device='cpu', seed=0,
-            sub_counter=[0], out_dir='', width=4, report=lambda *a: None)
-    assert len(calls) == 1
-
-
-
-
-
-
-def test_boundary_search_moves_down_up_and_refines(monkeypatch):
-    monkeypatch.syspath_prepend(str(PROJECT_ROOT / 'tts-engine'))
-    spec = importlib.util.spec_from_file_location('boundary_test', PROJECT_ROOT / 'tts-engine/benchmark_boundary.py')
-    bm = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bm)
-    assert bm.next_size([]) == 128
-    assert bm.next_size([dict(size=128, status='ok')]) == 160
-    runs = [dict(size=128, status='oom')]
-    assert bm.next_size(runs) == 96
-    runs.append(dict(size=96, status='oom'))
-    assert bm.next_size(runs) == 64
-    runs.append(dict(size=64, status='ok'))
-    assert bm.next_size(runs) == 80
-    runs.append(dict(size=80, status='ok'))
-    assert bm.next_size(runs) == 88
-    runs.append(dict(size=88, status='ok'))
-    assert bm.next_size(runs) is None
-    assert bm.next_size([dict(size=8, status='oom')]) is None
-
-
 def test_production_command_has_only_row_cap_and_fixed_decoder():
     from backend.engines.tts_batch import _build_cmd
     cmd = _build_cmd('python', 'worker', 'segments', 'voices', 'out', language='', device='cuda',
@@ -1594,50 +804,6 @@ def test_fixed_batches_do_not_shrink_for_length_or_total_chars():
     batches = list(tw.fixed_batches(rows, 80))
     assert [len(b) for b in batches] == [80, 80, 1]
     assert [r for b in batches for r in b] == rows
-
-
-def test_fixed_batches_restore_after_two_successes_even_when_char_threshold_is_exceeded():
-    tw = _load_worker()
-    rows = [dict(index=i, chars=190) for i in range(160)]
-    stack = [(1, 80)]  # deliberately lower than every trial batch
-    successes = [0]
-
-    first, remaining, cap, restored = tw.next_fixed_batch(rows, 40, stack, successes)
-    assert cap == 40 and len(first) == 40 and restored is None
-    successes[0] += 1
-    second, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
-    assert cap == 40 and len(second) == 40 and restored is None
-    successes[0] += 1
-
-    third, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
-    assert cap == restored == 80 and len(third) == 80
-    assert not remaining
-    assert first + second + third == rows
-    assert stack == [(1, 80)]  # caller emits the recovery event and pops it
-
-
-def test_fixed_batches_restore_one_timeout_level_at_a_time():
-    tw = _load_worker()
-    rows = [dict(index=i, chars=100) for i in range(120)]
-    stack = [(16000, 80), (8000, 40)]
-    successes = [0, 0]
-    first, remaining, cap, restored = tw.next_fixed_batch(rows, 20, stack, successes)
-    assert cap == 20 and restored is None
-    successes[-1] += 1
-    second, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
-    assert cap == 20 and restored is None
-    successes[-1] += 1
-    third, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
-    assert cap == restored == 40
-    stack.pop()
-    successes.pop()
-    successes[-1] += 1
-    fourth, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
-    assert cap == 40 and restored is None
-    successes[-1] += 1
-    fifth, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
-    assert cap == restored == 80
-    assert first + second + third + fourth + fifth == rows and not remaining
 
 
 def test_auto_batch_uses_upward_matched_safety_tiers():
@@ -1696,3 +862,47 @@ def test_fixed_batch_oom_does_not_retry_or_shrink(monkeypatch):
             args=SimpleNamespace(fixed_batch=True), clone_prompts={}, device='cpu', seed=0,
             sub_counter=[0], out_dir='', width=4, report=lambda *a: None)
     assert len(calls) == 1
+
+
+def test_fixed_batches_restore_after_two_successes_even_when_char_threshold_is_exceeded():
+    tw = _load_worker()
+    rows = [dict(index=i, chars=190) for i in range(160)]
+    stack = [(1, 80)]  # deliberately lower than every trial batch
+    successes = [0]
+
+    first, remaining, cap, restored = tw.next_fixed_batch(rows, 40, stack, successes)
+    assert cap == 40 and len(first) == 40 and restored is None
+    successes[0] += 1
+    second, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
+    assert cap == 40 and len(second) == 40 and restored is None
+    successes[0] += 1
+
+    third, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
+    assert cap == restored == 80 and len(third) == 80
+    assert not remaining
+    assert first + second + third == rows
+    assert stack == [(1, 80)]  # caller emits the recovery event and pops it
+
+
+def test_fixed_batches_restore_one_timeout_level_at_a_time():
+    tw = _load_worker()
+    rows = [dict(index=i, chars=100) for i in range(120)]
+    stack = [(16000, 80), (8000, 40)]
+    successes = [0, 0]
+    first, remaining, cap, restored = tw.next_fixed_batch(rows, 20, stack, successes)
+    assert cap == 20 and restored is None
+    successes[-1] += 1
+    second, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
+    assert cap == 20 and restored is None
+    successes[-1] += 1
+    third, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
+    assert cap == restored == 40
+    stack.pop()
+    successes.pop()
+    successes[-1] += 1
+    fourth, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
+    assert cap == 40 and restored is None
+    successes[-1] += 1
+    fifth, remaining, cap, restored = tw.next_fixed_batch(remaining, cap, stack, successes)
+    assert cap == restored == 80
+    assert first + second + third + fourth + fifth == rows and not remaining

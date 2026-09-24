@@ -15,7 +15,7 @@
 - 合成输入范围 1～128，默认 80；角色声音候选生成保留独立的 64 上限。
 - 旧配置的 `planner_*`、`batch_max_chars`、`batch_length_ratio`、`vocoder_batch_size`、`profile_stages` 被忽略，保存后删除。其他非组包设置保留。
 
-设置页当时只显示“批内上限”；现在另有“自动批量”开关。诊断脚本仍可独立设置对照参数。
+设置页当时只显示“批内上限”；现在另有“自动批量”开关。旧诊断脚本已退役。
 
 ## 本机结果
 
@@ -55,25 +55,21 @@ RTX 5090，32607 MiB，Windows WDDM，驱动 616.92；torch 2.11.0+cu128、trans
 
 激进方案为有界单写盘线程与下一批 GPU 推理重叠。如果完全隐藏约 9 秒写盘，理论收益约 12%，实际受 CPU 竞争限制；还需处理背压、取消、异常与清单一致性，本次未实现。tokenizer 实测单次约亚毫秒，不优先线程化；最后才考虑 attention/kernel/CUDA graph。
 
-## Benchmark 设计
+## 历史 Benchmark 设计（脚本已退役）
 
 普通扫档 32/36/40/44/48/52/56/60/64；每档相同语料、独立进程、完整批预热后计时：
 
-```powershell
-.venv/Scripts/python.exe tts-engine/benchmark.py --output .tmp/tts-sweep --samples 256 --repeats 3 --vocoder-batch-size 8
-```
+该批量扫描使用的独立 benchmark 脚本已退役，以下数据仅作为历史记录。
 
 从 128×200 开始，失败减 32，通过向上，再缩小至 8 段边界。默认对候选做三次双批确认，本次按用户要求提前停止：
 
-```powershell
-.venv/Scripts/python.exe tts-engine/benchmark_boundary.py --output .tmp/tts-boundary --start 128 --chars 200 --vocoder-batch-size 8
-```
+边界压测脚本已退役。
 
-诊断支持最高 512 段，独立于生产自动/固定配置，不用拆批重试冒充某档成功。音频生成在独立临时目录，不覆盖书籍音频；父进程正常收尾或终止子进程后清理。
+当时的诊断支持最高 512 段，独立于生产自动/固定配置。音频生成在独立临时目录，不覆盖书籍音频；父进程正常收尾或终止子进程后清理。
 
 报告包括总耗时（含加载/预热）、端到端合成耗时（预热完成至退出/清理）、samples/s、字符/s、音频秒/s、逐批/阶段耗时、GPU 利用率、显存峰值、allocator 峰值、进程树 RSS、OOM、退出码与最后阶段。文件读取/reference 编码合并统计，Python 后处理包含于总耗时，尚未完全细分。
 
-按吞吐中位数在最快档 5% 内选择最大实际批量；至少三轮全通过才给脚本正式推荐。心跳日志不算进度。显存余量不足 1 GiB 持续 10 秒且阶段 20 秒未完成时提前终止；即使完成，只要采样曾不足 1 GiB，也保守标记 `memory_pressure`。这不等于 CUDA 显式 OOM。
+当时按吞吐中位数在最快档 5% 内选择最大实际批量；至少三轮全通过才给脚本正式推荐。心跳日志不算进度。显存余量不足 1 GiB 持续 10 秒且阶段 20 秒未完成时提前终止；即使完成，只要采样曾不足 1 GiB，也保守标记 `memory_pressure`。这不等于 CUDA 显式 OOM。
 
 每秒采样可能漏掉短暂峰值，整卡读数包含其他进程；RSS 不是 WDDM 共享显存的直接测量。无 profiler 证据时不把停滞具体归因于驱动、CUDA graph 或 kernel。
 
