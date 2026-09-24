@@ -90,20 +90,6 @@ def protected_reason(path: Path, operation: str) -> str | None:
     return None
 
 
-def workspace_selection_reason(path: Path) -> str | None:
-    """Reject unsafe workspace roots without rejecting a valid existing project."""
-    path = Path(os.path.abspath(os.path.normpath(str(path))))
-    if path.parent == path or (path.anchor and os.path.normcase(str(path)) == os.path.normcase(path.anchor)):
-        return "不能将磁盘根目录作为工作空间"
-    for root in _system_roots():
-        if _same_or_child(path, root):
-            return "系统目录不能作为工作空间"
-    project_root = Path(core_paths.PROJECT_ROOT)
-    if _same_or_child(path, project_root) or _same_or_child(project_root, path):
-        return "应用目录及其祖先不能作为工作空间"
-    return None
-
-
 def _raise_oserror(exc: OSError, action: str) -> None:
     if isinstance(exc, PermissionError):
         raise FilesystemError(403, f"没有权限{action}此目录") from exc

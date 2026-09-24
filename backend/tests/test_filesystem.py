@@ -8,7 +8,6 @@ from backend.core import config as core_config
 from backend.core import filesystem
 from backend.core import filesystem_shortcuts
 from backend.core import paths as core_paths
-from backend.core import workspace_history
 
 
 @pytest.fixture
@@ -55,26 +54,6 @@ def test_root_and_application_paths_are_protected(fs_root):
         filesystem.create_folder(str(fs_root / "app"), "child")
     # The fixture's app root is protected, while its parent is not.
     assert root_error.value.status == 403
-
-
-def test_history_deduplicates_and_marks_missing(fs_root):
-    workspace_history.upsert(str(fs_root / "A"))
-    workspace_history.upsert(str(fs_root / "a"))
-    records = workspace_history.list_records(str(fs_root / "A"))
-    assert len(records) == 1
-    assert records[0]["is_current"] is True
-    assert records[0]["exists"] is False
-    assert workspace_history.remove(str(fs_root / "A")) is True
-    assert workspace_history.list_records() == []
-
-
-def test_corrupt_history_recovers(fs_root):
-    target = workspace_history.history_file()
-    target.parent.mkdir(parents=True)
-    target.write_text("not-json", encoding="utf-8")
-    assert workspace_history.list_records() == []
-    assert target.exists()
-    assert json.loads(target.read_text(encoding="utf-8")) == {"recent_workspaces": []}
 
 
 def test_shortcuts_mount_dedupes_and_remove_does_not_delete_folder(fs_root):

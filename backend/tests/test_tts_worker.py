@@ -1503,10 +1503,6 @@ def test_benchmark_recommendation_excludes_failure_and_prefers_larger_batch():
     runs += [dict(size=64, chars_per_second=200, status='oom') for _ in range(3)]
     assert bm.recommend(runs, 3) == 52
     assert bm.recommend(runs[:2], 3) is None
-    assert not bm.memory_pressure_stalled(None, 0, 100)
-    assert not bm.memory_pressure_stalled(15, 0, 20)
-    assert not bm.memory_pressure_stalled(0, 10, 20)
-    assert bm.memory_pressure_stalled(0, 0, 20)
     assert bm.memory_pressure_full(32607, 31600)
     assert not bm.memory_pressure_full(32607, 30000)
 

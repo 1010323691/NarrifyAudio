@@ -42,12 +42,6 @@ def recommend(runs, repeats, tolerance=0.05):
         max((b['rows'] for r in groups[size] for b in r.get('batches', [])), default=size), -size))
 
 
-def memory_pressure_stalled(pressure_since, last_progress, now):
-    """Reject sustained near-full VRAM with no completed stage, before paging drags on."""
-    return (pressure_since is not None and now-pressure_since >= 10
-            and now-last_progress >= 20)
-
-
 def memory_pressure_full(total_mib, used_mib, floor_mib=1024):
     """A full-GPU sample is an immediate failed probe; do not wait for paging."""
     return total_mib is not None and used_mib is not None and total_mib - used_mib < floor_mib
