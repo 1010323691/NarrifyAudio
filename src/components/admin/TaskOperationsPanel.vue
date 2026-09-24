@@ -65,7 +65,6 @@ function typeLabel(value: string): string {
   const labels: Record<string, string> = {
     'tts.batch': 'TTS 批量合成',
     'tts.merge': '音频合并',
-    'tts.stress': 'TTS 压测',
     'voices.foundation': '声音基础生成',
     'voices.clone': '声音克隆',
     'bgm.analysis': 'BGM 分析',

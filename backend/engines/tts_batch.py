@@ -1081,7 +1081,7 @@ def _write_manifest_file(manifest_path, manifest) -> None:
 
 
 def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=None,
-                    auto_concurrency: bool = False) -> dict:
+                    auto_concurrency: bool | None = None) -> dict:
     """Task worker: synthesize ONE script's lines (default = resume: only the not-yet-done).
 
     The single-file body behind :func:`synthesize` (the legacy API path and the tests).
@@ -1225,6 +1225,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
 
     cfg = get_config()
     t = cfg.tts
+    auto_concurrency = t.batch_auto if auto_concurrency is None else bool(auto_concurrency)
     # 批内段数（仅上限）: the request's value, else the persisted default
     # (config.tts.batch_concurrency); clamped to [1, 128] so a stray value can't spawn a
     # degenerate / unbounded cap (the worker sets the actual per-batch size at runtime).
@@ -1471,14 +1472,14 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
 
 
 def synthesize(handle, indices=None, script=None, concurrency=None, seed=None,
-               auto_concurrency: bool = False) -> dict:
+               auto_concurrency: bool | None = None) -> dict:
     """Single-file entry (the legacy ``POST /api/tts/batch`` path and the tests): delegates
     verbatim to :func:`_synthesize_one`. Signature kept identical so positional callers work."""
     return _synthesize_one(handle, indices, script, concurrency, seed, auto_concurrency)
 
 
 def synthesize_multi(handle, scripts, concurrency=None, seed=None,
-                     auto_concurrency: bool = False) -> dict:
+                     auto_concurrency: bool | None = None) -> dict:
     """Task worker: synthesize several parsed JSON files (chapters) in ONE task — pooled.
 
     Every selected chapter's *pending* segments (resume: the not-yet-done lines) are read
@@ -1646,6 +1647,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     seg_file = layout.temp / f"batch_segments_{uuid.uuid4().hex[:12]}.json"
     cfg = get_config()
     t = cfg.tts
+    auto_concurrency = t.batch_auto if auto_concurrency is None else bool(auto_concurrency)
     # 批内段数（仅上限）: the request's value, else the persisted default
     # (config.tts.batch_concurrency); clamped to [1, 128] — ONE cap for the whole pool.
     workers = clamp_concurrency(

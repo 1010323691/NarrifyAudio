@@ -779,7 +779,6 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         "voices.foundation",
         "voices.clone",
         "tts.batch",
-        "tts.stress",
         "tts.merge",
         "bgm.analysis",
         "bgm.segment",
@@ -987,7 +986,6 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
     from ..engines import merge as merge_engine
     from ..engines import music as music_engine
     from ..engines import tts_batch
-    from ..engines import tts_stress
     from ..engines import voices
 
     handle = PersistentTaskHandle(claim)
@@ -1019,7 +1017,7 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                         scripts,
                         payload.get("concurrency"),
                         payload.get("seed"),
-                        bool(payload.get("auto_concurrency")),
+                        payload.get("auto_concurrency"),
                     )
                 else:
                     result = tts_batch.synthesize(
@@ -1028,18 +1026,8 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                         scripts[0] if scripts else payload.get("script"),
                         payload.get("concurrency"),
                         payload.get("seed"),
-                        bool(payload.get("auto_concurrency")),
+                        payload.get("auto_concurrency"),
                     )
-            elif claim.task_type == "tts.stress":
-                result = tts_stress.stress_test(
-                    handle,
-                    int(payload.get("rows") or 1),
-                    int(payload.get("start_chars") or 1),
-                    int(payload.get("step_chars") or 1),
-                    payload.get("max_rounds"),
-                    payload.get("speaker"),
-                    payload.get("seed"),
-                )
             elif claim.task_type == "tts.merge":
                 result = merge_engine.run(
                     handle,

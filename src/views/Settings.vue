@@ -99,11 +99,18 @@ async function save() {
   let ok = false
   if (props.adminOnly) {
     const config = draft.value
+    const seedValue = config.tts.batch_seed
+    const seed = typeof seedValue === 'number' && Number.isFinite(seedValue) ? seedValue : -1
+    const tts = {
+      ...config.tts,
+      batch_concurrency: Math.max(1, Math.min(128, Math.trunc(Number(config.tts.batch_concurrency) || 80))),
+      batch_seed: Math.max(-1, Math.min(2147483647, Math.trunc(seed))),
+    }
     try {
       const result = await adminApi.updateApplicationSettings({
         text: config.text,
         audio: config.audio,
-        tts: { ...config.tts, batch_concurrency: Math.max(1, Math.min(128, Math.trunc(Number(config.tts.batch_concurrency) || 80))) },
+        tts,
         llm: config.llm,
         prompts: config.prompts,
         persona_prompts: config.persona_prompts,
@@ -356,18 +363,25 @@ async function save() {
           <CardDescription>按文本长度排序后组批，仅使用批内上限。</CardDescription>
         </CardHeader>
         <CardContent>
-          <div class="space-y-1.5">
-            <Label for="tts-batch-limit">批内上限</Label>
-            <div class="flex flex-wrap items-center gap-3">
-              <Input id="tts-batch-limit" v-model.number="draft.tts.batch_concurrency" type="number" min="1" max="128" step="1" class="max-w-[120px]" :disabled="draft.tts.batch_auto" />
-              <label class="flex items-center gap-2 text-sm text-muted-foreground" title="按同批最长文本字数向上匹配已测安全档位">
-                <input v-model="draft.tts.batch_auto" type="checkbox" class="h-4 w-4 rounded border-input accent-primary" />
-                自动
-              </label>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div class="space-y-1.5">
+              <Label for="tts-batch-limit">批内并发上限</Label>
+              <div class="flex flex-wrap items-center gap-3">
+                <Input id="tts-batch-limit" v-model.number="draft.tts.batch_concurrency" type="number" min="1" max="128" step="1" class="max-w-[120px]" :disabled="draft.tts.batch_auto" />
+                <label class="flex items-center gap-2 text-sm text-muted-foreground" title="按同批最长文本字数向上匹配已测安全档位">
+                  <input v-model="draft.tts.batch_auto" type="checkbox" class="h-4 w-4 rounded border-input accent-primary" />
+                  自动
+                </label>
+              </div>
             </div>
-            <p class="text-xs text-muted-foreground">自动模式按同批最长文本字数向上匹配已测安全档位。</p>
+            <div class="space-y-1.5">
+              <Label for="tts-batch-seed">合成 Seed</Label>
+              <Input id="tts-batch-seed" v-model.number="draft.tts.batch_seed" type="number" min="-1" max="2147483647" step="1" required class="max-w-[180px]" />
+              <p class="text-xs text-muted-foreground">-1 表示每次随机；设置为 0 或正整数后，可用相同 Seed 复现结果。</p>
+            </div>
           </div>
-        </CardContent>
+          <p class="text-xs text-muted-foreground">自动模式按同批最长文本字数匹配安全批量档位；Seed 设为 -1 时随机取值。</p>
+</CardContent>
       </Card>
 
       <!-- 音频分集 -->

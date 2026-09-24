@@ -53,17 +53,56 @@ def memory_pressure_full(total_mib, used_mib, floor_mib=1024):
     return total_mib is not None and used_mib is not None and total_mib - used_mib < floor_mib
 
 
+_PROBE_SENTENCES = (
+    "山下的雾气还没有散，村口的老槐树上落满了灰喜鹊。",
+    "他把茶碗放下，目光越过院墙望向北面的山头。",
+    "风从街口穿过来，带着一股淡淡的柴火气味。",
+    "老人咳嗽了两声，慢慢把门帘掀开了一道缝。",
+    "集市上的叫卖声一阵高过一阵，人群挤得水泄不通。",
+    "她低声说，别出声，先听他们说完再说。",
+    "雨点打在瓦片上，噼里啪啦地响个不停。",
+    "马在槽边低头吃着草，尾巴不耐烦地甩来甩去。",
+    "他把信读了一遍又一遍，手指微微有些发抖。",
+    "远处的钟声响了七下，天色已经暗了下来。",
+    "伙计端上一碗热汤，热气在冷风里散得很快。",
+    "他抬起头，看见门口站着个陌生的年轻人。",
+    "那条巷子又窄又长，石板路被脚步磨得发亮。",
+    "她说这话的时候，手一直攥着袖口的流苏。",
+    "炉火映着四壁，影子随着火苗轻轻摇晃。",
+    "掌柜的拨着算盘，头也不抬地报了个数。",
+    "夜色像水一样漫上来了，星星一颗一颗地亮。",
+    "他深吸一口气，把要说的话又咽了回去。",
+)
+_PROBE_PARAGRAPH = "".join(_PROBE_SENTENCES) * 20
+
+
+def _probe_text(length, offset):
+    length = max(0, int(length))
+    if length <= 0:
+        return ""
+    paragraph = _PROBE_PARAGRAPH * 2
+    start = int(offset) % len(_PROBE_PARAGRAPH)
+    return paragraph[start:start + length]
+
+
+def _pick_clone_speaker(voice_config):
+    for name, entry in voice_config.items():
+        if (isinstance(entry, dict) and entry.get("type") == "clone"
+                and entry.get("ref_audio") and (entry.get("ref_text") or "").strip()):
+            return name
+    raise RuntimeError("No usable cloned voice is configured for this benchmark.")
+
+
 def child(args):
     from backend.core.config import get_config
     from backend.core.paths import get_layout
-    from backend.engines.tts_stress import generate_text, pick_stress_speaker
     from types import SimpleNamespace
     spec = importlib.util.spec_from_file_location('worker', ROOT / 'tts-engine/tts_worker.py')
     worker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(worker)
     cfg, layout = get_config(), get_layout()
     voices = json.loads((layout.voice_profiles / 'voice_config.json').read_text('utf-8'))
-    speaker = pick_stress_speaker(voices)
+    speaker = _pick_clone_speaker(voices)
     worker._add_ffmpeg_to_path(cfg.ffmpeg.ffmpeg_path)
     model = worker.load_model(cfg.tts.base_model, 'cuda')
     start = time.perf_counter()
@@ -74,7 +113,7 @@ def child(args):
     preparation_started = time.perf_counter()
     lengths = [int(x) for x in args.lengths.split(',')]
     rows = [{'index': i, 'speaker': speaker, 'vd': voices[speaker], 'instruct': '',
-             'text': generate_text(lengths[i % len(lengths)], i * 17),
+             'text': _probe_text(lengths[i % len(lengths)], i * 17),
              'chars': lengths[i % len(lengths)]} for i in range(args.samples)]
     rows.sort(key=lambda row: row['chars'])
     print('[perf] ' + json.dumps({'stage': 'text_preparation', 'event': 'end',

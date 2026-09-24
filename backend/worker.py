@@ -23,7 +23,7 @@ def main() -> None:
         "task_types": [
             "text.format", "book.analyze", "book.split", "script.parse",
             "audio.silences", "audio.cut", "voices.foundation", "voices.clone",
-            "tts.batch", "tts.stress", "tts.merge", "bgm.analysis", "bgm.segment",
+            "tts.batch", "tts.merge", "bgm.analysis", "bgm.segment",
             "bgm.mix", "bgm.match", "bgm.package", "music.suggest_tags",
             "audio.zip", "audio.export", "tts.reset",
         ],

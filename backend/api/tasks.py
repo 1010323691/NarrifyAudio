@@ -58,7 +58,6 @@ def _durable_module(task_type: str) -> str:
         "voices.foundation": "voices-foundation",
         "voices.clone": "voices-clone",
         "tts.batch": "tts-batch",
-        "tts.stress": "tts-stress",
         "tts.merge": "merge",
         "bgm.analysis": "bgm-analysis",
         "bgm.segment": "bgm-segment",

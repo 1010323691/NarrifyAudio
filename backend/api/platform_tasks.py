@@ -111,7 +111,7 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
         account = UserQuotaAccount(user_id=user.id, available_units=0)
         db.add(account)
         db.flush()
-    if payload.task_type in {"script.parse", "voices.foundation", "voices.clone", "tts.batch", "tts.stress", "bgm.analysis", "bgm.segment", "music.suggest_tags"} and account.available_units <= 0:
+    if payload.task_type in {"script.parse", "voices.foundation", "voices.clone", "tts.batch", "bgm.analysis", "bgm.segment", "music.suggest_tags"} and account.available_units <= 0:
         raise HTTPException(409, "额度不足")
     if account.available_units < estimated_units:
         raise HTTPException(409, "额度不足")

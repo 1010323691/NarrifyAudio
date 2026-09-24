@@ -33,7 +33,6 @@ from ..core.tasks import TERMINAL, TaskStatus, get_task_manager
 from ..engines import merge as Merge
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
-from ..engines import tts_stress as Stress
 from ..engines import voices as V
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
@@ -600,13 +599,6 @@ class BatchRequest(BaseModel):
     # by one in a single task (each file = its own package; a per-file failure is isolated).
     # Takes precedence over ``script``; an empty list falls back to ``script`` / most recent.
     scripts: list[str] | None = None
-    # Manual batch ceiling (1..128); auto_concurrency uses measured safety tiers instead.
-    concurrency: int | None = None
-    # Use measured upward-matched safety tiers for the per-batch row cap.
-    auto_concurrency: bool = False
-    # Reproducible seed for the run: >=0 seeds each sub-batch (seed + sub-batch seq); None ->
-    # the persisted default (config.tts.batch_seed); -1 -> random.
-    seed: int | None = None
 
 
 @router.post("/batch")
@@ -629,10 +621,6 @@ def run_batch(
         label += f" · {scripts[0]}"
     elif len(scripts) > 1:
         label += f" · {len(scripts)} 个文件"
-    if req.concurrency:
-        label += f" · 批内 {req.concurrency}"
-    if req.auto_concurrency:
-        label += " · 自动批量"
     if isinstance(ctx, AuthContext):
         task = submit_legacy_engine_task(
             task_type="tts.batch",
@@ -641,9 +629,6 @@ def run_batch(
                 "indices": req.indices,
                 "script": req.script,
                 "scripts": scripts,
-                "concurrency": req.concurrency,
-                "auto_concurrency": req.auto_concurrency,
-                "seed": req.seed,
                 "config": get_config().model_dump(mode="json"),
             },
             ctx=ctx,
@@ -652,93 +637,15 @@ def run_batch(
         )
         return {"task_id": task["id"]}
     if len(scripts) > 1:
-        task_args = (scripts, req.concurrency, req.seed, req.auto_concurrency) \
-            if req.auto_concurrency else (scripts, req.concurrency, req.seed)
         task = get_task_manager().create(
             "tts-batch", label,
-            Batch.synthesize_multi, *task_args,
+            Batch.synthesize_multi, scripts,
         )
     else:  # 0 or 1 file: the legacy single-file path, byte-identical behaviour
-        task_args = (req.indices, scripts[0] if scripts else req.script,
-                     req.concurrency, req.seed, req.auto_concurrency) \
-            if req.auto_concurrency else (req.indices, scripts[0] if scripts else req.script,
-                                          req.concurrency, req.seed)
         task = get_task_manager().create(
             "tts-batch", label,
-            Batch.synthesize, *task_args,
+            Batch.synthesize, req.indices, scripts[0] if scripts else req.script,
         )
-    return {"task_id": task.id}
-
-
-class StressTestRequest(BaseModel):
-    # 批内行数（--concurrency 上限，钳 [1,128]）：每轮要垫成一个张量批的行数（固定不变）。
-    rows: int = 64
-    # 起始每行字数（1..2500）。
-    start_chars: int = 10
-    # 每轮递增的每行字数（≥1）：每轮 = 上一轮 + step，逐轮跑下去直到某轮失败。
-    step_chars: int = 10
-    # 轮数上限；None/0 = 不限（跑到失败为止，硬上限 Stress.MAX_STRESS_ROUNDS 防病态循环）。
-    max_rounds: int | None = None
-    # 压测用的克隆音色角色名；None = 自动取第一个可用克隆音色（任意克隆都可以）。
-    speaker: str | None = None
-    # 可复现 seed；None = 用持久默认（config.tts.batch_seed）。
-    seed: int | None = None
-
-
-def _engine_task_active() -> bool:
-    """Whether a task that spawns the shared .venv engine is in flight (音频合成 / 音频合并 /
-    角色配音·克隆 / 压测). Two engine subprocesses would fight over the GPU, so the
-    stress-test entry refuses to start while one runs."""
-    for t in get_task_manager().list():
-        if t.module in ("tts-batch", "merge", "voices-clone", "tts-stress") and t.status not in TERMINAL:
-            return True
-    return False
-
-
-@router.post("/stress-test")
-def run_stress_test(
-    req: StressTestRequest,
-    ctx: AuthContext = Depends(get_auth_context),
-    db: Session = Depends(get_db),
-) -> dict:
-    """压测（临时测试入口）：机器自动生成自然语句（不借助 LLM、不需要解析脚本），固定批内
-    行数、每行字数从起点每轮递增，用任意一个已有克隆音色逐轮跑下去，直到某轮未达吞吐标准
-    （1 秒 10 字）/ 看门狗 / 引擎失败为止。逐轮报告（处理量 / 耗时 / 吞吐）写入工作空间
-    stress_test/ 目录；临时产物全在 00_temp/、每轮用完即删。"""
-    _common.require_workspace()
-    if not 1 <= req.start_chars <= Stress.MAX_STRESS_CHARS:
-        raise HTTPException(400, f"起始每行字数须为 1..{Stress.MAX_STRESS_CHARS}。")
-    if req.step_chars < 1:
-        raise HTTPException(400, "每轮递增须 ≥ 1。")
-    if req.max_rounds is not None and req.max_rounds < 1:
-        raise HTTPException(400, "轮数上限须 ≥ 1（留空 = 不限）。")
-    if _engine_task_active():
-        raise HTTPException(409, "引擎任务进行中（音频合成 / 合并 / 角色克隆 / 压测），请待其结束后再压测。")
-    rows = Batch.clamp_concurrency(req.rows)
-    label = f"压测（{rows} 行 · {req.start_chars}字 起 · 每轮 +{req.step_chars}）"
-    if isinstance(ctx, AuthContext):
-        task = submit_legacy_engine_task(
-            task_type="tts.stress",
-            label=label,
-            payload={
-                "rows": rows,
-                "start_chars": req.start_chars,
-                "step_chars": req.step_chars,
-                "max_rounds": req.max_rounds,
-                "speaker": req.speaker,
-                "seed": req.seed,
-                "config": get_config().model_dump(mode="json"),
-            },
-            ctx=ctx,
-            db=db,
-            idempotency_prefix="tts-stress",
-        )
-        return {"task_id": task["id"]}
-    task = get_task_manager().create(
-        "tts-stress", label,
-        Stress.stress_test, rows, req.start_chars, req.step_chars, req.max_rounds,
-        req.speaker, req.seed,
-    )
     return {"task_id": task.id}
 
 
