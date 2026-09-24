@@ -131,6 +131,46 @@ class _Handle:
         self.stats.append((done, total, chars_done, chars_total))
 
 
+def test_segment_publication_moves_audio_to_workspace_and_records_final_path(tmp_path):
+    class _JournalHandle(_Handle):
+        def publish_workspace_stage(self, final_path, staged_path):
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged_path, final_path)
+
+    stage_dir = tmp_path / "attempt" / "staged"
+    final_dir = tmp_path / "workspace" / "05_audio_chunk" / "book"
+    stage_dir.mkdir(parents=True)
+    staged_audio = stage_dir / "0001.mp3"
+    staged_audio.write_bytes(b"audio")
+    results = {}
+
+    outcome = tts_batch._handle_segment(
+        f"[segment] 0 ok {staged_audio}", {0: {"speaker": "A"}}, 1,
+        results, _JournalHandle(), stage_dir, final_dir,
+    )
+
+    assert outcome["ok"] is True
+    assert results[0]["path"] == str(final_dir / "0001.mp3")
+    assert (final_dir / "0001.mp3").read_bytes() == b"audio"
+    assert not staged_audio.exists()
+
+
+def test_manifest_writer_uses_workspace_publication_handle(tmp_path):
+    writes = []
+
+    class _JournalHandle(_Handle):
+        def stage_workspace_file(self, final_path, data):
+            writes.append((final_path, data))
+
+    path = tmp_path / "manifest.json"
+    manifest = [{"index": 0, "ok": True}]
+    tts_batch._write_manifest_file(path, manifest, _JournalHandle())
+
+    assert not path.exists()
+    assert writes[0][0] == path
+    assert json.loads(writes[0][1]) == manifest
+
+
 @pytest.fixture
 def workspace(monkeypatch, tmp_path):
     """A throwaway project root + workspace so get_layout()/resolve_parsed_json() resolve.
@@ -1053,9 +1093,9 @@ def test_synthesize_manifest_flush_is_throttled(workspace, monkeypatch):
 
     real_write = tts_batch._write_manifest_file  # capture before the patch below
 
-    def counting(path, manifest):
+    def counting(path, manifest, handle=None):
         writes.append((len(manifest), sum(e["ok"] for e in manifest)))
-        real_write(path, manifest)
+        real_write(path, manifest, handle)
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
     monkeypatch.setattr(tts_batch, "run_worker", run_worker)

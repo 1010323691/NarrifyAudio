@@ -160,6 +160,7 @@ class PersistentTaskHandle:
         self._last_rate_event = 0.0
         self._publication_journal: PublicationJournal | None = None
         self._staged_workspace_paths: set[Path] = set()
+        self._staged_workspace_directories: set[Path] = set()
 
     @property
     def cancelled(self) -> bool:
@@ -243,6 +244,19 @@ class PersistentTaskHandle:
         self._staged_workspace_paths.add(staged)
         return staged
 
+    def allocate_workspace_directory(self, final_directory: Path) -> Path:
+        staged = self._workspace_stage_path(final_directory / "stage")
+        staged.mkdir(parents=True, exist_ok=False)
+        self._staged_workspace_directories.add(staged)
+        return staged
+
+    def discard_workspace_directory(self, staged: Path) -> None:
+        resolved = staged.resolve()
+        if resolved not in self._staged_workspace_directories:
+            raise ValueError("Workspace staging directory was not allocated by this task")
+        shutil.rmtree(resolved, ignore_errors=True)
+        self._staged_workspace_directories.discard(resolved)
+
     def _publish_staged_workspace_file(self, final_path: Path, staged: Path) -> None:
         with SessionLocal() as db:
             user = db.get(User, self.claim.owner_id)
@@ -298,6 +312,9 @@ class PersistentTaskHandle:
         for staged in self._staged_workspace_paths:
             staged.unlink(missing_ok=True)
         self._staged_workspace_paths.clear()
+        for staged in self._staged_workspace_directories:
+            shutil.rmtree(staged, ignore_errors=True)
+        self._staged_workspace_directories.clear()
         if self._publication_journal is not None:
             self._publication_journal.rollback()
 

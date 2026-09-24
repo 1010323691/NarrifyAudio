@@ -253,6 +253,29 @@ def _merged_output_paths(layout, package: str):
     return [layout.audio_merge / f"{safe}.mp3", layout.audio_merge / f"{safe}.wav"]
 
 
+def _defer_or_delete(handle, path: Path) -> None:
+    defer_delete = getattr(handle, "defer_workspace_delete", None)
+    if callable(defer_delete):
+        defer_delete(path)
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _migrate_voice_config(handle, path: Path, workspace, voice_config: dict) -> None:
+    changed = pathio.migrate_entries(voice_config.values(), workspace, ("ref_audio",))
+    if not changed:
+        return
+    encoded = json.dumps(voice_config, ensure_ascii=False, indent=2).encode("utf-8")
+    stage_file = getattr(handle, "stage_workspace_file", None)
+    if callable(stage_file):
+        stage_file(path, encoded)
+    else:
+        path.write_bytes(encoded)
+
+
 def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
     """Mark old per-segment audio for changed speakers as stale and drop merged output.
 
@@ -464,7 +487,20 @@ class _SegmentLogBuffer:
         self.pending_failure_details.clear()
 
 
-def _handle_segment(line: str, by_index: dict, total: int, seg_results: dict, handle) -> dict | None:
+def _published_segment_path(handle, detail: str, stage_dir, final_dir) -> str:
+    if stage_dir is None or final_dir is None:
+        return detail
+    staged_root = Path(stage_dir).resolve()
+    staged_file = Path(detail).resolve()
+    if not staged_file.is_relative_to(staged_root) or not staged_file.is_file():
+        raise RuntimeError(f"TTS worker returned an invalid staged audio path: {detail}")
+    final_file = Path(final_dir) / staged_file.relative_to(staged_root)
+    handle.publish_workspace_stage(final_file, staged_file)
+    return str(final_file)
+
+
+def _handle_segment(line: str, by_index: dict, total: int, seg_results: dict, handle,
+                    stage_dir=None, final_dir=None) -> dict | None:
     """Parse a ``[segment] <index> ok|error <detail>`` line into a result."""
     parts = line[len("[segment]"):].split(None, 2)
     if len(parts) < 2:
@@ -479,6 +515,7 @@ def _handle_segment(line: str, by_index: dict, total: int, seg_results: dict, ha
     detail = parts[2] if len(parts) > 2 else ""
     speaker = (by_index.get(index) or {}).get("speaker") or "(未知)"
     if status == "ok":
+        detail = _published_segment_path(handle, detail, stage_dir, final_dir)
         seg_results[index] = {"ok": True, "path": detail, "reason": ""}
         return {"ok": True, "index": index, "label": f"[{index + 1}/{total}] {speaker}"}
     else:
@@ -608,6 +645,7 @@ class _PooledFile:
     src: Path | None = None
     pkg: str = ""
     out_dir: Path | None = None
+    stage_out_dir: Path | None = None
     manifest_path: Path | None = None
     all_segments: list = field(default_factory=list)
     by_index: dict = field(default_factory=dict)
@@ -648,7 +686,7 @@ def _build_pool_rows(files, pool_start: int = 0) -> tuple:
         for local in f.pending:
             row = dict(f.by_index[local])
             row["index"] = pool_start
-            row["out_dir"] = str(f.out_dir)
+            row["out_dir"] = str(f.stage_out_dir or f.out_dir)
             row["file_index"] = local
             pool_rows.append(row)
             pool_owners.append(f)
@@ -683,6 +721,7 @@ def _handle_segment_pool(line: str, pool_map: dict, pool_total: int, handle) -> 
     f, local = owner
     speaker = (f.by_index.get(local) or {}).get("speaker") or "(未知)"
     if status == "ok":
+        detail = _published_segment_path(handle, detail, f.stage_out_dir, f.out_dir)
         f.seg_results[local] = {"ok": True, "path": detail, "reason": ""}
         f.dirty = True
         return {
@@ -725,7 +764,7 @@ def _settle_pool(handle, files) -> dict:
             })
             continue
         done = count_completion(
-            f.all_segments, migrate_manifest(f.out_dir),
+            f.all_segments, migrate_manifest(f.out_dir, handle),
             expected_voice_signatures=f.voice_signatures,
             expected_voice_params=f.voice_params,
         )
@@ -822,15 +861,15 @@ def read_manifest(out_dir) -> dict:
     return _load_manifest(out_dir, persist_migration=False)
 
 
-def migrate_manifest(out_dir) -> dict:
+def migrate_manifest(out_dir, handle=None) -> dict:
     """Read and persist legacy manifest migrations for a write operation."""
-    return _load_manifest(out_dir, persist_migration=True)
+    return _load_manifest(out_dir, persist_migration=True, handle=handle)
 
 
 load_manifest = migrate_manifest  # compatibility for existing Python callers
 
 
-def _load_manifest(out_dir, *, persist_migration: bool) -> dict:
+def _load_manifest(out_dir, *, persist_migration: bool, handle=None) -> dict:
     """The package's cumulative manifest as ``{index: entry}`` (``{}`` if absent / unreadable).
 
     One entry per segment the batch has ever reported — the source of truth for what is already
@@ -878,7 +917,12 @@ def _load_manifest(out_dir, *, persist_migration: bool) -> dict:
         by_index, expected_params or None, expected_signatures or None, layout.workspace,
     )
     if persist_migration and (n or voice_migrated or restored):
-        pathio.rewrite_json_file(p, data)
+        encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        stage_file = getattr(handle, "stage_workspace_file", None)
+        if callable(stage_file):
+            stage_file(p, encoded)
+        else:
+            p.write_bytes(encoded)
     return by_index
 
 
@@ -1103,9 +1147,14 @@ def count_completion(all_segments, manifest_by_index, out_dir=None,
     return {"total": total, "completed": completed, "remaining": total - completed}
 
 
-def _write_manifest_file(manifest_path, manifest) -> None:
+def _write_manifest_file(manifest_path, manifest, handle=None) -> None:
     """Write the (list) manifest to disk (UTF-8, pretty-printed; JSON tolerates the CRLF)."""
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    encoded = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    stage_file = getattr(handle, "stage_workspace_file", None)
+    if callable(stage_file):
+        stage_file(manifest_path, encoded)
+    else:
+        manifest_path.write_bytes(encoded)
 
 
 def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=None,
@@ -1158,9 +1207,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             handle.log(f"voice_config.json 无法解析（{e}）——相关角色将失败。", "WARNING")
         # Lazy migration of legacy absolute ref_audio values (the worker resolves the
         # relative form against --workspace, so the file must be rewritten before spawn).
-        _n, migrated_vc = pathio.migrate_entries_in(vc_path, ws, "dict", ("ref_audio",))
-        if isinstance(migrated_vc, dict):
-            voice_config = migrated_vc
+        _migrate_voice_config(handle, vc_path, ws, voice_config)
 
     out_dir = layout.audio_chunk / package_for(src)
     manifest_path = out_dir / "manifest.json"
@@ -1177,7 +1224,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         if vc_path.exists() else None
     )
     all_indices = {s["index"] for s in all_segments}
-    old_entries = migrate_manifest(out_dir)
+    old_entries = migrate_manifest(out_dir, handle)
     _restore_cached_voice_versions(
         old_entries, voice_params_by_index, voice_signatures, ws,
     )
@@ -1187,6 +1234,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     to_do = plan_to_synthesize(all_indices, done_set, indices)
     segments = [s for s in all_segments if s["index"] in to_do]
     run_total = len(segments)
+    allocate_directory = getattr(handle, "allocate_workspace_directory", None)
+    stage_out_dir = allocate_directory(out_dir) if run_total and callable(allocate_directory) else None
     stale_speakers = sorted({
         s["speaker"] for s in all_segments
         if s["index"] not in done_set
@@ -1196,12 +1245,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     if stale_speakers:
         handle.log(f"检测到角色声音已变更，将重新合成这些角色的全部台词：{'、'.join(stale_speakers)}", "WARNING")
         for output in _merged_output_paths(layout, out_dir.name):
-            try:
-                output.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
+            _defer_or_delete(handle, output)
     # Stable filename width: the digits this file's FULL segment count needs (not the
     # pending subset) — a resume / watchdog restart re-derives the same width, so the
     # package never ends up with mixed 000x / 0000x names.
@@ -1224,7 +1268,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             all_segments, old_entries, {}, root=ws,
             expected_voice_signatures=voice_signatures,
             expected_voice_params=voice_params_by_index,
-        ))
+        ), handle)
         done = count_completion(all_segments, old_entries,
                                 expected_voice_signatures=voice_signatures,
                                 expected_voice_params=voice_params_by_index)["completed"]
@@ -1325,13 +1369,15 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             all_segments, old_entries, seg_results, root=ws,
             expected_voice_signatures=voice_signatures,
             expected_voice_params=voice_params_by_index,
-        ))
+        ), handle)
         last_flush[0] = now
 
     def on_line(line: str) -> None:
         nonlocal workers  # a confirmed restore re-syncs the per-batch cap
         if line.startswith("[segment]"):
-            outcome = _handle_segment(line, by_index, run_total, seg_results, handle)
+            outcome = _handle_segment(
+                line, by_index, run_total, seg_results, handle, stage_out_dir, out_dir,
+            )
             if outcome and outcome.get("ok"):
                 from ..platform.quota import consume_tts_input
                 segment_index = outcome["index"]
@@ -1393,7 +1439,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 break
             seg_file.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
             cmd = _build_cmd(
-                python, worker, seg_file, vc_path, out_dir,
+                python, worker, seg_file, vc_path, stage_out_dir or out_dir,
                 language=t.language, device=t.device,
                 model=t.model, base_model=t.base_model, design_model=t.design_model,
                 ffmpeg_path=cfg.ffmpeg.ffmpeg_path, concurrency=workers, seed=seed,
@@ -1475,9 +1521,12 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             failed.append({"index": s["index"], "speaker": s["speaker"],
                            "reason": (r or {}).get("reason") or "（引擎未返回结果）"})
 
-    done = count_completion(all_segments, migrate_manifest(out_dir),
+    done = count_completion(all_segments, migrate_manifest(out_dir, handle),
                             expected_voice_signatures=voice_signatures,
                             expected_voice_params=voice_params_by_index)
+    discard_directory = getattr(handle, "discard_workspace_directory", None)
+    if stage_out_dir is not None and callable(discard_directory):
+        discard_directory(stage_out_dir)
     handle.log(
         f"音频合成结束：本次成功 {completed} / 失败 {len(failed)} / 共 {run_total} 段；"
         f"累计已合成 {done['completed']}/{done['total']} 段。清单：{manifest_path.name}"
@@ -1555,9 +1604,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 voice_config = loaded
         except Exception as e:  # noqa: BLE001
             handle.log(f"voice_config.json 无法解析（{e}）——相关角色将失败。", "WARNING")
-        _n, migrated_vc = pathio.migrate_entries_in(vc_path, ws, "dict", ("ref_audio",))
-        if isinstance(migrated_vc, dict):
-            voice_config = migrated_vc
+        _migrate_voice_config(handle, vc_path, ws, voice_config)
 
     # -- per-file prep (request order): fatal files are isolated, the rest join the pool --
     files: list[_PooledFile] = []
@@ -1592,7 +1639,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 segment_voice_params(f.all_segments, voice_config)
                 if vc_path.exists() else None
             )
-            f.old_entries = migrate_manifest(f.out_dir)
+            f.old_entries = migrate_manifest(f.out_dir, handle)
             all_indices = {s["index"] for s in f.all_segments}
             _restore_cached_voice_versions(
                 f.old_entries, f.voice_params, f.voice_signatures, ws,
@@ -1612,13 +1659,11 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                     "WARNING",
                 )
                 for output in _merged_output_paths(layout, f.pkg):
-                    try:
-                        output.unlink()
-                    except FileNotFoundError:
-                        pass
-                    except OSError:
-                        pass
+                    _defer_or_delete(handle, output)
             f.pending = sorted(plan_to_synthesize(all_indices, done_set))
+            allocate_directory = getattr(handle, "allocate_workspace_directory", None)
+            if f.pending and callable(allocate_directory):
+                f.stage_out_dir = allocate_directory(f.out_dir)
             f.all_count = len(f.all_segments)
             # Pre-run completion snapshot (进度指标 baseline: this file's done 段/字).
             f.done_set = done_set
@@ -1638,7 +1683,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                                          f.all_segments, f.old_entries, {}, root=ws,
                                          expected_voice_signatures=f.voice_signatures,
                                          expected_voice_params=f.voice_params,
-                                     ))
+                                     ), handle)
                 handle.log("无待合成段，跳过" if not f.all_count else f"已全部完成，跳过（0/{f.all_count} 段待合成）")
         except TaskCancelled:
             raise  # cancel is a task-level outcome — never "file failed, keep going"
@@ -1710,7 +1755,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                                      f.all_segments, f.old_entries, f.seg_results, root=ws,
                                      expected_voice_signatures=f.voice_signatures,
                                      expected_voice_params=f.voice_params,
-                                 ))
+                                 ), handle)
         last_flush[0] = now
 
     # In-flight POOL indices the current child was generating (from its [watchdog] line) —
@@ -1917,4 +1962,9 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     # The last 进度指标 push (the terminal snapshot / result events carry the same final
     # counters, so the page's card stays correct after the task settles).
     _report_stats(force=True)
+    discard_directory = getattr(handle, "discard_workspace_directory", None)
+    if callable(discard_directory):
+        for f in files:
+            if f.stage_out_dir is not None:
+                discard_directory(f.stage_out_dir)
     return _settle_pool(handle, files)
