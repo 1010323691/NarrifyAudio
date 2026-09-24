@@ -11,7 +11,7 @@ import time
 import zipfile
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -128,6 +128,12 @@ class TaskFileOutcome:
 
 
 @dataclass(frozen=True)
+class TaskSideEffectOutput:
+    temp_path: Path
+    final_path: Path
+
+
+@dataclass(frozen=True)
 class TaskOutcome:
     temp_path: Path
     output_name: str
@@ -137,6 +143,8 @@ class TaskOutcome:
     metadata: dict[str, Any]
     publish_module: str | None = None
     additional_outputs: tuple[TaskFileOutcome, ...] = field(default_factory=tuple)
+    side_effect_outputs: tuple[TaskSideEffectOutput, ...] = field(default_factory=tuple)
+    side_effect_deletes: tuple[Path, ...] = field(default_factory=tuple)
 
 
 class PersistentTaskHandle:
@@ -1007,6 +1015,8 @@ def _cleanup_outcome(outcome: TaskOutcome) -> None:
     outcome.temp_path.unlink(missing_ok=True)
     for extra in outcome.additional_outputs:
         extra.temp_path.unlink(missing_ok=True)
+    for extra in outcome.side_effect_outputs:
+        extra.temp_path.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -1065,6 +1075,8 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
 
     handle = PersistentTaskHandle(claim)
     payload = claim.payload
+    side_effect_outputs: list[TaskSideEffectOutput] = []
+    side_effect_deletes: list[Path] = []
     with _legacy_engine_context(claim):
         try:
             if claim.task_type == "voices.foundation":
@@ -1208,7 +1220,6 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                 if not source.is_relative_to(workspace.resolve()) or not source.is_file():
                     raise TaskExecutionError("input_missing", "源音频不存在")
                 destination = source.parent / "分集"
-                destination.mkdir(parents=True, exist_ok=True)
                 written = []
                 files = payload.get("files") or []
                 for index, item in enumerate(files, 1):
@@ -1222,7 +1233,17 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                         raise TaskExecutionError("input_missing", "待导出文件不存在")
                     name = safe_display_name(str(item.get("name") or input_path.name))
                     target = destination / name
-                    shutil.copy2(input_path, target)
+                    with SessionLocal() as db:
+                        user = db.get(User, claim.owner_id)
+                        if user is None:
+                            raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+                        staged = task_attempt_path(
+                            db, user.username, claim.project_id, claim.task_id, claim.attempt_id,
+                            f"audio-export-{index:05d}-{name}",
+                        )
+                    staged.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(input_path, staged)
+                    side_effect_outputs.append(TaskSideEffectOutput(staged, target))
                     written.append({"name": name, "path": str(target)})
                     update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
                 result = {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
@@ -1233,23 +1254,39 @@ def _execute_legacy_engine(claim: TaskClaim) -> TaskOutcome:
                 for index, name in enumerate(scripts, 1):
                     if cancellation_requested(claim):
                         raise TaskCancelledError()
-                    package = Batch.package_for(Path(name))
+                    package = tts_batch.package_for(Path(name))
                     target = (layout.audio_chunk / package).resolve()
                     if not target.is_relative_to(layout.audio_chunk.resolve()):
                         raise TaskExecutionError("invalid_payload", "合成包路径无效")
                     if target.exists():
-                        shutil.rmtree(target)
+                        side_effect_deletes.append(target)
                         removed.append(package)
                     update_progress(claim, int(index * 90 / max(1, len(scripts))), f"重置 {index}/{len(scripts)}")
                 result = {"engine": "tts.reset", "ok": True, "removed": removed}
             else:
                 raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
         except TaskCancelled as exc:
+            for item in side_effect_outputs:
+                item.temp_path.unlink(missing_ok=True)
             raise TaskCancelledError() from exc
+        except BaseException:
+            for item in side_effect_outputs:
+                item.temp_path.unlink(missing_ok=True)
+            raise
     if isinstance(result, TaskOutcome):
         return result
     handle.progress_percent(100, "完成")
-    return _legacy_result_outcome(claim, result)
+    try:
+        outcome = _legacy_result_outcome(claim, result)
+    except BaseException:
+        for item in side_effect_outputs:
+            item.temp_path.unlink(missing_ok=True)
+        raise
+    return replace(
+        outcome,
+        side_effect_outputs=tuple(side_effect_outputs),
+        side_effect_deletes=tuple(side_effect_deletes),
+    )
 
 
 def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
@@ -1345,6 +1382,10 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
                         "path": str(final_path) if item.publish_module else None,
                     }
                 )
+            for item in outcome.side_effect_outputs:
+                journal.publish(journal.add(item.final_path), item.temp_path)
+            for target in outcome.side_effect_deletes:
+                journal.remove(target)
             result_payload = {
                 "file_id": published[0]["file_id"],
                 "object_key": published[0]["object_key"],

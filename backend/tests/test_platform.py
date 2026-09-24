@@ -19,7 +19,7 @@ from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, sha256_file, task_attempt_path, user_workspace_root
-from backend.platform.task_worker import TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.task_worker import TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
 from backend.platform.legacy_tasks import estimate_legacy_units
 
 
@@ -972,6 +972,110 @@ def test_expired_attempt_restores_interrupted_publication(client: TestClient):
     recover_database_tasks()
     assert final.read_text("utf-8") == "old"
     assert not journal_path.exists()
+
+
+@pytest.mark.parametrize(("committed", "should_exist"), [(False, True), (True, False)])
+def test_publication_reconciles_directory_removal(tmp_path, committed, should_exist):
+    root = tmp_path / "storage"
+    target = root / "user" / "project" / "05_audio_chunk" / "chapter"
+    target.mkdir(parents=True)
+    (target / "keep.wav").write_bytes(b"audio")
+    journal_path = root / "user" / "project" / ".tasks" / "task" / "attempt" / "publication.json"
+    journal = PublicationJournal(root, journal_path)
+    journal.prepare()
+    journal.remove(target)
+
+    assert not target.exists()
+    assert PublicationJournal.reconcile(root, journal_path, committed=committed)
+    assert target.exists() is should_exist
+    if should_exist:
+        assert (target / "keep.wav").read_bytes() == b"audio"
+    assert not journal_path.exists()
+
+
+def test_audio_export_stages_replacement_until_commit(client: TestClient, monkeypatch):
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Export journal"}).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"], "task_type": "audio.export",
+            "payload": {"source_relative": "07_output/source.wav", "files": [
+                {"relative_path": "07_output/source.wav", "name": "take.wav"},
+            ]},
+            "estimated_units": 0, "idempotency_key": uuid.uuid4().hex,
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    claim = claim_task(submitted.json()["id"], "export-journal-worker")
+    assert claim is not None
+    with SessionLocal() as db:
+        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+    source = workspace / "07_output" / "source.wav"
+    final = workspace / "07_output" / "分集" / "take.wav"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"source audio")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final.write_bytes(b"original export")
+
+    outcome = execute_claim(claim)
+    assert final.read_bytes() == b"original export"
+    assert len(outcome.side_effect_outputs) == 1
+    assert outcome.side_effect_outputs[0].temp_path.read_bytes() == b"source audio"
+
+    original_factory = task_worker.SessionLocal
+
+    def failing_session():
+        session = original_factory()
+        session.commit = lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
+        return session
+
+    monkeypatch.setattr(task_worker, "SessionLocal", failing_session)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        complete_claim(claim, outcome)
+    assert final.read_bytes() == b"original export"
+
+
+def test_tts_reset_restores_deleted_package_when_commit_fails(client: TestClient, monkeypatch):
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Reset journal"}).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": ["chapter.json"]},
+            "estimated_units": 0, "idempotency_key": uuid.uuid4().hex,
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    claim = claim_task(submitted.json()["id"], "reset-journal-worker")
+    assert claim is not None
+    with SessionLocal() as db:
+        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+    package = workspace / "05_audio_chunk" / "chapter"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "keep.wav").write_bytes(b"existing audio")
+
+    outcome = execute_claim(claim)
+    assert package.is_dir()
+    assert outcome.side_effect_deletes == (package,)
+
+    original_factory = task_worker.SessionLocal
+
+    def failing_session():
+        session = original_factory()
+        session.commit = lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
+        return session
+
+    monkeypatch.setattr(task_worker, "SessionLocal", failing_session)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        complete_claim(claim, outcome)
+    assert (package / "keep.wav").read_bytes() == b"existing audio"
 
 
 def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestClient, tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -63,6 +64,21 @@ class PublicationJournal:
             os.replace(final, backup)
         os.replace(source, final)
 
+    def remove(self, final: Path) -> int:
+        """Move an existing file or directory aside until the DB commit is durable."""
+        index = self.add(final)
+        resolved_final, backup, had_original = self.entries[index]
+        if had_original:
+            os.replace(resolved_final, backup)
+        return index
+
+    @staticmethod
+    def _remove_backup(path: Path) -> None:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+
     def rollback(self) -> None:
         for final, backup, had_original in reversed(self.entries):
             if backup.exists():
@@ -73,7 +89,7 @@ class PublicationJournal:
 
     def finish(self) -> None:
         for _, backup, _ in self.entries:
-            backup.unlink(missing_ok=True)
+            self._remove_backup(backup)
         self.path.unlink(missing_ok=True)
 
     @classmethod
