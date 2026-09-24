@@ -168,7 +168,9 @@ export const useTaskStore = defineStore('task', () => {
 
   /** Issue a control; the SSE stream confirms the resulting state. */
   async function control(id: string, action: TaskControl): Promise<void> {
+    const requestGeneration = generation
     await controlTask(id, action)
+    if (requestGeneration !== generation) return
     // A retry flips the task back to running — make sure the live stream is up.
     ensureStream()
   }

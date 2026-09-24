@@ -19,6 +19,16 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const activeProjectName = computed(() => current.value?.workspace_name || activeProject.value?.name || '')
   const hasActiveProject = computed(() => !!current.value?.set && !!activeProjectId.value)
 
+  function applyCurrent(value: WorkspaceInfo) {
+    const changed = (value.workspace_id || value.project_id || '') !== activeProjectId.value
+    if (changed) {
+      usePipelineStateStore().reset()
+      useSettingsStore().reset()
+    }
+    current.value = value
+    return changed
+  }
+
   async function refresh() {
     const requestGeneration = generation
     loading.value = true
@@ -28,12 +38,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       workspaceApi.listManagedProjects(),
     ])
     if (requestGeneration !== generation) return current.value
-    if (activeResult.status === 'fulfilled') current.value = activeResult.value
+    let scopeChanged = false
+    if (activeResult.status === 'fulfilled') scopeChanged = applyCurrent(activeResult.value)
     else error.value = activeResult.reason?.message || '无法读取当前项目'
     if (projectsResult.status === 'fulfilled') projects.value = projectsResult.value
     else if (!error.value) error.value = projectsResult.reason?.message || '无法读取项目列表'
     loading.value = false
     loaded.value = true
+    if (scopeChanged) await useSettingsStore().load()
     return current.value
   }
 
@@ -44,13 +56,12 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     error.value = ''
     const requestGeneration = generation
     try {
-      const previousProjectId = activeProjectId.value
       const selected = await workspaceApi.selectWorkspace(projectId)
       if (requestGeneration !== generation) return null
-      current.value = selected
-      if (activeProjectId.value !== previousProjectId) usePipelineStateStore().reset()
+      applyCurrent(selected)
       const settings = useSettingsStore()
       await settings.load()
+      if (requestGeneration !== generation) return null
       return current.value
     } catch (cause: any) {
       if (requestGeneration === generation) error.value = cause?.message || '无法打开此项目'
@@ -65,7 +76,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function create(name: string) {
+    const requestGeneration = generation
     const created = await workspaceApi.createManagedWorkspace(name)
+    if (requestGeneration !== generation) return created
     await select(created.id)
     await refresh()
     return created
@@ -73,8 +86,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   function setCurrent(value: WorkspaceInfo) {
     generation += 1
-    if ((value.workspace_id || value.project_id || '') !== activeProjectId.value) usePipelineStateStore().reset()
-    current.value = value
+    if (applyCurrent(value)) void useSettingsStore().load()
     loading.value = false
     loaded.value = true
   }
@@ -88,6 +100,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     busy.value = false
     error.value = ''
     usePipelineStateStore().reset()
+    useSettingsStore().reset()
   }
 
   return {

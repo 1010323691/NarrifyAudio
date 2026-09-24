@@ -10,6 +10,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const config = ref<AppConfig | null>(null)
   const loaded = ref(false)
   const saving = ref(false)
+  let generation = 0
+  let latestRequest = 0
 
   function applyTheme(theme: string) {
     const root = document.documentElement
@@ -31,29 +33,44 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   async function load() {
+    const requestGeneration = generation
+    const requestId = ++latestRequest
     try {
-      config.value = await getConfig()
+      const value = await getConfig()
+      if (requestGeneration !== generation || requestId !== latestRequest) return
+      config.value = value
       applyTheme(config.value.ui.theme)
     } catch {
       /* backend may be down — leave config null */
     } finally {
-      loaded.value = true
+      if (requestGeneration === generation && requestId === latestRequest) loaded.value = true
     }
   }
 
   /** Merge a partial patch (at any nesting depth) into the persisted config; returns true on success. */
   async function save(patch: DeepPartial<AppConfig>): Promise<boolean> {
+    const requestGeneration = generation
+    const requestId = ++latestRequest
     saving.value = true
     try {
-      config.value = await patchConfig(patch)
+      const value = await patchConfig(patch)
+      if (requestGeneration !== generation || requestId !== latestRequest) return false
+      config.value = value
       if (patch.ui?.theme) applyTheme(patch.ui.theme)
       return true
     } catch {
       return false
     } finally {
-      saving.value = false
+      if (requestGeneration === generation) saving.value = false
     }
   }
 
-  return { config, loaded, saving, load, save, applyTheme }
+  function reset() {
+    generation += 1
+    config.value = null
+    loaded.value = false
+    saving.value = false
+  }
+
+  return { config, loaded, saving, load, save, applyTheme, reset }
 })

@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import * as authApi from '@/api/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useTaskStore } from '@/stores/task'
+import { useSettingsStore } from '@/stores/settings'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<authApi.AuthUser | null>(null)
@@ -29,11 +30,12 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const previousUserId = user.value?.id
       const signedIn = (await authApi.login({ identifier, password })).user
-      if (previousUserId && previousUserId !== signedIn.id) {
+      if (previousUserId !== signedIn.id) {
         useWorkspaceStore().reset()
         useTaskStore().reset()
       }
       user.value = signedIn
+      await useSettingsStore().load()
     } catch (cause: any) {
       error.value = cause?.message || '登录失败'
       throw cause
@@ -49,11 +51,12 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const previousUserId = user.value?.id
       const signedUp = (await authApi.register({ email, password, username, display_name: displayName })).user
-      if (previousUserId && previousUserId !== signedUp.id) {
+      if (previousUserId !== signedUp.id) {
         useWorkspaceStore().reset()
         useTaskStore().reset()
       }
       user.value = signedUp
+      await useSettingsStore().load()
     } catch (cause: any) {
       error.value = cause?.message || '注册失败'
       throw cause
