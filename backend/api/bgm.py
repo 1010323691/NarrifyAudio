@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from ..core import paths as core_paths
 from ..core.config import get_config
 from ..core.concurrency import gate, merge_gate, set_concurrency, set_merge_concurrency
-from ..core.paths import get_layout
+from ..core.paths import get_layout, peek_layout
 from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import bgm as Bgm
 from ..engines import merge as Merge
@@ -156,7 +156,7 @@ def list_chapters() -> dict:
     * ``music_missing`` — the assignment points at a music file that no longer
       exists in the library (frontend: 「⚠ 已删除」, mixing blocked, re-match allowed).
     """
-    layout = get_layout()
+    layout = peek_layout()
     if layout.split_text is None:
         return {"chapters": [], "mode": "llm"}
     lib_dir = core_paths.MUSIC_LIBRARY_DIR
@@ -811,7 +811,7 @@ def get_timeline(stem: str) -> dict:
     (degrade, like /chapters); file missing/corrupt → 404 with the actionable
     wording (the chapter needs a paragraph analysis + a segment match first).
     """
-    layout = get_layout()
+    layout = peek_layout()
     if layout.bgm is None:
         return {"timeline": None}
     if not stem or stem != Path(stem).name:

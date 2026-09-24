@@ -7,8 +7,11 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..platform.models import OutboxEvent, Project, Task, User, UserQuotaAccount
-from ..platform.task_state import append_task_event
+from ..platform.models import OutboxEvent, Project, Task, User, UserQuotaAccount, utcnow
+from ..platform.task_state import (
+    TERMINAL_TASK_STATUSES, append_task_event, release_reservation,
+    suppress_pending_dispatch,
+)
 from ..platform.storage import lock_storage_migration, storage_migration
 
 
@@ -17,6 +20,32 @@ class TaskSubmissionError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+def cancel_task_record(
+    db: Session, task: Task, *, admin: bool = False, actor_user_id: str | None = None,
+) -> bool:
+    """Apply the shared durable cancellation transition; return whether it changed state."""
+    if task.status in TERMINAL_TASK_STATUSES:
+        return False
+    if task.status in {"running", "cancelling"}:
+        task.status = "cancelling"
+    else:
+        task.status = "cancelled"
+        if admin:
+            task.finished_at = task.finished_at or utcnow()
+        release_reservation(
+            db, task, kind="release",
+            note="administrator cancelled task" if admin else "user cancelled before execution",
+        )
+        suppress_pending_dispatch(db, task.id)
+    task.updated_at = utcnow()
+    event_type = "admin_cancel_requested" if admin else "cancel_requested"
+    payload = {"status": task.status}
+    if admin:
+        payload["actor_user_id"] = actor_user_id
+    append_task_event(db, task.id, event_type, payload)
+    return True
 
 
 def task_dict(task: Task) -> dict:

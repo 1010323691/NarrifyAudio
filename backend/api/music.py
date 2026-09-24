@@ -83,9 +83,9 @@ def _locked_references(name: str) -> list[str]:
     """Current workspace's chapter stems whose assignment is LOCKED and points
     at ``name`` (from ``08_bgm/bgm_assignments.json``). No workspace / no file
     -> no references. Read-only, best-effort (a corrupt file degrades to [])."""
-    from ..core.paths import get_layout
+    from ..core.paths import peek_layout
 
-    layout = get_layout()
+    layout = peek_layout()
     bgm = layout.bgm
     if bgm is None or not bgm.exists():
         return []

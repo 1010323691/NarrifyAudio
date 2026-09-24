@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.paths import WORKSPACE_DIRS, get_layout, is_workspace_set
+from ..core.paths import WORKSPACE_DIRS, get_layout, peek_layout, is_workspace_set
 from ..platform.database import get_db
 from ..platform.file_response import file_response
 from ..platform.legacy_workspace import active_workspace, ensure_project
@@ -27,7 +27,7 @@ _MODULE_ATTRS = {name: attr for attr, name in WORKSPACE_DIRS if attr != "temp"}
 
 
 def _module_dir(module: str) -> Path:
-    layout = get_layout()
+    layout = peek_layout()
     attr = _MODULE_ATTRS.get(module)
     d = getattr(layout, attr, None) if attr else None
     if d is None:

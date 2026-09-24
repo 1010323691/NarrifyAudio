@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from ..core import pathio
 from ..core.config import get_config
 from ..core.concurrency import merge_gate, set_merge_concurrency
-from ..core.paths import ALL_PARSED_JSON, get_layout, resolve_parsed_json, resolve_parsed_json_all
+from ..core.paths import ALL_PARSED_JSON, get_layout, peek_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..core.tasks import TERMINAL, TaskStatus, get_task_manager
 from ..engines import merge as Merge
 from ..engines import tts as T
@@ -248,7 +248,7 @@ def list_voices(script: str | None = None) -> dict:
     ``speakers`` is sorted by ``line_count`` descending (stable — ties keep
     first-appearance order), so the leads top the page list.
     """
-    layout = get_layout()
+    layout = peek_layout()
     if layout.parsed_json is None:  # no workspace: nothing to read (read-only, degrades)
         return {"has_script": False, "script_path": "", "voice_config_path": "", "speakers": []}
     out_voices = layout.voice_profiles
@@ -866,7 +866,7 @@ def batch_status(script: str | None = None,
     the same rule as ``/voices``). ``"__all__"`` is rejected (400), as in ``POST /batch``.
     Degrades to zeros with no workspace / no files, like ``/voices``.
     """
-    layout = get_layout()
+    layout = peek_layout()
     if scripts:
         if any(s == ALL_PARSED_JSON for s in scripts):
             raise HTTPException(status_code=400, detail="“全部文件”只用于「角色配音」——请逐个列出解析 JSON。")
@@ -1098,7 +1098,7 @@ def merge_status(packages: Annotated[list[str] | None, Query()] = None) -> dict:
     for p in names:
         if not p or p != Path(p).name:
             raise HTTPException(400, f"非法包名：{p}")
-    layout = get_layout()
+    layout = peek_layout()
     if layout.audio_chunk is None:  # no workspace: nothing to read (read-only, degrades)
         return {"packages": [
             {"name": p, "total": 0, "completed": 0, "remaining": 0, "complete": False}

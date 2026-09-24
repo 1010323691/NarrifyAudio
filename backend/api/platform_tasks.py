@@ -14,7 +14,7 @@ from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, User, utcnow
 from ..platform.config import settings
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
-from ..services.tasks import TaskSubmissionError, submit_task_record, task_dict
+from ..services.tasks import TaskSubmissionError, cancel_task_record, submit_task_record, task_dict
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 
@@ -110,16 +110,7 @@ def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = 
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id).with_for_update())
     if task is None:
         raise HTTPException(404, "任务不存在")
-    if task.status in TERMINAL_TASK_STATUSES:
-        return _task_json(task)
-    if task.status in {"running", "cancelling"}:
-        task.status = "cancelling"
-    else:
-        task.status = "cancelled"
-        release_reservation(db, task, kind="release", note="user cancelled before execution")
-        suppress_pending_dispatch(db, task.id)
-    task.updated_at = utcnow()
-    append_task_event(db, task.id, "cancel_requested", {"status": task.status})
+    cancel_task_record(db, task)
     db.commit()
     return _task_json(task)
 

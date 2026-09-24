@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from ..core.paths import get_layout
+from ..core.paths import peek_layout
 from ..core.tasks import TERMINAL, get_task_manager
 from ..platform.database import SessionLocal
 from ..platform.deps import AuthContext, get_auth_context
@@ -33,7 +33,7 @@ def _sse(payload: dict) -> str:
 
 
 def _workspace_key() -> str | None:
-    workspace = get_layout().workspace
+    workspace = peek_layout().workspace
     return str(workspace.resolve()) if workspace is not None else None
 
 

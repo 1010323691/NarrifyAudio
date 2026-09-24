@@ -141,6 +141,16 @@ def test_get_layout_set_creates_workspace_dirs(sandbox, set_pointer):
     core_paths.get_layout()
 
 
+def test_peek_layout_resolves_workspace_without_creating_directories(sandbox, set_pointer):
+    ws = sandbox / "book"
+    ws.mkdir()
+    set_pointer(str(ws))
+    layout = core_paths.peek_layout()
+    assert layout.workspace == ws
+    assert layout.audio_chunk == ws / "05_audio_chunk"
+    assert list(ws.iterdir()) == []
+
+
 def test_get_layout_missing_root_is_inert(sandbox, set_pointer):
     """A pointer to a folder that no longer exists (the workspace was moved / deleted)
     must NOT resurrect an empty skeleton at the old location — the dashboard reports

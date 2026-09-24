@@ -6,7 +6,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..core import pathio
-from ..core.paths import get_layout
+from ..core.paths import get_layout, peek_layout
 from ..engines.book import decode_buffer
 
 
@@ -44,7 +44,7 @@ def resolve_inbound_path(path: str, *, label: str = "文件") -> Path:
     v = (path or "").strip()
     if not v:
         raise HTTPException(400, "未提供路径。")
-    ws = get_layout().workspace
+    ws = peek_layout().workspace
     if ws is not None:
         try:
             return pathio.resolve_path(v, ws, strict=True, label=label)

@@ -22,6 +22,7 @@ from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
+from ..services.tasks import cancel_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
 
@@ -685,15 +686,7 @@ def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session =
     if task.status in TERMINAL_TASK_STATUSES:
         return {"id": task.id, "status": task.status}
     previous_status = task.status
-    if task.status in {"running", "cancelling"}:
-        task.status = "cancelling"
-    else:
-        task.status = "cancelled"
-        task.finished_at = task.finished_at or utcnow()
-        release_reservation(db, task, kind="release", note="administrator cancelled task")
-        suppress_pending_dispatch(db, task.id)
-    task.updated_at = utcnow()
-    append_task_event(db, task.id, "admin_cancel_requested", {"actor_user_id": actor.id, "status": task.status})
+    cancel_task_record(db, task, admin=True, actor_user_id=actor.id)
     db.add(AuditLog(actor_user_id=actor.id, action="admin.task_cancelled", target_type="task", target_id=task.id, metadata_json={"previous_status": previous_status}))
     db.commit()
     return {"id": task.id, "status": task.status}
