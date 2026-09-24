@@ -1086,7 +1086,7 @@ def _analysis_prompts(sample: str, registry: dict[str, list[str]]) -> tuple[str,
     return system, user
 
 
-def register_analysis_tags(parsed: dict) -> list[str]:
+def register_analysis_tags(parsed: dict, handle=None) -> list[str]:
     """Register the chapter reply's out-of-vocabulary tag names into the GLOBAL
     music tag registry (``music_library/music_index.json``) — one atomic
     :func:`backend.engines.music.update_index` per call.
@@ -1117,7 +1117,7 @@ def register_analysis_tags(parsed: dict) -> list[str]:
                 i["tags"].setdefault(cat, []).append(name)
                 added.append(name)
 
-    music_engine.update_index(_mutate)
+    music_engine.update_index(_mutate, handle)
     if added:
         log.info("章节气氛分析 新增全局标签：%s", "、".join(added))
     return added
@@ -1323,7 +1323,7 @@ def analyze_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
         handle.log("分析完成：" + ("、".join(parts) if parts else "（无标签）"))
 
         handle.progress(0.8, "标签入库")
-        added = register_analysis_tags(parsed)
+        added = register_analysis_tags(parsed, handle)
         if added:
             handle.log("音乐库新增标签：" + "、".join(added))
         else:
@@ -1527,7 +1527,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
                     if t not in union[c]:
                         union[c].append(t)
         handle.progress(0.85, "标签入库")
-        added = register_analysis_tags(union)
+        added = register_analysis_tags(union, handle)
         if added:
             handle.log("音乐库新增标签：" + "、".join(added))
         else:

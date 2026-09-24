@@ -120,6 +120,34 @@ class PublicationJournal:
         return True
 
 
+class PublicationJournalBundle:
+    """One task attempt publishing files under several independently rooted stores."""
+
+    def __init__(self, journals: list[PublicationJournal]):
+        if not journals:
+            raise ValueError("A publication bundle needs at least one journal")
+        self.journals = list(journals)
+
+    def prepare(self) -> None:
+        prepared: list[PublicationJournal] = []
+        try:
+            for journal in self.journals:
+                journal.prepare()
+                prepared.append(journal)
+        except BaseException:
+            for journal in reversed(prepared):
+                journal.rollback()
+            raise
+
+    def rollback(self) -> None:
+        for journal in reversed(self.journals):
+            journal.rollback()
+
+    def finish(self) -> None:
+        for journal in self.journals:
+            journal.finish()
+
+
 @contextmanager
 def publication_transaction(journal: PublicationJournal, *, prepared: bool = False):
     if not prepared:

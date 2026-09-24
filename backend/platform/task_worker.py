@@ -43,7 +43,7 @@ from ..engines.text import format_text
 from ..engines import script as script_engine
 from ..engines import audio as audio_engine
 from .config import settings
-from .artifact_publication import PublicationJournal, publication_transaction
+from .artifact_publication import PublicationJournal, PublicationJournalBundle, publication_transaction
 from .database import SessionLocal
 from .models import (
     OutboxEvent,
@@ -146,7 +146,7 @@ class TaskOutcome:
     additional_outputs: tuple[TaskFileOutcome, ...] = field(default_factory=tuple)
     side_effect_outputs: tuple[TaskSideEffectOutput, ...] = field(default_factory=tuple)
     side_effect_deletes: tuple[Path, ...] = field(default_factory=tuple)
-    publication_journal: PublicationJournal | None = None
+    publication_journal: PublicationJournal | PublicationJournalBundle | None = None
 
 
 class PersistentTaskHandle:
@@ -159,6 +159,7 @@ class PersistentTaskHandle:
         self._rate_samples: deque[tuple[float, int]] = deque()
         self._last_rate_event = 0.0
         self._publication_journal: PublicationJournal | None = None
+        self._shared_publication_journal: PublicationJournal | None = None
         self._staged_workspace_paths: set[Path] = set()
         self._staged_workspace_directories: set[Path] = set()
 
@@ -208,8 +209,13 @@ class PersistentTaskHandle:
         })
 
     @property
-    def publication_journal(self) -> PublicationJournal | None:
-        return self._publication_journal
+    def publication_journal(self) -> PublicationJournal | PublicationJournalBundle | None:
+        journals = [journal for journal in (
+            self._publication_journal, self._shared_publication_journal,
+        ) if journal is not None]
+        if not journals:
+            return None
+        return journals[0] if len(journals) == 1 else PublicationJournalBundle(journals)
 
     def _ensure_publication_journal(self) -> PublicationJournal:
         if self._publication_journal is None:
@@ -227,6 +233,19 @@ class PersistentTaskHandle:
             journal.prepare()
             self._publication_journal = journal
         return self._publication_journal
+
+    def _ensure_shared_publication_journal(self) -> PublicationJournal:
+        if self._shared_publication_journal is None:
+            from ..core import paths as core_paths
+
+            library_root = Path(core_paths.MUSIC_LIBRARY_DIR).resolve()
+            journal = PublicationJournal(
+                library_root,
+                library_root / ".tasks" / self.claim.task_id / self.claim.attempt_id / "publication.json",
+            )
+            journal.prepare()
+            self._shared_publication_journal = journal
+        return self._shared_publication_journal
 
     def _workspace_stage_path(self, final_path: Path) -> Path:
         with SessionLocal() as db:
@@ -305,6 +324,19 @@ class PersistentTaskHandle:
             staged.unlink(missing_ok=True)
             raise
 
+    def stage_shared_file(self, final_path: Path, data: bytes) -> None:
+        """Publish a shared music-library JSON update under the attempt's recovery journal."""
+        self.check()
+        journal = self._ensure_shared_publication_journal()
+        staged = journal.path.parent / f"staged-{secrets.token_hex(12)}-{safe_display_name(final_path.name)}"
+        try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(data)
+            journal.publish(journal.add(final_path), staged)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
+
     def defer_workspace_delete(self, final_path: Path) -> None:
         self._ensure_publication_journal().remove(final_path)
 
@@ -317,6 +349,8 @@ class PersistentTaskHandle:
         self._staged_workspace_directories.clear()
         if self._publication_journal is not None:
             self._publication_journal.rollback()
+        if self._shared_publication_journal is not None:
+            self._shared_publication_journal.rollback()
 
     def check(self) -> None:
         if self.cancelled:
@@ -379,6 +413,11 @@ def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None
     root = configured_storage_root(db)
     path = task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json")
     PublicationJournal.reconcile(root, path, committed=task.status == "succeeded")
+    from ..core import paths as core_paths
+
+    shared_root = Path(core_paths.MUSIC_LIBRARY_DIR).resolve()
+    shared_path = shared_root / ".tasks" / task.id / attempt.id / "publication.json"
+    PublicationJournal.reconcile(shared_root, shared_path, committed=task.status == "succeeded")
 
 
 def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None) -> TaskClaim | None:

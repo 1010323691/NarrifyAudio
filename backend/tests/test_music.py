@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import multiprocessing
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -41,6 +42,25 @@ from backend.core import config as core_config
 from backend.core import paths as core_paths
 from backend.core.tasks import TERMINAL, TaskStatus, get_task_manager
 from backend.engines import music as music_engine
+
+
+def _race_music_ai_adoption(library_dir: str, ai_tag: str) -> None:
+    core_paths.MUSIC_LIBRARY_DIR = Path(library_dir)
+    music_engine.auto_apply_suggestion("song.mp3", {"scene": [ai_tag]})
+
+
+def _race_music_manual_edit(library_dir: str, entered, human_tag: str) -> None:
+    core_paths.MUSIC_LIBRARY_DIR = Path(library_dir)
+    original_update = music_engine.update_index
+
+    def mutate(index):
+        entered.set()
+        time.sleep(1.5)
+        index["tracks"]["song.mp3"]["tags"] = music_engine.normalize_track_tags(
+            {"scene": [human_tag]}, index["tags"],
+        )
+
+    original_update(mutate)
 
 
 # --------------------------------------------------------------------------- #
@@ -323,6 +343,38 @@ def test_update_index_concurrent_no_lost_updates(sandbox):
     with ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(add, range(8)))
     assert len(music_engine.load_index()["tracks"]) == 8
+
+
+def test_human_music_tags_win_against_cross_process_ai_adoption(sandbox):
+    index = music_engine._default_index()
+    index["tracks"]["song.mp3"] = {
+        "duration": 1.0, "enabled": True, "description": "",
+        "tags": music_engine._empty_track_tags(), "added_at": "",
+    }
+    music_engine.save_index(index)
+
+    context = multiprocessing.get_context("spawn")
+    human_entered = context.Event()
+    ai_tag, human_tag = music_engine.DEFAULT_TAGS["scene"][:2]
+    human = context.Process(
+        target=_race_music_manual_edit,
+        args=(str(sandbox["lib"]), human_entered, human_tag),
+    )
+    ai = context.Process(target=_race_music_ai_adoption, args=(str(sandbox["lib"]), ai_tag))
+    human.start()
+    try:
+        assert human_entered.wait(10), "manual update did not enter its read-modify-write transaction"
+        ai.start()
+        ai.join(10)
+        human.join(10)
+        assert ai.exitcode == 0
+        assert human.exitcode == 0
+        assert music_engine.load_index()["tracks"]["song.mp3"]["tags"]["scene"] == [human_tag]
+    finally:
+        for process in (ai, human):
+            if process.pid is not None and process.is_alive():
+                process.terminate()
+                process.join(5)
 
 
 # --------------------------------------------------------------------------- #

@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 import shutil
 import threading
+from types import SimpleNamespace
 from datetime import timedelta
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.core.observability import record_api_request
+from backend.core import paths as core_paths
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
@@ -34,6 +36,23 @@ def _register(client: TestClient, email: str) -> dict:
     response = client.post("/api/auth/register", json={"email": email, "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234", "display_name": "Test User"})
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_persistent_handle_journals_shared_music_file(monkeypatch, tmp_path):
+    library = tmp_path / "music_library"
+    library.mkdir()
+    index_path = library / "music_index.json"
+    index_path.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", library)
+    monkeypatch.setattr("backend.platform.task_worker.cancellation_requested", lambda _claim: False)
+    handle = PersistentTaskHandle(SimpleNamespace(task_id="task", attempt_id="attempt"))
+
+    handle.stage_shared_file(index_path, b"new")
+
+    assert index_path.read_bytes() == b"new"
+    assert isinstance(handle.publication_journal, PublicationJournal)
+    handle.rollback_publications()
+    assert index_path.read_text("utf-8") == "old"
 
 
 def test_session_cookie_and_project_scope(client: TestClient):

@@ -420,12 +420,16 @@ def load_index() -> dict:
         return _default_index()
 
 
-def save_index(index: dict) -> None:
+def save_index(index: dict, handle=None) -> None:
     """Atomically write the index (write_bytes + os.replace). Caller holds the
     lock (or accepts concurrent writers — os.replace is atomic either way)."""
     d = _library_dir()
-    d.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(index, ensure_ascii=False, indent=2).encode("utf-8")
+    stage_file = getattr(handle, "stage_shared_file", None)
+    if callable(stage_file):
+        stage_file(_index_path(), payload)
+        return
+    d.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".music_index_", suffix=".tmp", dir=str(d))
     try:
         with os.fdopen(fd, "wb") as f:
@@ -439,7 +443,7 @@ def save_index(index: dict) -> None:
         raise
 
 
-def update_index(mutator) -> dict:
+def update_index(mutator, handle=None) -> dict:
     """Atomic read -> mutate -> write transaction on the index (shared by
     upload / tag edits / batch ops / tag management).
 
@@ -451,7 +455,7 @@ def update_index(mutator) -> dict:
         with exclusive_file_lock(_library_dir() / ".music_index.lock"):
             idx = load_index()
             mutator(idx)
-            save_index(idx)
+            save_index(idx, handle)
             return idx
 
 
@@ -530,11 +534,15 @@ def load_suggestions() -> dict:
         return _default_suggestions()
 
 
-def save_suggestions(data: dict) -> None:
+def save_suggestions(data: dict, handle=None) -> None:
     """Atomically write the suggestions cache (write_bytes + os.replace)."""
     d = _library_dir()
-    d.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    stage_file = getattr(handle, "stage_shared_file", None)
+    if callable(stage_file):
+        stage_file(_suggestions_path(), payload)
+        return
+    d.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".music_suggest_", suffix=".tmp", dir=str(d))
     try:
         with os.fdopen(fd, "wb") as f:
@@ -548,7 +556,7 @@ def save_suggestions(data: dict) -> None:
         raise
 
 
-def update_suggestions(mutator) -> dict:
+def update_suggestions(mutator, handle=None) -> dict:
     """Atomic read -> mutate -> write transaction on the suggestions cache
     (parallel AI tasks each rewrite the whole file — the voice_config.json /
     08_bgm analysis precedent)."""
@@ -556,16 +564,16 @@ def update_suggestions(mutator) -> dict:
         with exclusive_file_lock(_library_dir() / ".music_suggestions.lock"):
             data = load_suggestions()
             mutator(data)
-            save_suggestions(data)
+            save_suggestions(data, handle)
             return data
 
 
-def clear_suggestion(name: str) -> None:
+def clear_suggestion(name: str, handle=None) -> None:
     """Drop one track's candidate entry (the user made a tag decision).
     No-op when absent — reads never write, the file is only touched when an
     entry actually exists."""
     if name in (load_suggestions().get("tracks") or {}):
-        update_suggestions(lambda d: d["tracks"].pop(name, None))
+        update_suggestions(lambda d: d["tracks"].pop(name, None), handle)
 
 
 def track_has_manual_tags(track: dict) -> bool:
@@ -579,7 +587,7 @@ def track_has_manual_tags(track: dict) -> bool:
     return any(tags.get(c) for c in TAG_CATEGORIES)
 
 
-def auto_apply_suggestion(name: str, cand: dict) -> bool:
+def auto_apply_suggestion(name: str, cand: dict, handle=None) -> bool:
     """Auto-adopt an AI candidate into the track's tags (2026-09：批量一键
     识别成功后，未手动打标的曲目直接落标签，不再要求用户手动「编辑-采用」).
 
@@ -601,7 +609,7 @@ def auto_apply_suggestion(name: str, cand: dict) -> bool:
         tr["tags"] = normalize_track_tags(cand, idx["tags"])
         applied = True
 
-    update_index(_mutate)
+    update_index(_mutate, handle)
     return applied
 
 
@@ -710,10 +718,10 @@ def suggest_track_tags(handle, name: str, llm_cfg, description: str | None = Non
 
         parts = [f"{c} {', '.join(parsed[c])}" for c in ("scene", "mood", "emotion") if parsed[c]]
         if any(parsed.get(c) for c in ("scene", "mood", "emotion")):
-            if auto_apply_suggestion(name, parsed):
+            if auto_apply_suggestion(name, parsed, handle):
                 # 未手动打标 → AI 结果直接落曲目标签并消费候选（含陈旧条目）；
                 # 已手动打标绝不覆盖——走 update_suggestions 保留候选待确认。
-                clear_suggestion(name)
+                clear_suggestion(name, handle)
                 handle.log("识别完成（未手动打标，已自动采用）：" + "、".join(parts))
                 handle.progress(1.0, "完成")
                 return parsed
@@ -722,7 +730,8 @@ def suggest_track_tags(handle, name: str, llm_cfg, description: str | None = Non
                 "tags": parsed,
                 "suggested_at": datetime.now().isoformat(timespec="seconds"),
                 "model": llm_cfg.model_name,
-            })
+            }),
+            handle,
         )
         handle.log("识别完成：" + ("、".join(parts) if parts else "（无标签）"))
         handle.progress(1.0, "完成")
