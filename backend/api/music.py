@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from ..core import paths as core_paths
 from ..core.config import get_config
 from ..engines import music as music_engine
 from ..engines.audio import probe_duration
+from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Project
@@ -231,12 +234,28 @@ async def upload_track(file: UploadFile = File(...),
             target_folder = music_engine.validate_folder_name(folder)
         except ValueError as e:
             raise HTTPException(400, str(e))
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, f"上传内容为空（{name}）。")
     d = _library_dir()
     d.mkdir(parents=True, exist_ok=True)
     dest = d / name
+    # Stream to a sidecar temp file with the global size cap (same pattern as
+    # /api/files/upload) — a large admin upload must never sit in API-process
+    # memory.
+    fd, tmp_name = tempfile.mkstemp(prefix=".upload_", suffix=".tmp", dir=str(d))
+    tmp = Path(tmp_name)
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise HTTPException(413, "文件超过大小限制")
+                handle.write(chunk)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if size == 0:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, f"上传内容为空（{name}）。")
 
     cfg = get_config()
     ffprobe = cfg.ffmpeg.ffprobe_path
@@ -248,7 +267,7 @@ async def upload_track(file: UploadFile = File(...),
             raise HTTPException(
                 409, f"已存在同名音乐（{name}）——请改名后上传（不会覆盖）。"
             )
-        dest.write_bytes(data)
+        os.replace(tmp, dest)  # moves the staged bytes into place
         dur, _err = probe_duration(dest, ffprobe)
         if not math.isfinite(dur):
             dur = 0.0  # probe failure is non-blocking
@@ -264,15 +283,16 @@ async def upload_track(file: UploadFile = File(...),
     try:
         idx = music_engine.update_index(_mutate)
     except HTTPException:
+        tmp.unlink(missing_ok=True)
         raise
     except Exception as e:
         # A write failure may leave the file on disk without an index entry —
         # remove the orphan so a re-upload of the same name is not blocked.
-        try:
-            if dest.exists():
-                dest.unlink()
-        except OSError:
-            pass
+        for orphan in (dest, tmp):
+            try:
+                orphan.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise HTTPException(500, f"音乐写入失败：{e}")
     return {"name": name, "track": idx["tracks"][name]}
 
@@ -613,28 +633,11 @@ def move_tracks(body: TrackMove) -> dict:
 # tag management
 # --------------------------------------------------------------------------- #
 
-def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> None:
-    """Rewrite a (renamed) tag in the current workspace's own analysis cache
-    (``08_bgm/chapter_music_analysis.json``). Best-effort: no workspace / no
-    file / corrupt file -> nothing to do. The saved per-chapter assignments
-    (``08_bgm/bgm_assignments.json``) are NOT rewritten (they are a
-    historical record)."""
-    from ..core.paths import get_or_prepare_layout
-
-    layout = get_or_prepare_layout()
-    bgm = layout.bgm
-    if bgm is None or not bgm.exists():
-        return
-    f = bgm / "chapter_music_analysis.json"
-    if not f.exists():
-        return
-    try:
-        data = json.loads(f.read_bytes().decode("utf-8"))
-    except Exception:
-        return
-    chapters = data.get("chapters") if isinstance(data, dict) else None
+def _rewrite_analysis_tags(chapters, old: str, new: str | None, category: str) -> bool:
+    """Rewrite ``old`` → ``new`` in each chapter's ``category`` tag lists
+    (``new=None`` removes it). Returns True when any chapter changed."""
     if not isinstance(chapters, dict):
-        return
+        return False
     changed = False
     for ch in chapters.values():
         if not isinstance(ch, dict):
@@ -646,9 +649,33 @@ def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> Non
             ch[category] = [new if v == old else v for v in lst] if new else \
                 [v for v in lst if v != old]
             changed = True
-    if changed:
+    return changed
+
+
+def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> None:
+    """Rewrite a (renamed) tag in the current workspace's own analysis cache
+    (``08_bgm/chapter_music_analysis.json``). Best-effort: no workspace / no
+    file / corrupt file -> nothing to do. The saved per-chapter assignments
+    (``08_bgm/bgm_assignments.json``) are NOT rewritten (they are a
+    historical record).
+
+    The read → rewrite → publish cycle holds the cross-process
+    ``bgm_storage.storage_lock`` (shared with the Worker's own cache writes)
+    and publishes atomically, so a concurrent BGM analysis task cannot lose
+    either side's write."""
+    from ..core.paths import get_or_prepare_layout
+    from ..engines import bgm_storage
+
+    layout = get_or_prepare_layout()
+    bgm = layout.bgm
+    if bgm is None or not (bgm / bgm_storage.ANALYSIS_NAME).exists():
+        return
+    with bgm_storage.storage_lock(layout):
+        data = bgm_storage.load_analysis(layout)
+        if not _rewrite_analysis_tags(data.get("chapters"), old, new, category):
+            return
         try:
-            f.write_bytes(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+            bgm_storage.save_analysis(layout, data)
         except OSError:
             pass
 

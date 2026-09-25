@@ -6,6 +6,7 @@ database, so tasks remain visible across API and Worker restarts.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -264,7 +265,12 @@ def list_tasks(ctx: AuthContext = Depends(get_auth_context)) -> list[dict]:
 def stream_all_tasks(request: Request, ctx: AuthContext = Depends(get_auth_context)):
     """Stream snapshots and lifecycle events for the current project's tasks."""
 
-    def gen():
+    async def gen():
+        # Async generator on purpose: Starlette runs sync generators by
+        # borrowing a thread-pool worker for EVERY iteration, so the 0.5 s
+        # poll below would hold a worker per idle connection (a handful of
+        # open tabs exhausts the pool). An async generator sleeps on the
+        # event loop instead — no worker is occupied while waiting.
         seen: dict[str, int] = {}
         token = request.cookies.get(settings.session_cookie)
         next_auth_check = 0.0
@@ -286,7 +292,7 @@ def stream_all_tasks(request: Request, ctx: AuthContext = Depends(get_auth_conte
                 yield _sse(event)
             if not events:
                 yield _sse({"type": "ping"})
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(
         gen(),

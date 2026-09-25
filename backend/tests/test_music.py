@@ -405,6 +405,24 @@ def test_upload_bad_name_or_empty_400(sandbox):
     assert ei.value.status_code == 400
 
 
+def test_upload_oversized_streams_to_disk_and_hits_cap(sandbox, monkeypatch):
+    """Q3: uploads stream to a sidecar temp file under the global size cap
+    (no whole-file read into API-process memory). An oversized stub is
+    rejected with 413 and leaves no partial file or index entry behind."""
+    import dataclasses
+
+    monkeypatch.setattr(
+        api_music, "settings",
+        dataclasses.replace(api_music.settings, max_upload_bytes=1024),
+    )
+    with pytest.raises(HTTPException) as ei:
+        _upload("big.mp3", b"\x00" * 4096)
+    assert ei.value.status_code == 413
+    assert not (sandbox["lib"] / "big.mp3").exists()
+    assert not list(sandbox["lib"].glob(".upload_*.tmp"))  # temp cleaned up
+    assert "big.mp3" not in music_engine.load_index()["tracks"]
+
+
 def test_preview_ok_and_errors(sandbox):
     _upload("a.mp3")
     resp = api_music.preview_track("a.mp3")

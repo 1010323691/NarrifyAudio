@@ -418,6 +418,69 @@ def test_analysis_cache_update_uses_task_publication_handle(sandbox):
     assert not staged[0][0].exists()
 
 
+def test_bgm_analysis_rmw_is_exclusive_across_processes(sandbox):
+    """Q2: the API process (tag propagation) and the Worker process (analysis
+    cache writes) are separate OS processes — the in-process ``_BGMS_LOCK``
+    cannot coordinate them, so every read → modify → publish cycle holds the
+    cross-process ``storage_lock`` instead. A real child process plays the
+    worker: it takes the lock, publishes its own chapter entry and keeps the
+    lock held; the parent-side tag rewrite must block until that write
+    lands, then rewrite on top of it (no lost writes either way)."""
+    import subprocess
+    import sys
+
+    from backend.api import music as api_music
+
+    layout = core_paths.get_or_prepare_layout()
+    bgm_storage.save_analysis(layout, {
+        "version": 1, "model": "seed", "chapters": {
+            STEM: {"scene": [], "mood": ["紧张"], "emotion": [],
+                   "custom": ["旧标签"], "analyzed_at": "t", "edited": False},
+        },
+    })
+    child = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "from backend.engines import bgm_storage\n"
+        "bgm = Path(sys.argv[1])\n"
+        "layout = SimpleNamespace(bgm=bgm)\n"
+        "with bgm_storage.storage_lock(layout):\n"
+        "    data = bgm_storage.load_analysis(layout)\n"
+        "    data['chapters']['worker_chapter'] = {'scene': [], 'mood': [], "
+        "'emotion': [], 'custom': ['worker-tag'], 'analyzed_at': 'w', 'edited': False}\n"
+        "    bgm_storage.save_analysis(layout, data)\n"
+        "    (bgm / 'child.locked').touch()\n"
+        "    time.sleep(1.5)  # hold the lock across a (slow) model call\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child, str(layout.bgm)],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        marker = layout.bgm / "child.locked"
+        deadline = time.time() + 30
+        while not marker.exists() and proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "child process never acquired the storage lock"
+        started = time.monotonic()
+        api_music._propagate_chapter_analysis("旧标签", "新标签", "custom")
+        blocked = time.monotonic() - started
+    finally:
+        proc.wait(timeout=30)
+        output = proc.stdout.read().decode("utf-8", "replace") if proc.stdout else ""
+    assert proc.returncode == 0, output
+    # The API-side rewrite really waited for the other process's critical
+    # section — without storage_lock it would have skipped straight through.
+    assert blocked >= 1.0
+    # No lost writes in either direction: the rename landed on top of the
+    # worker's write, and the worker's entry survived the parent's rewrite.
+    final = bgm_storage.load_analysis(layout)
+    assert final["chapters"][STEM]["custom"] == ["新标签"]
+    assert final["chapters"]["worker_chapter"]["custom"] == ["worker-tag"]
+
+
 def test_list_chapter_stems(sandbox):
     layout = core_paths.get_or_prepare_layout()
     assert bgm_engine.list_chapter_stems(layout) == [STEM, STEM2]

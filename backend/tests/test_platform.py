@@ -1486,3 +1486,119 @@ def test_admin_memory_metrics_use_container_cgroup_limit(tmp_path):
     (tmp_path / "memory.current").write_text("1500000")
     (tmp_path / "memory.max").write_text("2000000")
     assert _memory_usage(8_000_000, tmp_path) == (1_500_000, 2_000_000)
+
+
+def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
+    """Q4: the SSE body must be an *async* generator. Starlette bridges sync
+    generators through ``iterate_in_threadpool`` — one thread-pool worker per
+    0.5 s poll — so idle connections would occupy workers linearly. An async
+    generator drives on the event loop and merely awaits while waiting."""
+    import asyncio
+    import inspect
+
+    from starlette.concurrency import iterate_in_threadpool
+    from starlette.requests import Request
+
+    from backend.api import tasks as api_tasks
+    from backend.platform.config import settings
+    from backend.platform.deps import AuthContext
+    from backend.platform.security import load_session
+
+    _register(client, f"{uuid.uuid4()}@example.com")
+    token = client.cookies.get(settings.session_cookie)
+    assert token
+    with SessionLocal() as db:
+        session = load_session(db, token, touch=False)
+        assert session is not None
+        ctx = AuthContext(user=session.user, session=session)
+    request = Request({
+        "type": "http", "method": "GET", "path": "/api/tasks/stream",
+        "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
+        "query_string": b"",
+    })
+
+    # Structural: starlette only thread-pool-bridges NON-async iterables, so
+    # an unbridged async body is precisely what keeps idle connections off
+    # the worker pool.
+    body = api_tasks.stream_all_tasks(request, ctx).body_iterator
+    assert inspect.isasyncgen(body)
+    body_code = getattr(body, "ag_code", None) or getattr(body, "gi_code", None)
+    assert body_code is not iterate_in_threadpool.__code__, \
+        "SSE body is thread-pool bridged — idle connections would occupy workers"
+
+    # Functional: the generator runs to its first yield (driven on a bare
+    # event loop — a blocking time.sleep would freeze the loop here).
+    async def first_chunk():
+        gen = api_tasks.stream_all_tasks(request, ctx).body_iterator
+        try:
+            return await gen.__anext__()
+        finally:
+            await gen.aclose()
+
+    assert "snapshot_all" in asyncio.run(first_chunk())
+
+
+def test_task_stream_serves_concurrent_readers(client: TestClient):
+    """Several concurrent SSE connections each get their snapshot and their
+    poll tick. Driven straight against the endpoint's StreamingResponse ASGI
+    callable on one event loop (the test client's httpx transport buffers
+    whole responses and cannot follow an infinite stream) — so every
+    generator iteration also runs on the loop itself: exactly the
+    no-thread-worker shape the production server gets from the async body."""
+    import asyncio
+    import time
+
+    from backend.api import tasks as api_tasks
+    from backend.platform.config import settings
+    from backend.platform.deps import AuthContext
+    from backend.platform.security import load_session
+    from starlette.requests import Request
+
+    _register(client, f"{uuid.uuid4()}@example.com")
+    token = client.cookies.get(settings.session_cookie)
+    assert token
+    with SessionLocal() as db:
+        session = load_session(db, token, touch=False)
+        assert session is not None
+        ctx = AuthContext(user=session.user, session=session)
+    request = Request({
+        "type": "http", "method": "GET", "path": "/api/tasks/stream",
+        "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
+        "query_string": b"",
+    })
+
+    async def drive(num_chunks: int) -> tuple:
+        chunks: list = []
+        start: dict = {}
+        got_all = asyncio.Event()
+
+        async def receive():
+            await got_all.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                start.update(message)
+            elif message["type"] == "http.response.body" and message.get("body"):
+                chunks.append(message["body"])
+                if len(chunks) >= num_chunks:
+                    got_all.set()
+
+        started = time.monotonic()
+        await asyncio.wait_for(
+            api_tasks.stream_all_tasks(request, ctx)(
+                {"type": "http", "headers": []}, receive, send,
+            ),
+            timeout=15,
+        )
+        return start, chunks, time.monotonic() - started
+
+    async def probe():
+        return await asyncio.gather(drive(2), drive(2))
+
+    (start_a, chunks_a, _), (start_b, chunks_b, _) = asyncio.run(probe())
+    for start, chunks in ((start_a, chunks_a), (start_b, chunks_b)):
+        assert start["status"] == 200
+        assert b"text/event-stream" in dict(start["headers"]).get(b"content-type", b"")
+        assert b"snapshot_all" in chunks[0]
+        assert b"ping" in chunks[1]  # the 0.5 s poll ticked while the reader was idle
