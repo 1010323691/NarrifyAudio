@@ -11,8 +11,7 @@ from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
 from ..platform.models import User, UserQuotaAccount
-from ..platform.quota_config import initial_quota_units
-from ..platform.registration_config import registration_enabled
+from ..platform.system_config import initial_quota_units, registration_enabled
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
 from ..platform.storage import project_workspace_path
 from ..services.projects import create_project

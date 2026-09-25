@@ -1,12 +1,37 @@
-"""Cached access to administrator-managed application feature defaults."""
+"""SystemConfig-key accessors: quota defaults, registration, feature defaults.
+
+One module per config domain — these three keys are all administrator-managed
+SystemConfig reads, and the feature cache must live beside its readers.
+"""
 from __future__ import annotations
 
 import threading
 import time
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from .config import settings
 from .database import SessionLocal
 from .models import SystemConfig
+
+
+def initial_quota_units(db: Session) -> int:
+    config = db.get(SystemConfig, "quota.initial_units")
+    if config is None or not isinstance(config.value, dict):
+        return max(0, settings.initial_quota_units)
+    try:
+        return max(0, int(config.value.get("units", settings.initial_quota_units)))
+    except (TypeError, ValueError):
+        return max(0, settings.initial_quota_units)
+
+
+def registration_enabled(db: Session) -> bool:
+    config = db.get(SystemConfig, "registration.enabled")
+    if config is None or not isinstance(config.value, dict):
+        return settings.registration_enabled
+    value = config.value.get("enabled", settings.registration_enabled)
+    return bool(value)
 
 
 _lock = threading.RLock()

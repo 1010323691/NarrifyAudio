@@ -236,7 +236,7 @@ def reset_task_config(token) -> None:
 def _platform_config() -> dict[str, Any]:
     """Read administrator defaults without owning platform database access."""
     try:
-        from ..platform.feature_config import load_feature_defaults
+        from ..platform.system_config import load_feature_defaults
 
         return load_feature_defaults()
     except Exception:
@@ -245,7 +245,7 @@ def _platform_config() -> dict[str, Any]:
 
 def set_platform_config_cache(value: dict[str, Any]) -> None:
     """Compatibility adapter for invalidating the platform feature-config cache."""
-    from ..platform.feature_config import update_feature_defaults_cache
+    from ..platform.system_config import update_feature_defaults_cache
 
     update_feature_defaults_cache(value)
 
