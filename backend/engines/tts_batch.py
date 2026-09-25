@@ -348,7 +348,7 @@ def _parse_restore_cap(line: str):
     return None
 
 
-def _build_segments(script, indices=None):
+def build_segments(script, indices=None):
     """Build the ordered per-line synthesis segments (pure).
 
     ``index`` is the line's position in the *full* script, so per-segment filenames
@@ -617,7 +617,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
 
     # The full set of synthesizable segments (the manifest always describes exactly these) and
     # the subset this run will actually synthesize (a resume = the not-yet-done ones).
-    all_segments = _build_segments(script)
+    all_segments = build_segments(script)
     voice_params_by_index = (
         segment_voice_params(all_segments, voice_config)
         if vc_path.exists() else None
@@ -867,7 +867,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                     # restore the old gear (LIFO, one demotion per restore). An empty /
                     # unparseable in-flight set records nothing — a zero-chars record would
                     # be inert and would block the records behind it in the LIFO stack.
-                    # (chars = stripped code points — _build_segments already strips the
+                    # (chars = stripped code points — build_segments already strips the
                     # text, so this matches the worker's per-row chars exactly.)
                     timeout_chars = sum(len(by_index[i]["text"]) for i in in_flight if i in by_index)
                     if timeout_chars > 0:
@@ -1031,7 +1031,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             f.pkg = pkg
             f.out_dir = layout.audio_chunk / pkg
             f.manifest_path = f.out_dir / "manifest.json"
-            f.all_segments = _build_segments(script)
+            f.all_segments = build_segments(script)
             f.by_index = {s["index"]: s for s in f.all_segments}
             f.voice_signatures = (
                 segment_voice_signatures(f.all_segments, voice_config)

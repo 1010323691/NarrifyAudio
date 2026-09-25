@@ -763,7 +763,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
         return out
     if not isinstance(data, list) or not data:
         return out
-    segs = Batch._build_segments(data)
+    segs = Batch.build_segments(data)
     pkg_dir = out_dir or layout.audio_chunk / Batch.package_for(src)
     expected_params = _expected_voice_params(layout, segs, voice_config)
     manifest = Batch.read_manifest(pkg_dir)
@@ -855,7 +855,7 @@ def batch_status(script: str | None = None,
     if not isinstance(data, list) or not data:
         return {"total": 0, "completed": 0, "remaining": 0}
     out_dir = layout.audio_chunk / Batch.package_for(src)
-    segs = Batch._build_segments(data)
+    segs = Batch.build_segments(data)
     return Batch.count_completion(
         segs, Batch.read_manifest(out_dir), out_dir=out_dir,
         expected_voice_params=_expected_voice_params(
@@ -942,7 +942,7 @@ def _package_merge_status(name: str, layout) -> dict:
         except Exception:  # noqa: BLE001 — a corrupt source just degrades to the manifest
             data = None
         if isinstance(data, list) and data:
-            segs = Batch._build_segments(data)
+            segs = Batch.build_segments(data)
             c = Batch.count_completion(
                 segs, manifest, out_dir=layout.audio_chunk / name,
                 expected_voice_params=_expected_voice_params(

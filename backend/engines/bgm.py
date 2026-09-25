@@ -794,7 +794,7 @@ def load_segment_timeline(layout, stem: str, assignment: dict | None = None) -> 
 def _segment_audio_inputs(layout, stem: str, ffprobe_path: str):
     """Load a complete, current paragraph audio snapshot for one chapter."""
     entries = _load_parsed_entries(layout, stem)
-    expected = tts_batch._build_segments(entries)
+    expected = tts_batch.build_segments(entries)
     expected_indices = {s["index"] for s in expected}
     package = tts_batch.package_for(Path(f"{stem}.json"))
     manifest = tts_batch.read_manifest(layout.audio_chunk / package)
@@ -1527,7 +1527,7 @@ def recompute_segment_timelines(
                 "——请先运行「音频合成」。"
             )
         segs, _missing = collect_segments(list(manifest.values()), layout.workspace)
-        expected_segments = tts_batch._build_segments(entries)
+        expected_segments = tts_batch.build_segments(entries)
         expected_indices = {s["index"] for s in expected_segments}
         actual_indices = [s["index"] for s in segs]
         for s in segs:

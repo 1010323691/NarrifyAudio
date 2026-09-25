@@ -9,7 +9,7 @@ character on the 角色配音 page.
 from __future__ import annotations
 
 from backend.api.tts import _voice_usable
-from backend.engines.tts_batch import _build_segments
+from backend.engines.tts_batch import build_segments
 
 
 def _entry(speaker: str, text: str, instruct: str = "", pause_after=None, **extra):
@@ -21,53 +21,53 @@ def _entry(speaker: str, text: str, instruct: str = "", pause_after=None, **extr
 
 
 # --------------------------------------------------------------------------- #
-# _build_segments — ordering & index assignment
+# build_segments — ordering & index assignment
 # --------------------------------------------------------------------------- #
 
-def test_build_segments_in_json_order():
+def testbuild_segments_in_json_order():
     script = [_entry("A", "a"), _entry("B", "b"), _entry("A", "c")]
-    segs = _build_segments(script)
+    segs = build_segments(script)
     assert [s["index"] for s in segs] == [0, 1, 2]
     assert [s["speaker"] for s in segs] == ["A", "B", "A"]
     assert [s["text"] for s in segs] == ["a", "b", "c"]
 
 
-def test_build_segments_index_is_full_position():
+def testbuild_segments_index_is_full_position():
     # A filtered run must keep each segment's index = its position in the full script.
     script = [_entry("A", "a"), _entry("B", "b"), _entry("C", "c")]
-    segs = _build_segments(script, indices=[2, 0])
+    segs = build_segments(script, indices=[2, 0])
     assert [s["index"] for s in segs] == [0, 2]  # re-sorted back to JSON order
     assert [s["speaker"] for s in segs] == ["A", "C"]
 
 
-def test_build_segments_skips_empty_text():
+def testbuild_segments_skips_empty_text():
     script = [_entry("A", "  "), _entry("B", "b"), _entry("C", "")]
-    segs = _build_segments(script)
+    segs = build_segments(script)
     assert [s["index"] for s in segs] == [1]
     assert segs[0]["speaker"] == "B"
 
 
-def test_build_segments_ignores_unknown_indices():
+def testbuild_segments_ignores_unknown_indices():
     script = [_entry("A", "a"), _entry("B", "b")]
-    assert _build_segments(script, indices=[5, 99]) == []
+    assert build_segments(script, indices=[5, 99]) == []
 
 
-def test_build_segments_falls_back_to_type_for_speaker():
+def testbuild_segments_falls_back_to_type_for_speaker():
     # A script entry with only ``type`` (no ``speaker``) still yields a speaker label.
     script = [{"type": "NARRATOR", "text": "n", "instruct": ""}]
-    segs = _build_segments(script)
+    segs = build_segments(script)
     assert segs[0]["speaker"] == "NARRATOR"
 
 
-def test_build_segments_copies_pause_after_and_instruct():
+def testbuild_segments_copies_pause_after_and_instruct():
     script = [_entry("A", "a", instruct="warm", pause_after=900)]
-    segs = _build_segments(script)
+    segs = build_segments(script)
     assert segs[0]["instruct"] == "warm"
     assert segs[0]["pause_after"] == 900
 
 
-def test_build_segments_empty_script():
-    assert _build_segments([]) == []
+def testbuild_segments_empty_script():
+    assert build_segments([]) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -175,7 +175,7 @@ def test_manifest_writer_uses_workspace_publication_handle(tmp_path):
 def workspace(monkeypatch, tmp_path):
     """A throwaway project root + workspace so get_or_prepare_layout()/resolve_parsed_json() resolve.
 
-    Seeds one parsed script: two non-empty lines + one empty (which ``_build_segments``
+    Seeds one parsed script: two non-empty lines + one empty (which ``build_segments``
     skips). No voice_config is written — the run still completes because ``run_worker``
     is stubbed to report every segment ok.
     """
@@ -192,7 +192,7 @@ def workspace(monkeypatch, tmp_path):
         json.dumps([
             {"speaker": "A", "text": "hello"},
             {"speaker": "B", "text": "world"},
-            {"speaker": "A", "text": ""},  # empty -> skipped by _build_segments
+            {"speaker": "A", "text": ""},  # empty -> skipped by build_segments
         ]),
         encoding="utf-8",
     )
