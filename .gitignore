@@ -28,5 +28,8 @@ install_tts_env.log
 /.narrify/
 /storage/
 
+# 0015 migration backup dumps (contain user data — never commit)
+.backups/
+
 # --- 系统 / 编辑器 ---
 .DS_Store

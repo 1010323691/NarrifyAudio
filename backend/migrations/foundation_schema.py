@@ -1,4 +1,4 @@
-"""Frozen ORM schema from the initial platform migration (f79a78a)."""
+"""Frozen ORM schema from the 0001 platform-foundation migration."""
 from __future__ import annotations
 
 import uuid

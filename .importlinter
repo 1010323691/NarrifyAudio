@@ -1,6 +1,6 @@
-# NarrifyAudio backend layering contract (plan S3/Q17, batch 2 "import-linter rule in place").
+# NarrifyAudio backend layering contract (plan S3/Q17, batch 3 (ba96d6d) "import-linter rule in place").
 # Read by import-linter (dev-only, not in requirements files). Run with:
-#   .venv\Scripts\lint-imports
+#   .venv\Scripts\lint-imports   (or: npm run lint:imports / part of npm run build:all)
 # Config syntax: https://import-linter.readthedocs.io/en/latest/reference/user_interface.html
 # Keep this file ASCII-only: the linter reads it with the platform default encoding.
 

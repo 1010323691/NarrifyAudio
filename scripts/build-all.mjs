@@ -49,4 +49,16 @@ run(npm, npmArgs, '前端 TypeScript + Vite 构建')
 // compileall 只做 Python 语法/字节码检查，不导入 torch，也不会下载模型。
 run(python, ['-m', 'compileall', '-q', 'backend', 'tts-engine'], '后端 Python 编译检查')
 
+// 分层门禁：.importlinter 的四层契约（api -> services -> platform -> core），
+// 反向导入即非零退出。
+const lintImportsCandidates = process.platform === 'win32'
+  ? [join(root, '.venv', 'Scripts', 'lint-imports.exe')]
+  : [join(root, '.venv', 'bin', 'lint-imports')]
+const lintImports = lintImportsCandidates.find((candidate) => existsSync(candidate))
+if (!lintImports) {
+  console.error('.venv 中未找到 lint-imports（import-linter），请先运行 install_tts_env.ps1 安装依赖。')
+  process.exit(1)
+}
+run(lintImports, [], '分层门禁 lint-imports')
+
 console.log('\n===== build:all complete =====')

@@ -20,7 +20,7 @@ npm.cmd run dev                              # 启动 Vite 前端
 \.venv\Scripts\python.exe -m backend.main # 启动 FastAPI（127.0.0.1:8642）
 .\start.ps1                                 # 检查环境并启动后端 + 前端
 npm.cmd run build                            # 类型检查并构建生产版本
-npm.cmd run build:all                        # 前端构建 + 后端 Python 编译检查
+npm.cmd run build:all                        # 前端构建 + 后端 Python 编译检查 + 分层门禁（lint-imports）
 npm.cmd run typecheck                        # 执行前端 TypeScript/Vue 类型检查
 \.venv\Scripts\python.exe -m pytest backend/tests
 ```

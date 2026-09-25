@@ -167,7 +167,7 @@ npm.cmd run dev                 # 仅启动前端
 .\.venv\Scripts\python.exe -m backend.worker # 仅启动 Worker
 npm.cmd run typecheck           # 前端类型检查
 npm.cmd run build               # 类型检查并构建前端
-npm.cmd run build:all           # 前端构建和后端编译检查
+npm.cmd run build:all           # 前端构建 + 后端编译检查 + 分层门禁（lint-imports）
 ```
 
 后端监听 `127.0.0.1:8642`。本地 API 文档可在启动后访问 <http://127.0.0.1:8642/docs>。
