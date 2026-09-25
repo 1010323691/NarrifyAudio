@@ -21,7 +21,7 @@ from ..platform.project_context import active_project
 from ..platform.models import Task as DurableTask, TaskEvent
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
-from ..services.task_operations import owned_task
+from ..services.task_operations import owned_task, task_module
 from ..services.tasks import cancel_task_record
 from .task_operations import retry_task as retry_durable_task
 
@@ -42,19 +42,6 @@ def _legacy_status(status: str) -> str:
     if status == "cancelling":
         return "running"
     return status
-
-
-def _durable_module(task_type: str) -> str:
-    return {
-        "voices.foundation": "voices-foundation",
-        "voices.clone": "voices-clone",
-        "tts.batch": "tts-batch",
-        "tts.merge": "merge",
-        "bgm.analysis": "bgm-analysis",
-        "bgm.segment": "bgm-segment",
-        "bgm.mix": "bgm-mix",
-        "music.suggest_tags": "music-ai-tags",
-    }.get(task_type, task_type.split(".", 1)[0])
 
 
 def _durable_label(task: DurableTask) -> str:
@@ -134,7 +121,7 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
     result = task.result.result if task.result is not None else {}
     return {
         "id": task.id,
-        "module": _durable_module(task.task_type),
+        "module": task_module(task.task_type),
         "label": _durable_label(task),
         "seq": int(task.created_at.timestamp() * 1000),
         "status": _legacy_status(task.status),

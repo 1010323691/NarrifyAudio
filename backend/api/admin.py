@@ -18,6 +18,7 @@ from ..platform.models import AuditLog, Project, ProjectFile, QuotaReservation, 
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
+from ..services.task_operations import task_worker_group
 from ..services.tasks import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
@@ -639,19 +640,6 @@ def _gpu_status() -> list[dict]:
         return []
 
 
-def _task_module(task_type: str) -> str:
-    prefix = task_type.split(".", 1)[0]
-    if prefix in {"script", "music"}:
-        return "llm"
-    if prefix in {"tts", "voices"}:
-        return "tts"
-    if prefix in {"audio", "bgm"}:
-        return "audio"
-    if prefix in {"book", "text"}:
-        return "system"
-    return "worker"
-
-
 def _list_workers(db: Session) -> list[dict]:
     rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
     return [
@@ -729,7 +717,7 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
     except ImportError:
         pass
     recent_errors = [
-        {"id": task.id, "time": task.updated_at.isoformat(), "module": _task_module(task.task_type),
+        {"id": task.id, "time": task.updated_at.isoformat(), "module": task_worker_group(task.task_type),
          "type": task.error_code or task.status, "message": task.error_message or task.status}
         for task in recent_failures
     ]
@@ -789,7 +777,7 @@ def admin_events(level: str = "all", module: str = "all", search: str = "", limi
     cutoff = utcnow() - timedelta(hours=max(1, min(since_hours, 24 * 30)))
     task_rows = db.scalars(select(Task).where(Task.status.in_(("failed", "timeout")), Task.updated_at >= cutoff).order_by(Task.updated_at.desc()).limit(100)).all()
     audit_rows = db.scalars(select(AuditLog).where(AuditLog.created_at >= cutoff).order_by(AuditLog.created_at.desc()).limit(100)).all()
-    rows = ([{"id": task.id, "time": task.updated_at.isoformat(), "level": "error", "module": _task_module(task.task_type),
+    rows = ([{"id": task.id, "time": task.updated_at.isoformat(), "level": "error", "module": task_worker_group(task.task_type),
               "type": task.error_code or task.status, "message": task.error_message or task.status} for task in task_rows] +
             [{"id": audit.id, "time": audit.created_at.isoformat(), "level": "info", "module": "system",
               "type": audit.action, "message": f"{audit.target_type} {audit.target_id}"} for audit in audit_rows])

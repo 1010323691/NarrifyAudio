@@ -36,3 +36,40 @@ def owned_project(db: Session, user_id: str, project_id: str) -> Project | None:
         Project.owner_id == user_id,
         Project.deleted_at.is_(None),
     ))
+
+
+# Fine-grained display label per task type for the user task list.
+_MODULE_LABELS = {
+    "voices.foundation": "voices-foundation",
+    "voices.clone": "voices-clone",
+    "tts.batch": "tts-batch",
+    "tts.merge": "merge",
+    "bgm.analysis": "bgm-analysis",
+    "bgm.segment": "bgm-segment",
+    "bgm.mix": "bgm-mix",
+    "music.suggest_tags": "music-ai-tags",
+}
+
+
+def task_module(task_type: str) -> str:
+    """Fine-grained module label shown in the user task list."""
+    return _MODULE_LABELS.get(task_type, task_type.split(".", 1)[0])
+
+
+# Coarse execution group per task prefix for the admin console.
+# A different axis from task_module (group of workers, not display label).
+_WORKER_GROUPS = {
+    "script": "llm",
+    "music": "llm",
+    "tts": "tts",
+    "voices": "tts",
+    "audio": "audio",
+    "bgm": "audio",
+    "book": "system",
+    "text": "system",
+}
+
+
+def task_worker_group(task_type: str) -> str:
+    """Coarse worker group (llm/tts/audio/system/worker) for the admin console."""
+    return _WORKER_GROUPS.get(task_type.split(".", 1)[0], "worker")

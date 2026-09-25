@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api.admin import _task_module
+from backend.services.task_operations import task_worker_group
 from backend.services.admin_storage import scan_project_directory
 from backend.core import observability
 from backend.main import app
@@ -240,7 +240,7 @@ def test_workspace_scan_skips_symlinked_directories(tmp_path: Path):
     [("script.parse", "llm"), ("tts.batch", "tts"), ("bgm.mix", "audio"), ("text.format", "system")],
 )
 def test_admin_event_module_mapping(task_type: str, expected: str):
-    assert _task_module(task_type) == expected
+    assert task_worker_group(task_type) == expected
 
 
 def test_api_requests_today_uses_a_separate_daily_aggregate(monkeypatch: pytest.MonkeyPatch):
