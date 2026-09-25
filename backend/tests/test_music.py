@@ -39,7 +39,7 @@ from backend.api import music as api_music
 from backend.core import concurrency
 from backend.core import config as core_config
 from backend.core import paths as core_paths
-from backend.core.tasks import TERMINAL, TaskStatus, get_task_manager
+from backend.tests.task_support import TERMINAL, TaskStatus, get_task_manager
 from backend.engines import music as music_engine
 
 
@@ -193,14 +193,6 @@ def test_is_generic_track():
     assert music_engine.is_generic_track(
         {"enabled": True, "tags": {**empty, "custom": ["  "]}}
     ) is True
-
-
-def test_find_tag_category_first_bucket_wins():
-    registry = music_engine._default_index()["tags"]
-    # 悲伤 is registered in BOTH mood and emotion (grandfathered) — mood comes first
-    assert music_engine.find_tag_category(registry, "悲伤") == "mood"
-    assert music_engine.find_tag_category(registry, "战斗") == "scene"
-    assert music_engine.find_tag_category(registry, "未注册") is None
 
 
 def test_all_tag_names():

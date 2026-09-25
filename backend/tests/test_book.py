@@ -291,26 +291,6 @@ def test_sequence_clean():
 
 
 # --------------------------------------------------------------------------- #
-# ZIP
-# --------------------------------------------------------------------------- #
-
-def test_build_zip_roundtrip(tmp_path):
-    out = tmp_path / "out.zip"
-    B.build_zip(
-        [("分册01.txt", "第一章内容".encode("utf-8")),
-         ("分册02.txt", "第二章内容".encode("utf-8"))],
-        out,
-    )
-    import zipfile
-
-    with zipfile.ZipFile(out) as zf:
-        assert zf.namelist() == ["分册01.txt", "分册02.txt"]
-        assert zf.read("分册01.txt") == "第一章内容".encode("utf-8")
-        # STORED (no compression) -> compress_type is ZIP_STORED
-        assert zf.infolist()[0].compress_type == zipfile.ZIP_STORED
-
-
-# --------------------------------------------------------------------------- #
 # Smart recognition (smart_repair — mechanical chapter-structure repair)
 # --------------------------------------------------------------------------- #
 

@@ -130,16 +130,6 @@ def is_generic_track(track: dict) -> bool:
     )
 
 
-def find_tag_category(registry: dict[str, list[str]], name: str) -> str | None:
-    """The FIRST category (in :data:`TAG_CATEGORIES` order) whose registry
-    bucket contains ``name`` — or ``None`` when the name is not registered."""
-    for cat in TAG_CATEGORIES:
-        vals = registry.get(cat)
-        if isinstance(vals, list) and name in vals:
-            return cat
-    return None
-
-
 def all_tag_names(registry: dict[str, list[str]]) -> set[str]:
     """Every registered tag name (across all four buckets)."""
     names: set[str] = set()

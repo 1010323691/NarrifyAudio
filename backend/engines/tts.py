@@ -26,7 +26,6 @@ from ..core.paths import PROJECT_ROOT
 IMPLEMENTED = True
 NOT_READY_MSG = "TTS 引擎未就绪：请先运行 install_tts_env.ps1 安装共享的 .venv 环境。"
 
-DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 DEFAULT_LANGUAGE = "chinese"
 
 
@@ -259,6 +258,3 @@ def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix
         raise RuntimeError(msg)
     return stderr_tail
 
-
-# Compatibility alias for Python integrations using the former name.
-run_worker = run_tts_subprocess

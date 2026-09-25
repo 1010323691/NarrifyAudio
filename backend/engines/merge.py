@@ -31,8 +31,6 @@ from ..core.task_control import TaskCancelled
 from .tts import resolve_engine, run_tts_subprocess
 from . import tts_batch as Batch
 
-IMPLEMENTED = True
-
 # Segments per part WAV in the two-stage merge (passed as the worker's --merge-batch-size).
 MERGE_BATCH_SIZE = 100
 
@@ -332,7 +330,3 @@ def merge_audio_package(handle, m4b: bool = False, package: str | None = None) -
         "segments": len(segs),
         "size": size,
     }
-
-
-# Compatibility alias for integrations using the former generic name.
-run = merge_audio_package

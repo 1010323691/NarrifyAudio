@@ -64,7 +64,6 @@ from .tts_batch import (
     invalidate_speaker_outputs,
 )
 
-IMPLEMENTED = True
 
 # How much local context (entries, on each side) is attached to each sampled target
 # line, and how many target lines are drawn from each of the front / middle / back bands.
@@ -1135,6 +1134,3 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         "results": results,
     }
 
-
-# Compatibility alias for callers using the historical engine function name.
-make_clones = generate_voice_candidates

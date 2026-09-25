@@ -322,7 +322,7 @@ def test_run_spawns_only_after_slot(workspace, monkeypatch, fresh_gate):
     captured = {}
     _stub_engine(monkeypatch, captured)
     handle = _Handle()
-    t = threading.Thread(target=merge.run, args=(handle, False, "pkg"), daemon=True)
+    t = threading.Thread(target=merge.merge_audio_package, args=(handle, False, "pkg"), daemon=True)
     t.start()
     time.sleep(0.5)  # plenty of cooperative-poll cycles for the run to reach the gate
     assert "cmd" not in captured  # nothing spawned while the slot is held

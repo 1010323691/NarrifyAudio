@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
-from ..platform.models import AuditLog, User, UserQuotaAccount
+from ..platform.models import User, UserQuotaAccount
 from ..platform.quota_config import initial_quota_units
 from ..platform.registration_config import registration_enabled
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
@@ -107,14 +107,3 @@ def logout(response: Response, ctx: AuthContext = Depends(get_auth_context), _: 
     response.delete_cookie(settings.session_cookie, path="/")
     response.delete_cookie(settings.csrf_cookie, path="/")
     return {"ok": True}
-
-
-@router.post("/password")
-def change_password(payload: Credentials, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    _validate_password(payload.password)
-    user.password_hash = hash_password(payload.password)
-    for session in user.sessions:
-        revoke_session(session)
-    db.add(AuditLog(actor_user_id=user.id, action="auth.password_changed", target_type="user", target_id=user.id))
-    db.commit()
-    return {"ok": True, "message": "密码已修改，请重新登录"}

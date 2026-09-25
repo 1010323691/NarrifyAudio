@@ -22,7 +22,8 @@
   ``merge_gate`` balance).
 
 Everything is sandboxed like ``test_music.py`` (project root + music library dir
-monkeypatched into a tmp dir); tasks run through the REAL TaskManager.
+monkeypatched into a tmp dir); tasks run through the test-only thread executor
+(``backend.tests.task_support``).
 """
 from __future__ import annotations
 
@@ -42,7 +43,7 @@ import pytest
 from backend.core import config as core_config
 from backend.core import paths as core_paths
 from backend.core import concurrency
-from backend.core.tasks import TERMINAL, TaskStatus, get_task_manager
+from backend.tests.task_support import TERMINAL, TaskStatus, get_task_manager
 from backend.engines import bgm as bgm_engine
 from backend.engines import bgm_storage
 from backend.engines import merge as merge_engine

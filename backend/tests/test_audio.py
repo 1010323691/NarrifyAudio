@@ -39,30 +39,6 @@ def test_parse_duration_to_seconds():
     assert math.isnan(A.parse_duration_to_seconds(None))
 
 
-def test_format_duration():
-    assert A.format_duration(0) == "0:00"
-    assert A.format_duration(90) == "1:30"
-    assert A.format_duration(61) == "1:01"
-    assert A.format_duration(3599) == "59:59"
-    assert A.format_duration(3600) == "1:00:00"
-    assert A.format_duration(3661) == "1:01:01"
-    assert A.format_duration(-5) == "0:00"
-    assert A.format_duration(float("nan")) == "—"
-    assert A.format_duration(None) == "—"
-
-
-def test_format_bytes():
-    assert A.format_bytes(0) == "0 B"
-    assert A.format_bytes(500) == "500 B"
-    assert A.format_bytes(1023) == "1023 B"
-    assert A.format_bytes(1024) == "1 KB"
-    assert A.format_bytes(1536) == "2 KB"       # i==0 → 0 decimals → rounds
-    assert A.format_bytes(1048576) == "1.0 MB"
-    assert A.format_bytes(1610612736) == "1.5 GB"
-    assert A.format_bytes(float("nan")) == "—"
-    assert A.format_bytes(None) == "—"
-
-
 def test_get_extension():
     assert A.get_extension("song.mp3") == "mp3"
     assert A.get_extension("song.MP3") == "mp3"

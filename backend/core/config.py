@@ -60,12 +60,10 @@ class AudioConfig(BaseModel):
 class TTSConfig(BaseModel):
     # Local Qwen3-TTS engine — runs in the shared ``.venv`` as a one-shot subprocess
     # (see ``backend/engines/tts.py``); the app backend never imports torch directly.
-    enabled: bool = True
     model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"  # CustomVoice model id
     # The other two Qwen3-TTS 1.7B variants, loaded by the worker for clone / design.
     base_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"  # voice cloning
     design_model: str = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"  # text -> voice
-    speaker: str = "serena"  # default voice / speaker
     language: str = "chinese"  # default language
     device: str = "auto"  # auto | cuda | cpu | mps
     # Merge pause defaults (ported from the source project's TTS config): silence
@@ -397,11 +395,6 @@ def set_workspace_pointer(path: str) -> None:
         data.setdefault("paths", {})["working_dir"] = path
         _write_config_file(TEMPLATE_FILE, AppConfig.model_validate(data))
         reset_config_cache()
-
-
-def clear_workspace() -> None:
-    """Clear the pointer (re-locks the pipeline); config falls back to the template."""
-    set_workspace_pointer("")
 
 
 def init_workspace_config(ws: Path) -> None:

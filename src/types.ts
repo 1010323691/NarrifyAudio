@@ -750,5 +750,3 @@ export interface BgmPackageResult {
   base: string
 }
 
-
-/** Compatibility name for voice clone candidate-generation options. */

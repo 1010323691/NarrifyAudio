@@ -1,12 +1,12 @@
 """Unified logging: a rotating file (``<workspace>/logs/app.log``) plus console.
 
-The file handler *follows the active workspace*: it is (re)targeted whenever the
-workspace changes, and is absent (console-only) while no workspace is set — the
-app never writes logs into the project directory. The root-logger level is taken
-from the config so it can be changed at runtime (requirement #6); routine
-``uvicorn.access`` lines are demoted to keep the log readable. (Modules currently
-report through the task system's live logs; this setup exists for anything that
-does use the standard ``logging``.)
+Pointed at once from the app lifespan: the file handler targets the workspace's
+``logs/app.log`` and is absent (console-only) while no workspace is set — the
+app never writes logs into the project directory. The root-logger level is
+taken from the config so it can be changed at runtime; routine
+``uvicorn.access`` lines are demoted to keep the log readable. (Durable task
+activity is reported through the task platform's TaskEvent log; this setup
+serves the standard ``logging`` used by everything else.)
 """
 from __future__ import annotations
 
@@ -45,14 +45,13 @@ class _ExpectedProactorDisconnectFilter(logging.Filter):
 
 def setup_logging(logs_dir: Path | None, level: str = "INFO") -> None:
     """Point logging at ``logs_dir/app.log`` (or console-only when ``logs_dir`` is
-    ``None``). Safe to call repeatedly — at startup and on every workspace change:
-    only the file handler is re-targeted, the console handler is kept, and a level
-    change is applied to the root logger in place.
+    ``None``). Safe to call repeatedly: only the file handler is re-targeted, the
+    console handler is kept, and a level change is applied to the root logger in
+    place.
 
     A ``logs_dir`` whose parent (the workspace folder) no longer exists — a stale
-    pointer after the workspace was moved / deleted — degrades to console-only
-    instead of resurrecting a ghost ``logs/`` tree at the old location; the next
-    workspace (re-)selection re-points the handler.
+    pointer — degrades to console-only instead of resurrecting a ghost ``logs/``
+    tree at the old location.
     """
     global _console_installed, _file_handler, _file_path, _proactor_filter_installed
     if logs_dir is not None and not logs_dir.parent.exists():

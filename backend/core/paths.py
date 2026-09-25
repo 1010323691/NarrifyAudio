@@ -123,7 +123,7 @@ def is_workspace_set() -> bool:
 # ``get_or_prepare_layout()`` sits on every hot path (the 待合成 poll resolves one layout per package
 # AND per completed segment), and each uncached call re-reads the root ``app.json`` pointer
 # plus re-runs the 11 mkdir probes. The pointer only changes when the root file itself is
-# rewritten (``set_workspace_pointer`` / ``clear_workspace`` both rewrite it), so the file's
+# rewritten (``set_workspace_pointer`` rewrites it), so the file's
 # ``(mtime_ns, size)`` is a faithful invalidation key: steady state costs ONE stat per call.
 # The ``ensured`` flag remembers whether the cached layout's skeleton was planted — a stale-
 # pointer entry (the folder was gone when cached) plants it exactly once if the folder
@@ -271,8 +271,3 @@ def resolve_parsed_json_all() -> list[Path]:
     base = [p for p in d.glob("*.json") if p.is_file() and not p.name.endswith("_checked.json")]
     base.sort(key=lambda p: (p.stat().st_mtime, p.name))
     return base
-
-
-# Compatibility aliases retained for external scripts during the internal rename.
-get_layout = get_or_prepare_layout
-peek_layout = resolve_layout

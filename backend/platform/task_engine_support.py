@@ -64,7 +64,6 @@ def write_task_outcome(
     )
 
 
-_write_outcome = write_task_outcome
 
 
 
@@ -114,8 +113,3 @@ def engine_result_outcome(claim: TaskClaim, result: Any) -> TaskOutcome:
     )
 
 
-
-
-# Compatibility aliases for existing worker integrations.
-legacy_engine_context = engine_execution_context
-legacy_result_outcome = engine_result_outcome

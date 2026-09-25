@@ -173,9 +173,13 @@ def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient
     task = client.get(f"/api/v1/tasks/{task_id}").json()
     assert task["status"] == "succeeded"
     assert task["result"]["file_count"] == 2
-    download = client.get(
-        f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}"
+    activated = client.put(
+        "/api/v1/projects/active",
+        headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"]},
     )
+    assert activated.status_code == 200, activated.text
+    download = client.get("/api/files/download/08_bgm/Book.zip")
     assert download.status_code == 200
     with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
         assert archive.namelist() == ["Book/chapter-1.mp3", "Book/chapter-2.mp3"]
@@ -471,9 +475,6 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
     assert any(item["task_type"] == "text.format" for item in metrics.json()["by_type"])
     assert metrics.json()["throughput_60s"]["window_seconds"] == 60
     assert {"online_workers", "total_slots", "active_slots", "idle_slots"} <= metrics.json()["worker_pool"].keys()
-    activity = client.get("/api/v1/admin/task-activity")
-    assert activity.status_code == 200, activity.text
-    assert any(item["event_type"] == "admin_cancel_requested" for item in activity.json())
     overview = client.get("/api/v1/admin/overview")
     assert overview.status_code == 200, overview.text
     assert {item["key"] for item in overview.json()["services"]} >= {"api", "database", "queue", "llm", "tts", "audio", "gpu"}
@@ -533,8 +534,6 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
     assert not old_workspace_path.exists()
     assert client.get("/api/v1/admin/settings/storage").json()["source"] == "admin"
     assert client.get("/api/v1/admin/tasks").status_code == 200
-    assert client.get("/api/v1/admin/workers").status_code == 200
-    assert client.get("/api/v1/admin/queue").status_code == 200
 
 
 def test_workspaces_for_different_users_have_separate_username_roots(client: TestClient):
@@ -574,13 +573,19 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     assert uploaded.status_code == 200, uploaded.text
     legacy_file = uploaded.json()
     legacy_split = client.post(
-        "/api/book/split",
+        "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
-        json={"path": legacy_file["path"], "whole_book": True},
+        json={
+            "project_id": legacy_file["project_id"],
+            "task_type": "book.split",
+            "payload": {"input_file_id": legacy_file["file_id"], "whole_book": True},
+            "estimated_units": 0,
+            "idempotency_key": f"legacy-book-split-{uuid.uuid4()}",
+        },
     )
-    assert legacy_split.status_code == 200, legacy_split.text
+    assert legacy_split.status_code == 201, legacy_split.text
     assert process_task_message(
-        {"payload": {"task_id": legacy_split.json()["task_id"]}}, worker_id="test-book-worker"
+        {"payload": {"task_id": legacy_split.json()["id"]}}, worker_id="test-book-worker"
     ) == "succeeded"
     project_files = client.get(f"/api/v1/projects/{legacy_file['project_id']}/files").json()
     assert any(item["module"] == "02_split_text" for item in project_files)
@@ -591,23 +596,30 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
         files={"file": ("format.txt", b"text to format", "text/plain")},
     )
     assert formatted_upload.status_code == 200, formatted_upload.text
+    formatted_upload = formatted_upload.json()
     formatted = client.post(
-        "/api/text/format",
+        "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
-        json={"path": formatted_upload.json()["path"]},
+        json={
+            "project_id": formatted_upload["project_id"],
+            "task_type": "text.format",
+            "payload": {"input_file_id": formatted_upload["file_id"], "publish_module": "01_input"},
+            "estimated_units": 0,
+            "idempotency_key": f"legacy-text-format-{uuid.uuid4()}",
+        },
     )
-    assert formatted.status_code == 200, formatted.text
-    assert formatted.json()["file_id"]
+    assert formatted.status_code == 201, formatted.text
+    assert formatted.json()["id"]
     assert process_task_message(
-        {"payload": {"task_id": formatted.json()["task_id"]}}, worker_id="test-format-worker"
+        {"payload": {"task_id": formatted.json()["id"]}}, worker_id="test-format-worker"
     ) == "succeeded"
 
     durable_upload = client.post(
-        f"/api/v1/projects/{legacy_file['project_id']}/files",
+        "/api/files/upload",
         headers={"X-CSRF-Token": csrf},
-        files={"upload": ("durable.txt", b"durable source", "text/plain")},
+        files={"file": ("durable.txt", b"durable source", "text/plain")},
     )
-    assert durable_upload.status_code == 201, durable_upload.text
+    assert durable_upload.status_code == 200, durable_upload.text
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
@@ -662,12 +674,18 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
         headers={"X-CSRF-Token": csrf},
         json={"name": "Worker book"},
     ).json()
-    uploaded = client.post(
-        f"/api/v1/projects/{project['id']}/files",
+    activated = client.put(
+        "/api/v1/projects/active",
         headers={"X-CSRF-Token": csrf},
-        files={"upload": ("chapter.txt", "  第一章  \n你好...\n".encode("utf-8"), "text/plain")},
+        json={"project_id": project["id"]},
     )
-    assert uploaded.status_code == 201, uploaded.text
+    assert activated.status_code == 200, activated.text
+    uploaded = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("chapter.txt", "  第一章  \n你好...\n".encode("utf-8"), "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
     input_file = uploaded.json()
 
     with SessionLocal.begin() as db:
@@ -712,11 +730,12 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
     assert process_task_message(
         {"payload": {"task_id": analysis.json()["id"]}}, worker_id="test-book-analysis-worker"
     ) == "succeeded"
-    downloaded = client.get(f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}")
+    formatted_name = Path(task["result"]["path"]).name
+    downloaded = client.get(f"/api/files/download/01_input/{formatted_name}")
     assert downloaded.status_code == 200
     assert "第一章" in downloaded.text
     ranged = client.get(
-        f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}",
+        f"/api/files/download/01_input/{formatted_name}",
         headers={"Range": "bytes=0-4"},
     )
     assert ranged.status_code == 206
@@ -730,13 +749,22 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
     ledger = client.get("/api/v1/quota/transactions")
     assert ledger.json() == []
 
+    # The original upload row is soft-deleted when the format result publishes
+    # into 01_input (module replacement), so the raw-text analysis input must be
+    # a fresh upload that outlives the earlier publish.
+    analyzed_upload = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("analyze.txt", "  第一章  \n你好...\n".encode("utf-8"), "text/plain")},
+    )
+    assert analyzed_upload.status_code == 200, analyzed_upload.text
     analyzed = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
         json={
             "project_id": project["id"],
             "task_type": "book.analyze",
-            "payload": {"input_file_id": input_file["id"]},
+            "payload": {"input_file_id": analyzed_upload.json()["id"]},
             "estimated_units": 0,
             "idempotency_key": "worker-book-analyze-123",
         },
@@ -750,11 +778,11 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
     assert analyzed_task["result"]["analysis"]["chapters"][0]["title"] == ""
 
     split_input = client.post(
-        f"/api/v1/projects/{project['id']}/files",
+        "/api/files/upload",
         headers={"X-CSRF-Token": csrf},
-        files={"upload": ("split.txt", "第一章\n第一段\n第二章\n第二段\n".encode("utf-8"), "text/plain")},
+        files={"file": ("split.txt", "第一章\n第一段\n第二章\n第二段\n".encode("utf-8"), "text/plain")},
     )
-    assert split_input.status_code == 201, split_input.text
+    assert split_input.status_code == 200, split_input.text
     split_submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
@@ -819,12 +847,18 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
         headers={"X-CSRF-Token": csrf},
         json={"name": "Durable script"},
     ).json()
-    uploaded = client.post(
-        f"/api/v1/projects/{project['id']}/files",
+    activated = client.put(
+        "/api/v1/projects/active",
         headers={"X-CSRF-Token": csrf},
-        files={"upload": ("chapter.txt", b"narrator: hello", "text/plain")},
+        json={"project_id": project["id"]},
     )
-    assert uploaded.status_code == 201, uploaded.text
+    assert activated.status_code == 200, activated.text
+    uploaded = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("chapter.txt", b"narrator: hello", "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
     input_file = uploaded.json()
     observed: dict[str, str] = {}
     with SessionLocal.begin() as db:
@@ -891,12 +925,18 @@ def test_durable_worker_runs_audio_tasks_and_catalogs_outputs(client: TestClient
         headers={"X-CSRF-Token": csrf},
         json={"name": "Durable audio"},
     ).json()
-    uploaded = client.post(
-        f"/api/v1/projects/{project['id']}/files",
+    activated = client.put(
+        "/api/v1/projects/active",
         headers={"X-CSRF-Token": csrf},
-        files={"upload": ("merged.mp3", b"audio", "audio/mpeg")},
+        json={"project_id": project["id"]},
     )
-    assert uploaded.status_code == 201, uploaded.text
+    assert activated.status_code == 200, activated.text
+    uploaded = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("merged.mp3", b"audio", "audio/mpeg")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
     input_file = uploaded.json()
     with SessionLocal.begin() as db:
         account = db.get(UserQuotaAccount, first["user"]["id"])

@@ -59,8 +59,6 @@ from .tts_manifest import (
     _write_manifest_file,
 )
 
-IMPLEMENTED = True
-
 # 一键合成「批内段数」上限的上下界（前端输入与后端钳制共用）。这只是上限：worker 运行时按
 # 长度排序后按上限切批；仅超时触发临时减半及后续恢复。
 MIN_CONCURRENCY = 1

@@ -47,10 +47,8 @@ def test_regular_user_cannot_access_admin_api(client: TestClient):
 
     overview = client.get("/api/v1/admin/overview")
     users = client.get("/api/v1/admin/users")
-    queue = client.get("/api/v1/admin/queue")
     assert overview.status_code == 403, overview.text
     assert users.status_code == 403, users.text
-    assert queue.status_code == 403, queue.text
 
 
 def _create_task(client: TestClient, csrf: str, project_id: str, key: str) -> str:

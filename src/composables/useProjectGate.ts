@@ -2,10 +2,10 @@ import { computed } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 
 /**
- * Global workspace gate. The pipeline stays locked until the user picks a
- * workspace folder on the dashboard (开始); this reads the config that is loaded
- * at app start, so it flips reactively as soon as the dashboard saves a new
- * workspace (or clears it).
+ * Global project gate. The pipeline stays locked until an active project is
+ * set on the dashboard (项目); this reads the config that is loaded at app
+ * start, so it flips reactively as soon as the dashboard activates a project
+ * (or the active project is cleared).
  */
 export function useProjectGate() {
   const settings = useSettingsStore()

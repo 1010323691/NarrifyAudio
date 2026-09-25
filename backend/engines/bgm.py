@@ -1517,7 +1517,7 @@ def recompute_segment_timelines(
 
         # 2) the real 05 durations (manifest + ffprobe). collect_segments keeps
         # only ok segments whose file still exists, sorted by index — the same
-        # core merge.run feeds the worker (missing segments are skipped; the
+        # core merge.merge_audio_package feeds the worker (missing segments are skipped; the
         # cursor walk spans across them, exactly like the merged audio does).
         package = tts_batch.package_for(Path(f"{stem}.json"))
         manifest = tts_batch.read_manifest(layout.audio_chunk / package)

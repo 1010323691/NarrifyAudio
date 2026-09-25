@@ -196,9 +196,9 @@ def zip_files(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Package already-cut files into a STORE zip under the workspace's
-    ``07_output/`` so the browser can download it (mirrors the book module's
-    optional ``.zip`` output)."""
+    """Submit an ``audio.zip`` durable task that packages already-cut files
+    into a STORE zip under the workspace's ``07_output/`` so the browser can
+    download it."""
     _common.require_workspace()
     if not req.files:
         raise HTTPException(400, "没有可打包的文件。")

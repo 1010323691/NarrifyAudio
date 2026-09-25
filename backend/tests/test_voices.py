@@ -35,7 +35,7 @@ import backend.api.tts as tts_api
 from backend.platform.deps import AuthContext
 from backend.core import config as core_config
 from backend.core import paths as core_paths
-from backend.core.tasks import TaskCancelled, TaskStatus
+from backend.core.task_control import TaskCancelled
 from backend.engines import voices as V
 from backend.engines.voices import (
     _clone_done,

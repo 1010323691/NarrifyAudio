@@ -616,8 +616,9 @@ def move_tracks(body: TrackMove) -> dict:
 def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> None:
     """Rewrite a (renamed) tag in the current workspace's own analysis cache
     (``08_bgm/chapter_music_analysis.json``). Best-effort: no workspace / no
-    file / corrupt file -> nothing to do. Assignments snapshots are NOT
-    rewritten (they are a historical record)."""
+    file / corrupt file -> nothing to do. The saved per-chapter assignments
+    (``08_bgm/bgm_assignments.json``) are NOT rewritten (they are a
+    historical record)."""
     from ..core.paths import get_or_prepare_layout
 
     layout = get_or_prepare_layout()

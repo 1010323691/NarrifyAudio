@@ -24,9 +24,8 @@ from collections import Counter
 import hashlib
 import math
 import re
-import zipfile
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 
 # ============================ Encoding ============================
@@ -844,13 +843,9 @@ def make_whole_book_filename(base: str) -> str:
 
 # ======================= Analysis =======================
 
-def analyze_text(
-    text: str, on_progress: Optional[Callable[[float], None]] = None
-) -> dict:
+def analyze_text(text: str) -> dict:
     """Decoded text -> ``{text, newline_positions, chapters, totalChars}``."""
     newline_positions = build_newline_positions(text)
-    if on_progress:
-        on_progress(0.6)
 
     def char_count(a: int, b: int) -> int:
         return range_char_count(newline_positions, a, b)
@@ -871,16 +866,6 @@ def chapter_content(analysis: dict, chapter: dict) -> str:
     """One chapter's content = one slice of the original text. Concatenating the
     per-chapter slices in order reproduces the original exactly."""
     return analysis["text"][chapter["start"]: chapter["end"]]
-
-
-# ======================= ZIP (STORE) =======================
-
-def build_zip(files: list[tuple[str, bytes]], out_path: Path) -> None:
-    """Write an uncompressed (STORE) ZIP with UTF-8 filenames (replaces the hand
-    -written JS writer; stdlib ``zipfile`` is equivalent)."""
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED) as zf:
-        for name, data in files:
-            zf.writestr(name, data)
 
 
 # ======================= Smart repair (智能识别) =======================
@@ -1098,7 +1083,7 @@ def _mechanical_cut_points(
     return cuts, len(cuts) + 1
 
 
-def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable[[float], None]] = None) -> dict:
+def smart_repair(text: str, chapters: list[dict]) -> dict:
     """Mechanically repair the chapter structure of ``chapters`` (as produced
     by ``analyze_text``) and renumber 1..N in physical order. Pure function:
     inputs are not mutated.
@@ -1108,8 +1093,6 @@ def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable
     baseline_chars, original_count}``. A self-check (lossless concatenation,
     tiling, non-empty segments, unique 1..N numbering) runs last; on failure
     ``status="error"`` with a diagnostic ``error`` message and no output."""
-    if on_progress:
-        on_progress(0.1)
     warnings: list[dict] = []
     removed: list[dict] = []
     removed_spans: list[tuple[int, int]] = []  # raw ranges deleted from the text
@@ -1222,8 +1205,6 @@ def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable
     #     inferred from length (gated on _long).
     inferred_splits: dict[int, list[int]] = {}  # work index -> raw cut points
     split_nums: dict[int, list[tuple[str, Optional[int], str]]] = {}  # work index -> per-segment (numStr, num, title)
-    if on_progress:
-        on_progress(0.4)
     for i, c in enumerate(work):
         own = c["num"]
         nxt = work[i + 1]["num"] if i + 1 < len(work) else None
@@ -1468,8 +1449,6 @@ def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable
                     }
                 )
 
-    if on_progress:
-        on_progress(0.6)
 
     # -- step 4: fingerprints + duplicate removal --------------------------
     for c in work:
@@ -1572,8 +1551,6 @@ def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable
     for pos, c in enumerate(new_work):
         c["seq"] = pos + 1
         c["final_num"] = pos + 1
-    if on_progress:
-        on_progress(0.8)
 
     dup_nums = {n for n, ms in groups.items() if len(ms) >= 2}
 
@@ -1638,8 +1615,6 @@ def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable
     # chapters + the dropped spans tile [0, len(text)] exactly, and the kept
     # chapters concatenate to the original text with those spans removed
     # (no character lost, added, or reordered within the kept set).
-    if on_progress:
-        on_progress(0.9)
     all_spans = sorted([(c["start"], c["end"]) for c in new_work] + removed_spans)
     tiling_ok = all(b[0] == a[1] for a, b in zip(all_spans, all_spans[1:]))
     tiling_ok = tiling_ok and bool(all_spans) and all_spans[0][0] == 0 and all_spans[-1][1] == len(text)
@@ -1681,8 +1656,6 @@ def smart_repair(text: str, chapters: list[dict], on_progress: Optional[Callable
         ):
             out.pop(key, None)
         out_chapters.append(out)
-    if on_progress:
-        on_progress(1.0)
     return {
         "status": status,
         "chapters": out_chapters,
@@ -1720,8 +1693,6 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
 
 def is_generated_split_output_name(name: str) -> bool:
     """Return whether a top-level split output name follows a generated convention."""
-    import re
-
     return (
         (name.startswith("第") and name.endswith(".txt"))
         or bool(re.search(r" 分册\d+ 第\d+章\.txt$", name))

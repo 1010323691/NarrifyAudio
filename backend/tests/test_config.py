@@ -53,12 +53,14 @@ def test_retired_tts_settings_are_dropped_from_app_config():
             "voice": "legacy-voice",
             "concurrency": 3,
             "parallel_workers": 4,
+            "enabled": False,
+            "speaker": "serena",
         },
         "persona_prompts": {"advanced_prompt": "user-authored prompt"},
     })
 
     restored = AppConfig.model_validate(config.model_dump())
-    retired_tts = {"api_base", "api_key", "voice", "concurrency", "parallel_workers"}
+    retired_tts = {"api_base", "api_key", "voice", "concurrency", "parallel_workers", "enabled", "speaker"}
     assert not retired_tts & restored.tts.model_dump().keys()
     assert "advanced_prompt" not in restored.persona_prompts.model_dump()
 

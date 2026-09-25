@@ -36,9 +36,6 @@ from .llm_transport import HTTP_TIMEOUT, LLMHTTPError, request_chat_completion a
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 from .text import ends_sentence, is_chapter_title
 
-IMPLEMENTED = True
-
-
 log = logging.getLogger("audiobook.script")
 
 
@@ -871,11 +868,6 @@ def check_chunk_alignment(chunk: str, entries) -> dict:
         "source": source,
         "output": output,
     }
-
-
-# Public name used by callers that want to emphasize that this is a local,
-# complete text check rather than the legacy quoted-passage guard.
-check_text_alignment = check_chunk_alignment
 
 
 def split_chunk_balanced(chunk: str) -> tuple:
@@ -2039,7 +2031,6 @@ def long_entry_indices(entries: list, max_chars: int) -> list[int]:
     ]
 
 
-_validate_instructs_batch = _validate_instructs_one_call
 validate_instructs = _validate_instructs_one_call
 
 

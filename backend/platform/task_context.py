@@ -31,6 +31,23 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _cps10(samples: deque[tuple[float, int]], total: int, now: float) -> float:
+    """Average chars/s over the retained (≤10 s) span of rate samples.
+
+    ``samples`` holds (monotonic_ts, cumulative_chars) oldest-first; the cumulative total is
+    monotonic, so (total - first_total) is exactly the chars generated within the span and
+    (total - first_total) / (now - first_ts) is the true average rate over it — no bias from
+    how the flushes are spaced. Empty window or a near-zero span yields 0.
+    """
+    if not samples:
+        return 0.0
+    first_time, first_total = samples[0]
+    span = now - first_time
+    if span <= 0.001:
+        return 0.0
+    return max(0.0, (total - first_total) / span)
+
+
 
 class EngineTaskContext:
     """Adapter from the legacy engine callback contract to durable task events."""
@@ -74,9 +91,7 @@ class EngineTaskContext:
             self._rate_samples.append((now, self._rate_total))
             while self._rate_samples and self._rate_samples[0][0] < now - 10:
                 self._rate_samples.popleft()
-            first_time, first_total = self._rate_samples[0]
-            span = now - first_time
-            cps10 = max(0.0, (self._rate_total - first_total) / span) if span > 0.001 else 0.0
+            cps10 = _cps10(self._rate_samples, self._rate_total, now)
             if cps > 0 and now - self._last_rate_event < 1.0:
                 return
             self._last_rate_event = now

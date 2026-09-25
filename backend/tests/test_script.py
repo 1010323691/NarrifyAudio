@@ -23,7 +23,7 @@ from backend.core import config as core_config
 from backend.core import concurrency
 from backend.core import paths as core_paths
 from backend.core.config import GenerationConfig, LLMConfig, PromptsConfig
-from backend.core.tasks import TERMINAL, TaskCancelled, TaskManager, TaskStatus
+from backend.tests.task_support import TERMINAL, TaskCancelled, TaskManager, TaskStatus
 from backend.engines.script import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT,

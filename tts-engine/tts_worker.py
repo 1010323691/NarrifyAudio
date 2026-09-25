@@ -858,9 +858,6 @@ def bounded_vocoder(model, batch_size=0):
             delattr(tokenizer, "decode")
 
 
-@contextlib.contextmanager
-
-
 def _clear_gpu_cache(device) -> None:
     """gc + ``torch.cuda.empty_cache()`` between sub-batches (CUDA only); a no-op off CUDA.
 
@@ -1597,6 +1594,69 @@ def parse_restore_stack(raw: str) -> list:
     return out
 
 
+def run_planned_group(
+    model, vtype, planned_rows, planned_concurrency, *,
+    args, clone_prompts, device, seed, sub_counter, out_dir, width, report, pipeline,
+    synth_sub_batch=_synth_sub_batch,
+    clear_gpu_cache=_clear_gpu_cache,
+    count_speakers=count_batch_speakers,
+    log=log,
+    planner=None,
+) -> int:
+    """Run one planner group, temporarily splitting multi-role groups if needed.
+
+    Promoted from ``_run_batch`` for testability: synthesis, cache clearing, speaker
+    counting, logging and the batch planner are injected (defaults are the real
+    implementations, so production call sites are behavior-unchanged).
+    """
+    if not planned_rows:
+        return 0
+    if planner is None:
+        planner = next_auto_batch if args.auto_batch else next_fixed_batch
+    planned_speakers = count_speakers(planned_rows)
+    if planned_speakers <= 1:
+        log(f"子批（{vtype}）：{len(planned_rows)} 段（当前预定并发 {planned_concurrency}）")
+        synth_sub_batch(
+            model, vtype, planned_rows,
+            args=args, clone_prompts=clone_prompts, device=device, seed=seed,
+            sub_counter=sub_counter, out_dir=out_dir, width=width, report=report,
+            pipeline=pipeline)
+        clear_gpu_cache(device)
+        return 1
+
+    temporary_concurrency = planned_concurrency_for_rows(planned_rows)
+    pending = list(planned_rows)
+    successful_batches = 0
+    while pending:
+        half_rows, next_pending, _ignored_cap, _ignored_restore = planner(
+            pending, temporary_concurrency, [])
+        speaker_count = count_speakers(half_rows)
+        log(f"子批（{vtype}）：{len(half_rows)} 段（当前预定并发 {planned_concurrency}，"
+            f"临时实际并发 {temporary_concurrency}）"
+            + (f"（{speaker_count} 个角色，超时预算 ×{speaker_count}）"
+               if speaker_count > 1 else ""))
+        try:
+            synth_sub_batch(
+                model, vtype, half_rows,
+                args=args, clone_prompts=clone_prompts, device=device, seed=seed,
+                sub_counter=sub_counter, out_dir=out_dir, width=width,
+                report=report, pipeline=pipeline)
+        except Exception:
+            if len(half_rows) <= 1:
+                raise
+            previous = temporary_concurrency
+            temporary_concurrency = max(1, temporary_concurrency // 2)
+            pending = half_rows + next_pending
+            log(f"警告：多角色子批失败：临时并发 {previous} → {temporary_concurrency}，"
+                "保留未完成段继续重试")
+            continue
+        pending = next_pending
+        successful_batches += 1
+        clear_gpu_cache(device)
+    log(f"多角色预定组已完成：恢复后续子批使用并发 {planned_concurrency}")
+    return successful_batches
+
+
 
 
 
@@ -1791,54 +1851,6 @@ def _run_batch(args) -> int:
     log(f"机械后处理流水线：{pipeline.worker_count} 个消费者，队列上限 {pipeline.queue_size}；"
         "队列满时暂停继续推理")
 
-    def run_planned_group(model, vtype, planned_rows, planned_concurrency):
-        """Run one planner group, temporarily splitting multi-role groups if needed."""
-        if not planned_rows:
-            return 0
-        planned_speakers = count_batch_speakers(planned_rows)
-        if planned_speakers <= 1:
-            log(f"子批（{vtype}）：{len(planned_rows)} 段（当前预定并发 {planned_concurrency}）")
-            _synth_sub_batch(
-                model, vtype, planned_rows,
-                args=args, clone_prompts=clone_prompts, device=device, seed=seed,
-                sub_counter=sub_counter, out_dir=out_dir, width=width, report=report_result,
-                pipeline=pipeline)
-            _clear_gpu_cache(device)
-            return 1
-
-        temporary_concurrency = planned_concurrency_for_rows(planned_rows)
-        pending = list(planned_rows)
-        planner = next_auto_batch if args.auto_batch else next_fixed_batch
-        successful_batches = 0
-        while pending:
-            half_rows, next_pending, _ignored_cap, _ignored_restore = planner(
-                pending, temporary_concurrency, [])
-            speaker_count = count_batch_speakers(half_rows)
-            log(f"子批（{vtype}）：{len(half_rows)} 段（当前预定并发 {planned_concurrency}，"
-                f"临时实际并发 {temporary_concurrency}）"
-                + (f"（{speaker_count} 个角色，超时预算 ×{speaker_count}）"
-                   if speaker_count > 1 else ""))
-            try:
-                _synth_sub_batch(
-                    model, vtype, half_rows,
-                    args=args, clone_prompts=clone_prompts, device=device, seed=seed,
-                    sub_counter=sub_counter, out_dir=out_dir, width=width,
-                    report=report_result, pipeline=pipeline)
-            except Exception:
-                if len(half_rows) <= 1:
-                    raise
-                previous = temporary_concurrency
-                temporary_concurrency = max(1, temporary_concurrency // 2)
-                pending = half_rows + next_pending
-                log(f"多角色子批失败：临时并发 {previous} → {temporary_concurrency}，"
-                    "保留未完成段继续重试", "WARNING")
-                continue
-            pending = next_pending
-            successful_batches += 1
-            _clear_gpu_cache(device)
-        log(f"多角色预定组已完成：恢复后续子批使用并发 {planned_concurrency}")
-        return successful_batches
-
     try:
         queue_states = [(key, list(rows)) for key, rows in queues]
         queue_pos = 0
@@ -1861,7 +1873,11 @@ def _run_batch(args) -> int:
                     planner = next_auto_batch if args.auto_batch else next_fixed_batch
                     planned_rows, planned_remaining, _planned_cap, _planned_restore = planner(
                         remaining, max_batch, restore_stack, restore_successes)
-                    successful = run_planned_group(model, vtype, planned_rows, len(planned_rows))
+                    successful = run_planned_group(
+                        model, vtype, planned_rows, len(planned_rows),
+                        args=args, clone_prompts=clone_prompts, device=device, seed=seed,
+                        sub_counter=sub_counter, out_dir=out_dir, width=width,
+                        report=report_result, pipeline=pipeline)
                     if restore_stack and restore_successes:
                         restore_successes[-1] += successful
                     if _planned_restore is not None:
@@ -1881,7 +1897,11 @@ def _run_batch(args) -> int:
                 restore_stack.pop()
                 restore_successes.pop()
                 print(f"[restore] cap={restored}", flush=True)
-            successful = run_planned_group(model, vtype, rows_b, len(rows_b))
+            successful = run_planned_group(
+                model, vtype, rows_b, len(rows_b),
+                args=args, clone_prompts=clone_prompts, device=device, seed=seed,
+                sub_counter=sub_counter, out_dir=out_dir, width=width,
+                report=report_result, pipeline=pipeline)
             if restore_stack and restore_successes:
                 restore_successes[-1] += successful
     finally:

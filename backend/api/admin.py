@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
-import redis
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -16,8 +14,7 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
-from ..platform.outbox import STREAM_NAME
+from ..platform.models import AuditLog, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_state import TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
@@ -375,14 +372,6 @@ def _quota_json(account: UserQuotaAccount) -> dict:
     }
 
 
-@router.get("/users/{user_id}/quota")
-def get_user_quota(user_id: str, _: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    account = db.get(UserQuotaAccount, user_id)
-    if account is None:
-        raise HTTPException(404, "额度账户不存在")
-    return _quota_json(account)
-
-
 @router.post("/users/{user_id}/quota/adjust")
 def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     if actor.role != "admin":
@@ -556,31 +545,6 @@ def task_metrics(_: User = Depends(require_admin), db: Session = Depends(get_db)
     }
 
 
-@router.get("/task-activity")
-def task_activity(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
-    """Return recent durable task lifecycle events, including terminal outcomes."""
-    rows = db.execute(
-        select(TaskEvent, Task, User.username)
-        .join(Task, Task.id == TaskEvent.task_id)
-        .join(User, User.id == Task.owner_id)
-        .order_by(TaskEvent.created_at.desc(), TaskEvent.sequence.desc())
-        .limit(30)
-    ).all()
-    return [
-        {
-            "task_id": task.id,
-            "task_type": task.task_type,
-            "owner_username": username,
-            "status": task.status,
-            "progress": task.progress,
-            "event_type": event.event_type,
-            "payload": event.payload or {},
-            "created_at": event.created_at.isoformat(),
-        }
-        for event, task, username in rows
-    ]
-
-
 @router.post("/tasks/{task_id}/cancel")
 def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     if actor.role != "admin":
@@ -630,42 +594,6 @@ def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = 
                     target_id=task.id, metadata_json={"previous_status": previous_status, "attempts": attempts}))
     db.commit()
     return {"id": task.id, "status": task.status, "attempt_no": attempts}
-
-
-@router.get("/workers")
-def list_workers(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
-    return [
-        {
-            "worker_id": item.worker_id,
-            "status": "offline" if is_stale(item.last_seen_at) else item.status,
-            "capabilities": item.capabilities,
-            "current_task_id": item.current_task_id,
-            "started_at": item.started_at.isoformat(),
-            "last_seen_at": item.last_seen_at.isoformat(),
-        }
-        for item in rows
-    ]
-
-
-@router.get("/queue")
-def queue_status(_: User = Depends(require_admin)) -> dict:
-    client = redis.Redis.from_url(
-        os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"),
-        decode_responses=True,
-    )
-    try:
-        client.ping()
-        length = int(client.xlen(STREAM_NAME))
-        pending = 0
-        try:
-            summary = client.xpending(STREAM_NAME, os.getenv("NARRIFY_TASK_GROUP", "narrify-workers"))
-            pending = int(summary.get("pending", 0)) if isinstance(summary, dict) else int(summary[0] or 0)
-        except redis.ResponseError:
-            pass
-        return {"available": True, "stream": STREAM_NAME, "length": length, "pending": pending}
-    except Exception as exc:  # Redis is an operational dependency, not a request crash.
-        return {"available": False, "stream": STREAM_NAME, "length": 0, "pending": 0, "error": str(exc)}
 
 
 def _gpu_status() -> list[dict]:
@@ -725,15 +653,54 @@ def _task_module(task_type: str) -> str:
     return "worker"
 
 
+def _list_workers(db: Session) -> list[dict]:
+    rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
+    return [
+        {
+            "worker_id": item.worker_id,
+            "status": "offline" if is_stale(item.last_seen_at) else item.status,
+            "capabilities": item.capabilities,
+            "current_task_id": item.current_task_id,
+            "started_at": item.started_at.isoformat(),
+            "last_seen_at": item.last_seen_at.isoformat(),
+        }
+        for item in rows
+    ]
+
+
+def _queue_status() -> dict:
+    import os
+    import redis
+
+    from ..platform.outbox import STREAM_NAME
+
+    client = redis.Redis.from_url(
+        os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"),
+        decode_responses=True,
+    )
+    try:
+        client.ping()
+        length = int(client.xlen(STREAM_NAME))
+        pending = 0
+        try:
+            summary = client.xpending(STREAM_NAME, os.getenv("NARRIFY_TASK_GROUP", "narrify-workers"))
+            pending = int(summary.get("pending", 0)) if isinstance(summary, dict) else int(summary[0] or 0)
+        except redis.ResponseError:
+            pass
+        return {"available": True, "stream": STREAM_NAME, "length": length, "pending": pending}
+    except Exception as exc:  # Redis is an operational dependency, not a request crash.
+        return {"available": False, "stream": STREAM_NAME, "length": 0, "pending": 0, "error": str(exc)}
+
+
 @router.get("/overview")
 def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     now = utcnow()
     offset = timedelta(minutes=max(-840, min(tz_offset_minutes, 840)))
     today = (now - offset).replace(hour=0, minute=0, second=0, microsecond=0) + offset
     metrics = task_metrics(_, db)
-    queue = queue_status(_)
+    queue = _queue_status()
     gpu = _gpu_status()
-    workers = list_workers(_, db)
+    workers = _list_workers(db)
     live = [worker for worker in workers if worker["status"] != "offline"]
     def has_worker(prefix: str) -> bool:
         return any(any(str(kind).startswith(prefix) for kind in worker["capabilities"].get("task_types", [])) for worker in live)
@@ -811,7 +778,7 @@ def performance(_: User = Depends(require_admin), db: Session = Depends(get_db))
         if hasattr(platform_os, "getloadavg"):
             resource["load_average_1m"] = platform_os.getloadavg()[0]
     return {"generated_at": utcnow().isoformat(), "system": resource, "gpu": _gpu_status(),
-            "tasks": task_metrics(_, db), "workers": list_workers(_, db), "queue": queue_status(_),
+            "tasks": task_metrics(_, db), "workers": _list_workers(db), "queue": _queue_status(),
             "api": api_snapshot(),
             "unavailable_metrics": ["LLM Token/TTFT/吞吐", "TTS 字符/实时倍率", "磁盘 I/O/网络"]}
 

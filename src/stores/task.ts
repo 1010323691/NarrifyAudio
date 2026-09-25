@@ -5,9 +5,9 @@ import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
 
 const ACTIVE: TaskStatus[] = ['pending', 'running', 'paused']
 
-// Mirror of the backend's per-task LLM stream cap (core/tasks.py LLM_STREAM_CAP), so the
-// live buffer never holds more than the authoritative snapshot replays on the next
-// snapshot / terminal event (which replaces the whole task).
+// Client-side cap on the display-only live LLM stream buffer (「流式反馈」 panel): it
+// bounds the in-memory tail; snapshot / terminal events replace the whole task,
+// so any drift self-corrects on the next authoritative replay.
 const LLM_STREAM_CLIENT_CAP = 128 * 1024
 
 export const useTaskStore = defineStore('task', () => {

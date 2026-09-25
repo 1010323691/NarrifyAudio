@@ -94,5 +94,3 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-# Compatibility alias for scripts that still use the workspace-era name.
-user_workspace_root = project_workspace_path

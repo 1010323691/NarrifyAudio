@@ -38,9 +38,6 @@ def require_authenticated_user(ctx: AuthContext = Depends(get_auth_context)) -> 
     return ctx.user
 
 
-require_user = require_authenticated_user  # compatibility for direct Python imports
-
-
 def require_admin(user: User = Depends(require_authenticated_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")

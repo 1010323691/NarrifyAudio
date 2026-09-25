@@ -39,8 +39,6 @@ from ..core.task_control import TaskCancelled
 SILENCE_NOISE_DB = -30
 SILENCE_MIN_DURATION = 0.5
 DEFAULT_TOLERANCE = 15
-TOLERANCE_MIN = 5
-TOLERANCE_MAX = 30
 MAX_SEGMENTS = 1000
 
 MIME = {
@@ -67,35 +65,6 @@ def get_extension(file_name: Optional[str]) -> str:
     if idx == -1 or idx == len(base) - 1:
         return "mp3"
     return base[idx + 1:].lower()
-
-
-def format_bytes(b) -> str:
-    if b is None or (isinstance(b, float) and math.isnan(b)):
-        return "—"
-    if b < 1024:
-        return f"{b} B"
-    units = ["KB", "MB", "GB", "TB"]
-    n = float(b)
-    i = -1
-    while True:
-        n /= 1024
-        i += 1
-        if not (n >= 1024 and i < len(units) - 1):
-            break
-    digits = 0 if (n >= 100 or i == 0) else 1
-    return f"{n:.{digits}f} {units[i]}"
-
-
-def format_duration(total_seconds) -> str:
-    if total_seconds is None or (isinstance(total_seconds, float) and math.isnan(total_seconds)):
-        return "—"
-    s = max(0, round(total_seconds))
-    h = s // 3600
-    m = (s % 3600) // 60
-    sec = s % 60
-    if h > 0:
-        return f"{h}:{m:02d}:{sec:02d}"
-    return f"{m}:{sec:02d}"
 
 
 def parse_duration_to_seconds(value) -> float:

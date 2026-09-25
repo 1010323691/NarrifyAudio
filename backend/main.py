@@ -20,7 +20,6 @@ from .api import admin as api_admin
 from .api import admin_resources as api_admin_resources
 from .api import auth as api_auth
 from .api import bgm as api_bgm
-from .api import book as api_book
 from .api import config as api_config
 from .api import files as api_files
 from .api import music as api_music
@@ -30,7 +29,6 @@ from .api import projects as api_projects
 from .api import quota as api_quota
 from .api import script as api_script
 from .api import tasks as api_tasks
-from .api import text as api_text
 from .api import tts as api_tts
 from .core import config as core_config
 from .core import logging_setup
@@ -65,8 +63,6 @@ LEGACY_ROUTERS = [
     api_tasks.router,
     api_config.router,
     api_files.router,
-    api_text.router,
-    api_book.router,
     api_audio.router,
     api_bgm.router,
     api_tts.router,

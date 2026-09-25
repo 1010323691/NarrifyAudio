@@ -765,7 +765,7 @@ def test_run_worker_cancel_not_stalled_by_backlog(tmp_path):
     import threading
     import time
 
-    import backend.core.tasks as core_tasks
+    from backend.core.task_control import TaskCancelled
     from backend.engines import tts as tts_eng
 
     class _LateCancel(_Handle):
@@ -779,7 +779,7 @@ def test_run_worker_cancel_not_stalled_by_backlog(tmp_path):
 
         def check(self):
             if self.cancel_event.is_set():
-                raise core_tasks.TaskCancelled()
+                raise TaskCancelled()
 
         def note_line(self):
             self.seen += 1
@@ -792,7 +792,7 @@ def test_run_worker_cancel_not_stalled_by_backlog(tmp_path):
             "time.sleep(300)\n")
     h = _LateCancel(after=120)
     t0 = time.monotonic()
-    with pytest.raises(core_tasks.TaskCancelled):
+    with pytest.raises(TaskCancelled):
         tts_eng.run_tts_subprocess([sys.executable, "-c", code], h,
                            lambda line: (time.sleep(0.02), h.note_line()))
     assert time.monotonic() - t0 < 10, "cancel stalled behind the output backlog"

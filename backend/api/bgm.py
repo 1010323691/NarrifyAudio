@@ -239,7 +239,7 @@ class AnalyzeRequest(BaseModel):
 
 
 class PackageRequest(BaseModel):
-    chapters: list[str] | None = None  # None = all existing chapters (legacy callers)
+    chapters: list[str] | None = None  # None = all existing chapters
 
 
 @router.post("/analyze")
@@ -338,7 +338,7 @@ def run_analyze_segment(
 
 
 # --------------------------------------------------------------------------- #
-# 匹配（同步、确定性、不经任务系统）
+# 匹配（持久任务：LLM / random / 段落级时间轴重算）
 # --------------------------------------------------------------------------- #
 
 class MatchRequest(BaseModel):
@@ -589,11 +589,12 @@ def package_mixed_audio(
     db: Session = Depends(get_db),
     req: PackageRequest | None = None,
 ) -> dict:
-    """Package selected finished chapter mixes into a source-named ZIP.
+    """Submit a ``bgm.package`` durable task that zips the selected finished
+    chapter mixes into a source-named ZIP.
 
     The archive contains a top-level folder named after the source TXT stem,
-    with one final ``.mp3`` per chapter.  The same folder is used under
-    ``08_bgm/`` so the shared file download endpoint can serve the result.
+    with one final ``.mp3`` per chapter.  The ZIP is published under
+    ``08_bgm/`` so the file download endpoint can serve the result.
     """
     _common.require_workspace()
     layout = get_or_prepare_layout()

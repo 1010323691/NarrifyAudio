@@ -53,7 +53,7 @@ Copy-Item .env.example .env
 notepad .env
 ```
 
-设置 `POSTGRES_PASSWORD` 为安装 PostgreSQL 时设置的 `postgres` 密码；`NARRIFY_DATABASE_URL` 中 `narrify` 后面的密码则是应用专用数据库用户的密码。生成强密码并在连接串中进行 URL 编码（例如 `@` 写成 `%40`）。`.env` 已被 Git 忽略，不要提交实际密码。
+`NARRIFY_DATABASE_URL` 中 `narrify` 后面的密码是应用专用数据库用户的密码（安装 PostgreSQL 时的 `postgres` 管理员密码仅供人工 psql 运维使用，应用不读取、无需存入 `.env`）。生成强密码并在连接串中进行 URL 编码（例如 `@` 写成 `%40`）。`.env` 已被 Git 忽略，不要提交实际密码。
 
 以 PostgreSQL 管理员创建应用用户和数据库。将下方密码替换为 `.env` 中连接串对应的应用密码：
 
@@ -128,11 +128,12 @@ NARRIFY_REDIS_URL=redis://127.0.0.1:6379/0
 
 | 变量 | 说明 |
 | --- | --- |
-| `POSTGRES_PASSWORD` | PostgreSQL 安装时 `postgres` 管理员密码，便于本机维护 |
 | `NARRIFY_DATABASE_URL` | 应用数据库连接串 |
 | `NARRIFY_REDIS_URL` | Memurai/Redis 连接串 |
 | `NARRIFY_BOOTSTRAP_ADMIN_EMAIL` | 首次初始化管理员邮箱 |
 | `NARRIFY_BOOTSTRAP_ADMIN_PASSWORD` | 首次初始化管理员密码 |
+
+`postgres` 管理员密码仅供人工 psql 运维使用，应用不读取、无需存入 `.env`。
 
 LLM 服务凭据和制作参数按应用设置页面配置。不要把 API 密钥写入 README、提交到 Git 或放进前端代码。
 

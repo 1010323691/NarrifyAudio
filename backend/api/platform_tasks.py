@@ -18,7 +18,6 @@ from ..services.tasks import task_dict
 from .task_submission import (
     TaskSubmit,
     cancel_task as cancel_task_for_user,
-    retry_task as retry_task_for_user,
     submit_task as submit_task_for_user,
 )
 
@@ -107,8 +106,3 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
 @router.post("/{task_id}/cancel")
 def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     return cancel_task_for_user(task_id, user=user, db=db)
-
-
-@router.post("/{task_id}/retry")
-def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    return retry_task_for_user(task_id, user=user, db=db)
