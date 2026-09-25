@@ -2367,3 +2367,30 @@ def test_single_file_width_stable_across_watchdog_restart(workspace, monkeypatch
     assert rows1 == [1]     # the restart's table is the shrinking remainder
     assert _cmd_flag(cmd0, "--width") == _cmd_flag(cmd1, "--width") == "4"
     assert result["completed"] == 2
+
+
+def test_safe_package_name_snapshot():
+    """Q5: merge-output and bgm side-file sanitizers collapsed into one function —
+    behavior must match the two old inline copies exactly, including the deliberate
+    differences from ``safe_display_name`` (no 180-char cap, dots preserved)."""
+    from pathlib import Path
+
+    from backend.engines.tts_manifest import _merged_output_paths, _safe_package_name
+
+    cases = {
+        "my book": "my book",
+        'a/b:c*d?e"f<g>h|i\j': "a_b_c_d_e_f_g_h_i_j",
+        "  padded  ": "padded",
+        "   ": "audiobook",
+        "": "audiobook",
+        "中文 书名": "中文 书名",
+        "dots..kept": "dots..kept",
+        "long" * 50: "long" * 50,
+    }
+    for raw, expected in cases.items():
+        assert _safe_package_name(raw) == expected, raw
+
+    class _Layout:
+        audio_merge = Path("/ws/06_audio_merge")
+
+    assert [p.name for p in _merged_output_paths(_Layout(), 'a/b:c')] == ["a_b_c.mp3", "a_b_c.wav"]
