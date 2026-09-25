@@ -23,7 +23,7 @@ from pathlib import Path
 
 from ..core.paths import PROJECT_ROOT
 
-IMPLEMENTED = True
+READY = True
 NOT_READY_MSG = "TTS 引擎未就绪：请先运行 install_tts_env.ps1 安装共享的 .venv 环境。"
 
 DEFAULT_LANGUAGE = "chinese"

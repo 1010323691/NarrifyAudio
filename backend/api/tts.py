@@ -39,14 +39,15 @@ router = APIRouter(prefix="/api/tts", tags=["tts"])
 @router.get("/status")
 def status() -> dict:
     """Report the worker substrate without loading model packages or weights."""
-    ready = T.IMPLEMENTED
+    ready = T.READY
     if ready:
         try:
             T.resolve_engine()
         except (RuntimeError, OSError):
             ready = False
     return {
-        "implemented": T.IMPLEMENTED,
+        # 线协议字段名 "implemented" 被前端与测试消费，本轮不改
+        "implemented": T.READY,
         "ready": ready,
         "message": (
             "TTS 工作进程文件可用；模型依赖和权重将在任务启动时检查。"
