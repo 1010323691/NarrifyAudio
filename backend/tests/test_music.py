@@ -184,7 +184,7 @@ def test_normalize_track_tags_non_dict_input():
 
 
 def test_is_generic_track():
-    empty = music_engine._empty_track_tags()
+    empty = music_engine.empty_track_tags()
     assert music_engine.is_generic_track({"enabled": True, "tags": empty}) is True
     assert music_engine.is_generic_track({"enabled": False, "tags": empty}) is False
     assert music_engine.is_generic_track({"enabled": True, "tags": {**empty, "mood": ["紧张"]}}) is False
@@ -297,7 +297,7 @@ def test_coerce_index_degrades_corrupt_shapes():
 def test_save_index_write_bytes_no_crlf(sandbox):
     idx = music_engine._default_index()
     idx["tracks"]["战斗曲.mp3"] = {"duration": 1.0, "enabled": True, "description": "中文描述",
-                                   "tags": music_engine._empty_track_tags(), "added_at": ""}
+                                   "tags": music_engine.empty_track_tags(), "added_at": ""}
     music_engine.save_index(idx)
     p = sandbox["lib"] / "music_index.json"
     raw = p.read_bytes()
@@ -327,7 +327,7 @@ def test_update_index_concurrent_no_lost_updates(sandbox):
         def _m(idx):
             idx["tracks"][f"t{i:02d}.mp3"] = {
                 "duration": 1.0, "enabled": True, "description": "",
-                "tags": music_engine._empty_track_tags(), "added_at": "",
+                "tags": music_engine.empty_track_tags(), "added_at": "",
             }
         music_engine.update_index(_m)
 
@@ -340,7 +340,7 @@ def test_human_music_tags_win_against_cross_process_ai_adoption(sandbox):
     index = music_engine._default_index()
     index["tracks"]["song.mp3"] = {
         "duration": 1.0, "enabled": True, "description": "",
-        "tags": music_engine._empty_track_tags(), "added_at": "",
+        "tags": music_engine.empty_track_tags(), "added_at": "",
     }
     music_engine.save_index(index)
 
@@ -377,7 +377,7 @@ def test_upload_success_and_fields(sandbox):
     assert r["name"] == "a.mp3"
     tr = r["track"]
     assert tr["enabled"] is True
-    assert tr["tags"] == music_engine._empty_track_tags()
+    assert tr["tags"] == music_engine.empty_track_tags()
     assert tr["duration"] == 0.0  # fake bytes -> probe failure -> 0 (non-blocking)
     assert (sandbox["lib"] / "a.mp3").exists()
     assert "a.mp3" in music_engine.load_index()["tracks"]
@@ -790,7 +790,7 @@ def test_library_suggestions_filtered_to_existing_tracks(sandbox):
     r = api_music.get_library()
     assert set(r["suggestions"]) == {"a.mp3"}
     assert r["suggestions"]["a.mp3"]["tags"]["scene"] == ["战斗"]
-    assert r["tracks"]["a.mp3"]["tags"] == music_engine._empty_track_tags()  # candidates NOT applied
+    assert r["tracks"]["a.mp3"]["tags"] == music_engine.empty_track_tags()  # candidates NOT applied
 
 
 def test_update_track_tags_consumes_suggestion(sandbox):
@@ -915,7 +915,7 @@ def test_suggest_track_tags_success_auto_adopts_untagged(sandbox, monkeypatch):
         "scene": ["战斗"], "mood": ["紧张", "热血", "史诗"],
         "emotion": ["愤怒", "希望"], "custom": [],
     }
-    assert idx["tracks"]["b.mp3"]["tags"] == music_engine._empty_track_tags()
+    assert idx["tracks"]["b.mp3"]["tags"] == music_engine.empty_track_tags()
     # the candidate is consumed (incl. the stale entry) — nothing lingers
     assert music_engine.load_suggestions()["tracks"] == {}
     # the log leaves a trace (防自动采用被误读为「候选待确认」)
@@ -960,7 +960,7 @@ def test_suggest_track_tags_success_empty_candidate_kept(sandbox, monkeypatch):
                      music_engine.suggest_track_tags, "a.mp3", cfg.llm).id
     assert _wait_terminal(mgr, tid) == "succeeded"
     idx = music_engine.load_index()
-    assert idx["tracks"]["a.mp3"]["tags"] == music_engine._empty_track_tags()
+    assert idx["tracks"]["a.mp3"]["tags"] == music_engine.empty_track_tags()
     sugg = music_engine.load_suggestions()["tracks"]
     assert sugg["a.mp3"]["tags"] == {"scene": [], "mood": [], "emotion": []}
     assert concurrency.gate().active == 0
@@ -1140,7 +1140,7 @@ def _seed_folder_index() -> dict:
     for i, folder in enumerate(["战斗音乐", "战斗音乐", ""]):
         idx["tracks"][f"t{i}.mp3"] = {
             "duration": 1.0, "enabled": True, "description": "",
-            "tags": music_engine._empty_track_tags(), "added_at": "", "folder": folder,
+            "tags": music_engine.empty_track_tags(), "added_at": "", "folder": folder,
         }
     return idx
 
@@ -1195,7 +1195,7 @@ def test_coerce_index_folder_backward_compat():
     data = {"version": 1,
             "tags": music_engine._default_index()["tags"],
             "tracks": {"a.mp3": {"duration": 1.0, "enabled": True,
-                                 "tags": music_engine._empty_track_tags(), "added_at": ""}}}
+                                 "tags": music_engine.empty_track_tags(), "added_at": ""}}}
     idx = music_engine._coerce_index(data)
     assert idx["folders"] == {}
     assert idx["tracks"]["a.mp3"]["folder"] == ""

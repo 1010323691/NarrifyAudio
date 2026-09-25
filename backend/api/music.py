@@ -275,7 +275,7 @@ async def upload_track(file: UploadFile = File(...),
             "duration": round(dur, 3),
             "enabled": True,
             "description": "",
-            "tags": music_engine._empty_track_tags(),
+            "tags": music_engine.empty_track_tags(),
             "added_at": datetime.now().isoformat(timespec="seconds"),
             "folder": target_folder,
         }

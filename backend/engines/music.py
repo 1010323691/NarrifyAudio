@@ -80,7 +80,7 @@ _INDEX_NAME = "music_index.json"
 _INDEX_LOCK = threading.RLock()
 
 
-def _empty_track_tags() -> dict[str, list[str]]:
+def empty_track_tags() -> dict[str, list[str]]:
     return {c: [] for c in TAG_CATEGORIES}
 
 
@@ -95,7 +95,7 @@ def normalize_track_tags(raw: dict | None, registry: dict[str, list[str]]) -> di
     folded into ``custom``. A non-dict / missing input yields four empty
     buckets. The registry is the live index's ``tags`` section.
     """
-    out = _empty_track_tags()
+    out = empty_track_tags()
     if not isinstance(raw, dict):
         return out
     for cat in TAG_CATEGORIES:
