@@ -201,7 +201,7 @@ function selectReady() {
   }
 }
 
-function selectAllAll() {
+function selectAllIncludingDone() {
   const all = pkgNames.value
   if (!all.length) return
   clearSelection()
@@ -421,7 +421,7 @@ onActivated(() => {
             <Button variant="outline" size="sm" :disabled="submitting || !pkgNames.length" @click="selectReady">
               <ListChecks class="h-3.5 w-3.5" />{{ allReadySelected ? '已选' : '全选' }}
             </Button>
-            <Button variant="outline" size="sm" :disabled="submitting || !pkgNames.length" @click="selectAllAll">
+            <Button variant="outline" size="sm" :disabled="submitting || !pkgNames.length" @click="selectAllIncludingDone">
               <ListChecks class="h-3.5 w-3.5" />{{ allSelected ? '已全选' : '全量全选' }}
             </Button>
             <Button variant="outline" size="sm" :disabled="submitting || !pkgNames.length" @click="clearAll">

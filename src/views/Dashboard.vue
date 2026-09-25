@@ -10,7 +10,7 @@ import { showConfirm } from '@/components/ui/dialog'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
-import { listDurableTasks, type DurableTask } from '@/api/persistentTasks'
+import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
 import { deleteProject, getProjectSummary, type ProjectStorageSummary } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
 

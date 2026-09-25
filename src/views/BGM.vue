@@ -80,7 +80,7 @@ async function resolveDurable<T>(response: T | { task_id: string }): Promise<T> 
 // ---------------------------------------------------------------------------
 // 行数据（磁盘口径：02 章节 stem + 两个 08_bgm JSON 缓存 + 06/08 存在性）
 // ---------------------------------------------------------------------------
-const rowsData = ref<BgmChapterRow[]>([])
+const chapterRows = ref<BgmChapterRow[]>([])
 const mode = ref('llm')
 // 段落级模式是当前页面的交互状态，不会在每次任务完成后写回 assignments.mode。
 // 因此章节列表刷新只能在首次加载时从后端初始化，不能覆盖用户刚选的模式。
@@ -129,7 +129,7 @@ function segmentTimelineReady(row: BgmChapterRow): boolean {
 // > 段落已分析 / 段落分析已失效 > 已分析 > 未分析。
 const rows = computed<BgmRow[]>(() => {
   const { active, failed } = tasksByStem.value
-  return rowsData.value.map((d) => {
+  return chapterRows.value.map((d) => {
     const a = active.get(d.stem)
     const mixTask = a?.module === 'bgm-mix' ? a : undefined
     const segmentTask = a?.module === 'bgm-segment' ? a : undefined
@@ -220,7 +220,7 @@ const rows = computed<BgmRow[]>(() => {
   })
 })
 
-const selectedNames = computed(() => rowsData.value.filter((r) => !!selected[r.stem]).map((r) => r.stem))
+const selectedNames = computed(() => chapterRows.value.filter((r) => !!selected[r.stem]).map((r) => r.stem))
 const selectedMixedNames = computed(() => rows.value
   .filter((r) => !!selected[r.stem] && r.data.mix_exists && !r.mixTask)
   .map((r) => r.stem))
@@ -228,7 +228,7 @@ const selectedUnmixedCount = computed(() => Math.max(0, packageSelection.value.l
   isMixReady(stem),
 ).length))
 const matchedRows = computed(() => rows.value.filter((r) => r.matched))
-const mixedCount = computed(() => rowsData.value.filter((r) => r.mix_exists).length)
+const mixedCount = computed(() => chapterRows.value.filter((r) => r.mix_exists).length)
 const pendingAnalysisStems = computed(() =>
   rows.value
     .filter((r) => {
@@ -264,8 +264,8 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
     // 内容未变的行沿用旧对象引用：批量完成时每章一次刷新会整体重拉 300+ 行，
     // 若每次整表换引用，v-memo 行会全部失效重渲。stringify 比对（~毫秒级）换掉
     // 整列表 DOM patch，只有真正变化的行更新。
-    const prevByStem = new Map(rowsData.value.map((r) => [r.stem, r]))
-    rowsData.value = res.chapters.map((c) => {
+    const prevByStem = new Map(chapterRows.value.map((r) => [r.stem, r]))
+    chapterRows.value = res.chapters.map((c) => {
       const prev = prevByStem.get(c.stem)
       return prev && JSON.stringify(prev) === JSON.stringify(c) ? prev : c
     })
@@ -275,7 +275,7 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
     }
     if (reloadLibrary) lib.value = libRes
     for (const k of Object.keys(selected)) {
-      if (!rowsData.value.some((r) => r.stem === k)) delete selected[k]
+      if (!chapterRows.value.some((r) => r.stem === k)) delete selected[k]
     }
   } catch (e: any) {
     if (e?.name === 'AbortError') return
@@ -881,7 +881,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
           <!-- v-memo：任务流每次事件都会重算全局 rows computed，没有 memo 时整列表全量
                patch（待处理条目多时每次任务进度 tick 都重渲几百行）。key 覆盖行模板
                读到的全部响应式状态：行数据对象引用 + 本行任务 + 选中态 + 四个全局开关。
-               数据刷新（rowsData 整体替换）时 data 引用变化 → 该行必然重渲，不会漏更新。 -->
+               数据刷新（chapterRows 整体替换）时 data 引用变化 → 该行必然重渲，不会漏更新。 -->
           <div
             v-for="row in rows"
             :key="row.stem"

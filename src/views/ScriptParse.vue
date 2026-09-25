@@ -255,14 +255,14 @@ async function loadFiles() {
   }
 }
 
-function selectAll() {
+function selectAllPending() {
   // 【全选】= 只勾未完成的条目（先清空，避免残留已完成的勾选；幂等）。
   clearAll()
   files.value.forEach((f) => {
     if (!f.done) selected[f.name] = true
   })
 }
-function selectAllAll() {
+function selectAllIncludingDone() {
   // 【全量全选】= 无视状态全勾（含已完成）；执行时按实际勾选原样提交，不做状态二次过滤。
   files.value.forEach((f) => {
     selected[f.name] = true
@@ -414,10 +414,10 @@ async function cancelAll() {
         </p>
 
         <div class="flex flex-wrap items-center gap-2">
-          <Button variant="outline" size="sm" :disabled="busy || !files.length" @click="selectAll">
+          <Button variant="outline" size="sm" :disabled="busy || !files.length" @click="selectAllPending">
             <ListChecks class="h-3.5 w-3.5" />{{ allPendingSelected ? '已选' : '全选' }}
           </Button>
-          <Button variant="outline" size="sm" :disabled="busy || !files.length" @click="selectAllAll">
+          <Button variant="outline" size="sm" :disabled="busy || !files.length" @click="selectAllIncludingDone">
             <ListChecks class="h-3.5 w-3.5" />{{ allSelected ? '已全选' : '全量全选' }}
           </Button>
           <Button variant="outline" size="sm" :disabled="busy || !files.length" @click="clearAll">

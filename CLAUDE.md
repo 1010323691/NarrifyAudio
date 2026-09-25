@@ -57,7 +57,7 @@ npm.cmd run test:state-isolation # 前端状态隔离回归（node:test 沙箱�
 
 - 19 种任务类型的单一事实源是 `backend/platform/task_registry.py`（`task_types.py` 只做 re-export）。
 - 提交链路：路由 → `platform/task_submission.py:submit_task_record` → 事务内写 Task + OutboxEvent → Worker 的 `outbox.publish_pending` 投递 Redis Streams（租约 + XAUTOCLAIM 恢复，`recover_database_tasks` 兜底数据库侧遗留任务）→ 两个执行分发器：`platform/task_worker.py:execute_claim`（新类型）与 `platform/engine_task_executor.py:execute_engine_task`（legacy 引擎类型）。
-- legacy SSE 表面（`/api/tasks*`，前端 `src/api/tasks.ts` + `stores/task.ts`）与 v1 轮询（`src/api/persistentTasks.ts`）是**同一持久化任务数据库的两种 HTTP 表面**，不存在双任务数据源。
+- legacy SSE 表面（`/api/tasks*`，前端 `src/api/tasks.ts` + `stores/task.ts`）与 v1 轮询（`src/api/durableTasks.ts`）是**同一持久化任务数据库的两种 HTTP 表面**，不存在双任务数据源。
 - 额度按操作计费（`platform/quota.py` 的 `QuotaHold`）是现行生效路径；任务级 `QuotaReservation` 已退役。
 - 工作区绑定：请求级 ContextVar（`main.py` 的 `bind_authenticated_workspace` 中间件，Starlette 可能在不同线程跑同步依赖，故不能在 auth 依赖里绑）+ 任务级配置快照（`core.config`，任务启动时绑定）。
 

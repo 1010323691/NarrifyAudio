@@ -130,7 +130,7 @@ test('aborting a durable task wait stops its next polling request', async () => 
   const load = harness({ '@/api/client': {
     http: { get: async () => { calls += 1; return { status: 'running' } } },
   } })
-  const { waitForDurableTask } = load('@/api/persistentTasks')
+  const { waitForDurableTask } = load('@/api/durableTasks')
   const controller = new AbortController()
   const waiting = waitForDurableTask('task-1', 50, controller.signal)
   await Promise.resolve()
@@ -142,7 +142,7 @@ test('aborting a durable task wait stops its next polling request', async () => 
 
 test('audio task reattachment is restricted to the active project', () => {
   const load = harness()
-  const { findActiveDurableTask } = load('@/api/persistentTasks')
+  const { findActiveDurableTask } = load('@/api/durableTasks')
   const tasks = [
     { id: 'task-A', project_id: 'A', task_type: 'audio.cut', status: 'running' },
     { id: 'task-B', project_id: 'B', task_type: 'audio.cut', status: 'running' },

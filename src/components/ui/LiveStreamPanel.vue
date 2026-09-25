@@ -9,7 +9,7 @@
 import { computed } from 'vue'
 import type { TaskSnapshot } from '@/types'
 import { cn } from '@/lib/utils'
-import { useLogAutoFollow } from '@/utils/log-follow'
+import { useLogAutoFollow } from '@/utils/logFollow'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
 
 const props = defineProps<{

@@ -1,5 +1,5 @@
 import { onActivated, onDeactivated, onUnmounted, watch } from 'vue'
-import { trackDurableTask, type DurableTask } from '@/api/persistentTasks'
+import { trackDurableTask, type DurableTask } from '@/api/durableTasks'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 
