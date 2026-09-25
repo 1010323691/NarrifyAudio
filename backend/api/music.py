@@ -9,6 +9,7 @@ are not blocked — they degrade to ``music_missing`` and self-heal on re-match)
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import tempfile
@@ -31,6 +32,8 @@ from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Project
 from ..platform.engine_task_submission import active_durable_targets, submit_legacy_engine_task
 from ..platform.storage import configured_storage_root, safe_display_name
+
+log = logging.getLogger("audiobook.music")
 
 router = APIRouter(prefix="/api/music", tags=["music"])
 
@@ -654,15 +657,17 @@ def _rewrite_analysis_tags(chapters, old: str, new: str | None, category: str) -
 
 def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> None:
     """Rewrite a (renamed) tag in the current workspace's own analysis cache
-    (``08_bgm/chapter_music_analysis.json``). Best-effort: no workspace / no
-    file / corrupt file -> nothing to do. The saved per-chapter assignments
-    (``08_bgm/bgm_assignments.json``) are NOT rewritten (they are a
-    historical record).
+    (``08_bgm/chapter_music_analysis.json``). Best-effort: no workspace /
+    lock contention (incl. the 30s ``storage_lock`` timeout) / write failure
+    -> log and return, the rename/delete above is unaffected. The saved
+    per-chapter assignments (``08_bgm/bgm_assignments.json``) are NOT
+    rewritten (they are a historical record).
 
-    The read → rewrite → publish cycle holds the cross-process
-    ``bgm_storage.storage_lock`` (shared with the Worker's own cache writes)
-    and publishes atomically, so a concurrent BGM analysis task cannot lose
-    either side's write."""
+    Routes through ``bgm_storage.update_analysis`` so the read → rewrite →
+    publish cycle takes ``_BGMS_LOCK → storage_lock`` — the same order as the
+    Worker's own cache writes. Taking the cross-process ``storage_lock``
+    first (the old way) inverted that order and deadlocked against
+    ``update_*`` / ``PUT /chapters`` until the 30s file-lock timeout (500)."""
     from ..core.paths import get_or_prepare_layout
     from ..engines import bgm_storage
 
@@ -670,14 +675,14 @@ def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> Non
     bgm = layout.bgm
     if bgm is None or not (bgm / bgm_storage.ANALYSIS_NAME).exists():
         return
-    with bgm_storage.storage_lock(layout):
-        data = bgm_storage.load_analysis(layout)
-        if not _rewrite_analysis_tags(data.get("chapters"), old, new, category):
-            return
-        try:
-            bgm_storage.save_analysis(layout, data)
-        except OSError:
-            pass
+
+    def _mutate(data: dict) -> None:
+        _rewrite_analysis_tags(data.get("chapters"), old, new, category)
+
+    try:
+        bgm_storage.update_analysis(layout, _mutate)
+    except OSError as e:
+        log.warning("08_bgm 标签传播跳过（best-effort）：%s", e)
 
 
 @router.post("/tags", dependencies=[Depends(require_admin)])
