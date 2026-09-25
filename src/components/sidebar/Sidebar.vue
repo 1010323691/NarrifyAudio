@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, Headphones, FolderOpen, LogOut, Monitor, Sun, Moon,
+  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -109,7 +109,10 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
 <template>
   <aside class="app-sidebar">
     <RouterLink class="app-brand" :to="isAdminArea ? '/admin' : '/dashboard'" :aria-label="isAdminArea ? '返回管理控制台首页' : '返回工作台首页'">
-      <div class="app-brand__mark" aria-hidden="true"><component :is="isAdminArea ? ShieldCheck : Headphones" class="h-5 w-5" /></div>
+      <div class="app-brand__mark" :class="{ 'app-brand__mark--image': !isAdminArea }" aria-hidden="true">
+        <img v-if="!isAdminArea" class="app-brand__image" src="/narrify-audio-icon.png" alt="" />
+        <ShieldCheck v-else class="h-5 w-5" />
+      </div>
       <div class="app-brand__copy">
         <div class="app-brand__title">{{ isAdminArea ? '管理控制台' : '有声书工作台' }}</div>
         <div class="app-brand__subtitle">{{ isAdminArea ? 'ADMIN CONSOLE' : 'NARRIFY AUDIO WORKSPACE' }}</div>
