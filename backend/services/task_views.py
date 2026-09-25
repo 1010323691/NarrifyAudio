@@ -1,11 +1,9 @@
-"""Shared task-view logic for the legacy ``/api/tasks`` surface and the v1
-``/api/v1/tasks/stream`` aggregate endpoint (S7/5a).
-
-Both surfaces adapt durable Task/TaskEvent rows to the UI's legacy snapshot
-shape (module/label/phase/logs/llm metrics) over one SSE connection carrying
-many tasks. The enrichment lives here — once the views move to the v1
-endpoint the legacy adapter file is deleted, and this module is the only
-copy. Frame contract (all frames are ``data:`` lines, no ``event:`` field):
+"""Task-view logic for the v1 ``/api/v1/tasks/stream`` aggregate endpoint
+(S7/5a): adapts durable Task/TaskEvent rows to the UI's task-snapshot shape
+(module/label/phase/logs/llm metrics) over one SSE connection carrying many
+tasks. The legacy ``/api/tasks`` adapter that once shared this module is
+retired (5a) — this is the only copy. Frame contract (all frames are
+``data:`` lines, no ``event:`` field):
 
 - ``{"type": "snapshot_all", "tasks": [...]}``` — replayed once on connect
 - ``{"type": "progress"|"phase"|"log"|"llm_rate"|"llm_chars"|"segments", "task_id": ...}``

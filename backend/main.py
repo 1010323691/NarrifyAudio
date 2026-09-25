@@ -28,7 +28,6 @@ from .api import project_resources as api_project_resources
 from .api import projects as api_projects
 from .api import quota as api_quota
 from .api import script as api_script
-from .api import tasks as api_tasks
 from .api import tts as api_tts
 from .core import config as core_config
 from .core import logging_setup
@@ -60,7 +59,6 @@ PLATFORM_ROUTERS = [
 ]
 
 LEGACY_ROUTERS = [
-    api_tasks.router,
     api_config.router,
     api_files.router,
     api_audio.router,

@@ -21,7 +21,7 @@ import {
   musicPreviewUrl,
   renameFolder,
   renameTag,
-  suggestTagsDurable,
+  suggestTags,
   suggestTagsBatch,
   updateTrack,
   uploadMusic,
@@ -725,7 +725,7 @@ async function doSuggest() {
   aiTags.value = null
   aiNote.value = ''
   try {
-    const submitted = await suggestTagsDurable(e.name, e.desc.trim() || undefined)
+    const submitted = await suggestTags(e.name, e.desc.trim() || undefined)
     await taskStore.refresh()
     let task: TaskSnapshot | undefined
     for (let attempt = 0; attempt < 1200; attempt += 1) {

@@ -32,8 +32,8 @@ def _task_json(task: Task) -> dict:
 
 def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> list[Task]:
     """The user's durable tasks, newest first, cap 200 — v1 is user-scoped
-    (cross-project), unlike the legacy adapter's current-project scope; the
-    optional ``project_id`` narrows to one project (the UI views' scope)."""
+    (cross-project); the optional ``project_id`` narrows to one project (the
+    UI views' scope)."""
     stmt = select(Task).where(Task.owner_id == user_id)
     if project_id:
         stmt = stmt.where(Task.project_id == project_id)
@@ -55,10 +55,9 @@ def stream_user_tasks(
     """Aggregate task event stream: ONE connection carries the snapshots +
     lifecycle events of the user's tasks (all projects, or one when
     ``project_id`` is given), each frame tagged with ``task_id``. Replays
-    ``snapshot_all`` on connect so a reconnect self-heals the full state. The
-    durable-side replacement for the legacy ``/api/tasks/stream`` (Q9): the
-    per-task ``/{task_id}/events`` endpoint stays for direct consumers; 500 ms
-    polling should move here."""
+    ``snapshot_all`` on connect so a reconnect self-heals the full state.
+    The per-task ``/{task_id}/events`` endpoint stays for direct consumers;
+    500 ms polling should move here."""
     return StreamingResponse(
         task_views.aggregate_stream(
             lambda db: _user_tasks(db, user.id, project_id),

@@ -102,7 +102,7 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     assert all(item["id"] != workspace_id for item in client.get("/api/v1/projects").json())
 
 
-def test_legacy_task_ui_adapter_lists_and_controls_durable_tasks(client: TestClient):
+def test_task_surface_lists_and_controls_durable_tasks(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     workspace = client.post(
@@ -133,13 +133,13 @@ def test_legacy_task_ui_adapter_lists_and_controls_durable_tasks(client: TestCli
     assert submitted.status_code == 201, submitted.text
     task_id = submitted.json()["id"]
 
-    listed = client.get("/api/tasks")
+    listed = client.get("/api/v1/tasks")
     assert listed.status_code == 200, listed.text
-    assert any(row["id"] == task_id and row["module"] == "text" for row in listed.json())
-    snapshot = client.get(f"/api/tasks/{task_id}")
-    assert snapshot.status_code == 200, snapshot.text
-    assert snapshot.json()["id"] == task_id
-    cancelled = client.post(f"/api/tasks/{task_id}/cancel", headers={"X-CSRF-Token": csrf})
+    assert any(row["id"] == task_id and row["task_type"] == "text.format" for row in listed.json())
+    fetched = client.get(f"/api/v1/tasks/{task_id}")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["id"] == task_id
+    cancelled = client.post(f"/api/v1/tasks/{task_id}/cancel", headers={"X-CSRF-Token": csrf})
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["status"] == "cancelled"
 
@@ -1499,9 +1499,8 @@ def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
     from starlette.concurrency import iterate_in_threadpool
     from starlette.requests import Request
 
-    from backend.api import tasks as api_tasks
+    from backend.api import platform_tasks as api_platform_tasks
     from backend.platform.config import settings
-    from backend.platform.deps import AuthContext
     from backend.platform.security import load_session
 
     _register(client, f"{uuid.uuid4()}@example.com")
@@ -1510,9 +1509,9 @@ def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
     with SessionLocal() as db:
         session = load_session(db, token, touch=False)
         assert session is not None
-        ctx = AuthContext(user=session.user, session=session)
+        user = session.user
     request = Request({
-        "type": "http", "method": "GET", "path": "/api/tasks/stream",
+        "type": "http", "method": "GET", "path": "/api/v1/tasks/stream",
         "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
         "query_string": b"",
     })
@@ -1520,7 +1519,7 @@ def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
     # Structural: starlette only thread-pool-bridges NON-async iterables, so
     # an unbridged async body is precisely what keeps idle connections off
     # the worker pool.
-    body = api_tasks.stream_all_tasks(request, ctx).body_iterator
+    body = api_platform_tasks.stream_user_tasks(request, user).body_iterator
     assert inspect.isasyncgen(body)
     body_code = getattr(body, "ag_code", None) or getattr(body, "gi_code", None)
     assert body_code is not iterate_in_threadpool.__code__, \
@@ -1529,7 +1528,7 @@ def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
     # Functional: the generator runs to its first yield (driven on a bare
     # event loop — a blocking time.sleep would freeze the loop here).
     async def first_chunk():
-        gen = api_tasks.stream_all_tasks(request, ctx).body_iterator
+        gen = api_platform_tasks.stream_user_tasks(request, user).body_iterator
         try:
             return await gen.__anext__()
         finally:
@@ -1548,9 +1547,8 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
     import asyncio
     import time
 
-    from backend.api import tasks as api_tasks
+    from backend.api import platform_tasks as api_platform_tasks
     from backend.platform.config import settings
-    from backend.platform.deps import AuthContext
     from backend.platform.security import load_session
     from starlette.requests import Request
 
@@ -1560,7 +1558,7 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
     with SessionLocal() as db:
         session = load_session(db, token, touch=False)
         assert session is not None
-        ctx = AuthContext(user=session.user, session=session)
+        user = session.user
     # The body re-checks ``request.is_disconnected`` every poll, so the fake
     # request needs a receive channel. One shared wire: it stays silent until
     # BOTH readers below have seen their chunks, then reports the disconnect —
@@ -1574,7 +1572,7 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
 
     request = Request(
         {
-            "type": "http", "method": "GET", "path": "/api/tasks/stream",
+            "type": "http", "method": "GET", "path": "/api/v1/tasks/stream",
             "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
             "query_string": b"",
         },
@@ -1601,7 +1599,7 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
 
         started = time.monotonic()
         await asyncio.wait_for(
-            api_tasks.stream_all_tasks(request, ctx)(
+            api_platform_tasks.stream_user_tasks(request, user)(
                 {"type": "http", "headers": []}, wire_receive, send,
             ),
             timeout=15,

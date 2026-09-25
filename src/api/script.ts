@@ -11,12 +11,12 @@ import type { GenerateFilesResult } from '@/types'
  * toggles.
  */
 export function generateScriptFiles(names: string[]): Promise<GenerateFilesResult> {
-  return http.post<GenerateFilesResult>('/api/script/generate-files-durable', { files: names })
+  return http.post<GenerateFilesResult>('/api/script/generate-files', { files: names })
 }
 
 /** 【取消全部】：cancel the given tasks AND stop their batch(es) from dispatching
  *  further files (the backend's per-task cancel cannot express "stop dispatch").
  *  Terminal / unknown ids are ignored (idempotent). */
 export function cancelParseBatch(taskIds: string[]): Promise<{ cancelled: unknown[]; batches_stopped: number }> {
-  return http.post<{ cancelled: unknown[]; batches_stopped: number }>('/api/script/cancel-batch-durable', { task_ids: taskIds })
+  return http.post<{ cancelled: unknown[]; batches_stopped: number }>('/api/script/cancel-batch', { task_ids: taskIds })
 }

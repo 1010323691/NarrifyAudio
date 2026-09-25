@@ -8,13 +8,14 @@ import sqlalchemy as sa
 import pytest
 from sqlalchemy.orm import Session
 
-from backend.api.tasks import _durable_owned
+from backend.services import task_views
 from backend.core import config as core_config
 from backend.platform import quota, task_context, task_worker
 from backend.platform.engine_task_executor import execute_engine_task
 from backend.platform.task_contracts import TaskClaim, TaskExecutionError
 from sqlalchemy.dialects import postgresql
 from backend.services import task_views
+from backend.services import task_operations
 from backend.services import tasks as task_service
 from backend.platform.database import Base
 from backend.platform.models import TaskEvent, User
@@ -191,7 +192,6 @@ def test_worker_rejects_unsafe_bgm_paths_from_preexisting_tasks():
 
 
 def test_task_read_queries_do_not_lock_but_controls_can(monkeypatch):
-    monkeypatch.setattr("backend.api.tasks._current_project_id", lambda _db, _ctx: "project")
     task = SimpleNamespace(id="task")
 
     class CaptureSession:
@@ -201,13 +201,12 @@ def test_task_read_queries_do_not_lock_but_controls_can(monkeypatch):
             self.statement = statement
             return task
 
-    ctx = SimpleNamespace(user=SimpleNamespace(id="owner"))
     read_session = CaptureSession()
-    assert _durable_owned(read_session, ctx, "task") is task
+    assert task_operations.owned_task(read_session, "owner", "task") is task
     assert "FOR UPDATE" not in str(read_session.statement.compile(dialect=postgresql.dialect()))
 
     write_session = CaptureSession()
-    assert _durable_owned(write_session, ctx, "task", lock=True) is task
+    assert task_operations.owned_task(write_session, "owner", "task", lock=True) is task
     assert "FOR UPDATE" in str(write_session.statement.compile(dialect=postgresql.dialect()))
 
 

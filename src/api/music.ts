@@ -114,7 +114,7 @@ export function deleteTag(category: MusicTagCategory, name: string): Promise<{ t
 
 /** AI-recommended tags (filename + description + vocabulary; the LLM never
  *  reads the audio). Results are in-vocabulary candidates for user confirmation. */
-export function suggestTagsDurable(name: string, description?: string): Promise<{ task_id: string }> {
+export function suggestTags(name: string, description?: string): Promise<{ task_id: string }> {
   return http.post<{ task_id: string }>('/api/music/suggest-tags', { name, description })
 }
 

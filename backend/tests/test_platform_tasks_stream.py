@@ -1,6 +1,5 @@
-"""5a stage 1: the v1 aggregate task stream (user-scoped, one connection, many
-tasks) + the v1 retry route. The legacy ``/api/tasks`` surface is untouched —
-this stage is additive only (v1 端点只增不删).
+"""5a: the v1 aggregate task stream (user-scoped, one connection, many tasks)
++ the v1 retry route. The legacy ``/api/tasks`` surface is retired (5a-3).
 
 Test strategy: this starlette's TestClient request path blocks until the entire
 response completes, so the never-ending aggregate stream is exercised two ways —

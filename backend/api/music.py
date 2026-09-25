@@ -755,7 +755,7 @@ def _delete_tag(idx: dict, category: str, name: str) -> None:
 # --------------------------------------------------------------------------- #
 
 @router.post("/suggest-tags", dependencies=[Depends(require_admin)])
-def suggest_tags_durable(
+def suggest_tags(
     body: SuggestTagsReq,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),

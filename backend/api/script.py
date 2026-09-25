@@ -1,4 +1,8 @@
-"""HTTP adapters for persistent split-text parsing and batch cancellation."""
+"""HTTP adapters for persistent split-text parsing and batch cancellation.
+
+Both routes submit / cancel through the v1 durable task surface
+(``services.task_operations``) — the durable Worker is the only executor.
+"""
 from __future__ import annotations
 
 import uuid
@@ -63,21 +67,11 @@ def generate_files(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Submit one persistent parse task per selected split file."""
-    return generate_files_durable(req, ctx=ctx, db=db)
-
-
-@router.post("/generate-files-durable")
-def generate_files_durable(
-    req: GenerateFilesRequest,
-    ctx: AuthContext = Depends(get_auth_context),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Submit one PostgreSQL-backed parse task per selected split file.
+    """Submit one persistent parse task per selected split file.
 
     The response deliberately keeps the legacy ``{file, task_id}`` shape so the
-    existing page can use the unified task centre while execution happens only
-    in the durable Worker.
+    page can follow the tasks through the unified v1 task centre while
+    execution happens only in the durable Worker.
     """
     _common.require_workspace()
     names = list(dict.fromkeys(req.files))
@@ -122,16 +116,6 @@ class CancelBatchRequest(BaseModel):
 
 @router.post("/cancel-batch")
 def cancel_batch(
-    req: CancelBatchRequest,
-    ctx: AuthContext = Depends(get_auth_context),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Cancel selected persistent parse tasks."""
-    return cancel_batch_durable(req, ctx=ctx, db=db)
-
-
-@router.post("/cancel-batch-durable")
-def cancel_batch_durable(
     req: CancelBatchRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
