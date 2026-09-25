@@ -21,11 +21,6 @@ from .models import Task
 from .task_lifecycle import ACTIVE_TASK_STATUSES
 
 
-def estimate_legacy_units(task_type: str, payload: dict[str, Any]) -> int:
-    """Task size is not billable; actual model calls meter characters."""
-    return 0
-
-
 def submit_legacy_engine_task(
     *,
     task_type: str,
@@ -43,7 +38,6 @@ def submit_legacy_engine_task(
         task = submit_task_record(
             db, ctx.user, project_id=project.id, task_type=task_type,
             payload={"label": label, **payload},
-            estimated_units=estimate_legacy_units(task_type, payload),
             idempotency_key=f"{idempotency_prefix}:{uuid.uuid4()}",
         )
     except TaskSubmissionError as exc:

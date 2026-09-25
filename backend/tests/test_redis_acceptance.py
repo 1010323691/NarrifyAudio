@@ -51,7 +51,6 @@ def _submit_echo_task() -> str:
             project_id=project_id,
             task_type="text.format",
             payload={"value": "recovered"},
-            estimated_units=0,
             idempotency_key=f"redis-acceptance-{uuid.uuid4().hex}",
         )
         return task.id

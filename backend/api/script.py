@@ -100,7 +100,6 @@ def generate_files(
                     "source_name": item.original_name,
                     "config": snapshot,
                 },
-                estimated_units=0,
                 idempotency_key=f"script-parse:{item.id}:{uuid.uuid4()}",
             ),
             user=ctx.user,

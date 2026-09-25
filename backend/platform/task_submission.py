@@ -34,7 +34,7 @@ def task_dict(task: Task) -> dict:
 
 def submit_task_record(
     db: Session, user: User, *, project_id: str, task_type: str,
-    payload: dict, estimated_units: int, idempotency_key: str,
+    payload: dict, idempotency_key: str,
 ) -> Task:
     if task_type not in SUPPORTED_TASK_TYPES:
         raise TaskSubmissionError(422, f"不支持的任务类型：{task_type}")
@@ -45,11 +45,14 @@ def submit_task_record(
         raise TaskSubmissionError(422, error)
     if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
         raise TaskSubmissionError(409, "存储根目录正在迁移，暂时无法提交任务")
-    # Estimated task size remains part of the historical idempotency contract;
-    # actual model output/input characters are metered by the engines.
+    # ``estimated_units`` was removed from the submission surface, but it
+    # stays in the idempotency hash PINNED to 0 — every request that ever
+    # reached production sent 0, so replays of historical requests keep the
+    # exact same hash (actual model output/input characters are metered by
+    # the engines, never by this estimate).
     request_body = {
         "project_id": project_id, "task_type": task_type,
-        "payload": payload, "estimated_units": estimated_units,
+        "payload": payload, "estimated_units": 0,
     }
     request_hash = hashlib.sha256(json.dumps(request_body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     project = db.scalar(select(Project).where(

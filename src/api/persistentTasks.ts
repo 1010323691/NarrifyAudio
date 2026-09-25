@@ -40,7 +40,6 @@ export function submitDurableTask(payload: {
   project_id: string
   task_type: string
   payload: Record<string, unknown>
-  estimated_units: number
   idempotency_key: string
 }): Promise<DurableTask> {
   return http.post('/api/v1/tasks', payload)

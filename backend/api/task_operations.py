@@ -22,7 +22,6 @@ class TaskSubmit(BaseModel):
     project_id: str
     task_type: str = Field(min_length=1, max_length=80)
     payload: dict = Field(default_factory=dict)
-    estimated_units: int = Field(default=0, ge=0, le=10_000_000)
     idempotency_key: str = Field(min_length=8, max_length=180)
 
 
@@ -31,7 +30,7 @@ def submit_task(payload: TaskSubmit, *, user: User, db: Session) -> dict:
     try:
         task = submit_task_record(
             db, user, project_id=payload.project_id, task_type=payload.task_type,
-            payload=payload.payload, estimated_units=payload.estimated_units,
+            payload=payload.payload,
             idempotency_key=payload.idempotency_key,
         )
     except TaskSubmissionError as exc:

@@ -59,7 +59,6 @@ def _create_task(client: TestClient, csrf: str, project_id: str, key: str) -> st
             "project_id": project_id,
             "task_type": "text.format",
             "payload": {},
-            "estimated_units": 0,
             "idempotency_key": key,
         },
     )

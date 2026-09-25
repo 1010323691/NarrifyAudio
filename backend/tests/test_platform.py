@@ -24,7 +24,6 @@ from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
-from backend.platform.engine_task_submission import estimate_legacy_units
 
 
 @pytest.fixture(scope="module")
@@ -92,7 +91,7 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     assert any(item["name"] == "Renamed" for item in client.get("/api/v1/projects").json())
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": workspace_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": workspace_id, "task_type": "text.format", "payload": {}, "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     assert client.delete(f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}).status_code == 409
@@ -117,7 +116,7 @@ def test_task_surface_lists_and_controls_durable_tasks(client: TestClient):
     unsupported = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={
             "project_id": project_id, "task_type": "unknown.executor", "payload": {},
-            "estimated_units": 0, "idempotency_key": f"unsupported-{uuid.uuid4().hex}",
+            "idempotency_key": f"unsupported-{uuid.uuid4().hex}",
         },
     )
     assert unsupported.status_code == 422, unsupported.text
@@ -126,7 +125,6 @@ def test_task_surface_lists_and_controls_durable_tasks(client: TestClient):
             "project_id": project_id,
             "task_type": "text.format",
             "payload": {},
-            "estimated_units": 0,
             "idempotency_key": f"adapter-{uuid.uuid4().hex}",
         },
     )
@@ -163,7 +161,6 @@ def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient
             "project_id": project["id"],
             "task_type": "bgm.package",
             "payload": {"chapters": ["chapter-1", "chapter-2"], "base": "Book"},
-            "estimated_units": 0,
             "idempotency_key": f"bgm-package-{uuid.uuid4().hex}",
         },
     )
@@ -210,7 +207,7 @@ def test_generic_task_submission_rejects_unsafe_legacy_task_paths(client: TestCl
             json={
                 "project_id": project["id"], "task_type": task_type,
                 "payload": payload,
-                "estimated_units": 0, "idempotency_key": f"unsafe-bgm-{index}-{uuid.uuid4().hex}",
+                "idempotency_key": f"unsafe-bgm-{index}-{uuid.uuid4().hex}",
             },
         )
         assert response.status_code == 422, response.text
@@ -227,7 +224,7 @@ def test_generic_music_tag_task_requires_admin(client: TestClient):
         headers={"X-CSRF-Token": csrf},
         json={
             "project_id": project["id"], "task_type": "music.suggest_tags",
-            "payload": {"name": "track.mp3"}, "estimated_units": 0,
+            "payload": {"name": "track.mp3"},
             "idempotency_key": f"music-tags-user-{uuid.uuid4().hex}",
         },
     )
@@ -254,7 +251,7 @@ def test_music_tag_task_fails_if_owner_is_demoted_before_execution(client: TestC
         headers={"X-CSRF-Token": csrf},
         json={
             "project_id": project["id"], "task_type": "music.suggest_tags",
-            "payload": {"name": "track.mp3"}, "estimated_units": 0,
+            "payload": {"name": "track.mp3"},
             "idempotency_key": f"demoted-music-task-{uuid.uuid4().hex}",
         },
     )
@@ -301,7 +298,7 @@ def test_workspace_engine_lock_serializes_project_writers(client: TestClient):
             "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
             json={
                 "project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
-                "estimated_units": 0, "idempotency_key": f"writer-lock-{suffix}-{uuid.uuid4().hex}",
+                "idempotency_key": f"writer-lock-{suffix}-{uuid.uuid4().hex}",
             },
         ).json()
         claim = claim_task(task["id"], f"lock-test-{suffix}")
@@ -393,12 +390,12 @@ def test_idempotent_task_submission_and_quota_guard(client: TestClient):
         account = db.get(UserQuotaAccount, first["user"]["id"])
         assert account is not None
         account.available_units = 0
-    response = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={"project_id": project["id"], "task_type": "script.parse", "payload": {}, "estimated_units": 1, "idempotency_key": "request-123456"})
+    response = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={"project_id": project["id"], "task_type": "script.parse", "payload": {}, "idempotency_key": "request-123456"})
     assert response.status_code == 409
 
     # A zero-cost task can be submitted and a duplicate request returns the
     # same persisted row rather than creating a second business effect.
-    payload = {"project_id": project["id"], "task_type": "text.format", "payload": {"value": 1}, "estimated_units": 0, "idempotency_key": "request-123457"}
+    payload = {"project_id": project["id"], "task_type": "text.format", "payload": {"value": 1}, "idempotency_key": "request-123457"}
     created = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json=payload)
     duplicate = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json=payload)
     assert created.status_code == 201
@@ -461,7 +458,6 @@ def test_admin_can_cancel_persistent_task_and_keep_quota_unchanged(client: TestC
             "project_id": project["id"],
             "task_type": "text.format",
             "payload": {},
-            "estimated_units": 3,
             "idempotency_key": "admin-cancel-task-123",
         },
     )
@@ -579,7 +575,6 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
             "project_id": legacy_file["project_id"],
             "task_type": "book.split",
             "payload": {"input_file_id": legacy_file["file_id"], "whole_book": True},
-            "estimated_units": 0,
             "idempotency_key": f"legacy-book-split-{uuid.uuid4()}",
         },
     )
@@ -604,7 +599,6 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
             "project_id": formatted_upload["project_id"],
             "task_type": "text.format",
             "payload": {"input_file_id": formatted_upload["file_id"], "publish_module": "01_input"},
-            "estimated_units": 0,
             "idempotency_key": f"legacy-text-format-{uuid.uuid4()}",
         },
     )
@@ -627,7 +621,6 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
             "project_id": legacy_file["project_id"],
             "task_type": "book.split",
             "payload": {"input_file_id": durable_upload.json()["id"], "whole_book": True},
-            "estimated_units": 0,
             "idempotency_key": f"legacy-book-split-{uuid.uuid4()}",
         },
     )
@@ -700,7 +693,6 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
             "project_id": project["id"],
             "task_type": "text.format",
             "payload": {"input_file_id": input_file["id"], "publish_module": "01_input"},
-            "estimated_units": 2,
             "idempotency_key": "worker-format-123",
         },
     )
@@ -722,7 +714,6 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
             "project_id": project["id"],
             "task_type": "book.analyze",
             "payload": {"input_file_id": task["result"]["file_id"]},
-            "estimated_units": 0,
             "idempotency_key": "worker-book-analysis-123",
         },
     )
@@ -765,7 +756,6 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
             "project_id": project["id"],
             "task_type": "book.analyze",
             "payload": {"input_file_id": analyzed_upload.json()["id"]},
-            "estimated_units": 0,
             "idempotency_key": "worker-book-analyze-123",
         },
     )
@@ -790,7 +780,6 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
             "project_id": project["id"],
             "task_type": "book.split",
             "payload": {"input_file_id": split_input.json()["id"], "smart": True},
-            "estimated_units": 0,
             "idempotency_key": "worker-book-split-123",
         },
     )
@@ -898,7 +887,6 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
                     "generation": {"spot_check_rate": 0},
                 },
             },
-            "estimated_units": 0,
             "idempotency_key": "durable-script-parse-123",
         },
     )
@@ -955,7 +943,6 @@ def test_durable_worker_runs_audio_tasks_and_catalogs_outputs(client: TestClient
             "project_id": project["id"],
             "task_type": "audio.silences",
             "payload": {"input_file_id": input_file["id"], "target": "2", "tolerance": 5},
-            "estimated_units": 0,
             "idempotency_key": "durable-audio-plan-123",
         },
     )
@@ -990,7 +977,6 @@ def test_durable_worker_runs_audio_tasks_and_catalogs_outputs(client: TestClient
                 "naming": "第 {} 集",
                 "start_number": "1",
             },
-            "estimated_units": 0,
             "idempotency_key": "durable-audio-cut-123",
         },
     )
@@ -1014,7 +1000,7 @@ def test_cancel_before_claim_releases_quota(client: TestClient):
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 3, "idempotency_key": "cancel-before-claim"},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "idempotency_key": "cancel-before-claim"},
     )
     task_id = submitted.json()["id"]
     cancelled = client.post(f"/api/v1/tasks/{task_id}/cancel", headers={"X-CSRF-Token": csrf})
@@ -1049,7 +1035,7 @@ def test_fair_scheduler_rotates_between_users(client: TestClient):
             response = test_client.post(
                 "/api/v1/tasks",
                 headers={"X-CSRF-Token": csrf},
-                json={"project_id": project_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": key},
+                json={"project_id": project_id, "task_type": "text.format", "payload": {}, "idempotency_key": key},
             )
             assert response.status_code == 201, response.text
             return response.json()["id"]
@@ -1066,10 +1052,21 @@ def test_fair_scheduler_rotates_between_users(client: TestClient):
     assert claim_two.task_id == second_task
 
 
-def test_legacy_task_estimates_are_non_billable():
-    assert estimate_legacy_units("tts.batch", {"scripts": ["a.json", "b.json"]}) == 0
-    assert estimate_legacy_units("bgm.match", {"chapters": ["a", "b", "c"]}) == 0
-    assert estimate_legacy_units("audio.zip", {"files": [{"name": "a.mp3"}]}) == 0
+def test_idempotent_replay_survives_estimated_units_removal(client: TestClient):
+    """M5: ``estimated_units`` is gone from the submission surface. Historical
+    requests (which all sent 0) keep the exact idempotency hash — the key is
+    pinned to a constant — so a replay of an estimated_units=0-era request
+    still matches, even when the old client keeps sending the (now ignored)
+    field and the new one omits it: same key, same task, no 409."""
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Replay book"}).json()
+    base = {"project_id": project["id"], "task_type": "text.format", "payload": {"value": 1}, "idempotency_key": "replay-unit-1"}
+    legacy = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={**base, "estimated_units": 0})
+    assert legacy.status_code == 201, legacy.text
+    modern = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json=base)
+    assert modern.status_code == 201, modern.text
+    assert modern.json()["id"] == legacy.json()["id"]
 
 
 def test_public_submission_cannot_underestimate_known_task(client: TestClient):
@@ -1083,7 +1080,6 @@ def test_public_submission_cannot_underestimate_known_task(client: TestClient):
             "project_id": project["id"],
             "task_type": "tts.batch",
             "payload": {"scripts": ["one.json", "two.json"]},
-            "estimated_units": 0,
             "idempotency_key": "quota-floor-known-task",
         },
     )
@@ -1097,7 +1093,7 @@ def test_expired_worker_lease_is_fenced_and_recovery_requeues(client: TestClient
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": "recovery-lease-123"},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "idempotency_key": "recovery-lease-123"},
     )
     task_id = submitted.json()["id"]
     with SessionLocal.begin() as db:
@@ -1130,7 +1126,7 @@ def test_retry_deadline_applies_to_direct_and_fair_claims(client: TestClient):
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Backoff book"}).json()
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "book.analyze", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": project["id"], "task_type": "book.analyze", "payload": {}, "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     task_id = submitted.json()["id"]
@@ -1156,7 +1152,7 @@ def test_expired_cancelling_attempt_releases_tts_hold(client: TestClient):
         db.get(UserQuotaAccount, first["user"]["id"]).available_units = 10
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     task_id = submitted.json()["id"]
@@ -1187,7 +1183,7 @@ def test_failed_result_commit_restores_previous_workspace_file(client: TestClien
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Publish rollback"}).json()
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     claim = claim_task(submitted.json()["id"], "publish-rollback-worker")
@@ -1233,7 +1229,7 @@ def test_invalid_publish_module_fails_task_with_actionable_code(client: TestClie
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
         json={
             "project_id": project["id"], "task_type": "text.format", "payload": {},
-            "estimated_units": 0, "idempotency_key": uuid.uuid4().hex,
+            "idempotency_key": uuid.uuid4().hex,
         },
     )
     assert submitted.status_code == 201, submitted.text
@@ -1266,7 +1262,7 @@ def test_incremental_legacy_workspace_write_rolls_back_with_task_commit(client: 
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
         json={"project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
-              "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     claim = claim_task(submitted.json()["id"], "incremental-journal-worker")
@@ -1309,7 +1305,7 @@ def test_expired_attempt_restores_interrupted_publication(client: TestClient):
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Interrupted publish"}).json()
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {}, "idempotency_key": uuid.uuid4().hex},
     )
     claim = claim_task(submitted.json()["id"], "interrupted-publish-worker")
     assert claim is not None
@@ -1365,7 +1361,7 @@ def test_audio_export_stages_replacement_until_commit(client: TestClient, monkey
             "payload": {"source_relative": "07_output/source.wav", "files": [
                 {"relative_path": "07_output/source.wav", "name": "take.wav"},
             ]},
-            "estimated_units": 0, "idempotency_key": uuid.uuid4().hex,
+            "idempotency_key": uuid.uuid4().hex,
         },
     )
     assert submitted.status_code == 201, submitted.text
@@ -1408,7 +1404,7 @@ def test_tts_reset_restores_deleted_package_when_commit_fails(client: TestClient
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
         json={
             "project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": ["chapter.json"]},
-            "estimated_units": 0, "idempotency_key": uuid.uuid4().hex,
+            "idempotency_key": uuid.uuid4().hex,
         },
     )
     assert submitted.status_code == 201, submitted.text
@@ -1457,7 +1453,7 @@ def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestCli
     assert not source.exists()
     blocked = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": workspace["id"], "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": workspace["id"], "task_type": "text.format", "payload": {}, "idempotency_key": uuid.uuid4().hex},
     )
     assert blocked.status_code == 409
     resumed = client.patch("/api/v1/admin/settings/storage", headers={"X-CSRF-Token": csrf}, json={"root_path": str(target_root)})
@@ -1760,7 +1756,7 @@ def test_task_event_stream_poll_runs_in_worker_threads(client: TestClient, monke
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": first["csrf_token"]},
         json={"project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
-              "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     task_id = submitted.json()["id"]
@@ -1855,7 +1851,7 @@ def test_workspace_rollback_guard_uses_task_lock_and_fingerprint(client: TestCli
         response = client.post(
             "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
             json={"project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
-                  "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+            "idempotency_key": uuid.uuid4().hex},
         )
         assert response.status_code == 201, response.text
         return response.json()

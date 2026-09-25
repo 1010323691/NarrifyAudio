@@ -149,8 +149,6 @@ async function run(auto = false) {
         publish_module: '01_input',
         output_name: `${file.value.name.replace(/\.[^.]+$/, '')}_排版.txt`,
       },
-      // 计费规则尚未固定，本阶段保留零估算；任务仍完整进入额度账本。
-      estimated_units: 0,
       idempotency_key: `text-format:${file.value.file_id}:${crypto.randomUUID()}`,
     })
     const task = await waitForTask.wait(submitted.id)
@@ -192,7 +190,6 @@ async function analyzeAfterFormat() {
       payload: {
         input_file_id: formatResult.value.file_id,
       },
-      estimated_units: 0,
       idempotency_key: `book-analyze:${formatResult.value.file_id}:${crypto.randomUUID()}`,
     })
     const task = await waitForTask.wait(submitted.id)
@@ -342,7 +339,6 @@ async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) 
       input_file_id: formatResult.value.file_id,
       ...payload,
     },
-    estimated_units: 0,
     idempotency_key: `book-split:${formatResult.value.file_id}:${payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
   })
   const task = await waitForTask.wait(submitted.id)
