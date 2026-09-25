@@ -152,14 +152,23 @@ test('audio task reattachment is restricted to the active project', () => {
   assert.equal(findActiveDurableTask(tasks, 'C', 'audio.cut'), undefined)
 })
 
-test('task control applies the returned status before the next SSE event', async () => {
+test('task control confirms the status over the SSE stream, not from the POST response', async () => {
+  // The v1 control POST returns the lean durable dict (not a UI TaskSnapshot, and a
+  // running task's cancel first lands as the intermediate 'cancelling'), so 5a-2
+  // deliberately discards the response body — the stream's frames are the
+  // confirmation channel. This case pins that contract on both sides.
+  let emit
   const load = harness({ '@/api/tasks': {
     controlTask: async () => ({ id: 'task-1', status: 'cancelled', progress: 0 }),
     listTasks: async () => [],
-    streamAllTasks: () => () => {},
+    streamAllTasks: (onEvent) => { emit = onEvent; return () => {} },
   } })
   const store = load('@/stores/task').useTaskStore()
+  store.bindProject('proj-1')
   await store.control('task-1', 'cancel')
+  assert.equal(store.tasks.find((task) => task.id === 'task-1'), undefined)
+  emit({ task_id: 'task-1', type: 'snapshot_all', tasks: [{ id: 'task-1', status: 'running', progress: 0 }] })
+  emit({ task_id: 'task-1', type: 'status', status: 'cancelled' })
   assert.equal(store.tasks.find((task) => task.id === 'task-1')?.status, 'cancelled')
 })
 
