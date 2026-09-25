@@ -22,8 +22,6 @@ import random
 import re
 import threading
 import time
-import urllib.error
-import urllib.request
 
 from pathlib import Path
 
@@ -32,7 +30,10 @@ from ..core.concurrency import gate
 from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
 from .book import decode_buffer
-from .llm_transport import HTTP_TIMEOUT, LLMHTTPError, request_chat_completion as _llm_chat_completion
+from .llm_transport import (
+    request_chat_completion as _llm_chat_completion,
+    request_chat_completion_stream,
+)
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 from .text import ends_sentence, is_chapter_title
 
@@ -420,326 +421,6 @@ def split_into_chunks(text, max_size=3000):
 
 
 # ---------------------------------------------------------------------------
-# Structured-output retry: call the LLM, parse strictly, retry with feedback.
-# Shared by every "one JSON object back" LLM surface (BGM chapter analysis,
-# music-library AI tag suggestions) so malformed replies get an explicit,
-# error-bearing retry instead of a blind re-roll.
-# ---------------------------------------------------------------------------
-class LLMJSONRetryExhausted(RuntimeError):
-    """All LLM attempts failed to yield a parseable reply.
-
-    ``last_err`` is ``"回复不可解析"`` when the final attempt's reply did not
-    parse (or ``"回复不可解析（{具体原因}）"`` when the parser returned a
-    :class:`ParseRejected` with a specific violation — the reason is the
-    model's actionable self-correction hint); ``last_raw`` is the final raw
-    reply (``""`` when the final failure was a call error).
-    """
-
-    def __init__(self, attempts: int, last_err: str, last_raw: str = ""):
-        self.attempts = attempts
-        self.last_err = last_err
-        self.last_raw = last_raw
-        super().__init__(
-            f"{attempts} 次 LLM 调用均未返回可解析的 JSON（最后错误：{last_err}）"
-        )
-
-
-class ParseRejected:
-    """A parse that failed with a KNOWN, model-actionable reason.
-
-    ``parse → None`` says "not parseable" (blind re-roll); returning a
-    ``ParseRejected(reason)`` says "parseable, but this specific field
-    violates the contract" (e.g. ``end_segment`` past the batch bound).
-    :func:`llm_json_with_retry` threads ``reason`` into ``last_err`` and the
-    【重试】 feedback block — a deterministic model then receives the exact
-    violation description on every retry instead of re-rolling an identical
-    reply (2026-09 incident: chapter-final batches, stable 3× identical
-    rejection → stable batch failure).
-    """
-
-    def __init__(self, reason: str):
-        self.reason = reason
-
-
-def _retry_feedback(user: str, last_err: str, last_raw: str, format_hint: str) -> str:
-    """Append the 【重试】 block to the original user message (the system prompt
-    stays byte-identical across attempts)."""
-    excerpt = last_raw[:500] or "（调用失败，无回复）"
-    return (
-        user
-        + "\n\n【重试】你上一次的回复不合格，请重新输出。"
-        + f"\n问题：{last_err}"
-        + f"\n上次回复节选（可能不完整）：\n{excerpt}"
-        + "\n要求：只输出 JSON（不要解释、不要前后缀、不要代码围栏）。格式：" + format_hint
-    )
-
-
-def _reply_excerpt(content: str, full_limit: int = 600, head: int = 200,
-                   tail: int = 400) -> str:
-    """One-line excerpt of a failed LLM reply for the terminal log.
-
-    A max_tokens-truncated reply ends mid-string/mid-array; a format
-    violation is a COMPLETE reply. For short replies (≤ ``full_limit``) the
-    WHOLE reply is shown — the old tail-only view was blind to the head,
-    where a violation's offending fields (e.g. ``start_segment`` /
-    ``end_segment`` indices) actually sit. Longer replies show head + tail."""
-    flat = content.replace("\n", " ").replace("\r", " ")
-    if not flat:
-        return "（空回复）"
-    if len(flat) <= full_limit:
-        return flat
-    return flat[:head] + " …… " + flat[-tail:]
-
-
-def llm_json_with_retry(llm_cfg, system: str, user: str, parse, *,
-                        handle=None, llm_call=None, max_attempts: int = 3,
-                        max_tokens: int = 512, temperature: float = 0.2,
-                        top_p: float = 0.9, presence_penalty: float = 0.0,
-                        format_hint: str = "",
-                        extra_body: dict | None = None,
-                        operation_type: str = "llm.operation") -> tuple[object, int]:
-    """LLM call + strict parse with error-feedback retries.
-
-    Each attempt: ``handle.check()`` (``TaskCancelled`` propagates and is never
-    retried) → ``llm_call(...)`` → ``parse(content)``. A call exception or a
-    ``parse → None`` feeds the NEXT attempt's user message with a 【重试】 block
-    carrying the parse error plus an excerpt of the previous reply; the system
-    prompt is never modified. A ``parse → ParseRejected(reason)`` (a known,
-    model-actionable violation) additionally threads the SPECIFIC reason into
-    ``last_err`` / the error text / the 【重试】 block (``回复不可解析（{reason}）``)
-    so a deterministic model can self-correct instead of re-rolling an
-    identical reply. Exhaustion raises :class:`LLMJSONRetryExhausted` —
-    callers map it to their own user-facing error text.
-
-    ``llm_call`` defaults to this module's :func:`_llm_chat_completion`; callers
-    should pass their own imported reference (``llm_call=_llm_chat_completion``)
-    so ``monkeypatch``-ing the caller module's attribute keeps working in
-    tests. Returns ``(parsed, attempts_used)``. Mechanical work (sampling,
-    registry writes, matching) must stay OUTSIDE this loop — it only re-runs
-    the LLM call itself.
-
-    ``extra_body`` is forwarded to every attempt (openai-SDK ``extra_body``
-    parity) — e.g. ``{"enable_thinking": False}`` on small-JSON surfaces so a
-    thinking model's reasoning trace cannot starve the answer budget.
-    """
-    call = llm_call or _llm_chat_completion
-    last_err = "未知错误"
-    last_raw = ""
-    for attempt in range(1, max_attempts + 1):
-        if handle is not None:
-            handle.check()
-            handle.log(f"LLM（第 {attempt}/{max_attempts} 次）…")
-        try:
-            content, finish, usage = call(
-                llm_cfg.base_url, llm_cfg.api_key, llm_cfg.model_name,
-                [{"role": "system", "content": system},
-                 {"role": "user", "content": user}],
-                temperature=temperature, top_p=top_p,
-                presence_penalty=presence_penalty, max_tokens=max_tokens,
-                extra_body=extra_body,
-            )
-        except TaskCancelled:
-            raise
-        except Exception as e:  # noqa: BLE001 — record, retry with feedback
-            last_err = str(e)
-            last_raw = ""
-            log.warning("LLM JSON 调用失败（第 %d/%d 次）：%s",
-                        attempt, max_attempts, last_err)
-            if attempt < max_attempts and handle is not None:
-                handle.log(f"第 {attempt} 次调用失败（{last_err}），携带错误反馈重试…",
-                           "WARNING")
-            continue
-        parsed = parse(content)
-        rejected = parsed if isinstance(parsed, ParseRejected) else None
-        if rejected is None and parsed is not None:
-            from ..platform.quota import consume_llm_output
-            consume_llm_output(content, operation_type)
-            return parsed, attempt
-        last_raw = content
-        # 诊断失败根因并打进终端日志：截断（服务端明确报 finish_reason=length）
-        # 与格式违规表面都是「回复不可解析」，此前两者完全无法区分。
-        if finish == "length":
-            detail = "finish_reason=length"
-            if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
-                detail += f", completion_tokens={usage['completion_tokens']}"
-            detail += f" / max_tokens={max_tokens}"
-            last_err = f"回复不可解析（被 max_tokens 截断：{detail}）"
-            log.warning(
-                "LLM JSON 回复被 max_tokens 截断（第 %d/%d 次，%s）——思考 token 与正文"
-                "共用预算；回复：%s",
-                attempt, max_attempts, detail, _reply_excerpt(content))
-        else:
-            # ParseRejected 携带具体违规原因 → 并入 last_err 与【重试】反馈：
-            # 确定性模型能按原因自我纠正（同形回复重复投喂同一具体原因）。
-            last_err = (f"回复不可解析（{rejected.reason}）"
-                        if rejected else "回复不可解析")
-            log.warning(
-                "LLM JSON 回复不可解析（第 %d/%d 次，finish_reason=%s，回复长度=%d）"
-                "——%s；回复：%s",
-                attempt, max_attempts, finish, len(content), last_err,
-                _reply_excerpt(content))
-        if attempt < max_attempts and handle is not None:
-            handle.log("回复不可解析，携带错误反馈重试…", "WARNING")
-        user = _retry_feedback(user, last_err, last_raw, format_hint)
-    raise LLMJSONRetryExhausted(max_attempts, last_err, last_raw)
-
-
-def _llm_chat_completion_stream(base_url, api_key, model, messages,
-                                temperature, top_p, presence_penalty, max_tokens,
-                                top_k=0, min_p=0, banned_tokens=None, handle=None):
-    """Streaming twin of ``_llm_chat_completion``.
-
-    Issues the same OpenAI-compatible ``chat/completions`` POST with ``stream: true``
-    and reads the SSE delta frames as the model generates. Each coalesced slice of the
-    raw stream is forwarded to the UI via ``handle.llm_chunk(...)`` so the 文本解析
-    「流式反馈」 panel fills in real time — display only, never read back by the parse
-    pipeline. For reasoning models the stream carries ``delta.reasoning_content``
-    (the model's live "thinking") before any ``delta.content``; the panel shows both,
-    but the returned content is the ``delta.content`` answer only — byte-identical to
-    the non-streaming response (same body / sampling params; deltas concatenated and
-    stripped) — so the caller's downstream JSON clean / repair / salvage is unaffected.
-
-    Returns the same ``(content, finish_reason, usage)`` triple as the non-streaming
-    call. Raises on HTTP / network / parse failure — the caller's retry loop handles it.
-    ``handle`` may be ``None`` (no UI forwarding / no mid-stream cancel) for tests.
-    """
-    from ..platform.quota import require_quota
-    require_quota("LLM", "llm.operation")
-    url = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": top_p,
-        "presence_penalty": presence_penalty,
-        "max_tokens": max_tokens,
-        "stream": True,
-        # Ask OpenAI-compatible servers to include usage in the final frame; harmless
-        # for servers that ignore it (usage then stays None -> tokens logged as "?").
-        "stream_options": {"include_usage": True},
-    }
-    # openai ``extra_body`` keys go at the top level, only when set (non-zero).
-    if top_k:
-        body["top_k"] = top_k
-    if min_p:
-        body["min_p"] = min_p
-    if banned_tokens:
-        body["banned_tokens"] = banned_tokens
-
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
-
-    # Coalescing: buffer raw deltas and flush on a throttle so the per-task SSE queue
-    # (queue.Queue(maxsize=500), which silently drops when full) never chokes on
-    # token-rate events. A ~120 ms / ~256-char cadence reads as live to the panel.
-    #
-    # Two buffers, one cadence — a reasoning model (e.g. Qwen3 "thinking") streams its
-    # working in ``delta.reasoning_content`` long before any ``delta.content``:
-    #   * ``pending``     = the raw display stream (reasoning + content, in arrival
-    #                       order) -> the llm_chunk panel shows the model "thinking".
-    #   * ``content_buf`` = the answer only (delta.content) -> returned to the caller so
-    #                       the downstream JSON parser sees exactly the non-streaming text.
-    FLUSH_INTERVAL = 0.12  # seconds between UI flushes
-    FLUSH_SIZE = 256  # chars — flush early if a burst arrives
-    pending: list[str] = []
-    content_buf: list[str] = []
-    emitted: list[str] = []  # accumulated answer (content-only) = the return value
-    finish_reason = None
-    usage = None
-    last_flush = time.monotonic()
-    # Real-time generation rate (chars/s) for the 文本解析 吞吐量 / per-window gauge —
-    # measured from the actual streamed text (content + reasoning) as it arrives, never
-    # estimated. ``usage`` is still read per frame only for the per-chunk token log line
-    # and the return value; the rate itself uses the real chars, so it stays live on any
-    # endpoint (token counts are only reported by some servers, usually just in the final
-    # frame — and not at all by others).
-    cps = 0.0
-
-    def flush(force: bool = False) -> None:
-        nonlocal last_flush, cps
-        if not pending:
-            return
-        chars = sum(len(p) for p in pending)
-        if not (force
-                or time.monotonic() - last_flush >= FLUSH_INTERVAL
-                or chars >= FLUSH_SIZE):
-            return
-        now = time.monotonic()
-        dt = now - last_flush
-        if dt > 1e-3:  # chars/s over the window since the previous flush (skip ~0 window)
-            cps = chars / dt
-        last_flush = now
-        content_slice = "".join(content_buf)
-        if content_slice:
-            emitted.append(content_slice)
-        if handle is not None:
-            handle.llm_chunk("".join(pending))
-            handle.llm_rate(chars, cps)
-        content_buf.clear()
-        pending.clear()
-
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            for raw in resp:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload_text = line[5:].strip()
-                if payload_text == "[DONE]":
-                    break
-                try:
-                    payload = json.loads(payload_text)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                frame_usage = payload.get("usage")
-                if isinstance(frame_usage, dict):
-                    usage = frame_usage
-                choices = payload.get("choices") or []
-                if not choices:
-                    continue  # e.g. the trailing usage-only frame
-                first = choices[0]
-                if not isinstance(first, dict):
-                    continue
-                delta = first.get("delta") or {}
-                # Reasoning models emit their thinking in ``reasoning_content`` before the
-                # answer in ``content``: show both live, but return only ``content`` so the
-                # parse pipeline stays byte-identical to the non-streaming path.
-                reasoning = delta.get("reasoning_content")
-                if reasoning:
-                    pending.append(reasoning)
-                piece = delta.get("content")
-                if piece:
-                    pending.append(piece)
-                    content_buf.append(piece)
-                fr = first.get("finish_reason")
-                if fr:
-                    finish_reason = fr
-                flush()
-                # Honour cancel within one frame of a request. Pause stays at the
-                # between-chunk handle.check() in the caller (can't pause a live HTTP
-                # read meaningfully).
-                if handle is not None and handle.cancelled:
-                    raise TaskCancelled()
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
-
-    flush(force=True)  # push any trailing buffer so the panel shows the full output
-    if handle is not None and cps:
-        handle.llm_rate(0, cps)  # final rate (resting value is already 0; skip a no-op)
-
-    return "".join(emitted).strip(), finish_reason, usage
-
-
-# ---------------------------------------------------------------------------
 # 逐 chunk 忠实性校验 + 恢复（LLM 输出事后验证）
 # ---------------------------------------------------------------------------
 
@@ -973,7 +654,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                 # Stream the completion so the 「流式反馈」 panel shows the model's raw
                 # output live; the accumulated content is identical to the non-streaming
                 # response, so the JSON handling below is unchanged.
-                text, finish_reason, usage = _llm_chat_completion_stream(
+                text, finish_reason, usage = request_chat_completion_stream(
                     llm.base_url, llm.api_key, model_name, messages,
                     temperature=temp, top_p=top_p,
                     presence_penalty=presence_penalty, max_tokens=mt,
@@ -1640,7 +1321,7 @@ def _llm_call(llm: LLMConfig, generation: GenerationConfig, messages, handle=Non
     the exact same kind of call the parse does — only the prompt differs.
     """
     if llm.stream:
-        content, _fr, _usage = _llm_chat_completion_stream(
+        content, _fr, _usage = request_chat_completion_stream(
             llm.base_url, llm.api_key, llm.model_name, messages,
             temperature=generation.temperature, top_p=generation.top_p,
             presence_penalty=generation.presence_penalty,

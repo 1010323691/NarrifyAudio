@@ -56,11 +56,11 @@ from .bgm_storage import (
 )
 from backend.engines import tts_batch
 from backend.engines.merge import boundary_gap_ms, collect_segments, thread_budget
-from backend.engines.llm_transport import request_chat_completion as _llm_chat_completion
-from backend.engines.script import (
+from backend.engines.llm_transport import (
     LLMJSONRetryExhausted,
     ParseRejected,
     llm_json_with_retry,
+    request_chat_completion as _llm_chat_completion,
 )
 from backend.engines.voices import extract_json_object
 
@@ -576,7 +576,7 @@ def parse_segment_blocks_reply_detailed(
 
     Returns ``(None, reason)`` on ANY other violation — ``reason`` is a
     specific, model-actionable Chinese description threaded into the 【重试】
-    feedback via :class:`backend.engines.script.ParseRejected` (a bare
+    feedback via :class:`backend.engines.llm_transport.ParseRejected` (a bare
     ``None``-re-roll of a deterministic model is identical → useless).
     """
     data = _extract_json_array(content)

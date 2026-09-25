@@ -24,20 +24,23 @@ from backend.core import concurrency
 from backend.core import paths as core_paths
 from backend.core.config import GenerationConfig, LLMConfig, PromptsConfig
 from backend.tests.task_support import TERMINAL, TaskCancelled, TaskManager, TaskStatus
+from backend.engines.llm_transport import (
+    LLMHTTPError,
+    LLMJSONRetryExhausted,
+    ParseRejected,
+    llm_json_with_retry,
+    request_chat_completion_stream,
+)
 from backend.engines.script import (
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_USER_PROMPT,
     INSTRUCT_MAX_WORDS,
     adaptive_spot_rate,
-    LLMHTTPError,
-    LLMJSONRetryExhausted,
-    ParseRejected,
     SPOT_CHECK_HISTORY_CAP,
     _append_spot_history,
     _has_attribution_tag,
     _is_pure_saying_tag,
     _llm_chat_completion,
-    _llm_chat_completion_stream,
     _load_spot_history,
     _parse_entries_reply,
     _pick_majority,
@@ -59,7 +62,6 @@ from backend.engines.script import (
     is_suspicious_entry_text,
     instruct_entry_indices,
     instruct_word_count,
-    llm_json_with_retry,
     long_entry_indices,
     long_paragraph_resplit,
     merge_adjacent_same_speaker,
@@ -397,7 +399,7 @@ def test_stream_llm_accumulates_and_forwards(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _StreamResp(lines))
     handle = _Handle()
 
-    content, finish_reason, usage = _llm_chat_completion_stream(
+    content, finish_reason, usage = request_chat_completion_stream(
         "http://x/v1", "key", "model",
         [{"role": "user", "content": "hi"}],
         temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=100,
@@ -429,7 +431,7 @@ def test_stream_llm_none_handle_still_works(monkeypatch):
     ]
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _StreamResp(lines))
 
-    content, finish_reason, usage = _llm_chat_completion_stream(
+    content, finish_reason, usage = request_chat_completion_stream(
         "http://x/v1", "key", "model",
         [{"role": "user", "content": "hi"}],
         temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=100,
@@ -455,7 +457,7 @@ def test_stream_llm_reasoning_shown_but_not_returned(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _StreamResp(lines))
     handle = _Handle()
 
-    content, finish_reason, _usage = _llm_chat_completion_stream(
+    content, finish_reason, _usage = request_chat_completion_stream(
         "http://x/v1", "key", "model",
         [{"role": "user", "content": "hi"}],
         temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=100,
