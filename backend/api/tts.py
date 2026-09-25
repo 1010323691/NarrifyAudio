@@ -876,7 +876,6 @@ def batch_status(script: str | None = None,
 
 
 class MergeRequest(BaseModel):
-    m4b: bool = False
     packages: list[str] | None = None
 
 
@@ -907,12 +906,11 @@ def run_merge(
         raise HTTPException(409, "以下包已有合并任务在途：" + "、".join(conflicts))
     created = []
     for package in pkgs:
-        label = ("merge-m4b" if req.m4b else "merge-audio") + ": " + package
+        label = "merge-audio: " + package
         task = submit_legacy_engine_task(
             task_type="tts.merge",
             label=label,
             payload={
-                "m4b": req.m4b,
                 "package": package,
                 "config": get_config().model_dump(mode="json"),
             },

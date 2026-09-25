@@ -41,7 +41,7 @@ def test_merge_submits_one_durable_task_per_unique_package(workspace, monkeypatc
 
     monkeypatch.setattr(api_tts, "submit_legacy_engine_task", submit)
     result = api_tts.run_merge(
-        api_tts.MergeRequest(packages=["pkg1", "pkg2", "pkg1"], m4b=True),
+        api_tts.MergeRequest(packages=["pkg1", "pkg2", "pkg1"]),
         ctx=_ctx(), db=object(),
     )
 
@@ -54,7 +54,6 @@ def test_merge_submits_one_durable_task_per_unique_package(workspace, monkeypatc
     }
     assert [item["task_type"] for item in submitted] == ["tts.merge", "tts.merge"]
     assert [item["payload"]["package"] for item in submitted] == ["pkg1", "pkg2"]
-    assert all(item["payload"]["m4b"] is True for item in submitted)
 
 
 def test_merge_rejects_package_with_active_durable_task(workspace, monkeypatch):

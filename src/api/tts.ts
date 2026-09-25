@@ -109,15 +109,15 @@ export function batchStatusFiles(scripts: string[]): Promise<BatchStatusFiles> {
   return http.get<BatchStatusFiles>(`/api/tts/batch-status?${q.toString()}`)
 }
 
-/** 音频合并：start one merge Task per selected package (MP3 now; M4B is a later phase).
- *  ``packages`` are sub-folder names in 05_audio_chunk/; the backend runs them in
- *  parallel under a CPU-sized merge gate (one Task each, dispatched in order). */
-export function runMerge(m4b = false, packages: string[] = []): Promise<{
+/** 音频合并：start one merge Task per selected package (always MP3 — the M4B half-branch
+ *  is retired, A6). ``packages`` are sub-folder names in 05_audio_chunk/; the backend
+ *  runs them in parallel under a CPU-sized merge gate (one Task each, dispatched in order). */
+export function runMerge(packages: string[] = []): Promise<{
   task_ids: string[]
   packages: { package: string; task_id: string }[]
 }> {
   return http.post<{ task_ids: string[]; packages: { package: string; task_id: string }[] }>(
-    '/api/tts/merge', { m4b, packages },
+    '/api/tts/merge', { packages },
   )
 }
 

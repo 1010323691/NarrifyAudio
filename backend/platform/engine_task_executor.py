@@ -75,7 +75,6 @@ def _run_tts_merge(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     from ..engines import merge as merge_engine
     return merge_engine.merge_audio_package(
         handle,
-        bool(payload.get("m4b")),
         str(payload.get("package") or ""),
     )
 

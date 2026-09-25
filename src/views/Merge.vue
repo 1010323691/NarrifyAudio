@@ -221,7 +221,7 @@ async function doRun() {
   submitting.value = true
   error.value = ''
   try {
-    await runMerge(false, selectedNames.value)
+    await runMerge(selectedNames.value)
     await taskStore.refresh()
     // 完成由下方的 SSE 驱动 watcher 处理（逐包终态 → 行状态流转）。
   } catch (e: any) {

@@ -183,7 +183,7 @@ def _stale_voice_speakers(manifest, layout) -> list[str]:
     return sorted(stale)
 
 
-def merge_audio_package(handle, m4b: bool = False, package: str | None = None) -> dict:
+def merge_audio_package(handle, package: str | None = None) -> dict:
     """Task worker: merge one package's batch output into the final audiobook file.
 
     ``package`` names a sub-folder under ``05_audio_chunk/`` (one per source JSON,
@@ -214,9 +214,6 @@ def merge_audio_package(handle, m4b: bool = False, package: str | None = None) -
             "角色声音已变更，不能合并旧音频；请先重新合成角色的全部台词："
             + "、".join(stale)
         )
-
-    if m4b:
-        handle.log("（M4B 输出将在后续阶段支持；本次生成 MP3。）", "WARNING")
 
     # Keep only segments that succeeded and whose file actually exists, in order
     # (each stored path resolved against the current workspace root — see collect_segments).

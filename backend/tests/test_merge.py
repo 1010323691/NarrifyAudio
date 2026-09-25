@@ -134,7 +134,7 @@ def test_run_cmd_includes_tmp_dir_and_batch_size(workspace, monkeypatch):
     _seed_manifest(workspace, 250)
     captured = {}
     _stub_engine(monkeypatch, captured)
-    merge.merge_audio_package(_Handle(), False, "pkg")
+    merge.merge_audio_package(_Handle(), "pkg")
     tmp_dir = _cmd_flag(captured["cmd"], "--tmp-dir")
     assert tmp_dir.startswith(str(workspace / "00_temp") + os.sep)
     assert _cmd_flag(captured["cmd"], "--merge-batch-size") == "100"
@@ -147,13 +147,13 @@ def test_run_logs_two_stage_plan(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)
     handle = _Handle()
-    merge.merge_audio_package(handle, False, "pkg")
+    merge.merge_audio_package(handle, "pkg")
     assert "两阶段合并：250 段 → 3 批（每批 100 段）→ 整书" in _log_msgs(handle)
 
     # a single batch (<= MERGE_BATCH_SIZE segments) needs no plan line
     _seed_manifest(workspace, 50, package="small")
     handle2 = _Handle()
-    merge.merge_audio_package(handle2, False, "small")
+    merge.merge_audio_package(handle2, "small")
     assert not any("两阶段合并" in m for m in _log_msgs(handle2))
 
 
@@ -162,7 +162,7 @@ def test_run_success_result(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)
     handle = _Handle()
-    result = merge.merge_audio_package(handle, False, "pkg")
+    result = merge.merge_audio_package(handle, "pkg")
     assert result["file"] == "pkg.mp3"
     assert result["path"] == str(workspace / "06_audio_merge" / "pkg.mp3")
     assert result["segments"] == 120
@@ -175,7 +175,7 @@ def test_run_cleans_tmp_dir_on_success(workspace, monkeypatch):
     _seed_manifest(workspace, 120)
     captured = {}
     _stub_engine(monkeypatch, captured)
-    merge.merge_audio_package(_Handle(), False, "pkg")
+    merge.merge_audio_package(_Handle(), "pkg")
     assert list((workspace / "00_temp").glob("merge_tmp_*")) == []
 
 
@@ -184,7 +184,7 @@ def test_run_cleans_tmp_dir_on_failure(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured, behaviour="fail")
     with pytest.raises(RuntimeError):
-        merge.merge_audio_package(_Handle(), False, "pkg")
+        merge.merge_audio_package(_Handle(), "pkg")
     assert list((workspace / "00_temp").glob("merge_tmp_*")) == []
 
 
@@ -192,7 +192,7 @@ def test_run_relocates_wav_fallback(workspace, monkeypatch):
     _seed_manifest(workspace, 120)
     captured = {}
     _stub_engine(monkeypatch, captured, behaviour="wav-fallback")
-    result = merge.merge_audio_package(_Handle(), False, "pkg")
+    result = merge.merge_audio_package(_Handle(), "pkg")
     target = workspace / "06_audio_merge" / "pkg.wav"
     assert result["file"] == "pkg.wav"
     assert result["path"] == str(target)
@@ -208,7 +208,7 @@ def test_run_missing_manifest_raises(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)
     with pytest.raises(RuntimeError, match="未找到合成结果清单"):
-        merge.merge_audio_package(_Handle(), False, "nope")
+        merge.merge_audio_package(_Handle(), "nope")
 
 
 def test_run_empty_manifest_raises(workspace, monkeypatch):
@@ -217,7 +217,7 @@ def test_run_empty_manifest_raises(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)
     with pytest.raises(RuntimeError, match="manifest.json 为空"):
-        merge.merge_audio_package(_Handle(), False, "pkg")
+        merge.merge_audio_package(_Handle(), "pkg")
 
 
 def test_run_no_ok_segments_raises(workspace, monkeypatch):
@@ -225,7 +225,7 @@ def test_run_no_ok_segments_raises(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)
     with pytest.raises(RuntimeError, match="没有可合并的音频"):
-        merge.merge_audio_package(_Handle(), False, "pkg")
+        merge.merge_audio_package(_Handle(), "pkg")
 
 
 def test_run_rejects_segments_rendered_with_old_voice(workspace, monkeypatch):
@@ -244,7 +244,7 @@ def test_run_rejects_segments_rendered_with_old_voice(workspace, monkeypatch):
     _stub_engine(monkeypatch, captured)
 
     with pytest.raises(RuntimeError, match="角色声音已变更"):
-        merge.merge_audio_package(_Handle(), False, "pkg")
+        merge.merge_audio_package(_Handle(), "pkg")
     assert "cmd" not in captured
 
 
@@ -260,7 +260,7 @@ def test_run_rejects_legacy_segments_when_voice_config_exists(workspace, monkeyp
     _stub_engine(monkeypatch, captured)
 
     with pytest.raises(RuntimeError, match="角色声音已变更"):
-        merge.merge_audio_package(_Handle(), False, "pkg")
+        merge.merge_audio_package(_Handle(), "pkg")
     assert "cmd" not in captured
 
 
@@ -269,7 +269,7 @@ def test_run_skips_missing_files_with_warning(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)
     handle = _Handle()
-    result = merge.merge_audio_package(handle, False, "pkg")
+    result = merge.merge_audio_package(handle, "pkg")
     assert result["segments"] == 3
     assert any(level == "WARNING" and "2 段成功记录的文件缺失" in msg
                for level, msg in handle.logs)
@@ -288,7 +288,7 @@ def test_run_plain_lines_go_to_log(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured, behaviour="plain-lines")
     handle = _Handle()
-    merge.merge_audio_package(handle, False, "pkg")
+    merge.merge_audio_package(handle, "pkg")
     assert "一条普通日志行" in _log_msgs(handle)
 
 
@@ -306,7 +306,7 @@ def test_run_gate_acquired_after_fast_fail(workspace, monkeypatch, fresh_gate):
         _stub_engine(monkeypatch, captured)
         t0 = time.monotonic()
         with pytest.raises(RuntimeError, match="未找到合成结果清单"):
-            merge.merge_audio_package(_Handle(), False, "nope")
+            merge.merge_audio_package(_Handle(), "nope")
         assert time.monotonic() - t0 < 1.0  # did not sit down waiting for the slot
         assert fresh_gate.active == 1  # unchanged — never acquired
     finally:
@@ -322,7 +322,7 @@ def test_run_spawns_only_after_slot(workspace, monkeypatch, fresh_gate):
     captured = {}
     _stub_engine(monkeypatch, captured)
     handle = _Handle()
-    t = threading.Thread(target=merge.merge_audio_package, args=(handle, False, "pkg"), daemon=True)
+    t = threading.Thread(target=merge.merge_audio_package, args=(handle, "pkg"), daemon=True)
     t.start()
     time.sleep(0.5)  # plenty of cooperative-poll cycles for the run to reach the gate
     assert "cmd" not in captured  # nothing spawned while the slot is held
@@ -338,11 +338,11 @@ def test_run_release_balanced(workspace, monkeypatch, fresh_gate):
     """Every exit path releases the slot it took exactly once (no leak, no underflow)."""
     _seed_manifest(workspace, 10)
     _stub_engine(monkeypatch, {})
-    merge.merge_audio_package(_Handle(), False, "pkg")
+    merge.merge_audio_package(_Handle(), "pkg")
     assert fresh_gate.active == 0  # success path balances
     _stub_engine(monkeypatch, {}, behaviour="fail")
     with pytest.raises(RuntimeError):
-        merge.merge_audio_package(_Handle(), False, "pkg")
+        merge.merge_audio_package(_Handle(), "pkg")
     assert fresh_gate.active == 0  # engine-failure path balances too
 
 
@@ -358,7 +358,7 @@ def test_run_cancel_while_queued_zero_output(workspace, monkeypatch, fresh_gate)
 
         def worker():
             try:
-                merge.merge_audio_package(handle, False, "pkg")
+                merge.merge_audio_package(handle, "pkg")
             except Exception as e:  # noqa: BLE001 — a daemon thread swallows it; record
                 handle.error = e
 
@@ -385,7 +385,7 @@ def test_run_success_leaves_no_wav_in_output(workspace, monkeypatch, fresh_gate)
     06_audio_merge on the success path (the encode-failure WAV is the only kept one)."""
     _seed_manifest(workspace, 120)
     _stub_engine(monkeypatch, {})  # behaviour="ok" -> MP3 written at --out
-    result = merge.merge_audio_package(_Handle(), False, "pkg")
+    result = merge.merge_audio_package(_Handle(), "pkg")
     assert result["file"].endswith(".mp3")
     assert list((workspace / "06_audio_merge").glob("*.wav")) == []
     assert list((workspace / "00_temp").glob("merge_tmp_*")) == []
