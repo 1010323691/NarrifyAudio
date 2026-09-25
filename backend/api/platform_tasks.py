@@ -15,7 +15,7 @@ from ..platform.models import Task, TaskEvent, User
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
 from ..services.tasks import task_dict
-from .task_submission import (
+from .task_operations import (
     TaskSubmit,
     cancel_task as cancel_task_for_user,
     submit_task as submit_task_for_user,

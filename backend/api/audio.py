@@ -20,7 +20,7 @@ from ..platform.deps import AuthContext, get_auth_context
 from ..platform.file_catalog import catalog_managed_file
 from ..platform.engine_task_submission import estimate_legacy_units, submit_legacy_engine_task
 from ..platform.models import ProjectFile
-from .task_submission import TaskSubmit, submit_task
+from .task_operations import TaskSubmit, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])

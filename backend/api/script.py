@@ -14,7 +14,7 @@ from ..engines.script_prompts import load_default_prompts
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.file_catalog import catalog_managed_file
-from .task_submission import TaskSubmit, cancel_task as cancel_durable_task, submit_task
+from .task_operations import TaskSubmit, cancel_task as cancel_durable_task, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/script", tags=["script"])
