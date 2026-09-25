@@ -1,4 +1,4 @@
-"""Contracts shared by legacy engines and the durable task adapter."""
+"""Contracts shared by the legacy engines and the durable task boundary."""
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from datetime import datetime, timezone
@@ -14,7 +14,6 @@ from backend.platform import quota, task_context, task_worker
 from backend.platform.engine_task_executor import execute_engine_task
 from backend.platform.task_contracts import TaskClaim, TaskExecutionError
 from sqlalchemy.dialects import postgresql
-from backend.services import task_views
 from backend.services import task_operations
 from backend.services import tasks as task_service
 from backend.platform.database import Base

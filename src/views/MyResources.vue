@@ -58,7 +58,7 @@ const recentOutputs = computed(() => records.value.flatMap((record) => record.su
   .sort((a, b) => Date.parse(b.modified_at) - Date.parse(a.modified_at)).slice(0, 8))
 
 // 本页大小口径：零/负值统一 0 B，B 档取整，KB 及以上 1 位小数
-const RESOURCE_BYTES: BytesFormat = { emptyText: '0 B', lowRange: 'clamp', decimals: 'always-one' }
+const RESOURCE_BYTES: BytesFormat = { emptyText: '0 B', lowRange: 'clamp', decimals: 'always-one', nonFiniteText: '0 B' }
 function formatBytes(value: number) {
   return formatBytesBase(value, RESOURCE_BYTES)
 }

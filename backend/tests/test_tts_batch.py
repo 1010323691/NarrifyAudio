@@ -2379,7 +2379,7 @@ def test_safe_package_name_snapshot():
 
     cases = {
         "my book": "my book",
-        'a/b:c*d?e"f<g>h|i\j': "a_b_c_d_e_f_g_h_i_j",
+        r'a/b:c*d?e"f<g>h|i\j': "a_b_c_d_e_f_g_h_i_j",
         "  padded  ": "padded",
         "   ": "audiobook",
         "": "audiobook",

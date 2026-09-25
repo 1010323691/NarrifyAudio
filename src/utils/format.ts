@@ -13,11 +13,13 @@ export function formatDuration(totalSeconds: number | null | undefined): string 
 
 /** 每个调用点的大小文案语义（S8/Q11）：
  * emptyText — null/NaN 显示；lowRange — <1024 行为（'raw' 原样含负值，'clamp' 非正一律 0 B、B 档取整）；
- * decimals — KB+ 档小数规则（'smart' 即 KB 档或 ≥100 用 0 位、其余 1 位；'always-one' 一律 1 位）。 */
+ * decimals — KB+ 档小数规则（'smart' 即 KB 档或 ≥100 用 0 位、其余 1 位；'always-one' 一律 1 位）；
+ * nonFiniteText — 可选，±Infinity 的显示（NaN 仍走 emptyText）。 */
 export interface BytesFormat {
   emptyText: string
   lowRange: 'raw' | 'clamp'
   decimals: 'smart' | 'always-one'
+  nonFiniteText?: string
 }
 
 const DEFAULT_BYTES_FORMAT: BytesFormat = { emptyText: '—', lowRange: 'raw', decimals: 'smart' }
@@ -25,6 +27,7 @@ const DEFAULT_BYTES_FORMAT: BytesFormat = { emptyText: '—', lowRange: 'raw', d
 /** 1536 -> "1.5 KB", 1048576 -> "1.0 MB" (mirrors engines/audio.format_bytes). */
 export function formatBytes(b: number | null | undefined, format: BytesFormat = DEFAULT_BYTES_FORMAT): string {
   if (b == null || Number.isNaN(b)) return format.emptyText
+  if (format.nonFiniteText !== undefined && !Number.isFinite(b)) return format.nonFiniteText
   if (format.lowRange === 'clamp' && b <= 0) return '0 B'
   if (b < 1024) {
     if (format.lowRange === 'raw') return `${b} B`

@@ -431,7 +431,12 @@ async function handlePackageClick() {
     confirmText: ready.length ? '继续下载' : '知道了',
     hideCancel: !ready.length,
   })
-  if (confirmed && ready.length) void doPackageDownload(ready)
+  // The dialog can stay open while mixes finish — re-check readiness before
+  // acting, so a "继续下载" can only ever download currently-ready chapters.
+  if (confirmed) {
+    const freshReady = packageSelection.value.filter(isMixReady)
+    if (freshReady.length) void doPackageDownload(freshReady)
+  }
 }
 
 function isMixReady(stem: string) {
