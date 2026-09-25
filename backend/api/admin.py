@@ -14,11 +14,11 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
+from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
-from ..services.task_operations import task_worker_group
+from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, task_worker_group
 from ..services.tasks import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
@@ -570,21 +570,10 @@ def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = 
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(404, "任务不存在")
-    if task.status not in {"failed", "cancelled", "timeout"}:
-        raise HTTPException(409, "任务当前不可重试")
-    reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
-    if reservation is not None and reservation.units:
-        raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
-    metered = db.scalar(select(QuotaTransaction.id).where(
-        QuotaTransaction.task_id == task.id,
-        QuotaTransaction.resource_type.in_(["LLM", "TTS"]),
-        QuotaTransaction.kind == "consume",
-    ).limit(1))
-    if metered:
-        raise HTTPException(409, "已有模型消费的任务请重新提交，以创建新的计费操作")
-    attempts = int(db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0)
-    if attempts >= settings.task_max_attempts:
-        raise HTTPException(409, "任务已达到最大尝试次数")
+    try:
+        attempts = check_retry_eligible(db, task)
+    except RetryNotAllowedError as exc:
+        raise HTTPException(409, exc.message) from exc
     previous_status = task.status
     requeue_task_record(
         db, task, event_type="admin_retry_requested",

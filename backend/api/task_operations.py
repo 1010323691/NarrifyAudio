@@ -3,12 +3,10 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..platform.config import settings
-from ..platform.models import QuotaReservation, QuotaTransaction, TaskAttempt, User
-from ..services.task_operations import owned_task
+from ..platform.models import User
+from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, owned_task
 from ..services.tasks import (
     TaskSubmissionError,
     cancel_task_record,
@@ -54,21 +52,10 @@ def retry_task(task_id: str, *, user: User, db: Session) -> dict:
     task = owned_task(db, user.id, task_id, lock=True)
     if task is None:
         raise HTTPException(404, "任务不存在")
-    if task.status not in {"failed", "cancelled", "timeout"}:
-        raise HTTPException(409, "任务当前不可重试")
-    reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
-    if reservation is not None and reservation.units:
-        raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
-    metered = db.scalar(select(QuotaTransaction.id).where(
-        QuotaTransaction.task_id == task.id,
-        QuotaTransaction.resource_type.in_(["LLM", "TTS"]),
-        QuotaTransaction.kind == "consume",
-    ).limit(1))
-    if metered:
-        raise HTTPException(409, "已有模型消费的任务请重新提交，以创建新的计费操作")
-    attempts = db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0
-    if attempts >= settings.task_max_attempts:
-        raise HTTPException(409, "任务已达到最大尝试次数")
+    try:
+        check_retry_eligible(db, task)
+    except RetryNotAllowedError as exc:
+        raise HTTPException(409, exc.message) from exc
     requeue_task_record(db, task, event_type="retry_requested", event_payload={"status": "pending"})
     db.commit()
     return task_dict(task)
