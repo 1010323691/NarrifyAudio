@@ -60,6 +60,27 @@ def test_tts_config_keeps_legacy_fields():
     assert t.concurrency == 1
 
 
+def test_retired_tts_settings_survive_app_config_round_trip():
+    config = AppConfig.model_validate({
+        "tts": {
+            "api_base": "https://legacy.example/v1",
+            "api_key": "preserve-user-value",
+            "voice": "legacy-voice",
+            "concurrency": 3,
+            "parallel_workers": 4,
+        },
+        "persona_prompts": {"advanced_prompt": "user-authored prompt"},
+    })
+
+    restored = AppConfig.model_validate(config.model_dump())
+    assert restored.tts.api_base == "https://legacy.example/v1"
+    assert restored.tts.api_key == "preserve-user-value"
+    assert restored.tts.voice == "legacy-voice"
+    assert restored.tts.concurrency == 3
+    assert restored.tts.parallel_workers == 4
+    assert restored.persona_prompts.advanced_prompt == "user-authored prompt"
+
+
 # --------------------------------------------------------------------------- #
 # GenerationConfig: in-parse check toggles (migrated off the retired check sections)
 # --------------------------------------------------------------------------- #
