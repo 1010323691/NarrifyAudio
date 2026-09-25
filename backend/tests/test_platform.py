@@ -24,6 +24,7 @@ from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.task_lifecycle import ACTIVE_TASK_STATUSES
 
 
 @pytest.fixture(scope="module")
@@ -420,7 +421,7 @@ def test_admin_can_cancel_persistent_task_and_keep_quota_unchanged(client: TestC
         user.role = "admin"
         # The module-scoped database retains tasks submitted by earlier tests;
         # this case exercises an intentionally drained storage migration.
-        for task in db.scalars(select(Task).where(Task.status.in_(("pending", "queued", "running", "paused", "cancelling", "retrying")))).all():
+        for task in db.scalars(select(Task).where(Task.status.in_(ACTIVE_TASK_STATUSES))).all():
             task.status = "cancelled"
             task.finished_at = utcnow()
         account = db.get(UserQuotaAccount, user.id)
@@ -1439,7 +1440,7 @@ def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestCli
     workspace = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Storage resume"}).json()
     with SessionLocal.begin() as db:
         db.get(User, first["user"]["id"]).role = "admin"
-        for task in db.scalars(select(Task).where(Task.status.in_(("pending", "queued", "running", "paused", "cancelling", "retrying")))).all():
+        for task in db.scalars(select(Task).where(Task.status.in_(ACTIVE_TASK_STATUSES))).all():
             task.status = "cancelled"
             task.finished_at = utcnow()
         source_root = configured_storage_root(db)

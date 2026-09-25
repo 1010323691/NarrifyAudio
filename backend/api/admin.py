@@ -438,7 +438,7 @@ def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
     query = select(Task)
     status_groups = {
         "queued": ("pending", "queued", "retrying"),
-        "running": ("running", "paused", "cancelling"),
+        "running": ("running", "cancelling"),
         "completed": ("succeeded",),
         "failed": ("failed", "timeout"),
         "cancelled": ("cancelled",),
@@ -522,7 +522,7 @@ def task_metrics(_: User = Depends(require_admin), db: Session = Depends(get_db)
     running_count = count_statuses("running", "cancelling")
     has_slot_aware_simulator = any((row.capabilities or {}).get("simulation") is True for row in live_workers)
     consuming_count = min(running_count, worker_pool["active_slots"]) if has_slot_aware_simulator else running_count
-    queued_count = count_statuses("queued", "retrying", "paused")
+    queued_count = count_statuses("queued", "retrying")
     if has_slot_aware_simulator:
         # The simulator's heartbeat is authoritative about active slots; any
         # additional running leases are buffered claims and belong in the queue.
