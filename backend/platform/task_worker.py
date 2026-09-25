@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import redis
@@ -65,6 +65,7 @@ from .storage import (
     lock_storage_migration,
     storage_migration,
 )
+from .task_registry import TASK_TYPES
 from .task_types import LEGACY_ENGINE_TASK_TYPES, SUPPORTED_TASK_TYPES
 from .task_context import (
     EngineExecutionContext,
@@ -654,62 +655,56 @@ def _execute_load_simulation(claim: TaskClaim) -> TaskOutcome:
     )
 
 
-def execute_claim(claim: TaskClaim) -> TaskOutcome:
-    """Execute one real deterministic engine behind the durable worker boundary."""
-    if claim.payload.get("_load_simulation") is True:
-        return _execute_load_simulation(claim)
-    if claim.task_type not in SUPPORTED_TASK_TYPES:
-        raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
-    if claim.task_type in LEGACY_ENGINE_TASK_TYPES:
-        from .engine_task_executor import execute_engine_task
-
-        return execute_engine_task(claim)
-    if claim.task_type == "script.parse":
-        return _execute_script_parse(claim)
-    if claim.task_type == "audio.silences":
-        return _execute_audio_silences(claim)
-    if claim.task_type == "audio.cut":
-        return _execute_audio_cut(claim)
+def _prepare_text_claim(claim: TaskClaim) -> tuple[ProjectFile, str, str, Path]:
+    """Shared preamble for the text-based platform tasks: load + decode the input file."""
     with SessionLocal() as db:
         _, _, item, source_path = _input_file(db, claim)
         if cancellation_requested(claim):
             raise TaskCancelledError()
         update_progress(claim, 10, "读取输入")
         source_text, encoding = decode_buffer(source_path.read_bytes())
+    return item, source_text, encoding, source_path
 
-    if claim.task_type == "text.format":
-        config = TextConfig.model_validate(claim.payload.get("config") or {})
-        result = format_text(source_text, config)
-        update_progress(claim, 75, "完成排版")
-        output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_formatted.txt")
-        return write_task_outcome(
-            claim,
-            output_name,
-            "text/plain; charset=utf-8",
-            result["text"].encode("utf-8"),
-            {
-                "engine": "text.format",
-                "stats": result["stats"],
-                "source_file_id": item.id,
-                "preview": result["text"][:2000],
-                "full_length": len(result["text"]),
-            },
-            publish_module=str(claim.payload.get("publish_module") or "") or None,
-        )
 
-    if claim.task_type == "book.analyze":
-        analysis = _book_analysis_result(source_text, encoding, str(source_path))
-        update_progress(claim, 75, "完成章节分析")
-        output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_analysis.json")
-        return write_task_outcome(
-            claim,
-            output_name,
-            "application/json",
-            json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8"),
-            {"engine": "book.analyze", "source_file_id": item.id, "analysis": analysis},
-            publish_module=str(claim.payload.get("publish_module") or "") or None,
-        )
+def _execute_text_format(claim: TaskClaim) -> TaskOutcome:
+    item, source_text, _encoding, _source_path = _prepare_text_claim(claim)
+    config = TextConfig.model_validate(claim.payload.get("config") or {})
+    result = format_text(source_text, config)
+    update_progress(claim, 75, "完成排版")
+    output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_formatted.txt")
+    return write_task_outcome(
+        claim,
+        output_name,
+        "text/plain; charset=utf-8",
+        result["text"].encode("utf-8"),
+        {
+            "engine": "text.format",
+            "stats": result["stats"],
+            "source_file_id": item.id,
+            "preview": result["text"][:2000],
+            "full_length": len(result["text"]),
+        },
+        publish_module=str(claim.payload.get("publish_module") or "") or None,
+    )
 
+
+def _execute_book_analyze(claim: TaskClaim) -> TaskOutcome:
+    item, source_text, encoding, source_path = _prepare_text_claim(claim)
+    analysis = _book_analysis_result(source_text, encoding, str(source_path))
+    update_progress(claim, 75, "完成章节分析")
+    output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_analysis.json")
+    return write_task_outcome(
+        claim,
+        output_name,
+        "application/json",
+        json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8"),
+        {"engine": "book.analyze", "source_file_id": item.id, "analysis": analysis},
+        publish_module=str(claim.payload.get("publish_module") or "") or None,
+    )
+
+
+def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
+    item, source_text, _encoding, _source_path = _prepare_text_claim(claim)
     raw = analyze_text(source_text)
     chapters = raw["chapters"]
     base = str(claim.payload.get("base") or base_name(item.original_name)).strip() or base_name(item.original_name)
@@ -778,6 +773,62 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         publish_module="02_split_text",
         additional_outputs=outputs[1:],
     )
+
+
+# S1：6 个平台直连执行器的显式绑定（注册表按名查表；不用装饰器隐式注册）。
+DIRECT_EXECUTORS: dict[str, Callable[[TaskClaim], TaskOutcome]] = {
+    "text.format": _execute_text_format,
+    "book.analyze": _execute_book_analyze,
+    "book.split": _execute_book_split,
+    "script.parse": _execute_script_parse,
+    "audio.silences": _execute_audio_silences,
+    "audio.cut": _execute_audio_cut,
+}
+
+
+def _shadow_dispatch_kind(task_type: str) -> str:
+    """S1 影子双跑：批次 3 之前 execute_claim 旧 if-chain 的裁决，逐字保留。
+
+    注册表查表为主、本函数交叉核对（不一致 fail closed）；一个版本周期后删除。
+    返回：``"legacy"``（旧链委托 engine_task_executor）/ 直连执行器函数名 / ``"<unsupported>"``。
+    """
+    if task_type not in SUPPORTED_TASK_TYPES:
+        return "<unsupported>"
+    if task_type in LEGACY_ENGINE_TASK_TYPES:
+        return "legacy"
+    if task_type == "script.parse":
+        return "_execute_script_parse"
+    if task_type == "audio.silences":
+        return "_execute_audio_silences"
+    if task_type == "audio.cut":
+        return "_execute_audio_cut"
+    if task_type == "text.format":
+        return "_execute_text_format"
+    if task_type == "book.analyze":
+        return "_execute_book_analyze"
+    # 旧链兜底分支（supported 的剩余类型只有 book.split）
+    return "_execute_book_split"
+
+
+def execute_claim(claim: TaskClaim) -> TaskOutcome:
+    """Execute one real deterministic engine behind the durable worker boundary."""
+    if claim.payload.get("_load_simulation") is True:
+        return _execute_load_simulation(claim)
+    spec = TASK_TYPES.get(claim.task_type)
+    if spec is None:
+        raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
+    # S1 影子双跑：注册表裁决与旧分发链必须一致，不一致 fail closed（旧链一个版本周期后删）。
+    expected = _shadow_dispatch_kind(claim.task_type)
+    if (expected == "legacy") != spec.legacy_engine:
+        raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与旧分发链不一致")
+    if expected != "legacy":
+        if expected != spec.executor or DIRECT_EXECUTORS[claim.task_type].__name__ != spec.executor:
+            raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与旧分发链不一致")
+    if spec.legacy_engine:
+        from .engine_task_executor import execute_engine_task
+
+        return execute_engine_task(claim)
+    return DIRECT_EXECUTORS[claim.task_type](claim)
 
 
 def _cleanup_outcome(outcome: TaskOutcome) -> None:

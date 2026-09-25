@@ -1,22 +1,11 @@
-"""Task types accepted by the durable task API and executable by its Worker."""
+"""Task types accepted by the durable task API and executable by its Worker.
 
-LEGACY_ENGINE_TASK_TYPES = frozenset({
-    "voices.foundation", "voices.clone", "tts.batch", "tts.merge",
-    "bgm.analysis", "bgm.segment", "bgm.mix", "bgm.match", "bgm.package",
-    "music.suggest_tags", "audio.zip", "audio.export", "tts.reset",
-})
-
-SUPPORTED_TASK_TYPES = frozenset({
-    "text.format", "book.analyze", "book.split", "script.parse",
-    "audio.silences", "audio.cut", *LEGACY_ENGINE_TASK_TYPES,
-})
-
-BILLABLE_TASK_TYPES = frozenset({
-    "script.parse", "voices.foundation", "voices.clone", "tts.batch",
-    "bgm.analysis", "bgm.segment", "music.suggest_tags",
-})
-
-# These jobs mutate the shared music library, which is visible across projects.
-# Keep the policy at the durable submission boundary so alternate HTTP adapters
-# cannot bypass the route-level admin dependency.
-ADMIN_ONLY_TASK_TYPES = frozenset({"music.suggest_tags"})
+S1（批次 3）起，类型知识的单一事实源是 :mod:`backend.platform.task_registry`
+（19 种类型的显式注册表）；本模块只做 re-export，保持既有导入面不变。
+"""
+from .task_registry import (  # noqa: F401
+    ADMIN_ONLY_TASK_TYPES,
+    BILLABLE_TASK_TYPES,
+    LEGACY_ENGINE_TASK_TYPES,
+    SUPPORTED_TASK_TYPES,
+)

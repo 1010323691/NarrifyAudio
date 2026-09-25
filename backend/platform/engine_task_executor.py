@@ -6,6 +6,7 @@ import shutil
 import zipfile
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, Callable
 
 from ..core import config as core_config
 from ..core.paths import get_or_prepare_layout
@@ -13,6 +14,7 @@ from ..core.task_control import TaskCancelled
 from ..platform.database import SessionLocal
 from ..platform.models import User
 from ..platform.storage import safe_display_name, task_attempt_path
+from ..platform.task_registry import TASK_TYPES
 from ..platform.task_types import LEGACY_ENGINE_TASK_TYPES
 from ..platform.task_validation import legacy_task_payload_error
 from .task_contracts import (
@@ -25,14 +27,297 @@ from .task_contracts import (
 from .task_context import EngineExecutionContext, cancellation_requested, update_progress
 from .task_engine_support import engine_execution_context, engine_result_outcome, write_task_outcome
 
+def _run_voices_foundation(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import voices
+    return voices.prepare_foundations(
+        handle,
+        payload.get("speakers"),
+        bool(payload.get("new_only")),
+        payload.get("overrides") or {},
+        payload.get("script"),
+    )
+
+
+def _run_voices_clone(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import voices
+    return voices.generate_voice_candidates(
+        handle,
+        payload.get("speakers"),
+        bool(payload.get("new_only")),
+        payload.get("concurrency"),
+        payload.get("script"),
+        payload.get("candidate_count"),
+    )
+
+
+def _run_tts_batch(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import tts_batch
+    scripts = payload.get("scripts") or []
+    if len(scripts) > 1:
+        return tts_batch.synthesize_multi(
+            handle,
+            scripts,
+            payload.get("concurrency"),
+            payload.get("seed"),
+            payload.get("auto_concurrency"),
+        )
+    return tts_batch.synthesize(
+        handle,
+        payload.get("indices"),
+        scripts[0] if scripts else payload.get("script"),
+        payload.get("concurrency"),
+        payload.get("seed"),
+        payload.get("auto_concurrency"),
+    )
+
+
+def _run_tts_merge(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import merge as merge_engine
+    return merge_engine.merge_audio_package(
+        handle,
+        bool(payload.get("m4b")),
+        str(payload.get("package") or ""),
+    )
+
+
+def _run_bgm_analysis(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import bgm as bgm_engine
+    cfg = core_config.get_config()
+    return bgm_engine.analyze_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
+
+
+def _run_bgm_segment(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import bgm as bgm_engine
+    cfg = core_config.get_config()
+    return bgm_engine.analyze_segment_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
+
+
+def _run_bgm_mix(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import bgm as bgm_engine
+    cfg = core_config.get_config()
+    return bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
+
+
+def _run_music_suggest_tags(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import music as music_engine
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        if user is None or not user.is_active or user.role != "admin":
+            raise TaskExecutionError("permission_revoked", "该任务现在需要管理员权限")
+    cfg = core_config.get_config()
+    return music_engine.suggest_track_tags(
+        handle,
+        str(payload["name"]),
+        cfg.llm,
+        payload.get("description"),
+    )
+
+
+def _run_bgm_match(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import bgm as bgm_engine
+    cfg = core_config.get_config()
+    stems = [str(value) for value in (payload.get("chapters") or [])]
+    mode = str(payload.get("mode") or "llm")
+    if mode == "segment":
+        return bgm_engine.recompute_segment_timelines(
+            get_or_prepare_layout(),
+            stems,
+            cfg.bgm.min_match_score,
+            ffprobe_path=cfg.ffmpeg.ffprobe_path,
+            pause_ms=cfg.tts.pause_between_speakers_ms or 500,
+            same_ms=cfg.tts.pause_same_speaker_ms or 250,
+            volume_base=cfg.bgm.volume,
+            volume_tiers=cfg.bgm.segment_volume_tiers,
+            handle=handle,
+        )
+    return bgm_engine.match_stems(
+        get_or_prepare_layout(), stems, mode, cfg.bgm.min_match_score,
+        handle=handle,
+    )
+
+
+def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    layout = get_or_prepare_layout()
+    stems = [str(value) for value in (payload.get("chapters") or [])]
+    base = safe_display_name(str(payload.get("base") or "bgm"))
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
+        for index, stem in enumerate(stems, 1):
+            if cancellation_requested(claim):
+                raise TaskCancelledError()
+            if (
+                not stem
+                or stem in {".", ".."}
+                or "/" in stem
+                or "\\" in stem
+                or "\x00" in stem
+            ):
+                raise TaskExecutionError("invalid_payload", "BGM 章节参数无效")
+            source = layout.bgm / f"{stem}.mp3"
+            try:
+                resolved_source = source.resolve(strict=True)
+                resolved_bgm = layout.bgm.resolve(strict=True)
+                inside_bgm = resolved_source.is_relative_to(resolved_bgm)
+            except (OSError, RuntimeError):
+                inside_bgm = False
+            if not inside_bgm or not resolved_source.is_file():
+                raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
+            output.write(resolved_source, arcname=f"{base}/{stem}.mp3")
+            update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
+    result = write_task_outcome(
+        claim,
+        f"{base}.zip",
+        "application/zip",
+        archive.getvalue(),
+        {"engine": "bgm.package", "base": base, "file_count": len(stems)},
+        publish_module="08_bgm",
+    )
+    handle.progress_percent(100, "完成")
+    return result
+
+
+def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    workspace = get_or_prepare_layout().workspace
+    if workspace is None:
+        raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
+    base = safe_display_name(str(payload.get("base") or "audio"))
+    archive = io.BytesIO()
+    files = payload.get("files") or []
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
+        for index, item in enumerate(files, 1):
+            if cancellation_requested(claim):
+                raise TaskCancelledError()
+            if not isinstance(item, dict):
+                raise TaskExecutionError("invalid_payload", "打包文件参数无效")
+            relative = Path(str(item.get("relative_path") or ""))
+            source = (workspace / relative).resolve()
+            if not source.is_relative_to(workspace.resolve()) or not source.is_file():
+                raise TaskExecutionError("input_missing", "待打包文件不存在")
+            name = safe_display_name(str(item.get("name") or source.name))
+            output.write(source, arcname=name)
+            update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
+        result = write_task_outcome(
+        claim,
+        f"{base}.zip",
+        "application/zip",
+        archive.getvalue(),
+        {"engine": "audio.zip", "file_count": len(files)},
+        publish_module="07_output",
+    )
+    handle.progress_percent(100, "完成")
+    return result
+
+
+def _run_audio_export(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    workspace = get_or_prepare_layout().workspace
+    if workspace is None:
+        raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
+    source_relative = Path(str(payload.get("source_relative") or ""))
+    source = (workspace / source_relative).resolve()
+    if not source.is_relative_to(workspace.resolve()) or not source.is_file():
+        raise TaskExecutionError("input_missing", "源音频不存在")
+    destination = source.parent / "分集"
+    written = []
+    files = payload.get("files") or []
+    for index, item in enumerate(files, 1):
+        if cancellation_requested(claim):
+            raise TaskCancelledError()
+        if not isinstance(item, dict):
+            raise TaskExecutionError("invalid_payload", "导出文件参数无效")
+        relative = Path(str(item.get("relative_path") or ""))
+        input_path = (workspace / relative).resolve()
+        if not input_path.is_relative_to(workspace.resolve()) or not input_path.is_file():
+            raise TaskExecutionError("input_missing", "待导出文件不存在")
+        name = safe_display_name(str(item.get("name") or input_path.name))
+        target = destination / name
+        with SessionLocal() as db:
+            user = db.get(User, claim.owner_id)
+            if user is None:
+                raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+            staged = task_attempt_path(
+                db, user.username, claim.project_id, claim.task_id, claim.attempt_id,
+                f"audio-export-{index:05d}-{name}",
+            )
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(input_path, staged)
+        side_effect_outputs.append(TaskSideEffectOutput(staged, target))
+        written.append({"name": name, "path": str(target)})
+        update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
+    return {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
+
+
+def _run_tts_reset(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import tts_batch
+    layout = get_or_prepare_layout()
+    scripts = [str(value) for value in (payload.get("scripts") or [])]
+    removed = []
+    for index, name in enumerate(scripts, 1):
+        if cancellation_requested(claim):
+            raise TaskCancelledError()
+        package = tts_batch.package_for(Path(name))
+        target = (layout.audio_chunk / package).resolve()
+        if not target.is_relative_to(layout.audio_chunk.resolve()):
+            raise TaskExecutionError("invalid_payload", "合成包路径无效")
+        if target.exists():
+            side_effect_deletes.append(target)
+            removed.append(package)
+        update_progress(claim, int(index * 90 / max(1, len(scripts))), f"重置 {index}/{len(scripts)}")
+    return {"engine": "tts.reset", "ok": True, "removed": removed}
+
+
+# S1：13 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
+ENGINE_BRANCHES: dict[str, Callable] = {
+    "voices.foundation": _run_voices_foundation,
+    "voices.clone": _run_voices_clone,
+    "tts.batch": _run_tts_batch,
+    "tts.merge": _run_tts_merge,
+    "bgm.analysis": _run_bgm_analysis,
+    "bgm.segment": _run_bgm_segment,
+    "bgm.mix": _run_bgm_mix,
+    "music.suggest_tags": _run_music_suggest_tags,
+    "bgm.match": _run_bgm_match,
+    "bgm.package": _run_bgm_package,
+    "audio.zip": _run_audio_zip,
+    "audio.export": _run_audio_export,
+    "tts.reset": _run_tts_reset,
+}
+
+
+def _shadow_engine_kind(task_type: str) -> str:
+    """S1 影子双跑：批次 3 之前 execute_engine_task 旧 13 分支 if-chain 的裁决，
+    逐字保留；注册表查表为主、本函数交叉核对（不一致 fail closed）；一个版本周期后删除。"""
+    if task_type not in LEGACY_ENGINE_TASK_TYPES:
+        return "<unsupported>"
+    if task_type == "voices.foundation":
+        return "_run_voices_foundation"
+    if task_type == "voices.clone":
+        return "_run_voices_clone"
+    if task_type == "tts.batch":
+        return "_run_tts_batch"
+    if task_type == "tts.merge":
+        return "_run_tts_merge"
+    if task_type == "bgm.analysis":
+        return "_run_bgm_analysis"
+    if task_type == "bgm.segment":
+        return "_run_bgm_segment"
+    if task_type == "bgm.mix":
+        return "_run_bgm_mix"
+    if task_type == "music.suggest_tags":
+        return "_run_music_suggest_tags"
+    if task_type == "bgm.match":
+        return "_run_bgm_match"
+    if task_type == "bgm.package":
+        return "_run_bgm_package"
+    if task_type == "audio.zip":
+        return "_run_audio_zip"
+    if task_type == "audio.export":
+        return "_run_audio_export"
+    # 旧链兜底分支（legacy 的剩余类型只有 tts.reset）
+    return "_run_tts_reset"
+
+
 def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
     """Run an existing business engine inside the durable Worker boundary."""
-    from ..engines import bgm as bgm_engine
-    from ..engines import merge as merge_engine
-    from ..engines import music as music_engine
-    from ..engines import tts_batch
-    from ..engines import voices
-
     handle = EngineExecutionContext(claim)
     payload = claim.payload
     if claim.task_type in LEGACY_ENGINE_TASK_TYPES:
@@ -43,212 +328,18 @@ def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
     side_effect_deletes: list[Path] = []
     with engine_execution_context(claim):
         try:
-            if claim.task_type == "voices.foundation":
-                result = voices.prepare_foundations(
-                    handle,
-                    payload.get("speakers"),
-                    bool(payload.get("new_only")),
-                    payload.get("overrides") or {},
-                    payload.get("script"),
-                )
-            elif claim.task_type == "voices.clone":
-                result = voices.generate_voice_candidates(
-                    handle,
-                    payload.get("speakers"),
-                    bool(payload.get("new_only")),
-                    payload.get("concurrency"),
-                    payload.get("script"),
-                    payload.get("candidate_count"),
-                )
-            elif claim.task_type == "tts.batch":
-                scripts = payload.get("scripts") or []
-                if len(scripts) > 1:
-                    result = tts_batch.synthesize_multi(
-                        handle,
-                        scripts,
-                        payload.get("concurrency"),
-                        payload.get("seed"),
-                        payload.get("auto_concurrency"),
-                    )
-                else:
-                    result = tts_batch.synthesize(
-                        handle,
-                        payload.get("indices"),
-                        scripts[0] if scripts else payload.get("script"),
-                        payload.get("concurrency"),
-                        payload.get("seed"),
-                        payload.get("auto_concurrency"),
-                    )
-            elif claim.task_type == "tts.merge":
-                result = merge_engine.merge_audio_package(
-                    handle,
-                    bool(payload.get("m4b")),
-                    str(payload.get("package") or ""),
-                )
-            elif claim.task_type == "bgm.analysis":
-                cfg = core_config.get_config()
-                result = bgm_engine.analyze_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
-            elif claim.task_type == "bgm.segment":
-                cfg = core_config.get_config()
-                result = bgm_engine.analyze_segment_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
-            elif claim.task_type == "bgm.mix":
-                cfg = core_config.get_config()
-                result = bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
-            elif claim.task_type == "music.suggest_tags":
-                with SessionLocal() as db:
-                    user = db.get(User, claim.owner_id)
-                    if user is None or not user.is_active or user.role != "admin":
-                        raise TaskExecutionError("permission_revoked", "该任务现在需要管理员权限")
-                cfg = core_config.get_config()
-                result = music_engine.suggest_track_tags(
-                    handle,
-                    str(payload["name"]),
-                    cfg.llm,
-                    payload.get("description"),
-                )
-            elif claim.task_type == "bgm.match":
-                cfg = core_config.get_config()
-                stems = [str(value) for value in (payload.get("chapters") or [])]
-                mode = str(payload.get("mode") or "llm")
-                if mode == "segment":
-                    result = bgm_engine.recompute_segment_timelines(
-                        get_or_prepare_layout(),
-                        stems,
-                        cfg.bgm.min_match_score,
-                        ffprobe_path=cfg.ffmpeg.ffprobe_path,
-                        pause_ms=cfg.tts.pause_between_speakers_ms or 500,
-                        same_ms=cfg.tts.pause_same_speaker_ms or 250,
-                        volume_base=cfg.bgm.volume,
-                        volume_tiers=cfg.bgm.segment_volume_tiers,
-                        handle=handle,
-                    )
-                else:
-                    result = bgm_engine.match_stems(
-                        get_or_prepare_layout(), stems, mode, cfg.bgm.min_match_score,
-                        handle=handle,
-                    )
-            elif claim.task_type == "bgm.package":
-                layout = get_or_prepare_layout()
-                stems = [str(value) for value in (payload.get("chapters") or [])]
-                base = safe_display_name(str(payload.get("base") or "bgm"))
-                archive = io.BytesIO()
-                with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
-                    for index, stem in enumerate(stems, 1):
-                        if cancellation_requested(claim):
-                            raise TaskCancelledError()
-                        if (
-                            not stem
-                            or stem in {".", ".."}
-                            or "/" in stem
-                            or "\\" in stem
-                            or "\x00" in stem
-                        ):
-                            raise TaskExecutionError("invalid_payload", "BGM 章节参数无效")
-                        source = layout.bgm / f"{stem}.mp3"
-                        try:
-                            resolved_source = source.resolve(strict=True)
-                            resolved_bgm = layout.bgm.resolve(strict=True)
-                            inside_bgm = resolved_source.is_relative_to(resolved_bgm)
-                        except (OSError, RuntimeError):
-                            inside_bgm = False
-                        if not inside_bgm or not resolved_source.is_file():
-                            raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
-                        output.write(resolved_source, arcname=f"{base}/{stem}.mp3")
-                        update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
-                result = write_task_outcome(
-                    claim,
-                    f"{base}.zip",
-                    "application/zip",
-                    archive.getvalue(),
-                    {"engine": "bgm.package", "base": base, "file_count": len(stems)},
-                    publish_module="08_bgm",
-                )
-                handle.progress_percent(100, "完成")
-                return result
-            elif claim.task_type == "audio.zip":
-                workspace = get_or_prepare_layout().workspace
-                if workspace is None:
-                    raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
-                base = safe_display_name(str(payload.get("base") or "audio"))
-                archive = io.BytesIO()
-                files = payload.get("files") or []
-                with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
-                    for index, item in enumerate(files, 1):
-                        if cancellation_requested(claim):
-                            raise TaskCancelledError()
-                        if not isinstance(item, dict):
-                            raise TaskExecutionError("invalid_payload", "打包文件参数无效")
-                        relative = Path(str(item.get("relative_path") or ""))
-                        source = (workspace / relative).resolve()
-                        if not source.is_relative_to(workspace.resolve()) or not source.is_file():
-                            raise TaskExecutionError("input_missing", "待打包文件不存在")
-                        name = safe_display_name(str(item.get("name") or source.name))
-                        output.write(source, arcname=name)
-                        update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
-                    result = write_task_outcome(
-                    claim,
-                    f"{base}.zip",
-                    "application/zip",
-                    archive.getvalue(),
-                    {"engine": "audio.zip", "file_count": len(files)},
-                    publish_module="07_output",
-                )
-                handle.progress_percent(100, "完成")
-                return result
-            elif claim.task_type == "audio.export":
-                workspace = get_or_prepare_layout().workspace
-                if workspace is None:
-                    raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
-                source_relative = Path(str(payload.get("source_relative") or ""))
-                source = (workspace / source_relative).resolve()
-                if not source.is_relative_to(workspace.resolve()) or not source.is_file():
-                    raise TaskExecutionError("input_missing", "源音频不存在")
-                destination = source.parent / "分集"
-                written = []
-                files = payload.get("files") or []
-                for index, item in enumerate(files, 1):
-                    if cancellation_requested(claim):
-                        raise TaskCancelledError()
-                    if not isinstance(item, dict):
-                        raise TaskExecutionError("invalid_payload", "导出文件参数无效")
-                    relative = Path(str(item.get("relative_path") or ""))
-                    input_path = (workspace / relative).resolve()
-                    if not input_path.is_relative_to(workspace.resolve()) or not input_path.is_file():
-                        raise TaskExecutionError("input_missing", "待导出文件不存在")
-                    name = safe_display_name(str(item.get("name") or input_path.name))
-                    target = destination / name
-                    with SessionLocal() as db:
-                        user = db.get(User, claim.owner_id)
-                        if user is None:
-                            raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
-                        staged = task_attempt_path(
-                            db, user.username, claim.project_id, claim.task_id, claim.attempt_id,
-                            f"audio-export-{index:05d}-{name}",
-                        )
-                    staged.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(input_path, staged)
-                    side_effect_outputs.append(TaskSideEffectOutput(staged, target))
-                    written.append({"name": name, "path": str(target)})
-                    update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
-                result = {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
-            elif claim.task_type == "tts.reset":
-                layout = get_or_prepare_layout()
-                scripts = [str(value) for value in (payload.get("scripts") or [])]
-                removed = []
-                for index, name in enumerate(scripts, 1):
-                    if cancellation_requested(claim):
-                        raise TaskCancelledError()
-                    package = tts_batch.package_for(Path(name))
-                    target = (layout.audio_chunk / package).resolve()
-                    if not target.is_relative_to(layout.audio_chunk.resolve()):
-                        raise TaskExecutionError("invalid_payload", "合成包路径无效")
-                    if target.exists():
-                        side_effect_deletes.append(target)
-                        removed.append(package)
-                    update_progress(claim, int(index * 90 / max(1, len(scripts))), f"重置 {index}/{len(scripts)}")
-                result = {"engine": "tts.reset", "ok": True, "removed": removed}
-            else:
+            spec = TASK_TYPES.get(claim.task_type)
+            if spec is None or not spec.legacy_engine:
                 raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
+            # S1 影子双跑：注册表裁决与旧分发链必须一致，不一致 fail closed（旧链一个版本周期后删）。
+            if _shadow_engine_kind(claim.task_type) != spec.executor:
+                raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与旧分发链不一致")
+            runner = ENGINE_BRANCHES[claim.task_type]
+            if runner.__name__ != spec.executor:
+                raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与执行器绑定不一致")
+            result = runner(handle, claim, payload, side_effect_outputs, side_effect_deletes)
+            if isinstance(result, TaskOutcome):
+                return result
         except TaskCancelled as exc:
             for item in side_effect_outputs:
                 item.temp_path.unlink(missing_ok=True)
