@@ -48,7 +48,7 @@ def test_engine_context_reports_a_real_ten_second_llm_rate(monkeypatch):
         task_context, "_append_claim_event",
         lambda _claim, event_type, payload: events.append((event_type, payload)),
     )
-    handle = task_context.EngineTaskContext(SimpleNamespace(task_id="task", attempt_id="attempt"))
+    handle = task_context.EngineExecutionContext(SimpleNamespace(task_id="task", attempt_id="attempt"))
 
     handle.llm_rate(100, 50.0)
     now[0] = 3.1

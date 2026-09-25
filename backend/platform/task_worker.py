@@ -67,7 +67,7 @@ from .storage import (
 )
 from .task_types import LEGACY_ENGINE_TASK_TYPES, SUPPORTED_TASK_TYPES
 from .task_context import (
-    EngineTaskContext,
+    EngineExecutionContext,
     PersistentTaskHandle,
     _as_utc,
     _attempt_is_current,
@@ -418,7 +418,7 @@ def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
             reset_workspace(token)
 
     history_path = workspace / "config" / "spot_check_history.json"
-    handle = EngineTaskContext(claim)
+    handle = EngineExecutionContext(claim)
     token = bind_workspace(workspace)
     try:
         try:
@@ -459,7 +459,7 @@ def _execute_audio_silences(claim: TaskClaim) -> TaskOutcome:
     with SessionLocal() as db:
         user, _project, item, source_path = _input_file(db, claim)
         workspace = project_workspace_path(db, user.username, claim.project_id)
-    handle = EngineTaskContext(claim)
+    handle = EngineExecutionContext(claim)
     target = str(claim.payload.get("target") or "10:00")
     tolerance = int(claim.payload.get("tolerance") or audio_engine.DEFAULT_TOLERANCE)
     token = bind_workspace(workspace)
@@ -516,7 +516,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
             db, user.username, claim.project_id, claim.task_id, claim.attempt_id, "cut"
         )
         workspace = project_workspace_path(db, user.username, claim.project_id)
-    handle = EngineTaskContext(claim)
+    handle = EngineExecutionContext(claim)
     token = bind_workspace(workspace)
     try:
         ffmpeg = core_config.get_config().ffmpeg

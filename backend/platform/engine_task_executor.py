@@ -22,7 +22,7 @@ from .task_contracts import (
     TaskOutcome,
     TaskSideEffectOutput,
 )
-from .task_context import EngineTaskContext, cancellation_requested, update_progress
+from .task_context import EngineExecutionContext, cancellation_requested, update_progress
 from .task_engine_support import engine_execution_context, engine_result_outcome, write_task_outcome
 
 def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
@@ -33,7 +33,7 @@ def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
     from ..engines import tts_batch
     from ..engines import voices
 
-    handle = EngineTaskContext(claim)
+    handle = EngineExecutionContext(claim)
     payload = claim.payload
     if claim.task_type in LEGACY_ENGINE_TASK_TYPES:
         validation_error = legacy_task_payload_error(claim.task_type, payload)

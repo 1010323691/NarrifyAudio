@@ -49,7 +49,7 @@ def _cps10(samples: deque[tuple[float, int]], total: int, now: float) -> float:
 
 
 
-class EngineTaskContext:
+class EngineExecutionContext:
     """Adapter from the legacy engine callback contract to durable task events."""
 
     def __init__(self, claim: TaskClaim):
@@ -323,4 +323,4 @@ def cancellation_requested(claim: TaskClaim) -> bool:
 
 
 
-PersistentTaskHandle = EngineTaskContext
+PersistentTaskHandle = EngineExecutionContext
