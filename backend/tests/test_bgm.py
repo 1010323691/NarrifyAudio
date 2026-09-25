@@ -1395,7 +1395,7 @@ def test_parse_segment_blocks_end_past_batch_clamped():
     死牢块 end_segment=67（章末）→ 旧硬拒收 → 3 次同形拒收 → 稳定失败。
     start 越下界不钳制（会吞上一批条目 = 静默丢数据）→ 带 extend 提示拒收。"""
     b1 = [0, 9]
-    blocks, note = bgm_engine.parse_segment_blocks_reply_detailed(
+    blocks, note = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([_blk(0, 10)]), b1, None)
     assert blocks == [{"start": 0, "end": 9, "scene": "", "mood": "",
                        "music_tags": _tags(), "intensity": 2, "reason": ""}]
@@ -1404,28 +1404,28 @@ def test_parse_segment_blocks_end_past_batch_clamped():
     assert bgm_engine.parse_segment_blocks_reply(
         _block_reply([_blk(0, 10)]), b1, None) == blocks
     # 无钳制 → note 为空串
-    blocks2, note2 = bgm_engine.parse_segment_blocks_reply_detailed(
+    blocks2, note2 = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([_blk(0, 9)]), b1, None)
     assert blocks2 and note2 == ""
     # start 越下界 → 拒收（钳制 = 吞上一批条目）+ extend 提示
-    rejected, reason = bgm_engine.parse_segment_blocks_reply_detailed(
+    rejected, reason = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([_blk(-1, 4)]), b1, None)
     assert rejected is None
     assert "start_segment=-1" in reason and "extend" in reason
     # extend 块 end 越上界同样钳制（延续到本批末条）
-    got3, note3 = bgm_engine.parse_segment_blocks_reply_detailed(
+    got3, note3 = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([{"start_segment": 0, "end_segment": 99, "extend": True}]),
         b1, {"end": -1})
     assert got3 == [{"start": 0, "end": 9, "extend": True}]
     assert "已钳制到 9" in note3
     # 整块在本批之外（start 越过本批上界）→ 拒收——钳制起点会吞掉下一批的
     # 条目（且钳到 b1 后任何后续块都 start > b1，多钳制 note 拼接收不可达）
-    rejected4, reason4 = bgm_engine.parse_segment_blocks_reply_detailed(
+    rejected4, reason4 = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([_blk(0, 9), _blk(10, 15)]), b1, None)
     assert rejected4 is None
     assert "start_segment=10 超出本批上界 9" in reason4
     # 钳制后的块仍须满足升序不重叠（钳到 9 后又与下一块重叠 → 拒收）
-    rejected5, reason5 = bgm_engine.parse_segment_blocks_reply_detailed(
+    rejected5, reason5 = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([_blk(0, 99), _blk(9, 9)]), b1, None)
     assert rejected5 is None and "重叠" in reason5
 
@@ -1448,7 +1448,7 @@ def test_parse_segment_blocks_rejection_reasons():
         (_block_reply([_blk(0, 4, music_tags=["战斗"])]), "music_tags"),
     ]
     for reply, kw in cases:
-        rejected, reason = bgm_engine.parse_segment_blocks_reply_detailed(
+        rejected, reason = bgm_engine.parse_segment_blocks_reply_with_note(
             reply, b1, None)
         assert rejected is None
         assert kw in reason, (kw, reason)
@@ -1456,18 +1456,18 @@ def test_parse_segment_blocks_rejection_reasons():
     prev = {"end": 9}
     b2 = [10, 11, 12]
     ext = _block_reply([{"start_segment": 10, "end_segment": 12, "extend": True}])
-    _, r1 = bgm_engine.parse_segment_blocks_reply_detailed(ext, b2, None)
+    _, r1 = bgm_engine.parse_segment_blocks_reply_with_note(ext, b2, None)
     assert "没有可延续的" in r1
-    _, r2 = bgm_engine.parse_segment_blocks_reply_detailed(
+    _, r2 = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([_blk(10, 10),
                       {"start_segment": 11, "end_segment": 12, "extend": True}]),
         b2, prev)
     assert "首位" in r2
-    _, r3 = bgm_engine.parse_segment_blocks_reply_detailed(
+    _, r3 = bgm_engine.parse_segment_blocks_reply_with_note(
         _block_reply([{"start_segment": 11, "end_segment": 12, "extend": True}]),
         b2, prev)
     assert "须等于本批首条 10" in r3
-    _, r4 = bgm_engine.parse_segment_blocks_reply_detailed(ext, b2, {"end": 10})
+    _, r4 = bgm_engine.parse_segment_blocks_reply_with_note(ext, b2, {"end": 10})
     assert "状态错乱" in r4
 
 

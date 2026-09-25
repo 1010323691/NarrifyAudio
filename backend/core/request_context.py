@@ -5,8 +5,16 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 
 
-_UNSET = object()
-_workspace: ContextVar[Path | None | object] = ContextVar("narrify_workspace", default=_UNSET)
+class _WorkspaceUnset:
+    """Sentinel held by the ContextVar outside request scope (see bound_workspace)."""
+
+    __slots__ = ()
+
+
+_UNSET = _WorkspaceUnset()
+_workspace: ContextVar[Path | None | _WorkspaceUnset] = ContextVar(
+    "narrify_workspace", default=_UNSET
+)
 
 
 def bind_workspace(path: Path | None) -> Token:
@@ -17,6 +25,6 @@ def reset_workspace(token: Token) -> None:
     _workspace.reset(token)
 
 
-def bound_workspace() -> Path | None | object:
-    """Return the request workspace, or a sentinel for non-request callers."""
+def bound_workspace() -> Path | None | _WorkspaceUnset:
+    """The request-bound workspace; the ``_UNSET`` sentinel for non-request callers."""
     return _workspace.get()

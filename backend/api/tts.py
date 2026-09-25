@@ -730,11 +730,11 @@ def reset_batch_status_cache() -> None:
         _STATUS_CACHE.clear()
 
 
-def _stat_key(p) -> tuple | None:
+def _stat_key(path) -> tuple | None:
     """A path's ``(mtime_ns, size)``, or ``None`` when it cannot be stat'ed (a file that
     vanishes between keying and computing degrades to a miss on the next poll, never a crash)."""
     try:
-        st = Path(p).stat()
+        st = Path(path).stat()
         return (st.st_mtime_ns, st.st_size)
     except OSError:
         return None

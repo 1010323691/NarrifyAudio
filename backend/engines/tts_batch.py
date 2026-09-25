@@ -146,6 +146,8 @@ def _build_cmd(python, worker, seg_file, vc_path, out_dir, *, language, device,
     if base_model:
         cmd += ["--base-model", base_model]
     if design_model:
+        # 跨层术语映射：worker 侧「design」声线模型，后端任务 voices.clone 即 worker 的
+        # design-batch 模式（模式与行协议见 tts-engine/tts_worker.py 头部注释）。
         cmd += ["--design-model", design_model]
     if ffmpeg_path:
         cmd += ["--ffmpeg", ffmpeg_path]
@@ -159,15 +161,15 @@ def _build_cmd(python, worker, seg_file, vc_path, out_dir, *, language, device,
     return cmd
 
 
-def _load_script(p):
-    if not p.exists():
+def _load_script(script_path):
+    if not script_path.exists():
         raise RuntimeError("未找到脚本 JSON（03_parsed_json/）——请先在「文本解析」生成脚本。")
     try:
-        data = json.loads(p.read_text("utf-8"))
+        data = json.loads(script_path.read_text("utf-8"))
     except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"{p.name} 无法解析：{e}")
+        raise RuntimeError(f"{script_path.name} 无法解析：{e}")
     if not isinstance(data, list) or not data:
-        raise RuntimeError(f"{p.name} 为空——请先生成脚本。")
+        raise RuntimeError(f"{script_path.name} 为空——请先生成脚本。")
     return data
 
 

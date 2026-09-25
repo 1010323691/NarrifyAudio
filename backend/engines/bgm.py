@@ -539,7 +539,7 @@ def _parse_scene_intensity(raw) -> int:
     return max(1, min(3, value))
 
 
-def parse_segment_blocks_reply_detailed(
+def parse_segment_blocks_reply_with_note(
     content: str, batch: list[int], prev_scene: dict | None
 ) -> tuple[list[dict] | None, str]:
     """Parse one paragraph-batch LLM reply into a list of SCENE BLOCKS.
@@ -661,7 +661,7 @@ def parse_segment_blocks_reply(
 ) -> list[dict] | None:
     """Public wrapper (unchanged contract): the blocks, or ``None`` on any
     violation / clamp-note ignored."""
-    blocks, _note = parse_segment_blocks_reply_detailed(content, batch, prev_scene)
+    blocks, _note = parse_segment_blocks_reply_with_note(content, batch, prev_scene)
     return blocks
 
 
@@ -1315,7 +1315,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
                 # last_err + 【重试】反馈，确定性模型可自我纠正）；end 钳制
                 # 成功 → 两通道各留一行（终端/app.log + 任务日志）：该场景
                 # 由下一批 extend 接住。
-                got, note = parse_segment_blocks_reply_detailed(c, _b, _ps)
+                got, note = parse_segment_blocks_reply_with_note(c, _b, _ps)
                 if got is None:
                     return ParseRejected(note)
                 if note:

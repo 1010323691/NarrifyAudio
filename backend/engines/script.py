@@ -249,18 +249,18 @@ def _evict_trailing_title(chunk: str) -> tuple:
     return body, last_line
 
 
-def _run_start(S: str, q: int) -> int:
-    """包含 q 的极大空白游程的起始偏移（q = 空白字符，或零宽句末位置）。
+def _run_start(text: str, pos: int) -> int:
+    """包含 pos 的极大空白游程的起始偏移（pos = 空白字符，或零宽句末位置）。
 
     句末候选落在标点之后：若后随空白则游程自标点后的第一个空白字符起；
     若标点直接衔接文字（中文常态）则游程长度为零、起点即标点后一位。
     """
-    while q > 0 and S[q - 1].isspace():
-        q -= 1
-    return q
+    while pos > 0 and text[pos - 1].isspace():
+        pos -= 1
+    return pos
 
 
-def _boundary_runs(S: str) -> list:
+def _boundary_runs(text: str) -> list:
     """统一合法边界表（硬约束）：合法切点偏移的升序列表。
 
     一个极大空白游程 = 一个逻辑边界（同 gap 内多类候选合并为一个）；句末候选
@@ -270,16 +270,16 @@ def _boundary_runs(S: str) -> list:
     切点只能落在这张表的偏移上；没有合法边界就不切。
     """
     starts = set()
-    for m in re.finditer(r"\n\s*\n", S):
-        starts.add(_run_start(S, m.start()))
-    for m in re.finditer(r"\n", S):
-        starts.add(_run_start(S, m.start()))
-    for m in re.finditer(r"(?<=[。！？!?…])", S):
+    for m in re.finditer(r"\n\s*\n", text):
+        starts.add(_run_start(text, m.start()))
+    for m in re.finditer(r"\n", text):
+        starts.add(_run_start(text, m.start()))
+    for m in re.finditer(r"(?<=[。！？!?…])", text):
         p = m.end()
-        if p < len(S):
-            starts.add(_run_start(S, p))
-    for m in re.finditer(r"(?<=[.!?])\s", S):
-        starts.add(_run_start(S, m.end() - 1))
+        if p < len(text):
+            starts.add(_run_start(text, p))
+    for m in re.finditer(r"(?<=[.!?])\s", text):
+        starts.add(_run_start(text, m.end() - 1))
     starts.discard(0)
     return sorted(starts)
 
@@ -296,7 +296,7 @@ def _tail_is_title(block: str) -> bool:
     return is_chapter_title(b.rsplit("\n", 1)[1])
 
 
-def _find_cut(runs: list, t: float, floor: int, S: str):
+def _find_cut(runs: list, t: float, floor: int, text: str):
     """目标位 t 的切点：t 最近、且在上一切点（floor）右侧的合法边界。
 
     悬题改判：最近者悬题（切后前一块末行是章标题）而另一候选不悬题 →
@@ -310,15 +310,15 @@ def _find_cut(runs: list, t: float, floor: int, S: str):
         cands.append(runs[i - 1])
     if i < len(runs) and runs[i] > floor:
         cands.append(runs[i])
-    cands = [c for c in cands if S[floor:c].strip()]
+    cands = [c for c in cands if text[floor:c].strip()]
     if not cands:
         return None
-    safe = [c for c in cands if not _tail_is_title(S[floor:c])]
+    safe = [c for c in cands if not _tail_is_title(text[floor:c])]
     pool = safe if safe else cands
     return min(pool, key=lambda c: (abs(t - c), c))
 
 
-def _drop_short_chunks(S: str, cuts: list, size: int) -> list:
+def _drop_short_chunks(text: str, cuts: list, size: int) -> list:
     """收尾调整：消除过短块（strip 后 < 目标长度一半）。
 
     合并 = 只删一个已有切点（不重切、不引入任何新切点——每轮严格收缩，
@@ -329,8 +329,8 @@ def _drop_short_chunks(S: str, cuts: list, size: int) -> list:
     threshold = size / 2
     accepted = set()
     while True:
-        bounds = [0] + list(cuts) + [len(S)]
-        lens = [len(S[a:b].strip()) for a, b in zip(bounds, bounds[1:])]
+        bounds = [0] + list(cuts) + [len(text)]
+        lens = [len(text[a:b].strip()) for a, b in zip(bounds, bounds[1:])]
         i = next(
             (k for k in range(len(lens))
              if lens[k] < threshold and (bounds[k], bounds[k + 1]) not in accepted),
@@ -341,8 +341,8 @@ def _drop_short_chunks(S: str, cuts: list, size: int) -> list:
         a, b = bounds[i], bounds[i + 1]
         # 合并结果是否「末行成标题」按兜底自身口径（_evict，含 100 字窗）判定，
         # 与切片阶段的驱逐语义一致——绝不产出会在切片时被再驱逐的块。
-        okL = i > 0 and _evict_trailing_title(S[bounds[i - 1]:b].strip())[1] == ""
-        okR = i < len(lens) - 1 and _evict_trailing_title(S[a:bounds[i + 1]].strip())[1] == ""
+        okL = i > 0 and _evict_trailing_title(text[bounds[i - 1]:b].strip())[1] == ""
+        okR = i < len(lens) - 1 and _evict_trailing_title(text[a:bounds[i + 1]].strip())[1] == ""
         if not (okL or okR):
             accepted.add((a, b))
             continue
@@ -1208,11 +1208,11 @@ def parse_speaker_map_full(text: str | None, target_indices: list) -> dict:
     if not targets or not text:
         return {}
     text = _clean_reply(text.strip())
-    tset = set(targets)
+    target_set = set(targets)
     # Primary: the batch mapping ({"results": [...]}, a bare array, or an index-keyed object).
     value = _extract_json(text)
     if value is not None:
-        m = _map_from_value(value, tset, targets)
+        m = _map_from_value(value, target_set, targets)
         if m:
             return m
     # Single-target fallback: the scalar parser, so a reply shaped for one entry
@@ -1224,7 +1224,7 @@ def parse_speaker_map_full(text: str | None, target_indices: list) -> dict:
     return {}
 
 
-def _map_from_value(v, tset: set, targets: list) -> dict:
+def _map_from_value(v, target_set: set, targets: list) -> dict:
     """Extract ``{index: (speaker, text)}`` from a parsed JSON value (object or array);
     ``text`` is ``None`` whenever the reply item carries no usable ``text`` key."""
     if isinstance(v, dict):
@@ -1232,22 +1232,22 @@ def _map_from_value(v, tset: set, targets: list) -> dict:
         for key in ("results", "speakers", "entries", "items", "list"):
             inner = v.get(key)
             if isinstance(inner, list):
-                m = _map_from_list(inner, tset, targets)
+                m = _map_from_list(inner, target_set, targets)
                 if m:
                     return m
         # index-keyed object: {"0": "NARRATOR", "3": "BOB"} (speaker-only values)
         m = {}
         for k, sp in v.items():
             idx = _as_int(k)
-            if isinstance(sp, str) and sp.strip() and idx is not None and idx in tset:
+            if isinstance(sp, str) and sp.strip() and idx is not None and idx in target_set:
                 m[idx] = (sp.strip(), None)
         return m
     if isinstance(v, list):
-        return _map_from_list(v, tset, targets)
+        return _map_from_list(v, target_set, targets)
     return {}
 
 
-def _map_from_list(lst: list, tset: set, targets: list) -> dict:
+def _map_from_list(lst: list, target_set: set, targets: list) -> dict:
     if not lst:
         return {}
     # form A: [{"index": .., "speaker": .., "text": ..?}, ...]
@@ -1256,7 +1256,7 @@ def _map_from_list(lst: list, tset: set, targets: list) -> dict:
         for x in lst:
             idx = _as_int(x.get("index"))
             sp = x.get("speaker")
-            if idx is not None and isinstance(sp, str) and sp.strip() and idx in tset:
+            if idx is not None and isinstance(sp, str) and sp.strip() and idx in target_set:
                 tx = x.get("text")
                 m[idx] = (sp.strip(), tx.strip() if isinstance(tx, str) and tx.strip() else None)
         if m:

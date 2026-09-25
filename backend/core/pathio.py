@@ -99,13 +99,13 @@ def _norm(value: str) -> str:
     return posixpath.normpath(v)
 
 
-def _within(vn: str, rn: str) -> bool:
-    """Whether normalized ``vn`` is ``rn`` itself or inside it (segment-wise)."""
-    return vn == rn or vn.startswith(rn + "/")
+def _within(value_norm: str, root_norm: str) -> bool:
+    """Whether normalized ``value_norm`` is ``root_norm`` itself or inside it (segment-wise)."""
+    return value_norm == root_norm or value_norm.startswith(root_norm + "/")
 
 
-def _escapes(vn: str) -> bool:
-    return vn == ".." or vn.startswith("../")
+def _escapes(value_norm: str) -> bool:
+    return value_norm == ".." or value_norm.startswith("../")
 
 
 # -- write side: serialization ------------------------------------------------ #
@@ -127,15 +127,15 @@ def to_workspace_relative(value, root) -> str | None:
     v = str(value).strip()
     if not v:
         return None
-    rn = _norm(str(root))
+    root_norm = _norm(str(root))
     if not _is_abs(v):
-        vn = _norm(v)
-        if _escapes(vn):
+        value_norm = _norm(v)
+        if _escapes(value_norm):
             raise PathOutsideWorkspace(f"相对路径越出工作目录：{value}")
-        return vn
-    vn = _norm(v)
-    if _within(vn, rn):
-        return "" if vn == rn else vn[len(rn) + 1:]
+        return value_norm
+    value_norm = _norm(v)
+    if _within(value_norm, root_norm):
+        return "" if value_norm == root_norm else value_norm[len(root_norm) + 1:]
     return None
 
 
@@ -158,7 +158,7 @@ def _find_by_name(root: Path, name: str) -> list[Path]:
     return hits
 
 
-def _recover(vn: str, rn: str, original: str) -> str | None:
+def _recover(value_norm: str, root_norm: str, original: str) -> str | None:
     """Best-effort re-location of a stale absolute path (the workspace moved).
 
     1) Original structure: the tail of the old path starting at the first known
@@ -168,16 +168,16 @@ def _recover(vn: str, rn: str, original: str) -> str | None:
 
     Returns the recovered absolute path (string) or ``None``.
     """
-    parts = [p for p in vn.split("/") if p not in ("", ".")]
+    parts = [p for p in value_norm.split("/") if p not in ("", ".")]
     for i, part in enumerate(parts):
         if part in WORKSPACE_MARKERS:  # both sides already normalized (case-folded on win)
-            cand = posixpath.join(rn, *parts[i:])
+            cand = posixpath.join(root_norm, *parts[i:])
             if os.path.exists(cand):
                 return cand
     name = parts[-1] if parts else ""
-    if name and rn:
+    if name and root_norm:
         try:
-            hits = _find_by_name(Path(rn), name)
+            hits = _find_by_name(Path(root_norm), name)
         except OSError:
             hits = []
         if len(hits) == 1:
@@ -207,16 +207,16 @@ def resolve_path(value, root, *, strict: bool = True, label: str = "") -> Path |
     if not v:
         return None
     if not _is_abs(v):
-        vn = _norm(v)
-        if _escapes(vn):
+        value_norm = _norm(v)
+        if _escapes(value_norm):
             raise PathOutsideWorkspace(f"{label}路径越出工作目录：{value}")
-        return Path(str(root)) / vn
-    vn, rn = _norm(v), _norm(str(root))
-    if _within(vn, rn):
+        return Path(str(root)) / value_norm
+    value_norm, root_norm = _norm(v), _norm(str(root))
+    if _within(value_norm, root_norm):
         return Path(v)  # legacy absolute inside the workspace: valid as-is
     if os.path.exists(v):
         return Path(v)  # external resource (a user-selected tool / model dir, …)
-    cand = _recover(vn, rn, v)
+    cand = _recover(value_norm, root_norm, v)
     if cand is not None:
         log.warning("路径已失效，已按原目录结构/文件名恢复：%s → %s", v, cand)
         return Path(cand)
