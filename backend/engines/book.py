@@ -1716,3 +1716,14 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
         used.add(name)
         out.append(name)
     return out
+
+
+def is_generated_split_output_name(name: str) -> bool:
+    """Return whether a top-level split output name follows a generated convention."""
+    import re
+
+    return (
+        (name.startswith("第") and name.endswith(".txt"))
+        or bool(re.search(r" 分册\d+ 第\d+章\.txt$", name))
+        or name.endswith(" 全书.txt")
+    )

@@ -19,8 +19,8 @@ from backend.core.observability import record_api_request
 from backend.core import paths as core_paths
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
-from backend.platform.models import OutboxEvent, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
-from backend.platform.storage import configured_storage_root, sha256_file, task_attempt_path, user_workspace_root
+from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
+from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, user_workspace_root
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
 from backend.platform.legacy_tasks import estimate_legacy_units
 
@@ -575,12 +575,37 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
     )
     assert split_submitted.status_code == 201, split_submitted.text
     split_id = split_submitted.json()["id"]
+    stale_key = f"{first['user']['username']}/{project['id']}/02_split_text/\u65e7\u4e66 \u5168\u4e66.txt"
+    manual_key = f"{first['user']['username']}/{project['id']}/02_split_text/manual.txt"
+    with SessionLocal() as db:
+        for name, key in (("\u65e7\u4e66 \u5168\u4e66.txt", stale_key), ("manual.txt", manual_key)):
+            stale_path = object_path(key, configured_storage_root(db))
+            stale_path.parent.mkdir(parents=True, exist_ok=True)
+            stale_path.write_text("old", encoding="utf-8")
+            db.add(ProjectFile(
+                project_id=project["id"],
+                owner_id=first["user"]["id"],
+                original_name=name,
+                object_key=key,
+                content_type="text/plain; charset=utf-8",
+                size_bytes=3,
+                sha256=sha256_file(stale_path),
+                kind="artifact",
+            ))
+        db.commit()
     assert process_task_message({"payload": {"task_id": split_id}}, worker_id="test-worker") == "succeeded"
     split_task = client.get(f"/api/v1/tasks/{split_id}").json()
     assert split_task["status"] == "succeeded"
     assert split_task["result"]["file_count"] == 2
     assert len(split_task["result"]["files"]) == 2
     assert all("/02_split_text/" in item["path"].replace("\\", "/") for item in split_task["result"]["files"])
+    with SessionLocal() as db:
+        stale = db.scalar(select(ProjectFile).where(ProjectFile.object_key == stale_key))
+        manual = db.scalar(select(ProjectFile).where(ProjectFile.object_key == manual_key))
+        assert stale is not None and stale.deleted_at is not None
+        assert manual is not None and manual.deleted_at is None
+        assert not object_path(stale_key, configured_storage_root(db)).exists()
+        assert object_path(manual_key, configured_storage_root(db)).is_file()
 
     with SessionLocal() as db:
         account = db.get(UserQuotaAccount, first["user"]["id"])

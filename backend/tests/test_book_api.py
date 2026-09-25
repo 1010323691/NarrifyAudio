@@ -1,28 +1,17 @@
-"""Regression tests for the book-splitting API's output-directory policy."""
+"""Regression tests for generated book output naming."""
 from __future__ import annotations
 
-from backend.api.book import _clear_generated_split_files
+from backend.engines.book import is_generated_split_output_name
 
 
-def test_clear_generated_split_files_removes_only_splitter_outputs(tmp_path):
-    output = tmp_path / "02_split_text"
-    output.mkdir()
+def test_generated_split_output_names_match_only_known_patterns():
     generated = [
-        "第 001 章.txt",
-        "第 001 章 成人典礼.txt",
-        "小说 分册01 第001章.txt",
-        "小说 全书.txt",
+        "\u7b2c 001 \u7ae0.txt",
+        "\u7b2c 001 \u7ae0 \u732b\u5496.txt",
+        "\u5c0f\u8bf4 \u5206\u518c01 \u7b2c001\u7ae0.txt",
+        "\u5c0f\u8bf4 \u5168\u4e66.txt",
     ]
-    preserved = [
-        "manual.txt",
-        "自定义 第001章.txt",
-    ]
-    for name in generated + preserved:
-        (output / name).write_text("x", encoding="utf-8")
-    (output / "archive").mkdir()
-    (output / "archive" / "第 001 章.txt").write_text("x", encoding="utf-8")
+    preserved = ["manual.txt", "\u81ea\u5b9a\u4e49 \u7b2c001\u7ae0.txt"]
 
-    _clear_generated_split_files(output)
-
-    assert {p.name for p in output.iterdir() if p.is_file()} == set(preserved)
-    assert (output / "archive" / "第 001 章.txt").exists()
+    assert all(is_generated_split_output_name(name) for name in generated)
+    assert not any(is_generated_split_output_name(name) for name in preserved)

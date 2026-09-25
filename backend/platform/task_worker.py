@@ -36,6 +36,7 @@ from ..engines.book import (
     make_chapter_filenames,
     make_whole_book_filename,
     make_smart_filenames,
+    is_generated_split_output_name,
     chapter_content,
     smart_repair,
 )
@@ -1483,6 +1484,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
             _cleanup_outcome(outcome)
             return False
         legacy_module_paths: list[tuple[str, Path]] = []
+        stale_book_paths: list[Path] = []
         module_outputs = {item.publish_module for item in outputs if item.publish_module}
         for module in module_outputs:
             module_prefix = f"{safe_display_name(user.username)}/{task.project_id}/{module}/"
@@ -1501,6 +1503,22 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
                         continue
                     existing.deleted_at = utcnow()
                     legacy_module_paths.append((module, object_path(existing.object_key, configured_storage_root(db))))
+            if claim.task_type == "book.split" and module == "02_split_text":
+                output_names = {safe_display_name(item.output_name) for item in outputs if item.publish_module == module}
+                for existing in db.scalars(
+                    select(ProjectFile).where(
+                        ProjectFile.owner_id == task.owner_id,
+                        ProjectFile.project_id == task.project_id,
+                        ProjectFile.kind == "artifact",
+                        ProjectFile.deleted_at.is_(None),
+                        ProjectFile.object_key.like(module_prefix + "%"),
+                    )
+                ).all():
+                    relative_name = existing.object_key.removeprefix(module_prefix)
+                    if "/" in relative_name or relative_name in output_names or not is_generated_split_output_name(relative_name):
+                        continue
+                    existing.deleted_at = utcnow()
+                    stale_book_paths.append(object_path(existing.object_key, configured_storage_root(db)))
         journal = outcome.publication_journal or PublicationJournal(
             configured_storage_root(db),
             task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json"),
@@ -1550,6 +1568,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
             for item in outcome.side_effect_outputs:
                 journal.publish(journal.add(item.final_path), item.temp_path)
             for target in outcome.side_effect_deletes:
+                journal.remove(target)
+            for target in stale_book_paths:
                 journal.remove(target)
             result_payload = {
                 "file_id": published[0]["file_id"],
