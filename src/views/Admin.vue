@@ -14,7 +14,7 @@ import { showConfirm } from '@/components/ui/dialog'
 import * as api from '@/api/admin'
 import { modulePrefixes } from '@/utils/taskTypes'
 import { formatBytes, type BytesFormat } from '@/utils/format'
-import Settings from '@/views/Settings.vue'
+import AdminSettings from '@/components/settings/AdminSettings.vue'
 
 type Tab = 'overview' | 'performance' | 'users' | 'resources' | 'settings' | 'tasks' | 'logs'
 type SettingsSection = 'text' | 'models' | 'audio' | 'general' | 'storage' | 'runtime'
@@ -382,7 +382,7 @@ async function cleanupTemp() {
       <nav class="settings-nav" aria-label="系统配置分类">
         <button v-for="item in ([['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频'],['general','通用'],['storage','存储路径'],['runtime','Worker / Queue']] as [SettingsSection,string][])" :key="item[0]" :class="settingsSection === item[0] ? 'active' : ''" @click="settingsSection = item[0]">{{ item[1] }}</button>
       </nav>
-      <Settings v-if="['text','models','audio'].includes(settingsSection)" :admin-only="true" :admin-section="settingsSection" />
+      <AdminSettings v-if="settingsSection === 'text' || settingsSection === 'models' || settingsSection === 'audio'" :section="settingsSection" />
       <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>通用</CardTitle></CardHeader><CardContent class="admin-form">
         <label><input v-model="registrationDraft" type="checkbox" /> 允许新用户注册</label><Button :disabled="!registration" @click="saveRegistration">保存注册设置</Button>
         <label for="initial-quota">新用户初始额度</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
