@@ -1486,12 +1486,10 @@ def test_admin_memory_metrics_use_container_cgroup_limit(tmp_path):
 
 
 def test_admin_gpu_sample_is_ttl_cached(monkeypatch):
-    """Q20: the Admin page refreshes every ~15 s and each poll hits BOTH
-    /overview and /system — both read the same TTL-cached nvidia-smi sample,
-    so a poll interval costs one spawn, not two (and idle polls inside the
-    TTL window cost none)."""
-    import time
-
+    """Q20: the Admin page refreshes every ~15 s; each poll reads /overview
+    and /performance, both on the same TTL-cached nvidia-smi sample — the
+    spawn runs under the lock, so a stale window costs one spawn even for
+    racing callers (and idle polls inside the TTL window cost none)."""
     from backend.api import admin
 
     samples: list[list[dict]] = []
@@ -1505,14 +1503,18 @@ def test_admin_gpu_sample_is_ttl_cached(monkeypatch):
     monkeypatch.setattr(admin, "_gpu_sample", None)
 
     try:
-        first = admin._gpu_status()
-        assert admin._gpu_status() is first
-        assert len(samples) == 1
-
-        # A sample older than the TTL is re-sampled on the next call.
-        admin._gpu_sample = (time.monotonic() - admin._GPU_SAMPLE_TTL_SECONDS - 1, first)
-        assert admin._gpu_status() == first
-        assert len(samples) == 2
+        # Three refresh cycles — one spawn per TTL window, repeated reads
+        # inside a window share the sample (no double spawn on racing
+        # callers either: the spawn runs under the lock).
+        for expected in (1, 2, 3):
+            if admin._gpu_sample is not None:
+                admin._gpu_sample = (
+                    admin._gpu_sample[0] - admin._GPU_SAMPLE_TTL_SECONDS - 1, admin._gpu_sample[1],
+                )
+            admin._gpu_status()
+            assert len(samples) == expected, f"cycle {expected} cost {len(samples)} spawns"
+            assert admin._gpu_status() == admin._gpu_sample[1]
+            assert len(samples) == expected
     finally:
         admin._gpu_sample = None
 
