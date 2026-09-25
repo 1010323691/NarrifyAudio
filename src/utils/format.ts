@@ -11,10 +11,26 @@ export function formatDuration(totalSeconds: number | null | undefined): string 
   return `${m}:${String(sec).padStart(2, '0')}`
 }
 
+/** 每个调用点的大小文案语义（S8/Q11）：
+ * emptyText — null/NaN 显示；lowRange — <1024 行为（'raw' 原样含负值，'clamp' 非正一律 0 B、B 档取整）；
+ * decimals — KB+ 档小数规则（'smart' 即 KB 档或 ≥100 用 0 位、其余 1 位；'always-one' 一律 1 位）。 */
+export interface BytesFormat {
+  emptyText: string
+  lowRange: 'raw' | 'clamp'
+  decimals: 'smart' | 'always-one'
+}
+
+const DEFAULT_BYTES_FORMAT: BytesFormat = { emptyText: '—', lowRange: 'raw', decimals: 'smart' }
+
 /** 1536 -> "1.5 KB", 1048576 -> "1.0 MB" (mirrors engines/audio.format_bytes). */
-export function formatBytes(b: number | null | undefined): string {
-  if (b == null || Number.isNaN(b)) return '—'
-  if (b < 1024) return `${b} B`
+export function formatBytes(b: number | null | undefined, format: BytesFormat = DEFAULT_BYTES_FORMAT): string {
+  if (b == null || Number.isNaN(b)) return format.emptyText
+  if (format.lowRange === 'clamp' && b <= 0) return '0 B'
+  if (b < 1024) {
+    if (format.lowRange === 'raw') return `${b} B`
+    // B 档取整；(0,1) 分数字节保留旧副本的负指数档显示
+    return b >= 1 ? `${b.toFixed(0)} B` : `${(b * 1024).toFixed(1)} B`
+  }
   const units = ['KB', 'MB', 'GB', 'TB']
   let n = b
   let i = -1
@@ -23,7 +39,7 @@ export function formatBytes(b: number | null | undefined): string {
     i++
     if (!(n >= 1024 && i < units.length - 1)) break
   }
-  const digits = n >= 100 || i === 0 ? 0 : 1
+  const digits = format.decimals === 'always-one' ? 1 : (n >= 100 || i === 0 ? 0 : 1)
   return `${n.toFixed(digits)} ${units[i]}`
 }
 

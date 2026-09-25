@@ -7,6 +7,7 @@ import StatusPill from '@/components/ui/StatusPill.vue'
 import { getQuota, listQuotaTransactions, type QuotaBalance, type QuotaTransaction } from '@/api/quota'
 import { getProjectSummary, listProjects } from '@/api/project'
 import { listProjectFiles } from '@/api/projectFiles'
+import { formatBytes as formatBytesBase, type BytesFormat } from '@/utils/format'
 
 const balance = ref<QuotaBalance | null>(null)
 const transactions = ref<QuotaTransaction[]>([])
@@ -32,12 +33,10 @@ const dailyUsage = computed(() => {
 })
 const hasUsage = computed(() => transactions.value.some((row) => ['consume', 'settle'].includes(row.kind)))
 
+// 本页大小口径：未采集显示占位文案，零/负值统一 0 B，KB 及以上 1 位小数
+const USAGE_BYTES: BytesFormat = { emptyText: '未采集', lowRange: 'clamp', decimals: 'always-one' }
 function formatBytes(value: number | null) {
-  if (value === null) return '未采集'
-  if (value <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
-  return `${(value / (1024 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+  return formatBytesBase(value, USAGE_BYTES)
 }
 
 function transactionLabel(kind: string) {

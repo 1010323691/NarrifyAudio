@@ -13,6 +13,7 @@ import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import * as api from '@/api/admin'
 import { modulePrefixes } from '@/utils/taskTypes'
+import { formatBytes, type BytesFormat } from '@/utils/format'
 import Settings from '@/views/Settings.vue'
 
 type Tab = 'overview' | 'performance' | 'users' | 'resources' | 'settings' | 'tasks' | 'logs'
@@ -79,11 +80,10 @@ const cleanupCandidates = computed(() => resources.value?.project_storage?.clean
 
 watch(userSearch, () => { userPage.value = 1 })
 function date(value?: string | null) { return value ? new Date(value).toLocaleString('zh-CN') : '—' }
+// 管理端大小口径：缺失显示「未采集」，<1024 原样（含负值），KB+ 一律 1 位小数
+const ADMIN_BYTES: BytesFormat = { emptyText: '未采集', lowRange: 'raw', decimals: 'always-one' }
 function bytes(value?: number | null) {
-  if (value == null) return '未采集'
-  if (value < 1024) return `${value} B`
-  const unit = Math.min(4, Math.floor(Math.log(value) / Math.log(1024)))
-  return `${(value / 1024 ** unit).toFixed(1)} ${['B', 'KB', 'MB', 'GB', 'TB'][unit]}`
+  return formatBytes(value, ADMIN_BYTES)
 }
 function elapsed(start?: string | null, end?: string | null) {
   if (!start) return '—'

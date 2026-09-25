@@ -8,6 +8,7 @@ import { cleanupProjectTemp, getProjectSummary, type ProjectFileSummary, type Pr
 import { listProjectFiles } from '@/api/projectFiles'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
+import { formatBytes as formatBytesBase, type BytesFormat } from '@/utils/format'
 
 interface ResourceProject {
   id: string
@@ -56,11 +57,10 @@ const fileRows = computed(() => records.value.flatMap((record) => record.summary
 const recentOutputs = computed(() => records.value.flatMap((record) => record.summary.recent_outputs.map((file) => ({ ...file, projectName: record.name })))
   .sort((a, b) => Date.parse(b.modified_at) - Date.parse(a.modified_at)).slice(0, 8))
 
+// 本页大小口径：零/负值统一 0 B，B 档取整，KB 及以上 1 位小数
+const RESOURCE_BYTES: BytesFormat = { emptyText: '0 B', lowRange: 'clamp', decimals: 'always-one' }
 function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
-  return `${(value / (1024 ** index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+  return formatBytesBase(value, RESOURCE_BYTES)
 }
 
 function formatDate(value: string) {
