@@ -71,7 +71,7 @@ const waitForTask = useDurableTaskWait()
 
 async function resolveDurable<T>(response: T | { task_id: string }): Promise<T> {
   if (!('task_id' in (response as object))) return response as T
-  const task = await waitForTask((response as { task_id: string }).task_id)
+  const task = await waitForTask.wait((response as { task_id: string }).task_id)
   if (task.status !== 'succeeded') throw new Error(task.error_message || '任务执行失败')
   return (task.result ?? {}) as T
 }

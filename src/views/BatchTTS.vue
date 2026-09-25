@@ -309,7 +309,7 @@ async function doRunAll() {
   try {
     // Clear the completion state (the package folders) first …
     const reset = await submitBatchReset(names)
-    const resetTask = await waitForTask(reset.task_id)
+    const resetTask = await waitForTask.wait(reset.task_id)
     if (resetTask.status !== 'succeeded') {
       throw new Error(resetTask.error_message || '重置合成包失败')
     }

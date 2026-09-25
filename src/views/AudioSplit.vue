@@ -57,7 +57,7 @@ const waitForTask = useDurableTaskWait()
 
 async function resolveAudioTask(response: { task_id: string } | Record<string, any>): Promise<Record<string, any>> {
   if (!('task_id' in response)) return response
-  const task = await waitForTask(response.task_id)
+  const task = await waitForTask.wait(response.task_id)
   if (task.status !== 'succeeded') throw new Error(task.error_message || '任务执行失败')
   return task.result ?? {}
 }
@@ -150,33 +150,29 @@ function reattachTasks() {
       planTaskId.value = planning.id
       planTask.value = planning
       busyPlan.value = true
-      void trackTask(planning.id, 'plan', signal)
+      void trackTask(planning.id, 'plan')
     }
     if (cutting) {
       cutTaskId.value = cutting.id
       cutTask.value = cutting
       busyCut.value = true
-      void trackTask(cutting.id, 'cut', signal)
+      void trackTask(cutting.id, 'cut')
     }
   }).catch(() => undefined)
 }
 
-async function trackTask(id: string, kind: 'plan' | 'cut', signal = trackingController.signal) {
+async function trackTask(id: string, kind: 'plan' | 'cut') {
   const projectId = projectStore.activeProjectId
-  const isCurrentTracking = () => !signal.aborted
-    && projectId !== null
+  const isCurrentTracking = () => projectId !== null
     && projectStore.activeProjectId === projectId
     && (kind === 'plan' ? planTaskId.value === id : cutTaskId.value === id)
   try {
-    while (true) {
-      signal.throwIfAborted()
-      const task = await getDurableTask(id, signal)
-      if (!isCurrentTracking()) return
+    await waitForTask.track(id, (task) => {
+      // 跟踪目标已变（项目切换 / 新任务）→ 静默停止，不报错误。
+      if (!isCurrentTracking()) return false
       if (kind === 'plan') planTask.value = task
       else cutTask.value = task
-      if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)) return
-      await new Promise((resolve) => window.setTimeout(resolve, 500))
-    }
+    })
   } catch (e: any) {
     if (e?.name === 'AbortError') return
     if (!isCurrentTracking()) return
@@ -285,7 +281,7 @@ async function buildPlan() {
       planTask.value = await getDurableTask(task_id, signal)
       signal.throwIfAborted()
       if (!isCurrent()) return
-      void trackTask(task_id, 'plan', signal)
+      void trackTask(task_id, 'plan')
       // Completion is handled by the watcher on planTask.status.
     } else {
       const r = await planAudio(source.path, targetDuration.value)
@@ -354,7 +350,7 @@ async function doCut() {
     cutTask.value = await getDurableTask(task_id, signal)
     signal.throwIfAborted()
     if (!isCurrent()) return
-    void trackTask(task_id, 'cut', signal)
+    void trackTask(task_id, 'cut')
     // Remember the cut parameters (fire-and-forget; the cut above already carries them).
     rememberParams()
     // Completion is handled by the watcher on cutTask.status.

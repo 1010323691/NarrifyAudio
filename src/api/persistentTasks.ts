@@ -58,23 +58,43 @@ export function cancelDurableTask(taskId: string): Promise<DurableTask> {
   return http.post(`/api/v1/tasks/${taskId}/cancel`, {})
 }
 
-export async function waitForDurableTask(taskId: string, intervalMs = 500, signal?: AbortSignal): Promise<DurableTask> {
+const TERMINAL_DURABLE_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout'])
+
+function interruptibleSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', abort)
+      resolve()
+    }, ms)
+    const abort = () => {
+      window.clearTimeout(timer)
+      reject(signal?.reason ?? new DOMException('Task wait cancelled', 'AbortError'))
+    }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+  })
+}
+
+/**
+ * 轮询持久化任务直到终态。onTick 收到每次状态快照；
+ * 返回 false 提前停止轮询（返回最后一个快照）。
+ */
+export async function trackDurableTask(
+  taskId: string,
+  onTick: (task: DurableTask) => boolean | void,
+  intervalMs = 500,
+  signal?: AbortSignal,
+): Promise<DurableTask> {
   while (true) {
     signal?.throwIfAborted()
     const task = await getDurableTask(taskId, signal)
     signal?.throwIfAborted()
-    if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)) return task
-    await new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        signal?.removeEventListener('abort', abort)
-        resolve()
-      }, intervalMs)
-      const abort = () => {
-        window.clearTimeout(timer)
-        reject(signal?.reason ?? new DOMException('Task wait cancelled', 'AbortError'))
-      }
-      signal?.addEventListener('abort', abort, { once: true })
-      if (signal?.aborted) abort()
-    })
+    if (onTick(task) === false) return task
+    if (TERMINAL_DURABLE_STATUSES.has(task.status)) return task
+    await interruptibleSleep(intervalMs, signal)
   }
+}
+
+export function waitForDurableTask(taskId: string, intervalMs = 500, signal?: AbortSignal): Promise<DurableTask> {
+  return trackDurableTask(taskId, () => undefined, intervalMs, signal)
 }

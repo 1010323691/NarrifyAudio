@@ -153,7 +153,7 @@ async function run(auto = false) {
       estimated_units: 0,
       idempotency_key: `text-format:${file.value.file_id}:${crypto.randomUUID()}`,
     })
-    const task = await waitForTask(submitted.id)
+    const task = await waitForTask.wait(submitted.id)
     if (task.status !== 'succeeded' || !task.result) {
       throw new Error(task.error_message || '持久化排版任务失败')
     }
@@ -195,7 +195,7 @@ async function analyzeAfterFormat() {
       estimated_units: 0,
       idempotency_key: `book-analyze:${formatResult.value.file_id}:${crypto.randomUUID()}`,
     })
-    const task = await waitForTask(submitted.id)
+    const task = await waitForTask.wait(submitted.id)
     if (task.status !== 'succeeded' || !task.result?.analysis) {
       throw new Error(task.error_message || '持久化章节分析任务失败')
     }
@@ -345,7 +345,7 @@ async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) 
     estimated_units: 0,
     idempotency_key: `book-split:${formatResult.value.file_id}:${payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
   })
-  const task = await waitForTask(submitted.id)
+  const task = await waitForTask.wait(submitted.id)
   if (task.status !== 'succeeded' || !task.result) {
     throw new Error(task.error_message || '持久化分册任务失败')
   }
