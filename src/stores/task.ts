@@ -188,15 +188,29 @@ export const useTaskStore = defineStore('task', () => {
     loading.value = true
     try {
       if (!allStream) {
-        await Promise.race([
-          new Promise<void>((resolve) => {
-            snapshotWaiters.push(() => {
-              if (requestGeneration === generation) resolve()
-            })
-          }),
-          new Promise<void>((resolve) => setTimeout(resolve, SNAPSHOT_WAIT_TIMEOUT_MS)),
-        ])
+        // The replay is the ONLY event that can wake this waiter, so the
+        // stream must be opened BEFORE the wait — waiting first would burn
+        // the full timeout on a cold start and resolve with tasks still
+        // empty, losing the one-shot reattach (F5 / project switch).
         ensureStream()
+        const gate: { drop?: () => void } = {}
+        const replay = new Promise<void>((resolve) => {
+          const wait = () => {
+            if (requestGeneration === generation) resolve()
+          }
+          snapshotWaiters.push(wait)
+          // The timeout path settles without the replay — remove the waiter
+          // then, so it never lingers in snapshotWaiters as an orphan.
+          gate.drop = () => {
+            const i = snapshotWaiters.indexOf(wait)
+            if (i !== -1) snapshotWaiters.splice(i, 1)
+          }
+        })
+        const timedOut = await Promise.race([
+          replay,
+          new Promise<true>((resolve) => setTimeout(() => resolve(true), SNAPSHOT_WAIT_TIMEOUT_MS)),
+        ])
+        if (timedOut) gate.drop?.()
       }
     } finally {
       if (requestGeneration === generation) loading.value = false
