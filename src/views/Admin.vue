@@ -12,6 +12,7 @@ import StatusPill from '@/components/ui/StatusPill.vue'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import * as api from '@/api/admin'
+import { modulePrefixes } from '@/utils/taskTypes'
 import Settings from '@/views/Settings.vue'
 
 type Tab = 'overview' | 'performance' | 'users' | 'resources' | 'settings' | 'tasks' | 'logs'
@@ -57,19 +58,20 @@ const matchingUsers = computed(() => users.value.filter(row =>
 const userPages = computed(() => Math.max(1, Math.ceil(matchingUsers.value.length / 20)))
 const shownUsers = computed(() => matchingUsers.value.slice((userPage.value - 1) * 20, userPage.value * 20))
 
-function aggregateTypes(prefixes: string[], exact: string[] = [], excluded: string[] = []) {
+function aggregateTypes(prefixes: string[]) {
   const rows = performance.value?.tasks.by_type ?? []
-  return rows.filter(row => !excluded.includes(row.task_type) && (prefixes.some(prefix => row.task_type.startsWith(prefix)) || exact.includes(row.task_type)))
+  return rows.filter(row => prefixes.some(prefix => row.task_type.startsWith(prefix)))
     .reduce((total, row) => {
       for (const [status, count] of Object.entries(row.statuses)) total[status] = (total[status] ?? 0) + count
       return total
     }, {} as Record<string, number>)
 }
+// 服务归类（模块 → 前缀，单源见 utils/taskTypes.ts）：tts.merge 按 ffmpeg 口径计入 ffmpeg
 const serviceTaskMetrics = computed(() => ({
-  llm: aggregateTypes(['script.', 'music.']),
-  tts: aggregateTypes(['tts.', 'voices.'], [], ['tts.merge']),
-  ffmpeg: aggregateTypes(['audio.'], ['tts.merge']),
-  bgm: aggregateTypes(['bgm.']),
+  llm: aggregateTypes(modulePrefixes('script', 'music')),
+  tts: aggregateTypes(modulePrefixes('tts', 'voices')),
+  ffmpeg: aggregateTypes(modulePrefixes('audio', 'merge')),
+  bgm: aggregateTypes(modulePrefixes('bgm')),
 }))
 const taskStatusSummary = computed(() => taskMetrics.value?.status_counts ?? {})
 const resourceCategories = computed(() => resources.value?.project_storage?.categories ?? [])

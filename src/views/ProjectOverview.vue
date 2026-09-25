@@ -10,6 +10,7 @@ import { listDurableTasks, type DurableTask } from '@/api/persistentTasks'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
+import { modulePrefixes } from '@/utils/taskTypes'
 
 const route = useRoute()
 const router = useRouter()
@@ -24,13 +25,14 @@ const refreshing = ref(false)
 const SPLIT_VOLUME_NAME = /^第\s+\d+\s+章(?:\s|\.|$)/
 
 const STAGE_DEFS = [
-  { key: 'text', label: '排版与分册', path: '/text', dir: '02_split_text', icon: FileText, taskTypes: ['text.', 'book.'] },
-  { key: 'script', label: '文本解析', path: '/script', dir: '03_parsed_json', icon: FileText, taskTypes: ['script.parse'] },
-  { key: 'voices', label: '角色配音', path: '/voices', dir: '04_voice_profiles', icon: AudioLines, taskTypes: ['voices.'] },
+  { key: 'text', label: '排版与分册', path: '/text', dir: '02_split_text', icon: FileText, taskTypes: modulePrefixes('text', 'book') },
+  { key: 'script', label: '文本解析', path: '/script', dir: '03_parsed_json', icon: FileText, taskTypes: modulePrefixes('script') },
+  { key: 'voices', label: '角色配音', path: '/voices', dir: '04_voice_profiles', icon: AudioLines, taskTypes: modulePrefixes('voices') },
+  // tts 模块含 tts.reset（重置流），合成阶段只盯在途的 tts.batch
   { key: 'batch', label: '音频合成', path: '/batch', dir: '05_audio_chunk', icon: FileAudio2, taskTypes: ['tts.batch'] },
-  { key: 'merge', label: '音频合并', path: '/merge', dir: '06_audio_merge', icon: FileAudio2, taskTypes: ['tts.merge'] },
-  { key: 'audio', label: '音频分集', path: '/audio', dir: '07_output', icon: AudioLines, taskTypes: ['audio.'], optional: true },
-  { key: 'bgm', label: '背景音乐', path: '/bgm', dir: '08_bgm', icon: AudioLines, taskTypes: ['bgm.'] },
+  { key: 'merge', label: '音频合并', path: '/merge', dir: '06_audio_merge', icon: FileAudio2, taskTypes: modulePrefixes('merge') },
+  { key: 'audio', label: '音频分集', path: '/audio', dir: '07_output', icon: AudioLines, taskTypes: modulePrefixes('audio'), optional: true },
+  { key: 'bgm', label: '背景音乐', path: '/bgm', dir: '08_bgm', icon: AudioLines, taskTypes: modulePrefixes('bgm') },
 ]
 const STAGES = computed(() => STAGE_DEFS.filter((stage) => !stage.optional || settings.config?.ui.show_audio_split))
 
