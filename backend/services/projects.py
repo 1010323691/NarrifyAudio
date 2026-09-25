@@ -5,9 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.models import Project, Task, new_id, utcnow
-
-
-ACTIVE_TASK_STATUSES = ("pending", "queued", "running", "paused", "cancelling", "retrying")
+from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 
 
 class ActiveProjectTasksError(ValueError):

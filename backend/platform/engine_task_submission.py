@@ -18,9 +18,7 @@ from ..services.tasks import TaskSubmissionError, submit_task_record, task_dict
 from .deps import AuthContext
 from .project_context import active_project
 from .models import Task
-
-
-ACTIVE_TASK_STATUSES = {"pending", "queued", "running", "paused", "cancelling", "retrying"}
+from .task_lifecycle import ACTIVE_TASK_STATUSES
 
 
 def estimate_legacy_units(task_type: str, payload: dict[str, Any]) -> int:

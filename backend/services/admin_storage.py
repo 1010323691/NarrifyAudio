@@ -10,7 +10,6 @@ from ..platform.storage import safe_display_name
 from .project_filesystem import iter_regular_project_files
 
 
-ACTIVE_TASK_STATUSES = ("pending", "queued", "running", "paused", "cancelling", "retrying")
 TEMP_CLEANUP_AGE_DAYS = 7
 PROJECT_CATEGORY_LABELS = {
     "00_temp": "临时文件",

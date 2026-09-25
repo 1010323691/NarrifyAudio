@@ -12,6 +12,7 @@ from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, Task, User
 from ..platform.storage import configured_storage_root, safe_display_name
+from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -40,7 +41,6 @@ _CATEGORY_LABELS = {
 }
 _CACHE_DIRS = {"00_temp", ".cache", "cache"}
 _CACHE_MAX_AGE = timedelta(days=7)
-_ACTIVE_TASKS = ("pending", "queued", "running", "paused", "cancelling", "retrying")
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".zip"}
 _SPLIT_VOLUME_NAME = re.compile(r"^第\s+\d+\s+章(?:\s|\.|$)")
 
@@ -123,7 +123,7 @@ def _project_summary(root: Path, *, active: bool) -> dict:
 def get_project_summary(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, project_id)
     active = db.scalar(select(Task.id).where(
-        Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(_ACTIVE_TASKS)
+        Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)
     ).limit(1)) is not None
     root = _safe_project_directory(db, user, item)
     if root is None:
@@ -140,7 +140,7 @@ def get_project_summary(project_id: str, user: User = Depends(require_authentica
 def cleanup_project_temp(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, project_id)
     active = db.scalar(select(Task.id).where(
-        Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(_ACTIVE_TASKS)
+        Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)
     ).limit(1)) is not None
     if active:
         raise HTTPException(409, "项目仍有正在处理的任务，暂时不能清理临时文件")

@@ -7,6 +7,8 @@ from .models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskE
 
 
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "cancelled", "timeout"}
+# Every status that is not terminal: a task in one of these can still change state.
+ACTIVE_TASK_STATUSES = {"pending", "queued", "running", "paused", "cancelling", "retrying"}
 
 
 def append_task_event(db: Session, task_id: str, event_type: str, payload: dict) -> TaskEvent:
