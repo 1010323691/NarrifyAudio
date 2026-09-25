@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -23,8 +22,6 @@ from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
 from ..core.config import get_config
-from ..core.concurrency import gate, set_concurrency
-from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import music as music_engine
 from ..engines.audio import probe_duration
 from ..platform.database import get_db
@@ -32,7 +29,6 @@ from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Workspace
 from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from ..platform.storage import configured_storage_root, safe_display_name
-from ..services.legacy_batch import run_bounded_task_coordinator
 
 router = APIRouter(prefix="/api/music", tags=["music"])
 
@@ -771,18 +767,6 @@ class SuggestBatchReq(BaseModel):
     names: list[str]
 
 
-def _inflight_ai_names() -> set[str]:
-    """Track names (the label tail ``：{name}``) of non-terminal
-    ``music-ai-tags`` tasks — the same-track in-flight guard (two tasks on one
-    track would race on the same suggestion entry / LLM slot).
-    Non-conflicting tracks may still join a running batch."""
-    out = set()
-    for t in get_task_manager().list():
-        if t.module == AI_TAGS_MODULE and t.status not in TERMINAL:
-            m = re.search(r"：(.+)$", t.label)
-            if m:
-                out.add(m.group(1))
-    return out
 
 
 @router.post("/suggest-tags-batch", dependencies=[Depends(require_admin)])
@@ -820,43 +804,24 @@ def suggest_tags_batch(
     cfg = get_config()
     if not cfg.llm.model_name:
         raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
-    conflicts = [n for n in names if n in _inflight_ai_names()]
-    if isinstance(ctx, AuthContext):
-        conflicts.extend(
-            n for n in names
-            if n in active_durable_targets(
-                task_type="music.suggest_tags", payload_key="name", ctx=ctx, db=db,
-            ) and n not in conflicts
-        )
+    active_names = active_durable_targets(
+        task_type="music.suggest_tags", payload_key="name", ctx=ctx, db=db,
+    )
+    conflicts = [name for name in names if name in active_names]
     if conflicts:
         raise HTTPException(409, "以下音乐已有 AI 推荐任务在途：" + "、".join(conflicts))
-    if isinstance(ctx, AuthContext):
-        created = []
-        for name in names:
-            task = submit_legacy_engine_task(
-                task_type="music.suggest_tags",
-                label=f"{AI_TAGS_LABEL}：{name}",
-                payload={
-                    "name": name,
-                    "config": cfg.model_dump(mode="json"),
-                },
-                ctx=ctx,
-                db=db,
-                idempotency_prefix=f"music-ai-tags:{name}",
-            )
-            created.append({"name": name, "task_id": task["id"]})
-        return {"task_ids": [item["task_id"] for item in created], "tracks": created}
-    set_concurrency(cfg.generation.max_concurrency)
-    mgr = get_task_manager()
-    created = [
-        {"name": n, "task_id": mgr.create(
-            AI_TAGS_MODULE, f"{AI_TAGS_LABEL}：{n}",
-            music_engine.suggest_track_tags, n, cfg.llm, start=False,
-        ).id}
-        for n in names
-    ]
-    threading.Thread(
-        target=run_bounded_task_coordinator,
-        args=([c["task_id"] for c in created], gate), daemon=True,
-    ).start()
-    return {"task_ids": [c["task_id"] for c in created], "tracks": created}
+    created = []
+    for name in names:
+        task = submit_legacy_engine_task(
+            task_type="music.suggest_tags",
+            label=f"{AI_TAGS_LABEL}：{name}",
+            payload={
+                "name": name,
+                "config": cfg.model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"music-ai-tags:{name}",
+        )
+        created.append({"name": name, "task_id": task["id"]})
+    return {"task_ids": [item["task_id"] for item in created], "tracks": created}
