@@ -21,6 +21,7 @@ from ..platform.project_context import active_project
 from ..platform.models import Task as DurableTask, TaskEvent
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
+from ..services.task_operations import owned_task
 from ..services.tasks import cancel_task_record
 from .task_operations import retry_task as retry_durable_task
 
@@ -185,14 +186,7 @@ def _durable_owned(
     project_id = _current_project_id(db, ctx)
     if project_id is None:
         return None
-    statement = select(DurableTask).where(
-        DurableTask.id == task_id,
-        DurableTask.owner_id == ctx.user.id,
-        DurableTask.project_id == project_id,
-    )
-    if lock:
-        statement = statement.with_for_update()
-    return db.scalar(statement)
+    return owned_task(db, ctx.user.id, task_id, project_id=project_id, lock=lock)
 
 
 def _durable_event_payload(db, task: DurableTask, event: TaskEvent) -> dict | None:

@@ -14,12 +14,13 @@ from ..platform.models import Project, Task, User
 from ..platform.storage import configured_storage_root, safe_display_name
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
+from ..services.task_operations import owned_project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
 
 def _owned(db: Session, user: User, project_id: str) -> Project:
-    item = db.scalar(select(Project).where(Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)))
+    item = owned_project(db, user.id, project_id)
     if item is None:
         raise HTTPException(404, "项目不存在")
     return item

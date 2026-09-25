@@ -7,7 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..platform.config import settings
-from ..platform.models import QuotaReservation, QuotaTransaction, Task, TaskAttempt, User
+from ..platform.models import QuotaReservation, QuotaTransaction, TaskAttempt, User
+from ..services.task_operations import owned_task
 from ..services.tasks import (
     TaskSubmissionError,
     cancel_task_record,
@@ -40,7 +41,7 @@ def submit_task(payload: TaskSubmit, *, user: User, db: Session) -> dict:
 
 def cancel_task(task_id: str, *, user: User, db: Session) -> dict:
     """Cancel an owned task and return its durable-task representation."""
-    task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id).with_for_update())
+    task = owned_task(db, user.id, task_id, lock=True)
     if task is None:
         raise HTTPException(404, "任务不存在")
     cancel_task_record(db, task)
@@ -50,7 +51,7 @@ def cancel_task(task_id: str, *, user: User, db: Session) -> dict:
 
 def retry_task(task_id: str, *, user: User, db: Session) -> dict:
     """Retry an eligible zero-cost task without depending on a route module."""
-    task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id).with_for_update())
+    task = owned_task(db, user.id, task_id, lock=True)
     if task is None:
         raise HTTPException(404, "任务不存在")
     if task.status not in {"failed", "cancelled", "timeout"}:
