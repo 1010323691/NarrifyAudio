@@ -86,3 +86,18 @@ def active_durable_targets(
         elif value is not None:
             values.add(str(value))
     return values
+
+
+def has_active_durable_tasks(*, task_type: str, ctx: AuthContext, db: Session) -> bool:
+    """Return whether the current project has any non-terminal task of this type."""
+    workspace = active_workspace(db, ctx.user, ctx.session)
+    if workspace is None:
+        return False
+    return db.scalar(
+        select(Task.id).where(
+            Task.owner_id == ctx.user.id,
+            Task.project_id == workspace.id,
+            Task.task_type == task_type,
+            Task.status.in_(ACTIVE_TASK_STATUSES),
+        ).limit(1)
+    ) is not None

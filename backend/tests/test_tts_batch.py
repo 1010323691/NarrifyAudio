@@ -2155,236 +2155,91 @@ def test_batch_status_multi_no_workspace_degrades(monkeypatch, tmp_path):
 # run_batch dispatch (the API layer)
 # --------------------------------------------------------------------------- #
 
-class _RecordingManager:
-    """A task-manager stand-in that records create() calls without spawning threads."""
-
-    def __init__(self):
-        self.created = []
-
-    def create(self, module, label, func, *args, **kwargs):
-        self.created.append((module, label, func, args))
-
-        class _Task:
-            id = "fake"
-
-        return _Task()
-
-    def list(self):
-        return []  # no in-flight tasks (the reset guard sees an idle manager)
+def _durable_ctx():
+    from types import SimpleNamespace
+    return SimpleNamespace(user=SimpleNamespace(id="user-1"), session=object())
 
 
-def _stub_manager(monkeypatch):
+def test_run_batch_submits_durable_task_with_selected_scripts(workspace, monkeypatch):
     import backend.api.tts as tts_api
-
-    mgr = _RecordingManager()
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: mgr)
-    return mgr
-
-
-def test_run_batch_dispatches_multi(workspace, monkeypatch):
     from backend.api.tts import BatchRequest, run_batch
 
-    mgr = _stub_manager(monkeypatch)
-    run_batch(BatchRequest(scripts=["s.json", "t.json"]))
-    module, label, func, args = mgr.created[0]
-    assert module == "tts-batch"
-    assert func is tts_batch.synthesize_multi
-    assert args == (["s.json", "t.json"],)
-    assert "2 个文件" in label and "续合" in label
+    submitted = []
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        return {"id": "durable-task"}
+    monkeypatch.setattr(tts_api, "submit_legacy_engine_task", submit)
+
+    result = run_batch(
+        BatchRequest(scripts=["s.json", "t.json"]), ctx=_durable_ctx(), db=object(),
+    )
+
+    assert result == {"task_id": "durable-task"}
+    assert submitted[0]["task_type"] == "tts.batch"
+    assert submitted[0]["payload"]["scripts"] == ["s.json", "t.json"]
+    assert submitted[0]["payload"]["indices"] is None
 
 
-def test_run_batch_single_file_via_scripts_uses_legacy_path(workspace, monkeypatch):
+def test_run_batch_keeps_single_file_and_index_validation(workspace, monkeypatch):
+    import backend.api.tts as tts_api
     from backend.api.tts import BatchRequest, run_batch
 
-    mgr = _stub_manager(monkeypatch)
-    run_batch(BatchRequest(scripts=["s.json"]))
-    module, label, func, args = mgr.created[0]
-    assert func is tts_batch.synthesize
-    assert args == (None, "s.json")
-    assert "· s.json" in label
+    monkeypatch.setattr(tts_api, "submit_legacy_engine_task", lambda **kwargs: {"id": "task"})
+    result = run_batch(
+        BatchRequest(script="s.json", indices=[0, 2]), ctx=_durable_ctx(), db=object(),
+    )
+    assert result == {"task_id": "task"}
+    with pytest.raises(Exception) as exc:
+        run_batch(
+            BatchRequest(scripts=["s.json", "t.json"], indices=[0]),
+            ctx=_durable_ctx(), db=object(),
+        )
+    assert getattr(exc.value, "status_code", None) == 400
 
 
-def test_run_batch_scripts_with_indices_rejected(workspace, monkeypatch):
+def test_run_batch_rejects_all_parsed_json_sentinel(workspace):
     from fastapi import HTTPException
-
     from backend.api.tts import BatchRequest, run_batch
 
-    _stub_manager(monkeypatch)
-    with pytest.raises(HTTPException) as ei:
-        run_batch(BatchRequest(scripts=["s.json", "t.json"], indices=[0]))
-    assert ei.value.status_code == 400
+    with pytest.raises(HTTPException) as exc:
+        run_batch(BatchRequest(scripts=["__all__"]), ctx=_durable_ctx(), db=object())
+    assert exc.value.status_code == 400
 
 
-def test_run_batch_legacy_flags_do_not_override_configured_settings(workspace, monkeypatch):
-    from backend.api.tts import BatchRequest, run_batch
-
-    mgr = _stub_manager(monkeypatch)
-    request = BatchRequest(scripts=["s.json"], auto_concurrency=True, concurrency=4, seed=7)
-    assert "auto_concurrency" not in request.model_dump()
-    assert "concurrency" not in request.model_dump()
-    assert "seed" not in request.model_dump()
-    run_batch(request)
-    _module, label, func, args = mgr.created[0]
-    assert func is tts_batch.synthesize
-    assert args == (None, "s.json")
-    assert "续合" in label
-
-
-def test_run_batch_scripts_reject_all(workspace, monkeypatch):
-    from fastapi import HTTPException
-
-    from backend.api.tts import BatchRequest, run_batch
-
-    _stub_manager(monkeypatch)
-    with pytest.raises(HTTPException) as ei:
-        run_batch(BatchRequest(scripts=["__all__"]))
-    assert ei.value.status_code == 400
-
-
-# --------------------------------------------------------------------------- #
-# reset_batch — 「重新全部合成」= delete the packages, then the ordinary run
-# --------------------------------------------------------------------------- #
-
-def test_reset_batch_removes_package_dirs(workspace, monkeypatch):
-    """The requested packages (mp3s + manifest) are deleted; sibling packages survive."""
-    from backend.api.tts import ResetBatchRequest, reset_batch
-
-    _stub_manager(monkeypatch)
-    _seed_done_index0(workspace)  # 05_audio_chunk/s (s.json)
-    out_t = workspace / "05_audio_chunk" / "t"
-    out_t.mkdir(parents=True, exist_ok=True)
-    (out_t / "0001.mp3").write_bytes(b"fake")
-    (out_t / "manifest.json").write_text("[]", encoding="utf-8")
-    out_u = workspace / "05_audio_chunk" / "u"  # NOT requested — must survive
-    out_u.mkdir(parents=True, exist_ok=True)
-    (out_u / "0001.mp3").write_bytes(b"fake")
-
-    res = reset_batch(ResetBatchRequest(scripts=["s.json", "t.json"]))
-    assert res == {"ok": True, "removed": ["s", "t"]}
-    assert not (workspace / "05_audio_chunk" / "s").exists()
-    assert not (workspace / "05_audio_chunk" / "t").exists()
-    assert (out_u / "0001.mp3").exists()
-
-
-def test_reset_batch_noop_when_absent(workspace, monkeypatch):
-    from backend.api.tts import ResetBatchRequest, reset_batch
-
-    _stub_manager(monkeypatch)
-    assert reset_batch(ResetBatchRequest(scripts=["s.json"])) == {"ok": True, "removed": []}
-
-
-def test_reset_batch_checked_name_maps_to_base_package(workspace, monkeypatch):
-    """A ``_checked`` file name maps to the SAME package the engine writes to (``package_for``
-    strips the suffix on both sides) — a reset can never orphan the engine's output."""
-    from backend.api.tts import ResetBatchRequest, reset_batch
-
-    _stub_manager(monkeypatch)
-    _seed_done_index0(workspace)  # 05_audio_chunk/s
-    res = reset_batch(ResetBatchRequest(scripts=["s_checked.json"]))
-    assert res == {"ok": True, "removed": ["s"]}
-    assert not (workspace / "05_audio_chunk" / "s").exists()
-
-
-def test_reset_batch_rejects_all_sentinel(workspace, monkeypatch):
-    from fastapi import HTTPException
-
-    from backend.api.tts import ResetBatchRequest, reset_batch
-
-    _stub_manager(monkeypatch)
-    with pytest.raises(HTTPException) as ei:
-        reset_batch(ResetBatchRequest(scripts=["__all__"]))
-    assert ei.value.status_code == 400
-
-
-def test_reset_batch_requires_workspace(tmp_path, monkeypatch):
-    """No workspace pointer -> the write guard refuses before any deletion."""
-    monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
-    from fastapi import HTTPException
-
-    from backend.api.tts import ResetBatchRequest, reset_batch
-
-    try:
-        core_config.reset_config_cache()
-        with pytest.raises(HTTPException) as ei:
-            reset_batch(ResetBatchRequest(scripts=["s.json"]))
-        assert ei.value.status_code == 409
-    finally:
-        core_config.reset_config_cache()
-
-
-class _InFlightManager(_RecordingManager):
-    """A manager reporting one in-flight tts-batch task (the reset guard)."""
-
-    def list(self):
-        class _Task:
-            module = "tts-batch"
-            status = "running"
-
-        return [_Task()]
-
-
-def test_reset_batch_refused_while_task_in_flight(workspace, monkeypatch):
-    """A running synthesis task is writing the package folders — the reset must wait."""
+def test_reset_batch_submits_durable_task_and_blocks_active_synthesis(workspace, monkeypatch):
     import backend.api.tts as tts_api
     from fastapi import HTTPException
-
     from backend.api.tts import ResetBatchRequest, reset_batch
 
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _InFlightManager())
-    with pytest.raises(HTTPException) as ei:
-        reset_batch(ResetBatchRequest(scripts=["s.json"]))
-    assert ei.value.status_code == 409
+    submitted = []
+    monkeypatch.setattr(tts_api, "has_active_durable_tasks", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        tts_api, "submit_legacy_engine_task",
+        lambda **kwargs: submitted.append(kwargs) or {"id": "reset-task"},
+    )
+    result = reset_batch(
+        ResetBatchRequest(scripts=["s.json", "t_checked.json"]),
+        ctx=_durable_ctx(), db=object(),
+    )
+    assert result == {"task_id": "reset-task"}
+    assert submitted[0]["task_type"] == "tts.reset"
+    assert submitted[0]["payload"]["scripts"] == ["s.json", "t_checked.json"]
+
+    monkeypatch.setattr(tts_api, "has_active_durable_tasks", lambda **_kwargs: True)
+    with pytest.raises(HTTPException) as exc:
+        reset_batch(ResetBatchRequest(scripts=["s.json"]), ctx=_durable_ctx(), db=object())
+    assert exc.value.status_code == 409
 
 
-def test_reset_then_ordinary_run_redoes_all(workspace, monkeypatch):
-    """「重新全部合成」end-to-end: a fully-done package is reset (deleted), and the ordinary
-    one-click run — the SAME call a fresh run is, no special flags — re-synthesizes every
-    segment instead of taking the zero-segment short-circuit."""
+def test_reset_batch_rejects_empty_and_all_sentinel(workspace):
+    from fastapi import HTTPException
     from backend.api.tts import ResetBatchRequest, reset_batch
 
-    _stub_manager(monkeypatch)
-    captured = {}
+    for scripts in ([], ["__all__"]):
+        with pytest.raises(HTTPException) as exc:
+            reset_batch(ResetBatchRequest(scripts=scripts), ctx=_durable_ctx(), db=object())
+        assert exc.value.status_code == 400
 
-    def run_worker(cmd, handle, on_line, *, temp_files=(), fail_prefix="TTS 引擎", **kw):
-        """Like _fake_run_worker, but leaves the mp3 files on disk (the real worker does)."""
-        captured["cmd"] = cmd
-        with open(cmd[cmd.index("--segments-file") + 1], encoding="utf-8") as f:
-            segs = json.load(f)
-        out_dir = Path(cmd[cmd.index("--out-dir") + 1])
-        for s in segs:
-            name = str(s["index"] + 1).zfill(4) + ".mp3"
-            (out_dir / name).write_bytes(b"fake")
-            on_line(f"[segment] {s['index']} ok {str(out_dir / name)}")
-        return deque()
-
-    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
-
-    tts_batch.synthesize(_Handle(), None, "s.json", None)  # run 1: completes everything
-
-    calls = []
-
-    def counting(cmd, handle, on_line, **kw):
-        calls.append(cmd)
-
-    monkeypatch.setattr(tts_batch, "run_worker", counting)
-    tts_batch.synthesize(_Handle(), None, "s.json", None)
-    assert calls == []  # pre-reset: a plain resume has nothing left (zero-segment short-circuit)
-
-    reset_batch(ResetBatchRequest(scripts=["s.json"]))
-    assert not (workspace / "05_audio_chunk" / "s").exists()
-
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
-    tts_batch.synthesize(_Handle(), None, "s.json", None)  # the identical ordinary call
-    assert sorted(_segments_written(captured)) == [0, 1]  # every segment re-synthesized
-
-
-# --------------------------------------------------------------------------- #
-# filename width: precomputed per run, uniform across packages, restart-stable
-# --------------------------------------------------------------------------- #
 
 def test_filename_width_helper():
     """The zero-pad width = the digits the LARGEST package's full count needs, floored at 4

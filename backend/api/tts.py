@@ -15,9 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import threading
-import time
 from pathlib import Path
 from typing import Annotated
 
@@ -27,16 +25,14 @@ from sqlalchemy.orm import Session
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.concurrency import merge_gate, set_merge_concurrency
 from ..core.paths import ALL_PARSED_JSON, get_layout, peek_layout, resolve_parsed_json, resolve_parsed_json_all
-from ..core.tasks import TERMINAL, TaskStatus, get_task_manager
-from ..engines import merge as Merge
+from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
+from ..platform.legacy_tasks import active_durable_targets, has_active_durable_tasks, submit_legacy_engine_task
 from . import _common
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
@@ -607,32 +603,20 @@ def run_batch(
         label += f" · {scripts[0]}"
     elif len(scripts) > 1:
         label += f" · {len(scripts)} 个文件"
-    if isinstance(ctx, AuthContext):
-        task = submit_legacy_engine_task(
-            task_type="tts.batch",
-            label=label,
-            payload={
-                "indices": req.indices,
-                "script": req.script,
-                "scripts": scripts,
-                "config": get_config().model_dump(mode="json"),
-            },
-            ctx=ctx,
-            db=db,
-            idempotency_prefix="tts-batch",
-        )
-        return {"task_id": task["id"]}
-    if len(scripts) > 1:
-        task = get_task_manager().create(
-            "tts-batch", label,
-            Batch.synthesize_multi, scripts,
-        )
-    else:  # 0 or 1 file: the legacy single-file path, byte-identical behaviour
-        task = get_task_manager().create(
-            "tts-batch", label,
-            Batch.synthesize, req.indices, scripts[0] if scripts else req.script,
-        )
-    return {"task_id": task.id}
+    task = submit_legacy_engine_task(
+        task_type="tts.batch",
+        label=label,
+        payload={
+            "indices": req.indices,
+            "script": req.script,
+            "scripts": scripts,
+            "config": get_config().model_dump(mode="json"),
+        },
+        ctx=ctx,
+        db=db,
+        idempotency_prefix="tts-batch",
+    )
+    return {"task_id": task["id"]}
 
 
 class ResetBatchRequest(BaseModel):
@@ -642,14 +626,6 @@ class ResetBatchRequest(BaseModel):
     scripts: list[str]
 
 
-def _batch_task_active() -> bool:
-    """Whether a tts-batch (音频合成) task is in flight. Its engine writes the package folders
-    while running, so deleting a package mid-run would tear out the files / manifest it is
-    producing — refuse the reset while one runs (the same guard shape as voice selection)."""
-    for t in get_task_manager().list():
-        if t.module == "tts-batch" and t.status not in TERMINAL:
-            return True
-    return False
 
 
 @router.post("/batch-reset")
@@ -673,32 +649,17 @@ def reset_batch(
         raise HTTPException(status_code=400, detail="“全部文件”只用于「角色配音」——请逐个列出解析 JSON。")
     if not req.scripts:
         raise HTTPException(status_code=400, detail="没有要重置的文件。")
-    if _batch_task_active():
+    if has_active_durable_tasks(task_type="tts.batch", ctx=ctx, db=db):
         raise HTTPException(409, "合成任务进行中，请待其结束后再重置。")
-    if isinstance(ctx, AuthContext):
-        active = active_durable_targets(
-            task_type="tts.batch", payload_key="scripts", ctx=ctx, db=db,
-        )
-        if any(name in active for name in req.scripts):
-            raise HTTPException(409, "合成任务进行中，请等待其结束后再重置。")
-        task = submit_legacy_engine_task(
-            task_type="tts.reset",
-            label=f"重新合成：{len(req.scripts)} 个文件",
-            payload={"scripts": req.scripts},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix="tts-reset",
-        )
-        return {"task_id": task["id"]}
-    layout = get_layout()
-    removed = []
-    for name in req.scripts:
-        pkg_name = Batch.package_for(Path(name))
-        pkg = layout.audio_chunk / pkg_name
-        if pkg.exists():
-            shutil.rmtree(pkg)
-            removed.append(pkg_name)
-    return {"ok": True, "removed": removed}
+    task = submit_legacy_engine_task(
+        task_type="tts.reset",
+        label=f"重新合成：{len(req.scripts)} 个文件",
+        payload={"scripts": req.scripts},
+        ctx=ctx,
+        db=db,
+        idempotency_prefix="tts-reset",
+    )
+    return {"task_id": task["id"]}
 
 
 def _read_voice_config(layout) -> dict:
@@ -885,74 +846,13 @@ def batch_status(script: str | None = None,
 # ---------------------------------------------------------------------------
 
 # Same prefetch invariant as the parse batch: tasks waiting for a merge slot stay ≤ 4.
-MERGE_PREFETCH_DEPTH = 4
 
 
-def _inflight_merge_packages() -> set[str]:
-    """Package names (the label tail ``：{package}``) of non-terminal merge tasks.
-
-    The same-package in-flight guard: two merge tasks on one package would write the same
-    ``06_audio_merge/<包>.mp3``. Non-conflicting packages may still join a running batch —
-    their tasks simply queue behind the gate. (The label format is the load-bearing
-    contract shared with the frontend's F5 reattach — change all sides together.)
-    """
-    out = set()
-    for t in get_task_manager().list():
-        if t.module == "merge" and t.status not in TERMINAL:
-            m = re.search(r"：(.+)$", t.label)
-            if m:
-                out.add(m.group(1))
-    return out
-
-
-def _run_merge_coordinator(ordered: list[str]) -> None:
-    """Dispatch a merge batch's PENDING shells in order, keeping the prefetch bounded.
-
-    Invariant maintained each round: the number of batch tasks *waiting for a merge slot*
-    (started but not yet slot-holding) is < MERGE_PREFETCH_DEPTH. Slot holders are read
-    from the process-wide ``merge_gate().active`` (only merge workers hold merge slots),
-    so the gate is the hard cap and this thread only paces the start-ups.
-    """
-    mgr = get_task_manager()
-    while True:
-        tasks = [mgr.get(tid) for tid in ordered]
-        if all(t is None or t.status in TERMINAL for t in tasks):
-            return
-        no_slot = sum(
-            1 for t in tasks
-            if t is not None and t.status in (TaskStatus.RUNNING, TaskStatus.PAUSED)
-        )
-        waiting = max(0, no_slot - merge_gate().active)
-        while waiting < MERGE_PREFETCH_DEPTH:
-            next_tid = next(
-                (tid for tid, t in zip(ordered, tasks)
-                 if t is not None and t.status is TaskStatus.PENDING),
-                None,
-            )
-            if next_tid is None:
-                break
-            try:
-                mgr.start(next_tid)
-            except (ValueError, KeyError):
-                break  # raced with a cancel — it will no longer be PENDING
-            tasks = [mgr.get(tid) for tid in ordered]
-            no_slot = sum(
-                1 for t in tasks
-                if t is not None and t.status in (TaskStatus.RUNNING, TaskStatus.PAUSED)
-            )
-            waiting = max(0, no_slot - merge_gate().active)
-        time.sleep(0.2)
 
 
 class MergeRequest(BaseModel):
-    m4b: bool = False  # M4B output is a later phase; MP3 is produced for now.
-    # Multi-select: package names (sub-folder names in 05_audio_chunk/, one per source
-    # JSON) to merge — one Task each, run in parallel under the process-wide merge gate.
+    m4b: bool = False
     packages: list[str] | None = None
-    # Legacy single-select field, kept ONLY to detect an old pre-built frontend: any
-    # non-null value is refused with an actionable error (the new UI always sends
-    # explicit package names; the "most recent package" fallback is gone).
-    package: str | None = None
 
 
 @router.post("/merge")
@@ -961,70 +861,42 @@ def run_merge(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Start one merge Task per selected package.
+    """Submit one durable Worker task per selected merge package.
 
-    All task shells are created up front (PENDING, in request order) so the response
-    carries every task_id; a coordinator thread then starts them in order with a bounded
-    prefetch, and each worker takes the process-wide merge gate (hard cap =
-    ``Merge.concurrency_limit()``) around its whole engine run. Guards: no workspace 409
-    → legacy ``package`` field 400 (old frontend) → empty selection 400 (no most-recent
-    fallback) → illegal package name 400 (traversal) → same-package in-flight 409.
-    Returns ``{"task_ids": [...], "packages": [{package, task_id}, ...]}``.
+    Duplicate package names are collapsed in request order. A package already
+    being merged in the current project is rejected so two workers cannot write
+    the same output concurrently.
     """
     _common.require_workspace()
-    if req.package is not None:
-        raise HTTPException(400, "前端版本过旧（仍在发送单选 package 字段）——请重新构建前端（npm run build）后刷新页面。")
     pkgs = list(dict.fromkeys(req.packages or []))  # dedupe, preserving order
     if not pkgs:
         raise HTTPException(400, "请选择要合并的音频包。")
     for p in pkgs:
         if not p or p != Path(p).name:
             raise HTTPException(400, f"非法包名：{p}")
-    conflicts = [p for p in pkgs if p in _inflight_merge_packages()]
-    if isinstance(ctx, AuthContext):
-        conflicts.extend(
-            p for p in pkgs
-            if p in active_durable_targets(
-                task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
-            ) and p not in conflicts
-        )
+    active_packages = active_durable_targets(
+        task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
+    )
+    conflicts = [package for package in pkgs if package in active_packages]
     if conflicts:
         raise HTTPException(409, "以下包已有合并任务在途：" + "、".join(conflicts))
-    if isinstance(ctx, AuthContext):
-        created = []
-        for package in pkgs:
-            label = ("merge-m4b" if req.m4b else "merge-audio") + ": " + package
-            task = submit_legacy_engine_task(
-                task_type="tts.merge",
-                label=label,
-                payload={
-                    "m4b": req.m4b,
-                    "package": package,
-                    "config": get_config().model_dump(mode="json"),
-                },
-                ctx=ctx,
-                db=db,
-                idempotency_prefix=f"tts-merge:{package}",
-            )
-            created.append({"package": package, "task_id": task["id"]})
-        return {"task_ids": [item["task_id"] for item in created], "packages": created}
-    set_merge_concurrency(Merge.concurrency_limit())
-    mgr = get_task_manager()
-    created = [
-        {
-            "package": p,
-            "task_id": mgr.create(
-                "merge",
-                ("合并 M4B" if req.m4b else "合并音频（Merge）") + f"：{p}",
-                Merge.run, req.m4b, p, start=False,
-            ).id,
-        }
-        for p in pkgs
-    ]
-    threading.Thread(
-        target=_run_merge_coordinator, args=([c["task_id"] for c in created],), daemon=True,
-    ).start()
-    return {"task_ids": [c["task_id"] for c in created], "packages": created}
+    created = []
+    for package in pkgs:
+        label = ("merge-m4b" if req.m4b else "merge-audio") + ": " + package
+        task = submit_legacy_engine_task(
+            task_type="tts.merge",
+            label=label,
+            payload={
+                "m4b": req.m4b,
+                "package": package,
+                "config": get_config().model_dump(mode="json"),
+            },
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"tts-merge:{package}",
+        )
+        created.append({"package": package, "task_id": task["id"]})
+    return {"task_ids": [item["task_id"] for item in created], "packages": created}
 
 
 def _package_merge_status(name: str, layout) -> dict:
