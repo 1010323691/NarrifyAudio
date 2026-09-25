@@ -25,6 +25,7 @@ import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useProjectGate } from '@/composables/useProjectGate'
+import { useLabelDerivedTasks, labelKeyOf, LABEL_TASK_TERMINAL_STATUSES } from '@/composables/useLabelDerivedTasks'
 import {
   Combine,
   Download,
@@ -63,35 +64,9 @@ const error = ref('')
 // ---------------------------------------------------------------------------
 // 行任务派生：store 中 merge 任务按 label 尾部「：{包名}」归位（F5 刷新后 store 的
 // refresh 已拉回全量任务 → 派生式重挂，无需本地 job 列表）。
-// 在途（非终态）取 seq 升序首个；失败取 seq 降序最新（重试走同一任务 id，
-// 故同一任务不会同时处于两种集合）。
 // ---------------------------------------------------------------------------
 
-const TERMINAL = new Set(['cancelled', 'succeeded', 'failed'])
-
-function pkgOfLabel(label: string): string {
-  // 与后端 _inflight_merge_packages 的 re.search(r"：(.+)$") 同一口径：取第一个「：」。
-  const i = label.indexOf('：')
-  return i >= 0 ? label.slice(i + 1) : ''
-}
-
-const tasksByPkg = computed(() => {
-  const active = new Map<string, TaskSnapshot>()
-  const failed = new Map<string, TaskSnapshot>()
-  for (const t of taskStore.tasks) {
-    if (t.module !== 'merge') continue
-    const pkg = pkgOfLabel(t.label)
-    if (!pkg) continue
-    if (t.status === 'failed') {
-      const cur = failed.get(pkg)
-      if (!cur || t.seq > cur.seq) failed.set(pkg, t)
-    } else if (!TERMINAL.has(t.status)) {
-      const cur = active.get(pkg)
-      if (!cur || t.seq < cur.seq) active.set(pkg, t)
-    }
-  }
-  return { active, failed }
-})
+const tasksByPkg = useLabelDerivedTasks('merge')
 
 type RowVariant = 'default' | 'secondary' | 'success' | 'warning' | 'destructive' | 'outline'
 
@@ -295,15 +270,15 @@ watch(
     if (!watcherArmed) {
       watcherArmed = true
       for (const t of taskStore.tasks) {
-        if (t.module === 'merge' && TERMINAL.has(t.status)) processed.add(t.id)
+        if (t.module === 'merge' && LABEL_TASK_TERMINAL_STATUSES.has(t.status)) processed.add(t.id)
       }
       return
     }
     for (const t of taskStore.tasks) {
       if (t.module !== 'merge') continue
-      const pkg = pkgOfLabel(t.label)
+      const pkg = labelKeyOf(t.label)
       if (!pkg) continue
-      if (!TERMINAL.has(t.status)) {
+      if (!LABEL_TASK_TERMINAL_STATUSES.has(t.status)) {
         processed.delete(t.id) // 重试转回运行态 → 允许再次处理其终态
         continue
       }

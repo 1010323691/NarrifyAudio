@@ -45,6 +45,7 @@ import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useProjectGate } from '@/composables/useProjectGate'
+import { useLabelDerivedTasks, labelKeyOf, LABEL_TASK_TERMINAL_STATUSES } from '@/composables/useLabelDerivedTasks'
 import {
   Eraser,
   ListChecks,
@@ -95,34 +96,9 @@ const packageSelection = ref<string[]>([])
 
 // ---------------------------------------------------------------------------
 // 行任务派生：bgm-analysis / bgm-segment / bgm-mix 任务按 label 尾部「：{stem}」归位。
-// 在途（非终态）取 seq 升序首个；失败取 seq 降序最新（重试走同一任务 id）。
 // ---------------------------------------------------------------------------
-const TERMINAL = new Set(['cancelled', 'succeeded', 'failed'])
 const BGM_MODULES = ['bgm-analysis', 'bgm-segment', 'bgm-mix']
-
-function stemOfLabel(label: string): string {
-  // 与后端 _inflight_bgm_stems 的 re.search(r"：(.+)$") 同一口径：取第一个「：」。
-  const i = label.indexOf('：')
-  return i >= 0 ? label.slice(i + 1) : ''
-}
-
-const tasksByStem = computed(() => {
-  const active = new Map<string, TaskSnapshot>()
-  const failed = new Map<string, TaskSnapshot>()
-  for (const t of taskStore.tasks) {
-    if (!BGM_MODULES.includes(t.module)) continue
-    const stem = stemOfLabel(t.label)
-    if (!stem) continue
-    if (t.status === 'failed') {
-      const cur = failed.get(stem)
-      if (!cur || t.seq > cur.seq) failed.set(stem, t)
-    } else if (!TERMINAL.has(t.status)) {
-      const cur = active.get(stem)
-      if (!cur || t.seq < cur.seq) active.set(stem, t)
-    }
-  }
-  return { active, failed }
-})
+const tasksByStem = useLabelDerivedTasks(BGM_MODULES)
 
 type RowVariant = 'default' | 'secondary' | 'success' | 'warning' | 'destructive' | 'outline'
 
@@ -754,20 +730,20 @@ watch(
     if (!watcherArmed) {
       watcherArmed = true
       for (const t of taskStore.tasks) {
-        if (BGM_MODULES.includes(t.module) && TERMINAL.has(t.status)) processed.add(t.id)
+        if (BGM_MODULES.includes(t.module) && LABEL_TASK_TERMINAL_STATUSES.has(t.status)) processed.add(t.id)
       }
       return
     }
     for (const t of taskStore.tasks) {
       if (!BGM_MODULES.includes(t.module)) continue
-      if (!TERMINAL.has(t.status)) {
+      if (!LABEL_TASK_TERMINAL_STATUSES.has(t.status)) {
         processed.delete(t.id)
         continue
       }
       if (processed.has(t.id)) continue
       processed.add(t.id)
       if (t.status === 'succeeded') {
-        const stem = stemOfLabel(t.label)
+        const stem = labelKeyOf(t.label)
         if (t.module === 'bgm-mix') {
           toast({ title: '混音完成', variant: 'success', description: stem })
         } else if (t.module === 'bgm-segment') {

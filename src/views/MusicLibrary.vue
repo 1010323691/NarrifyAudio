@@ -5,6 +5,7 @@ import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm, showPrompt } from '@/components/ui/dialog'
 import { useTaskStore } from '@/stores/task'
+import { useLabelDerivedTasks, LABEL_TASK_TERMINAL_STATUSES } from '@/composables/useLabelDerivedTasks'
 import {
   applySuggestions,
   batchDelete,
@@ -234,37 +235,11 @@ function clearSelection() {
 
 // ---------------------------------------------------------------------------
 // AI 识别任务派生（module music-ai-tags，label「AI 推荐标签：{name}」）
-// 行任务按 label 尾部「：{name}」归位（与 BGM 页 stemOfLabel 同形）：
-// 在途（非终态）取 seq 升序首个；失败取 seq 降序最新（重试走同一任务 id）。
 // ---------------------------------------------------------------------------
 
 const taskStore = useTaskStore()
 const AI_MODULE = 'music-ai-tags'
-const AI_TERMINAL = new Set(['cancelled', 'succeeded', 'failed'])
-
-function aiTrackOfLabel(label: string): string {
-  // 与后端 _inflight_ai_names 的 re.search(r"：(.+)$") 同一口径：取第一个「：」后全部。
-  const i = label.indexOf('：')
-  return i >= 0 ? label.slice(i + 1) : ''
-}
-
-const aiTasks = computed(() => {
-  const active = new Map<string, TaskSnapshot>()
-  const failed = new Map<string, TaskSnapshot>()
-  for (const t of taskStore.tasks) {
-    if (t.module !== AI_MODULE) continue
-    const name = aiTrackOfLabel(t.label)
-    if (!name) continue
-    if (t.status === 'failed') {
-      const cur = failed.get(name)
-      if (!cur || t.seq > cur.seq) failed.set(name, t)
-    } else if (!AI_TERMINAL.has(t.status)) {
-      const cur = active.get(name)
-      if (!cur || t.seq < cur.seq) active.set(name, t)
-    }
-  }
-  return { active, failed }
-})
+const aiTasks = useLabelDerivedTasks(AI_MODULE)
 
 function suggestionOf(name: string): MusicSuggestion | undefined {
   return lib.value?.suggestions?.[name]
@@ -755,7 +730,7 @@ async function doSuggest() {
     let task: TaskSnapshot | undefined
     for (let attempt = 0; attempt < 1200; attempt += 1) {
       task = taskStore.tasks.find((item) => item.id === submitted.task_id)
-      if (task && AI_TERMINAL.has(task.status)) break
+      if (task && LABEL_TASK_TERMINAL_STATUSES.has(task.status)) break
       await new Promise((resolve) => setTimeout(resolve, 500))
     }
     if (!task || task.status !== 'succeeded') {
@@ -871,14 +846,14 @@ watch(
       aiWatcherArmed = true
       for (const t of taskStore.tasks) {
         if ((t.module === AI_MODULE || t.module === BGM_ANALYSIS_MODULE)
-            && AI_TERMINAL.has(t.status)) aiProcessed.add(t.id)
+            && LABEL_TASK_TERMINAL_STATUSES.has(t.status)) aiProcessed.add(t.id)
       }
       return
     }
     let dirty = false
     for (const t of taskStore.tasks) {
       if (t.module !== AI_MODULE && t.module !== BGM_ANALYSIS_MODULE) continue
-      if (!AI_TERMINAL.has(t.status)) {
+      if (!LABEL_TASK_TERMINAL_STATUSES.has(t.status)) {
         aiProcessed.delete(t.id)
         continue
       }
