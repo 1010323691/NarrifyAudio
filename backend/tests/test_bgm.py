@@ -481,6 +481,90 @@ def test_bgm_analysis_rmw_is_exclusive_across_processes(sandbox):
     assert final["chapters"]["worker_chapter"]["custom"] == ["worker-tag"]
 
 
+def test_bgm_rollback_keeps_concurrent_api_write_across_processes(sandbox):
+    """M1 scenario (plan second-round objection): a Worker process publishes
+    the shared analysis cache through the REAL publication journal (guarded),
+    the API process rewrites the SAME cache via the real tag-propagation
+    path, then the worker's failure rollback runs. The rollback must not
+    restore over the API's edit — the fingerprint compare under the
+    cross-process storage lock lets the concurrent writer win."""
+    import subprocess
+    import sys
+
+    from backend.api import music as api_music
+
+    layout = core_paths.get_or_prepare_layout()
+    bgm_dir = layout.bgm
+    bgm_storage.save_analysis(layout, {
+        "version": 1, "model": "", "chapters": {"chapter-1": {"mood": ["original-tag"]}},
+    })
+    child = (
+        "import logging, sys, time\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "logging.basicConfig(level=logging.WARNING)\n"
+        "bgm = Path(sys.argv[1])\n"
+        "from backend.platform.database import SessionLocal, initialize_schema\n"
+        "initialize_schema()\n"
+        "from backend.platform.models import User\n"
+        "with SessionLocal() as db:\n"
+        "    db.add(User(id='guard-worker-u', email='gw@example.com', username='guard-worker', password_hash='x'))\n"
+        "    db.commit()\n"
+        "from backend.platform.task_context import PersistentTaskHandle\n"
+        "from backend.engines import bgm_storage\n"
+        "layout = SimpleNamespace(bgm=bgm)\n"
+        "claim = SimpleNamespace(task_id='guard-worker-t', attempt_id='guard-worker-a', "
+        "owner_id='guard-worker-u', project_id='guard-p')\n"
+        "handle = PersistentTaskHandle(claim)\n"
+        "bgm_storage.update_analysis(layout, "
+        "lambda d: d['chapters'].setdefault('chapter-1', {}).update({'mood': ['old-tag']}), "
+        "handle=handle)\n"
+        "(bgm / 'worker_published').touch()\n"
+        "for _ in range(600):\n"
+        "    if (bgm / 'api_wrote').exists():\n"
+        "        break\n"
+        "    time.sleep(0.1)\n"
+        "handle.rollback_publications()\n"
+        "(bgm / 'done').touch()\n"
+    )
+    # The child worker gets its OWN storage root (the sandbox dir, so the
+    # workspace paths it publishes are inside it) while the API process
+    # above keeps the suite's storage root — the 08_bgm dir is the shared
+    # physical ground between them.
+    env = {**os.environ, "NARRIFY_STORAGE_ROOT": str(sandbox["root"])}
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child, str(bgm_dir)],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env=env,
+    )
+    try:
+        marker = bgm_dir / "worker_published"
+        deadline = time.time() + 30
+        while not marker.exists() and proc.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+        assert marker.exists(), "child worker never published its analysis update"
+        # The API process rewrites the same cache through the real propagation path.
+        api_music._propagate_chapter_analysis("old-tag", "new-tag", "mood")
+        assert bgm_storage.load_analysis(layout)["chapters"]["chapter-1"]["mood"] == ["new-tag"]
+        (bgm_dir / "api_wrote").touch()
+        proc.wait(timeout=30)
+        output = proc.stdout.read().decode("utf-8", "replace") if proc.stdout else ""
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert proc.returncode == 0, output
+    # The API's rename survives the worker's failure rollback.
+    assert bgm_storage.load_analysis(layout)["chapters"]["chapter-1"]["mood"] == ["new-tag"]
+    # The worker logged the guarded skip (its version would have clobbered the API's).
+    assert "Concurrent writer modified" in output
+    # The worker's journal and backups are cleaned up (under the child's own storage root).
+    attempt = sandbox["root"] / "guard-worker" / "guard-p" / ".tasks" / "guard-worker-t" / "guard-worker-a"
+    assert not (attempt / "publication.json").exists()
+    assert not list(attempt.glob("publication-backup-*"))
+
+
 def test_list_chapter_stems(sandbox):
     layout = core_paths.get_or_prepare_layout()
     assert bgm_engine.list_chapter_stems(layout) == [STEM, STEM2]

@@ -1647,3 +1647,68 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
         assert b"text/event-stream" in dict(start["headers"]).get(b"content-type", b"")
         assert b"snapshot_all" in chunks[0]
         assert b"ping" in chunks[1]  # the 0.5 s poll ticked while the reader was idle
+
+
+def test_workspace_rollback_guard_uses_task_lock_and_fingerprint(client: TestClient):
+    """M1 wiring on the real handle: the engine registers mark_workspace_guarded
+    + set_rollback_lock, and rollback restores the guarded shared-cache entry
+    only while its bytes still match the task's publication — a concurrent
+    writer's version survives, and the same entry is restored when untouched."""
+    from backend.engines import bgm_storage
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Guard wiring"}).json()
+    username = first["user"]["username"]
+
+    def _submit() -> dict:
+        response = client.post(
+            "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+            json={"project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
+                  "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    with SessionLocal() as db:
+        root = configured_storage_root(db)
+        bgm_dir = project_workspace_path(db, username, project["id"]) / "08_bgm"
+    bgm_dir.mkdir(parents=True, exist_ok=True)
+    layout = SimpleNamespace(bgm=bgm_dir)
+    final = bgm_dir / "chapter_music_analysis.json"
+    final.write_text('{"version": 1, "model": "", "chapters": {}}', encoding="utf-8")
+
+    # 1) concurrent writer wins: the API process rewrites under the same lock.
+    submitted = _submit()
+    claim = claim_task(submitted["id"], "guard-wiring-worker")
+    assert claim is not None
+    handle = PersistentTaskHandle(claim)
+    handle.mark_workspace_guarded(final)
+    handle.set_rollback_lock(bgm_storage.storage_lock, layout)
+    handle.publish_workspace_bytes(final, b'{"published": true}')
+    assert final.read_text("utf-8") == '{"published": true}'
+    with bgm_storage.storage_lock(layout):
+        final.write_text('{"concurrent": true}', encoding="utf-8")
+    handle.rollback_publications()
+    assert final.read_text("utf-8") == '{"concurrent": true}'
+
+    # 2) untouched entry is restored to its pre-publication bytes.
+    final.write_text('{"fresh": true}', encoding="utf-8")
+    first_claim = claim
+    claim = claim_task(_submit()["id"], "guard-wiring-worker-2")
+    assert claim is not None
+    handle = PersistentTaskHandle(claim)
+    handle.mark_workspace_guarded(final)
+    handle.set_rollback_lock(bgm_storage.storage_lock, layout)
+    handle.publish_workspace_bytes(final, b'{"published": true}')
+    handle.rollback_publications()
+    assert final.read_text("utf-8") == '{"fresh": true}'
+
+    # Both journals are cleaned up (no file, no orphaned backups).
+    with SessionLocal() as db:
+        for task_claim in (first_claim, claim):
+            journal = task_attempt_path(
+                db, username, project["id"], task_claim.task_id, task_claim.attempt_id, "publication.json",
+            )
+            assert not journal.exists()
+            assert not list(journal.parent.glob("publication-backup-*"))

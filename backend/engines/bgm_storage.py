@@ -119,6 +119,27 @@ def save_segment_analysis(layout, data: dict, handle=None) -> None:
         _atomic_write_json(_bgm_dir(layout) / SEGMENT_ANALYSIS_NAME, data, handle)
 
 
+def _guard_shared_cache(layout, name: str, handle) -> None:
+    """Ask the task handle (if any) to guard this shared-cache publication: on
+    rollback the entry is restored ONLY while its bytes still match what the
+    task published, under the same cross-process lock the writers hold — a
+    late failure rollback can no longer clobber a concurrent edit from the
+    API process (tag propagation / manual chapter edits).
+
+    Only the three JSON caches below are guarded. ``timelines/<stem>.json``
+    is written solely by the worker (bgm.recompute_segment_timelines), so it
+    needs no guard — extend this list if a new writer ever appears."""
+    if handle is None:
+        return
+    mark = getattr(handle, "mark_workspace_guarded", None)
+    if not callable(mark):
+        return
+    mark(_bgm_dir(layout) / name)
+    set_lock = getattr(handle, "set_rollback_lock", None)
+    if callable(set_lock):
+        set_lock(storage_lock, layout)
+
+
 def update_analysis(layout, mutator, handle=None) -> dict:
     """Atomic read → mutate → write on the analysis cache.
 
@@ -133,6 +154,7 @@ def update_analysis(layout, mutator, handle=None) -> dict:
         with storage_lock(layout):
             data = load_analysis(layout)
             mutator(data)
+            _guard_shared_cache(layout, ANALYSIS_NAME, handle)
             save_analysis(layout, data, handle)
             return data
 
@@ -145,6 +167,7 @@ def update_assignments(layout, mutator, handle=None) -> dict:
         with storage_lock(layout):
             data = load_assignments(layout)
             mutator(data)
+            _guard_shared_cache(layout, ASSIGNMENTS_NAME, handle)
             save_assignments(layout, data, handle)
             return data
 
@@ -157,6 +180,7 @@ def update_segment_analysis(layout, mutator, handle=None) -> dict:
         with storage_lock(layout):
             data = load_segment_analysis(layout)
             mutator(data)
+            _guard_shared_cache(layout, SEGMENT_ANALYSIS_NAME, handle)
             save_segment_analysis(layout, data, handle)
             return data
 

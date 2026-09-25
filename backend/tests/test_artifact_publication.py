@@ -129,3 +129,155 @@ def test_bundle_prepare_rolls_back_first_root_if_second_root_is_unavailable(tmp_
 
     assert not workspace_journal.path.exists()
     assert shared_journal.path.read_text("utf-8") == "conflict"
+
+
+# --------------------------------------------------------------------------- #
+# Guarded entries: rollback may restore a shared-cache file ONLY while its
+# bytes still match what the task published (M1 — a concurrent writer, e.g.
+# the API process's tag propagation, must win over a late failure rollback).
+# --------------------------------------------------------------------------- #
+
+def _locked(raise_timeout: bool = False):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def lock():
+        if raise_timeout:
+            raise TimeoutError("storage lock busy")
+        yield
+
+    return lock()
+
+
+def _publish_guarded(root: Path, name: str, content: str) -> tuple[PublicationJournal, Path, Path]:
+    final = root / name
+    final.write_text("original", encoding="utf-8")
+    staged = root / "staged.json"
+    staged.write_text(content, encoding="utf-8")
+    journal = _journal(root)
+    journal.prepare()
+    journal.publish(journal.add(final, guard=True), staged)
+    return journal, final, staged
+
+
+def test_guarded_rollback_restores_untouched_publication(tmp_path):
+    journal, final, _ = _publish_guarded(tmp_path, "cache.json", "published")
+    assert final.read_text("utf-8") == "published"
+    journal.rollback(guarded_lock=_locked())
+    assert final.read_text("utf-8") == "original"
+    assert not journal.path.exists()
+    assert not list(journal.path.parent.glob("publication-backup-*"))
+
+
+def test_guarded_rollback_keeps_concurrent_writer_version(tmp_path):
+    journal, final, _ = _publish_guarded(tmp_path, "cache.json", "published")
+    # A concurrent writer (API process) rewrites the shared cache after the
+    # publication — the rollback must NOT restore over their edit.
+    final.write_text("concurrent edit", encoding="utf-8")
+    journal.rollback(guarded_lock=_locked())
+    assert final.read_text("utf-8") == "concurrent edit"
+    assert not journal.path.exists()
+    assert not list(journal.path.parent.glob("publication-backup-*"))
+
+
+def test_guarded_rollback_new_file_removed_when_untouched(tmp_path):
+    final = tmp_path / "new.json"
+    staged = tmp_path / "staged.json"
+    staged.write_text("published new", encoding="utf-8")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final, guard=True), staged)
+    assert final.read_text("utf-8") == "published new"
+    journal.rollback(guarded_lock=_locked())
+    assert not final.exists()
+    assert not journal.path.exists()
+
+
+def test_guarded_rollback_new_file_kept_when_concurrently_created(tmp_path):
+    final = tmp_path / "new.json"
+    staged = tmp_path / "staged.json"
+    staged.write_text("published new", encoding="utf-8")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final, guard=True), staged)
+    # A concurrent writer touched the path after publication — their file wins.
+    final.write_text("concurrent new", encoding="utf-8")
+    journal.rollback(guarded_lock=_locked())
+    assert final.read_text("utf-8") == "concurrent new"
+    assert not journal.path.exists()
+
+
+def test_guarded_rollback_lock_timeout_skips_and_cleans(tmp_path):
+    """The writer-domain lock is still busy at rollback time: the guarded
+    phase is skipped entirely (published version stays on disk — the
+    concurrent writer may be mid-write), backups are dropped so a later
+    reconcile cannot resurrect the restore, and the journal is cleaned up.
+    No exception escapes rollback."""
+    journal, final, _ = _publish_guarded(tmp_path, "cache.json", "published")
+    final.write_text("concurrent edit", encoding="utf-8")
+    journal.rollback(guarded_lock=_locked(raise_timeout=True))
+    assert final.read_text("utf-8") == "concurrent edit"
+    assert not journal.path.exists()
+    assert not list(journal.path.parent.glob("publication-backup-*"))
+
+
+def test_unguarded_entries_unaffected_by_guarded_phase(tmp_path):
+    """Phase split must not change the unguarded behaviour: the task's own
+    artifacts restore unconditionally while a modified guarded entry is kept."""
+    journal, guarded, _ = _publish_guarded(tmp_path, "shared.json", "published")
+    artifact = tmp_path / "artifact.json"
+    artifact.write_text("old artifact", encoding="utf-8")
+    staged_artifact = tmp_path / "staged-artifact.json"
+    staged_artifact.write_text("published artifact", encoding="utf-8")
+    journal.publish(journal.add(artifact), staged_artifact)
+    assert artifact.read_text("utf-8") == "published artifact"
+    guarded.write_text("concurrent edit", encoding="utf-8")
+    journal.rollback(guarded_lock=_locked())
+    assert artifact.read_text("utf-8") == "old artifact"
+    assert guarded.read_text("utf-8") == "concurrent edit"
+    assert not journal.path.exists()
+
+
+def test_reconcile_rebuilds_legacy_journal_without_guard_field(tmp_path):
+    """Journals written before the guard field exists keep rolling back
+    exactly as before (unguarded entries)."""
+    final = tmp_path / "c.json"
+    final.write_text("old", encoding="utf-8")
+    staged = tmp_path / "s.json"
+    staged.write_text("new", encoding="utf-8")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final), staged)
+    import json
+
+    legacy = {
+        "version": 1,
+        "files": [{
+            "final": "c.json",
+            "backup": str((journal.path.parent / "publication-backup-0.bin").relative_to(tmp_path)),
+            "had_original": True,
+        }],
+    }
+    journal.path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert final.read_text("utf-8") == "old"
+
+
+def test_reconcile_applies_guarded_compare_without_lock(tmp_path):
+    """Crash recovery has no lock available: the fingerprint compare still
+    protects the concurrent writer's version, and a fingerprint is only
+    trusted when the journal carried one."""
+    import json
+
+    final = tmp_path / "c.json"
+    final.write_text("old", encoding="utf-8")
+    staged = tmp_path / "s.json"
+    staged.write_text("new", encoding="utf-8")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final, guard=True), staged)
+    final.write_text("concurrent edit", encoding="utf-8")
+    assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert final.read_text("utf-8") == "concurrent edit"
+    assert not journal.path.exists()
+    assert not list(journal.path.parent.glob("publication-backup-*"))

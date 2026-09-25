@@ -1,12 +1,15 @@
 """Recoverable replacement of attempt outputs published into the workspace."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shutil
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+
+log = logging.getLogger("audiobook.platform.artifact_publication")
 
 
 class PublicationJournal:
@@ -15,7 +18,8 @@ class PublicationJournal:
         self.path = path.resolve()
         if not self.path.is_relative_to(self.root):
             raise ValueError("Publication journal is outside the storage root")
-        self.entries: list[tuple[Path, Path, bool]] = []
+        self.entries: list[tuple[Path, Path, bool, bool]] = []
+        self._published_hashes: dict[int, str] = {}
         self._closed = False
 
     def _under_root(self, relative: str) -> Path:
@@ -30,7 +34,7 @@ class PublicationJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._write([])
 
-    def add(self, final: Path) -> int:
+    def add(self, final: Path, *, guard: bool = False) -> int:
         resolved_final = final.resolve()
         if not resolved_final.is_relative_to(self.root):
             raise ValueError("Publication target is outside the storage root")
@@ -38,19 +42,24 @@ class PublicationJournal:
         backup = self.path.parent / f"publication-backup-{index}.bin"
         if backup.exists():
             raise RuntimeError(f"Publication backup already exists: {backup}")
-        entries = [*self.entries, (resolved_final, backup, resolved_final.exists())]
+        entries = [*self.entries, (resolved_final, backup, resolved_final.exists(), guard)]
         self._write(entries)
         self.entries = entries
         return index
 
-    def _write(self, entries: list[tuple[Path, Path, bool]]) -> None:
-        data = {
-            "version": 1,
-            "files": [
-                {"final": str(final.relative_to(self.root)), "backup": str(backup.relative_to(self.root)), "had_original": had_original}
-                for final, backup, had_original in entries
-            ],
-        }
+    def _write(self, entries: list[tuple[Path, Path, bool, bool]]) -> None:
+        files = []
+        for index, (final, backup, had_original, guard) in enumerate(entries):
+            item = {
+                "final": str(final.relative_to(self.root)),
+                "backup": str(backup.relative_to(self.root)),
+                "had_original": had_original,
+            }
+            if guard:
+                item["guard"] = True
+                item["published_sha256"] = self._published_hashes.get(index, "")
+            files.append(item)
+        data = {"version": 1, "files": files}
         pending = self.path.with_suffix(".tmp")
         with pending.open("w", encoding="utf-8") as stream:
             json.dump(data, stream)
@@ -59,16 +68,22 @@ class PublicationJournal:
         os.replace(pending, self.path)
 
     def publish(self, index: int, source: Path) -> None:
-        final, backup, had_original = self.entries[index]
+        final, backup, had_original, guard = self.entries[index]
         final.parent.mkdir(parents=True, exist_ok=True)
         if had_original:
             os.replace(final, backup)
         os.replace(source, final)
+        if guard:
+            # Fingerprint the PUBLISHED bytes now: at rollback time this is
+            # the only copy left, and the compare decides whether a
+            # concurrent writer touched the file after this task.
+            self._published_hashes[index] = hashlib.sha256(final.read_bytes()).hexdigest()
+            self._write(self.entries)
 
     def remove(self, final: Path) -> int:
         """Move an existing file or directory aside until the DB commit is durable."""
         index = self.add(final)
-        resolved_final, backup, had_original = self.entries[index]
+        resolved_final, backup, had_original, _guard = self.entries[index]
         if had_original:
             os.replace(resolved_final, backup)
         return index
@@ -80,21 +95,73 @@ class PublicationJournal:
         else:
             path.unlink(missing_ok=True)
 
-    def rollback(self) -> None:
+    def rollback(self, guarded_lock=None) -> None:
+        """Undo every publication. UNGUARDED entries keep the old behaviour
+        (unconditional restore). GUARDED entries are restored ONLY while the
+        file still holds exactly what this task published — ``guarded_lock``
+        (the writer domain's cross-process lock, e.g. the 08_bgm storage
+        lock) is held across that compare-and-restore so a concurrent writer
+        cannot slip in between. If the lock is busy (TimeoutError) the whole
+        guarded phase is skipped: the concurrent writer wins, the backups are
+        dropped so a later reconcile cannot resurrect the restore, and the
+        journal is still cleaned up."""
         if self._closed:
             return
-        for final, backup, had_original in reversed(self.entries):
+        for final, backup, had_original, guard in reversed(self.entries):
+            if guard:
+                continue
             if backup.exists():
                 os.replace(backup, final)
             elif not had_original:
                 final.unlink(missing_ok=True)
+        guarded = [(index, entry) for index, entry in enumerate(reversed(self.entries)) if entry[3]]
+        if guarded:
+            try:
+                with (guarded_lock if guarded_lock is not None else nullcontext()):
+                    for index, (final, backup, had_original, _guard) in guarded:
+                        self._restore_guarded(index, final, backup, had_original)
+            except TimeoutError:
+                log.warning(
+                    "Rollback skipped guarded publications (storage lock busy) — "
+                    "keeping the concurrent writer's version: %s", self.path,
+                )
+                for _index, (_final, backup, _had, _guard) in guarded:
+                    self._remove_backup(backup)
         self.path.unlink(missing_ok=True)
         self._closed = True
+
+    def _restore_guarded(self, index: int, final: Path, backup: Path, had_original: bool) -> None:
+        """Restore one guarded entry ONLY if the file still holds exactly what
+        this task published; a concurrent writer (API tag propagation, manual
+        edit, another worker) means the compare misses and their version is
+        kept (warning logged)."""
+        recorded = self._published_hashes.get(index, "")
+        if not recorded:
+            # Guarded entry without a fingerprint (crash between add and
+            # publish): cannot verify — keeping the on-disk version is the
+            # safe side.
+            log.warning("Guarded publication has no recorded fingerprint — keeping on-disk version: %s", final)
+            self._remove_backup(backup)
+            return
+        matches = final.exists() and hashlib.sha256(final.read_bytes()).hexdigest() == recorded
+        if matches:
+            if backup.exists():
+                os.replace(backup, final)
+            elif not had_original:
+                final.unlink(missing_ok=True)
+            else:
+                log.warning("Guarded backup missing at rollback — keeping published version: %s", final)
+            return
+        log.warning(
+            "Concurrent writer modified %s after publication — keeping their version, skipping restore",
+            final,
+        )
+        self._remove_backup(backup)
 
     def finish(self) -> None:
         if self._closed:
             return
-        for _, backup, _ in self.entries:
+        for _final, backup, _had, _guard in self.entries:
             self._remove_backup(backup)
         self.path.unlink(missing_ok=True)
         self._closed = True
@@ -107,15 +174,23 @@ class PublicationJournal:
         data = json.loads(path.read_text("utf-8"))
         if data.get("version") != 1 or not isinstance(data.get("files"), list):
             raise ValueError("Invalid publication journal")
-        for item in data["files"]:
+        for index, item in enumerate(data["files"]):
             final = journal._under_root(str(item["final"]))
             backup = journal._under_root(str(item["backup"]))
             if not backup.is_relative_to(journal.path.parent):
                 raise ValueError("Publication backup is outside the attempt directory")
-            journal.entries.append((final, backup, item["had_original"] is True))
+            guard = item.get("guard") is True
+            journal.entries.append((final, backup, item["had_original"] is True, guard))
+            if guard:
+                journal._published_hashes[index] = str(item.get("published_sha256", ""))
         if committed:
             journal.finish()
         else:
+            # No lock is available on the recovery path: the guarded
+            # compare-and-restore still applies (a live concurrent writer
+            # wins), the missing lock only leaves a small compare→restore
+            # window — acceptable here because the worker that owns the
+            # journal is already dead.
             journal.rollback()
         return True
 

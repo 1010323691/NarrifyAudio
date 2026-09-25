@@ -62,6 +62,8 @@ class EngineExecutionContext:
         self._shared_publication_journal: PublicationJournal | None = None
         self._staged_workspace_paths: set[Path] = set()
         self._staged_workspace_directories: set[Path] = set()
+        self._guarded_workspace_paths: set[Path] = set()
+        self._rollback_lock: tuple | None = None
 
     @property
     def cancelled(self) -> bool:
@@ -187,7 +189,9 @@ class EngineExecutionContext:
             raise ValueError("Staged workspace output is outside the active task attempt")
         journal = self._ensure_publication_journal()
         try:
-            journal.publish(journal.add(final_path), staged)
+            # Guarded entries (see mark_workspace_guarded) are restored on
+            # rollback only if still untouched by a concurrent writer.
+            journal.publish(journal.add(final_path, guard=final_path.resolve() in self._guarded_workspace_paths), staged)
         except BaseException:
             staged.unlink(missing_ok=True)
             self._staged_workspace_paths.discard(staged)
@@ -239,6 +243,21 @@ class EngineExecutionContext:
             staged.unlink(missing_ok=True)
             raise
 
+    def mark_workspace_guarded(self, final_path: Path) -> None:
+        """Engines call this before publishing a workspace file that is shared
+        across processes (the 08_bgm JSON caches). Rollback then restores the
+        entry ONLY while its bytes still match what this task published, so a
+        concurrent writer (API tag propagation, manual edit, another worker)
+        is never clobbered by a late failure rollback."""
+        self._guarded_workspace_paths.add(final_path.resolve())
+
+    def set_rollback_lock(self, lock_cm_factory, *args) -> None:
+        """Register the cross-process lock (a context-manager factory, e.g.
+        ``bgm_storage.storage_lock(layout)``) that rollback acquires around
+        the guarded compare-and-restore — the same lock the writers hold, so
+        the restore cannot interleave with an in-flight read-modify-write."""
+        self._rollback_lock = (lock_cm_factory, args)
+
     def defer_workspace_delete(self, final_path: Path) -> None:
         self._ensure_publication_journal().remove(final_path)
 
@@ -250,7 +269,11 @@ class EngineExecutionContext:
             shutil.rmtree(staged, ignore_errors=True)
         self._staged_workspace_directories.clear()
         if self._publication_journal is not None:
-            self._publication_journal.rollback()
+            lock = None
+            if self._rollback_lock is not None:
+                factory, args = self._rollback_lock
+                lock = factory(*args)
+            self._publication_journal.rollback(guarded_lock=lock)
         if self._shared_publication_journal is not None:
             self._shared_publication_journal.rollback()
 
