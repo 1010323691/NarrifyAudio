@@ -82,7 +82,7 @@ from .task_contracts import (
     TaskFileOutcome,
     TaskOutcome,
 )
-from .task_state import (
+from .task_lifecycle import (
     TERMINAL_TASK_STATUSES,
     append_task_event,
     release_reservation,

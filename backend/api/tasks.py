@@ -20,7 +20,7 @@ from ..platform.deps import AuthContext, get_auth_context
 from ..platform.project_context import active_project
 from ..platform.models import Task as DurableTask, TaskEvent
 from ..platform.security import session_is_valid_for_user
-from ..platform.task_state import TERMINAL_TASK_STATUSES
+from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
 from ..services.tasks import cancel_task_record
 from .task_submission import retry_task as retry_durable_task
 

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.models import OutboxEvent, Project, Task, User, UserQuotaAccount, utcnow
-from ..platform.task_state import (
+from ..platform.task_lifecycle import (
     TERMINAL_TASK_STATUSES, append_task_event, release_reservation,
     suppress_pending_dispatch,
 )

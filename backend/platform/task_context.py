@@ -20,7 +20,7 @@ from .storage import configured_storage_root, safe_display_name, task_attempt_pa
 from .task_contracts import (
     TaskClaim, TaskExecutionError,
 )
-from .task_state import TERMINAL_TASK_STATUSES, append_task_event
+from .task_lifecycle import TERMINAL_TASK_STATUSES, append_task_event
 
 
 def _as_utc(value: datetime | None) -> datetime | None:

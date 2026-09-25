@@ -16,7 +16,7 @@ from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
-from ..platform.task_state import TERMINAL_TASK_STATUSES
+from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
 from ..services.tasks import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
