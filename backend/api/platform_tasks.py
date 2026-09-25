@@ -15,9 +15,11 @@ from ..platform.models import Task, TaskEvent, User
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
 from ..platform.task_submission import task_dict
+from ..services import task_views
 from .task_operations import (
     TaskSubmit,
     cancel_task as cancel_task_for_user,
+    retry_task as retry_task_for_user,
     submit_task as submit_task_for_user,
 )
 
@@ -28,10 +30,45 @@ def _task_json(task: Task) -> dict:
     return task_dict(task)
 
 
+def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> list[Task]:
+    """The user's durable tasks, newest first, cap 200 — v1 is user-scoped
+    (cross-project), unlike the legacy adapter's current-project scope; the
+    optional ``project_id`` narrows to one project (the UI views' scope)."""
+    stmt = select(Task).where(Task.owner_id == user_id)
+    if project_id:
+        stmt = stmt.where(Task.project_id == project_id)
+    return db.scalars(stmt.order_by(Task.created_at.desc()).limit(200)).all()
+
+
 @router.get("")
 def list_tasks(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(Task).where(Task.owner_id == user.id).order_by(Task.created_at.desc()).limit(200)).all()
     return [_task_json(row) for row in rows]
+
+
+@router.get("/stream")
+def stream_user_tasks(
+    request: Request,
+    user: User = Depends(require_authenticated_user),
+    project_id: str | None = None,
+) -> StreamingResponse:
+    """Aggregate task event stream: ONE connection carries the snapshots +
+    lifecycle events of the user's tasks (all projects, or one when
+    ``project_id`` is given), each frame tagged with ``task_id``. Replays
+    ``snapshot_all`` on connect so a reconnect self-heals the full state. The
+    durable-side replacement for the legacy ``/api/tasks/stream`` (Q9): the
+    per-task ``/{task_id}/events`` endpoint stays for direct consumers; 500 ms
+    polling should move here."""
+    return StreamingResponse(
+        task_views.aggregate_stream(
+            lambda db: _user_tasks(db, user.id, project_id),
+            request.cookies.get(settings.session_cookie),
+            user.id,
+            request.is_disconnected,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{task_id}")
@@ -106,3 +143,8 @@ def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Ses
 @router.post("/{task_id}/cancel")
 def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     return cancel_task_for_user(task_id, user=user, db=db)
+
+
+@router.post("/{task_id}/retry")
+def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    return retry_task_for_user(task_id, user=user, db=db)

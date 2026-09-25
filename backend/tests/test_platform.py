@@ -1561,33 +1561,48 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
         session = load_session(db, token, touch=False)
         assert session is not None
         ctx = AuthContext(user=session.user, session=session)
-    request = Request({
-        "type": "http", "method": "GET", "path": "/api/tasks/stream",
-        "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
-        "query_string": b"",
-    })
+    # The body re-checks ``request.is_disconnected`` every poll, so the fake
+    # request needs a receive channel. One shared wire: it stays silent until
+    # BOTH readers below have seen their chunks, then reports the disconnect —
+    # each stream (the generator's non-blocking peek, and starlette's
+    # disconnect listener) reads it independently.
+    disconnected = asyncio.Event()
+
+    async def wire_receive():
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    request = Request(
+        {
+            "type": "http", "method": "GET", "path": "/api/tasks/stream",
+            "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
+            "query_string": b"",
+        },
+        receive=wire_receive,
+    )
+
+    done = 0
 
     async def drive(num_chunks: int) -> tuple:
+        nonlocal done
         chunks: list = []
         start: dict = {}
-        got_all = asyncio.Event()
-
-        async def receive():
-            await got_all.wait()
-            return {"type": "http.disconnect"}
 
         async def send(message: dict) -> None:
+            nonlocal done
             if message["type"] == "http.response.start":
                 start.update(message)
             elif message["type"] == "http.response.body" and message.get("body"):
                 chunks.append(message["body"])
-                if len(chunks) >= num_chunks:
-                    got_all.set()
+                if len(chunks) == num_chunks:
+                    done += 1
+                    if done >= 2:
+                        disconnected.set()
 
         started = time.monotonic()
         await asyncio.wait_for(
             api_tasks.stream_all_tasks(request, ctx)(
-                {"type": "http", "headers": []}, receive, send,
+                {"type": "http", "headers": []}, wire_receive, send,
             ),
             timeout=15,
         )

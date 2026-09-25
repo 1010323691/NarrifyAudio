@@ -8,12 +8,13 @@ import sqlalchemy as sa
 import pytest
 from sqlalchemy.orm import Session
 
-from backend.api.tasks import _durable_event_payload, _durable_owned, _durable_snapshot
+from backend.api.tasks import _durable_owned
 from backend.core import config as core_config
 from backend.platform import quota, task_context, task_worker
 from backend.platform.engine_task_executor import execute_engine_task
 from backend.platform.task_contracts import TaskClaim, TaskExecutionError
 from sqlalchemy.dialects import postgresql
+from backend.services import task_views
 from backend.services import tasks as task_service
 from backend.platform.database import Base
 from backend.platform.models import TaskEvent, User
@@ -103,7 +104,7 @@ def test_reconnected_snapshot_uses_latest_events_and_preserves_phase():
             created_at=datetime.now(timezone.utc), started_at=None, finished_at=None,
             result=None, error_message="",
         )
-        snapshot = _durable_snapshot(db, task)
+        snapshot = task_views.task_snapshot(db, task)
     engine.dispose()
     assert snapshot["phase"] == "rendering"
     assert snapshot["current"] == "part 1"
@@ -158,7 +159,7 @@ def test_cancel_queued_task_cancels_immediately_once(monkeypatch):
 
 
 def test_lifecycle_control_events_emit_authoritative_status_snapshot(monkeypatch):
-    monkeypatch.setattr("backend.api.tasks._durable_snapshot", lambda _db, task: {"status": task.status})
+    monkeypatch.setattr("backend.services.task_views.task_snapshot", lambda _db, task: {"status": task.status})
     for event_type, status in (
         ("retry_requested", "pending"),
         ("retry_scheduled", "pending"),
@@ -166,10 +167,10 @@ def test_lifecycle_control_events_emit_authoritative_status_snapshot(monkeypatch
         ("dispatch_recovered", "pending"),
         ("attempt_started", "running"),
     ):
-        task = SimpleNamespace(status=status)
+        task = SimpleNamespace(id="task", status=status)
         event = SimpleNamespace(event_type=event_type, payload={"status": status})
-        mapped = _durable_event_payload(object(), task, event)
-        assert mapped == {"type": "status", "status": status, "task": {"status": status}}
+        mapped = task_views.event_frame(object(), task, event)
+        assert mapped == {"type": "status", "status": status, "task_id": "task", "task": {"status": status}}
 
 
 def test_worker_rejects_unsafe_bgm_paths_from_preexisting_tasks():
