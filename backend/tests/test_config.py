@@ -41,26 +41,11 @@ def test_tts_config_pause_defaults():
     assert t.pause_same_speaker_ms == 250
 
 
-def test_tts_config_concurrency_placeholder():
-    assert TTSConfig().parallel_workers == 1
-
-
 def test_tts_config_batch_concurrency_default():
-    # 一键合成 (batch) 并发段数 defaults to 4 — distinct from parallel_workers (make-clones).
     assert TTSConfig().batch_concurrency == 80
-    assert TTSConfig().parallel_workers == 1
 
 
-def test_tts_config_keeps_legacy_fields():
-    # An existing config/app.json still round-trips: legacy API fields survive.
-    t = TTSConfig()
-    assert t.api_base == ""
-    assert t.api_key == ""
-    assert t.voice == ""
-    assert t.concurrency == 1
-
-
-def test_retired_tts_settings_survive_app_config_round_trip():
+def test_retired_tts_settings_are_dropped_from_app_config():
     config = AppConfig.model_validate({
         "tts": {
             "api_base": "https://legacy.example/v1",
@@ -73,12 +58,9 @@ def test_retired_tts_settings_survive_app_config_round_trip():
     })
 
     restored = AppConfig.model_validate(config.model_dump())
-    assert restored.tts.api_base == "https://legacy.example/v1"
-    assert restored.tts.api_key == "preserve-user-value"
-    assert restored.tts.voice == "legacy-voice"
-    assert restored.tts.concurrency == 3
-    assert restored.tts.parallel_workers == 4
-    assert restored.persona_prompts.advanced_prompt == "user-authored prompt"
+    retired_tts = {"api_base", "api_key", "voice", "concurrency", "parallel_workers"}
+    assert not retired_tts & restored.tts.model_dump().keys()
+    assert "advanced_prompt" not in restored.persona_prompts.model_dump()
 
 
 # --------------------------------------------------------------------------- #
@@ -119,7 +101,6 @@ def test_app_config_includes_persona_prompts():
     cfg = AppConfig()
     assert cfg.persona_prompts.system_prompt == ""
     assert cfg.persona_prompts.user_prompt == ""
-    assert cfg.persona_prompts.advanced_prompt == ""
 
 
 def test_app_config_round_trips():
@@ -283,6 +264,18 @@ def test_update_config_requires_workspace(sandbox):
 def test_update_config_writes_workspace_and_forces_pointer(sandbox):
     ws = sandbox / "MyBook"
     core_config.init_workspace_config(ws)  # seeds ws/config/app.json
+    workspace_config = ws / "config" / "app.json"
+    old = _read(workspace_config)
+    old["tts"].update({
+        "api_base": "https://legacy.example/v1",
+        "api_key": "retired-provider-key",
+        "voice": "legacy-voice",
+        "concurrency": 3,
+        "parallel_workers": 4,
+    })
+    old["persona_prompts"]["advanced_prompt"] = "retired prompt"
+    workspace_config.write_text(json.dumps(old), encoding="utf-8")
+    core_config.reset_config_cache()
     core_config.set_workspace_pointer(str(ws))
 
     cfg = core_config.update_config({"tts": {"batch_concurrency": 5}})
@@ -290,7 +283,11 @@ def test_update_config_writes_workspace_and_forces_pointer(sandbox):
     assert cfg.paths.working_dir == str(ws)  # forced to the workspace itself
 
     # The value landed in the workspace config; the ROOT template is untouched:
-    assert _read(ws / "config" / "app.json")["tts"]["batch_concurrency"] == 5
+    saved = _read(workspace_config)
+    assert saved["tts"]["batch_concurrency"] == 5
+    retired_tts = {"api_base", "api_key", "voice", "concurrency", "parallel_workers"}
+    assert not retired_tts & saved["tts"].keys()
+    assert "advanced_prompt" not in saved["persona_prompts"]
     assert _read(sandbox / "app.json")["paths"]["working_dir"] == str(ws)
 
 

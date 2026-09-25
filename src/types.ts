@@ -439,8 +439,6 @@ export interface AppConfig {
     align_tolerance: number
   }
   tts: {
-    /** 遗留字段（无读取方，仅为旧配置 round-trip 保留）。 */
-    parallel_workers: number
     /** 长度排序后每批最多容纳的行数；合成支持 1..128。 */
     batch_concurrency: number
     /** 音频合成页的自动批量开关。 */
@@ -460,7 +458,6 @@ export interface AppConfig {
   persona_prompts: {
     system_prompt: string
     user_prompt: string
-    advanced_prompt: string
   }
   generation: {
     chunk_size: number

@@ -73,20 +73,12 @@ class TTSConfig(BaseModel):
     # inserted between segments, per-speaker vs. speaker-change (ms).
     pause_between_speakers_ms: int = 500
     pause_same_speaker_ms: int = 250
-    # 角色配音·阶段 2（克隆）的并行 TTS 子进程数（每个子进程各自加载一次模型，显存随之增加）。
-    parallel_workers: int = 1
     # 正常组包仅按长度排序后按此上限切批；保留超时减半与后续恢复。
     batch_concurrency: int = 80
     # When enabled, the worker selects the per-batch row cap from measured safety tiers.
     batch_auto: bool = False
     # 可复现 seed；不是组包限制。
     batch_seed: int = -1
-    # Legacy API-provider fields, unused by the local engine, kept so an existing
-    # config/app.json still loads (and round-trips) cleanly.
-    api_base: str = ""
-    api_key: str = ""
-    voice: str = ""
-    concurrency: int = 1
 
 
 class BGMConfig(BaseModel):
@@ -110,7 +102,6 @@ class PersonaPromptsConfig(BaseModel):
     # to the bundled defaults in ``backend/engines/persona_prompts.py``.
     system_prompt: str = ""
     user_prompt: str = ""
-    advanced_prompt: str = ""
 
 
 class FFmpegConfig(BaseModel):
