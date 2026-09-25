@@ -1488,6 +1488,38 @@ def test_admin_memory_metrics_use_container_cgroup_limit(tmp_path):
     assert _memory_usage(8_000_000, tmp_path) == (1_500_000, 2_000_000)
 
 
+def test_admin_gpu_sample_is_ttl_cached(monkeypatch):
+    """Q20: the Admin page refreshes every ~15 s and each poll hits BOTH
+    /overview and /system — both read the same TTL-cached nvidia-smi sample,
+    so a poll interval costs one spawn, not two (and idle polls inside the
+    TTL window cost none)."""
+    import time
+
+    from backend.api import admin
+
+    samples: list[list[dict]] = []
+
+    def fake_sample() -> list[dict]:
+        rows = [{"index": 0, "name": "Test GPU"}]
+        samples.append(rows)
+        return rows
+
+    monkeypatch.setattr(admin, "_sample_gpus", fake_sample)
+    monkeypatch.setattr(admin, "_gpu_sample", None)
+
+    try:
+        first = admin._gpu_status()
+        assert admin._gpu_status() is first
+        assert len(samples) == 1
+
+        # A sample older than the TTL is re-sampled on the next call.
+        admin._gpu_sample = (time.monotonic() - admin._GPU_SAMPLE_TTL_SECONDS - 1, first)
+        assert admin._gpu_status() == first
+        assert len(samples) == 2
+    finally:
+        admin._gpu_sample = None
+
+
 def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
     """Q4: the SSE body must be an *async* generator. Starlette bridges sync
     generators through ``iterate_in_threadpool`` — one thread-pool worker per

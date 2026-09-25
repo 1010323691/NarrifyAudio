@@ -6,6 +6,7 @@ labels retain their legacy names for the existing task UI.
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -501,6 +502,42 @@ class MixRequest(BaseModel):
     chapters: list[str]
 
 
+def _validate_mix_chapter(layout, stem: str, entry: dict, lib_dir: Path, ffprobe_path: str) -> None:
+    """One chapter's pre-submission guard (raises HTTPException on a doomed mix).
+
+    Runs concurrently across chapters (Q20): the per-chapter ffprobe used to
+    serialize, so submitting N chapters cost N sequential probes of latency.
+    The engine-side guards are unchanged — this only fails the request early.
+    """
+    narration = Bgm._find_narration(layout, stem)
+    if narration is None:
+        raise HTTPException(400,
+            f"未找到旁白音频（06_audio_merge/{stem}.mp3），请先完成音频合并。")
+    m = entry.get("music")
+    if m and not (lib_dir / m).is_file():
+        raise HTTPException(400,
+            f"音乐库中找不到 {m}，请先到「音乐库」页检查或重新匹配（{stem}）。")
+    # 段落级时间轴的前置守卫——不让「⚠ 行」发起必败任务：时间轴缺失/过期
+    #（旁白时长变化）/ span 曲目出库 → 400（引擎侧同守卫）。章节级匹配
+    # 若只重置了 assignment.segment，但段落分析和时间轴仍有效，也继续认这份结果。
+    tl = Bgm.load_segment_timeline(layout, stem, entry)
+    if entry.get("segment") or tl is not None:
+        if tl is None:
+            raise HTTPException(
+                400, f"该章没有时间轴，请重新进行段落分析（{stem}）。")
+        d, _perr = probe_duration(narration, ffprobe_path)
+        if (d > 0
+                and abs(d - float(tl.get("duration") or 0.0)) > Bgm._STALE_TOLERANCE_S):
+            raise HTTPException(
+                400, f"时间轴已过期（旁白时长变化），请重新进行段落分析（{stem}）。")
+        for sp in tl.get("timeline") or []:
+            mid = sp.get("music_id") or ""
+            if not (lib_dir / mid).is_file():
+                raise HTTPException(
+                    400,
+                    f"音乐库中找不到 {mid}，请先到「音乐库」页检查或重新匹配（{stem}）。")
+
+
 @router.post("/mix")
 def run_mix(
     req: MixRequest,
@@ -515,39 +552,34 @@ def run_mix(
         raise HTTPException(400, "请选择要混音的章节。")
     data = Bgm.load_assignments(layout)
     chapters = data.get("chapters") or {}
-    lib_dir = core_paths.MUSIC_LIBRARY_DIR
-    cfg = get_config()
+    entries: dict[str, dict] = {}
     for s in stems:
         e = chapters.get(s)
         if not isinstance(e, dict):
             raise HTTPException(400, f"该章从未匹配，请先匹配（{s}）。")
-        narration = Bgm._find_narration(layout, s)
-        if narration is None:
-            raise HTTPException(400,
-                f"未找到旁白音频（06_audio_merge/{s}.mp3），请先完成音频合并。")
-        m = e.get("music")
-        if m and not (lib_dir / m).is_file():
-            raise HTTPException(400,
-                f"音乐库中找不到 {m}，请先到「音乐库」页检查或重新匹配（{s}）。")
-        # 段落级时间轴的前置守卫——不让「⚠ 行」发起必败任务：时间轴缺失/过期
-        #（旁白时长变化）/ span 曲目出库 → 400（引擎侧同守卫）。章节级匹配
-        # 若只重置了 assignment.segment，但段落分析和时间轴仍有效，也继续认这份结果。
-        tl = Bgm.load_segment_timeline(layout, s, e)
-        if e.get("segment") or tl is not None:
-            if tl is None:
-                raise HTTPException(
-                    400, f"该章没有时间轴，请重新进行段落分析（{s}）。")
-            d, _perr = probe_duration(narration, cfg.ffmpeg.ffprobe_path)
-            if (d > 0
-                    and abs(d - float(tl.get("duration") or 0.0)) > Bgm._STALE_TOLERANCE_S):
-                raise HTTPException(
-                    400, f"时间轴已过期（旁白时长变化），请重新进行段落分析（{s}）。")
-            for sp in tl.get("timeline") or []:
-                mid = sp.get("music_id") or ""
-                if not (lib_dir / mid).is_file():
-                    raise HTTPException(
-                        400,
-                        f"音乐库中找不到 {mid}，请先到「音乐库」页检查或重新匹配（{s}）。")
+        entries[s] = e
+    # Q20: the per-chapter ffprobe prechecks ran in parallel — a multi-chapter
+    # mix submission no longer blocks on N sequential probe spawns. The first
+    # failure in selection order keeps the 400 semantics.
+    failures: dict[str, HTTPException] = {}
+    lib_dir = core_paths.MUSIC_LIBRARY_DIR
+    cfg = get_config()
+    ffprobe_path = cfg.ffmpeg.ffprobe_path
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(_validate_mix_chapter, layout, s, entries[s], lib_dir, ffprobe_path): s
+            for s in stems
+        }
+        for future in as_completed(futures):
+            exc = future.exception()
+            if exc is None:
+                continue
+            if isinstance(exc, HTTPException):
+                failures[futures[future]] = exc
+            else:
+                raise exc
+    if failures:
+        raise failures[min(failures, key=lambda s: stems.index(s))]
     audio_conflicts = _durable_audio_conflicts(stems, ctx, db)
     if audio_conflicts:
         raise HTTPException(

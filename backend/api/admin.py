@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal
@@ -586,7 +588,15 @@ def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = 
     return {"id": task.id, "status": task.status, "attempt_no": attempts}
 
 
-def _gpu_status() -> list[dict]:
+# The Admin page auto-refreshes every ~15 s and each poll hits BOTH /overview
+# and /system — one nvidia-smi sample per interval is plenty, so the spawn is
+# cached per process with a short TTL (Q20).
+_GPU_SAMPLE_TTL_SECONDS = 5.0
+_gpu_sample_lock = threading.Lock()
+_gpu_sample: tuple[float, list[dict]] | None = None
+
+
+def _sample_gpus() -> list[dict]:
     binary = shutil.which("nvidia-smi")
     if not binary:
         return []
@@ -628,6 +638,23 @@ def _gpu_status() -> list[dict]:
         return rows
     except (OSError, subprocess.SubprocessError):
         return []
+
+
+def _gpu_status() -> list[dict]:
+    """The TTL-cached sample: concurrent polls within the window share one
+    spawn (a second caller racing a stale sample re-uses its result)."""
+    global _gpu_sample
+    now = time.monotonic()
+    with _gpu_sample_lock:
+        if _gpu_sample is not None and now - _gpu_sample[0] < _GPU_SAMPLE_TTL_SECONDS:
+            return _gpu_sample[1]
+    rows = _sample_gpus()
+    with _gpu_sample_lock:
+        current = _gpu_sample
+        if current is None or time.monotonic() - current[0] >= _GPU_SAMPLE_TTL_SECONDS:
+            _gpu_sample = (time.monotonic(), rows)
+            return rows
+        return current[1]
 
 
 def _list_workers(db: Session) -> list[dict]:
