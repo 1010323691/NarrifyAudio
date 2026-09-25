@@ -1038,7 +1038,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
               {{ row.data.assignment.reason }}
             </p>
             <p v-if="row.failedTask" class="bgm-row__note text-xs text-destructive">{{ row.failedTask.error || '任务失败' }}</p>
-            <div v-if="row.task && (row.task.status === 'running' || row.task.status === 'paused')" class="bgm-row__log">
+            <div v-if="row.task && row.task.status === 'running'" class="bgm-row__log">
               <LiveLogPanel :task="row.task" :max-height-class="'h-40'" />
             </div>
           </div>

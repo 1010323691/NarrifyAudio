@@ -266,7 +266,7 @@ onActivated(() => {
   void refreshRows()
   reattachTask()
   const st = task.value?.status
-  if (task.value && (st === 'pending' || st === 'running' || st === 'paused')) startStatusPolling()
+  if (task.value && (st === 'pending' || st === 'running')) startStatusPolling()
 })
 onDeactivated(() => stopStatusPolling(false)) // hidden: no timer, no requests
 onUnmounted(() => stopStatusPolling(false)) // last resort (keep-alive usually prevents this)

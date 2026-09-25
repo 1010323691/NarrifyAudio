@@ -375,7 +375,6 @@ export interface GenerateFilesResult {
 export type TaskStatus =
   | 'pending'
   | 'running'
-  | 'paused'
   | 'cancelled'
   | 'succeeded'
   | 'failed'
@@ -423,7 +422,7 @@ export interface TaskSnapshot {
   /** Monotonic creation order (backend `itertools.count`) — batch order after reload. */
   seq: number
 }
-export type TaskControl = 'cancel' | 'pause' | 'resume' | 'retry'
+export type TaskControl = 'cancel' | 'retry'
 
 // ------------------------------ config ------------------------------
 export interface AppConfig {

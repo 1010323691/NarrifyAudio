@@ -6,7 +6,7 @@ export function listTasks(): Promise<TaskSnapshot[]> {
   return http.get<TaskSnapshot[]>('/api/tasks')
 }
 
-/** cancel / pause / resume / retry. */
+/** cancel / retry. */
 export function controlTask(id: string, action: TaskControl): Promise<TaskSnapshot> {
   return http.post<TaskSnapshot>(`/api/tasks/${id}/${action}`)
 }

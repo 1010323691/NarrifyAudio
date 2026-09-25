@@ -27,7 +27,7 @@ const logs = computed(() => props.task?.logs ?? [])
 
 // While the task is in a live state the step row spins; once it lands in a terminal state
 // (succeeded / failed / cancelled) the spinner stops so a finished run doesn't look busy.
-const ACTIVE = ['pending', 'running', 'paused']
+const ACTIVE = ['pending', 'running']
 const isActive = computed(() => (props.task ? ACTIVE.includes(props.task.status) : false))
 
 // Follow the log to its bottom while the user is reading the tail (newest line is last).

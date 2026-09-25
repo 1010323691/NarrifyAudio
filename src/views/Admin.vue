@@ -101,7 +101,7 @@ function tone(status: string): 'positive' | 'warning' | 'negative' | 'neutral' {
 }
 function statusLabel(status: string) {
   return ({ healthy: '正常', warning: '警告', error: '异常', unknown: '未采集', pending: '排队中', queued: '排队中',
-    running: '运行中', processing: '运行中', paused: '已暂停', retrying: '重试中', succeeded: '已完成', completed: '已完成',
+    running: '运行中', processing: '运行中', retrying: '重试中', succeeded: '已完成', completed: '已完成',
     failed: '失败', timeout: '超时', cancelled: '已取消', idle: '空闲', offline: '离线' } as Record<string, string>)[status] ?? status
 }
 async function load() {
@@ -402,7 +402,7 @@ async function cleanupTemp() {
       <div class="admin-title"><div><h2>任务 / 队列</h2><p>管理员运维视图 · 最近 {{ tasks.length }} 条</p></div>
         <div class="controls"><select v-model="taskStatus" aria-label="任务状态"><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><Input v-model="taskSearch" placeholder="任务 ID、类型或用户" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button></div>
       </div>
-      <div class="metric-grid task-summary"><div class="metric"><span>排队中</span><strong>{{ metricCount(taskStatusSummary, 'pending', 'queued', 'retrying') }}</strong></div><div class="metric"><span>运行中</span><strong>{{ metricCount(taskStatusSummary, 'running', 'cancelling', 'paused') }}</strong></div><div class="metric"><span>已完成</span><strong>{{ metricCount(taskStatusSummary, 'succeeded') }}</strong></div><div class="metric"><span>失败 / 超时</span><strong>{{ metricCount(taskStatusSummary, 'failed', 'timeout') }}</strong></div><div class="metric"><span>已取消</span><strong>{{ metricCount(taskStatusSummary, 'cancelled') }}</strong></div></div>
+      <div class="metric-grid task-summary"><div class="metric"><span>排队中</span><strong>{{ metricCount(taskStatusSummary, 'pending', 'queued', 'retrying') }}</strong></div><div class="metric"><span>运行中</span><strong>{{ metricCount(taskStatusSummary, 'running', 'cancelling') }}</strong></div><div class="metric"><span>已完成</span><strong>{{ metricCount(taskStatusSummary, 'succeeded') }}</strong></div><div class="metric"><span>失败 / 超时</span><strong>{{ metricCount(taskStatusSummary, 'failed', 'timeout') }}</strong></div><div class="metric"><span>已取消</span><strong>{{ metricCount(taskStatusSummary, 'cancelled') }}</strong></div></div>
       <Card><CardContent class="pad"><div class="admin-table"><table class="wide-table"><thead><tr><th>类型 / ID</th><th>用户</th><th>项目</th><th>状态</th><th>Worker</th><th>创建时间</th><th>操作</th></tr></thead>
         <tbody><tr v-for="task in tasks" :key="task.id"><td><strong>{{ task.task_type }}</strong><small class="mono">{{ task.id }}</small></td><td>{{ task.owner_username }}</td><td class="mono">{{ task.project_id?.slice(0, 8) ?? '—' }}</td><td><StatusPill :label="statusLabel(task.status)" :tone="tone(task.status)" /></td><td class="clip" :title="task.worker_id ?? ''">{{ task.worker_id || '—' }}</td><td>{{ date(task.created_at) }}</td><td><Button variant="outline" size="sm" @click="selectedTask = task">详情</Button></td></tr></tbody></table></div><p v-if="!tasks.length" class="admin-empty">没有匹配的任务</p></CardContent></Card>
       <Card v-if="selectedTask"><CardHeader><CardTitle>任务详情</CardTitle></CardHeader><CardContent class="admin-form">

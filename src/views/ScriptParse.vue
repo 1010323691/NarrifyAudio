@@ -80,8 +80,6 @@ function jobState(task: TaskSnapshot | undefined): JobState {
       return { label: '失败', variant: 'destructive' }
     case 'cancelled':
       return { label: '已取消', variant: 'outline' }
-    case 'paused':
-      return { label: '已暂停', variant: 'secondary' }
     case 'running':
       // Still waiting on the concurrency gate reads as "queued", not actively working.
       // （后端排队文案含「排队」二字，勿改文案否则此判定失效。）
@@ -124,7 +122,7 @@ const jobRows = computed<JobRow[]>(() =>
       queueIndex: idx + 1,
       queueTotal: fileJobs.value.length,
       progress: task?.progress ?? 0,
-      active: status === 'pending' || status === 'running' || status === 'paused',
+      active: status === 'pending' || status === 'running',
       error: task?.error || '',
     }
   }),

@@ -50,7 +50,7 @@ function projectState(project: ProjectSummary) {
 }
 
 function statusLabel(status: string) {
-  return ({ pending: '等待中', queued: '排队中', running: '处理中', paused: '已暂停', retrying: '重试中',
+  return ({ pending: '等待中', queued: '排队中', running: '处理中', retrying: '重试中',
     succeeded: '已完成', failed: '失败', timeout: '超时', cancelled: '已取消', cancelling: '正在取消' } as Record<string, string>)[status] || status
 }
 

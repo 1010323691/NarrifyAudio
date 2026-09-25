@@ -406,8 +406,8 @@ onActivated(() => {
               <p v-if="row.failedTask" class="mt-1 pl-7 text-xs text-destructive">
                 {{ row.failedTask.error || '合并失败' }}
               </p>
-              <!-- 日志面板仅在运行/暂停时渲染（防 N 个排队壳渲染 N 个空面板）。 -->
-              <div v-if="row.task && (row.task.status === 'running' || row.task.status === 'paused')" class="mt-2">
+              <!-- 日志面板仅在运行时渲染（防 N 个排队壳渲染 N 个空面板）。 -->
+              <div v-if="row.task && row.task.status === 'running'" class="mt-2">
                 <LiveLogPanel :task="row.task" :max-height-class="'h-40'" />
               </div>
             </div>

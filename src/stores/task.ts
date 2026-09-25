@@ -3,7 +3,7 @@ import { ref } from 'vue'
 import { controlTask, listTasks, streamAllTasks } from '@/api/tasks'
 import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
 
-const ACTIVE: TaskStatus[] = ['pending', 'running', 'paused']
+const ACTIVE: TaskStatus[] = ['pending', 'running']
 
 // Client-side cap on the display-only live LLM stream buffer (「流式反馈」 panel): it
 // bounds the in-memory tail; snapshot / terminal events replace the whole task,

@@ -180,7 +180,7 @@ const scope = ref(pipeline.activeScript || '')
 const script = computed(() => scope.value)
 
 // A phase is "running" while any of its tasks is active (drives the per-row 生成中/制作中 overlay).
-const ACTIVE: string[] = ['pending', 'running', 'paused']
+const ACTIVE: string[] = ['pending', 'running']
 const foundationRunning = computed(() => taskStore.tasks.some((t) => t.module === 'voices-foundation' && ACTIVE.includes(t.status)))
 const cloneRunning = computed(() => taskStore.tasks.some((t) => t.module === 'voices-clone' && ACTIVE.includes(t.status)))
 
