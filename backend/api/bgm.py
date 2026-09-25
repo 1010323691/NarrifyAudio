@@ -1,17 +1,11 @@
-"""BGM endpoints (背景音乐 · 章节气氛分析 / 匹配 / 手动干预 / 混音).
+"""BGM chapter analysis, matching, manual edits, and mixing endpoints.
 
-Label contracts (承重 — three pinned sites: backend regex ↔ frontend derivation
-↔ tests): analysis module ``bgm-analysis`` with label ``章节气氛分析：{stem}``;
-mix module ``bgm-mix`` with label ``背景音乐混音：{stem}``; paragraph analysis
-module ``bgm-segment`` with label ``段落分析：{stem}``. The in-flight guards
-extract the stem from the label tail with ``re.search(r"：(.+)$")`` — the same
-shape as the merge page's ``pkgOfLabel`` (take everything after the FIRST
-full-width colon; a stem may itself contain one).
+Long-running operations are submitted as durable Worker tasks. Snapshot module
+labels retain their legacy names for the existing task UI.
 """
 from __future__ import annotations
 
 import re
-import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -21,26 +15,19 @@ from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
 from ..core.config import get_config
-from ..core.concurrency import gate, merge_gate, set_concurrency, set_merge_concurrency
 from ..core.paths import get_layout, peek_layout
-from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import bgm as Bgm
-from ..engines import merge as Merge
 from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
 from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
-from ..services.legacy_batch import PREFETCH_DEPTH, run_bounded_task_coordinator
+from ..platform.legacy_tasks import active_durable_payloads, active_durable_targets, submit_legacy_engine_task
 from . import _common
 
 router = APIRouter(prefix="/api/bgm", tags=["bgm"])
 
-# Same prefetch invariant as the merge batch: tasks waiting for a slot stay ≤ 4.
-BGM_PREFETCH_DEPTH = PREFETCH_DEPTH
-_run_bgm_coordinator = run_bounded_task_coordinator
-
+# Durable task types dispatched by the task worker.
 ANALYSIS_MODULE = "bgm-analysis"
 MIX_MODULE = "bgm-mix"
 SEGMENT_MODULE = "bgm-segment"
@@ -50,68 +37,34 @@ SEGMENT_LABEL = "段落分析"
 
 
 # --------------------------------------------------------------------------- #
-# in-flight guards + coordinator (no registry / no stop flag — cancel = the
-# frontend's per-task control; a cancelled PENDING shell terminates in place and
-# drops out of the dispatch search naturally)
+# Durable in-flight guards.
 # --------------------------------------------------------------------------- #
 
-def _inflight_bgm_stems(module: str) -> set[str]:
-    """Stems (the label tail ``：{stem}``) of non-terminal tasks of ``module``.
-
-    The same-chapter in-flight guard: two analysis (or mix) tasks on one chapter
-    would race on the same JSON entry / output file. Non-conflicting chapters may
-    still join a running batch — their tasks simply queue behind the gate.
-    """
-    out = set()
-    for t in get_task_manager().list():
-        if t.module == module and t.status not in TERMINAL:
-            m = re.search(r"：(.+)$", t.label)
-            if m:
-                out.add(m.group(1))
-    return out
-
-
-def _inflight_audio_stems(stems: list[str]) -> list[str]:
-    """Return chapters whose TTS batch or merge task can change their audio.
-
-    BGM paragraph analysis/matching reads the 03 script and 05 manifest, while
-    mixing also reads 06. A task without an inspectable target is treated as a
-    conflict conservatively because the batch endpoint's ``script=None`` means
-    "most recent" and merge task labels are the only stable public identity.
-    """
-    wanted = {
-        TtsBatch.package_for(Path(f"{stem}.json")): stem for stem in stems
-    }
-    conflicts: set[str] = set()
-    for task in get_task_manager().list():
-        if task.module not in {"tts-batch", "merge"} or task.status in TERMINAL:
-            continue
-        targets: set[str] | None
-        if task.module == "merge":
-            match = re.search(r"：(.+)$", task.label)
-            targets = {match.group(1)} if match else None
+def _durable_audio_conflicts(stems: list[str], ctx: AuthContext, db: Session) -> list[str]:
+    """Find chapters whose active durable TTS batch or merge can change audio."""
+    wanted = {TtsBatch.package_for(Path(f"{stem}.json")): stem for stem in stems}
+    active_packages = active_durable_targets(
+        task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
+    )
+    batch_payloads = active_durable_payloads(task_type="tts.batch", ctx=ctx, db=db)
+    batch_payload_targets: set[str] = set()
+    has_unscoped_batch = False
+    for payload in batch_payloads:
+        scripts = payload.get("scripts")
+        script = payload.get("script")
+        if isinstance(scripts, list) and scripts:
+            batch_payload_targets.update(str(value) for value in scripts)
+        elif isinstance(script, str) and script:
+            batch_payload_targets.add(script)
         else:
-            func_name = getattr(getattr(task, "_func", None), "__name__", "")
-            args = getattr(task, "_args", ())
-            if func_name == "synthesize_multi":
-                scripts = args[0] if args else None
-                targets = (
-                    {TtsBatch.package_for(Path(script)) for script in scripts}
-                    if isinstance(scripts, (list, tuple)) and scripts else None
-                )
-            else:
-                script = args[1] if len(args) > 1 else None
-                targets = (
-                    {TtsBatch.package_for(Path(script))}
-                    if isinstance(script, str) and script else None
-                )
-        if targets is None:
-            conflicts.update(wanted.values())
-        else:
-            conflicts.update(
-                stem for package, stem in wanted.items() if package in targets
-            )
-    return sorted(conflicts)
+            # A missing script means "most recent" and cannot be mapped safely.
+            has_unscoped_batch = True
+    if has_unscoped_batch:
+        return list(stems)
+    active_packages.update(
+        TtsBatch.package_for(Path(script)) for script in batch_payload_targets if script
+    )
+    return sorted(stem for package, stem in wanted.items() if package in active_packages)
 
 
 def _validated_stems(layout, stems: list[str]) -> list[str]:
@@ -277,7 +230,7 @@ def _source_txt_base(layout) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# LLM 章节气氛分析（PENDING 壳 + 协调者，共享 LLM 闸）
+# Durable task submission and conflict guards.
 # --------------------------------------------------------------------------- #
 
 class AnalyzeRequest(BaseModel):
@@ -294,14 +247,7 @@ def run_analyze(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Start one analysis Task per selected chapter (LLM slot = the shared
-    process-wide gate; slot scope = the whole task — no check phase).
-
-    Guards: no workspace 409 → empty selection 400 → per-stem (traversal /
-    missing file) 400 → model not configured 400 → same-chapter analysis
-    in-flight 409 (non-conflicting chapters allowed). Returns
-    ``{"task_ids": [...], "chapters": [{stem, task_id}, ...]}``.
-    """
+    """Submit one durable analysis task per selected chapter."""
     _common.require_workspace()
     layout = get_layout()
     stems = _validated_stems(layout, req.chapters or [])
@@ -310,47 +256,34 @@ def run_analyze(
     cfg = get_config()
     if not cfg.llm.model_name:
         raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
-    conflicts = [s for s in stems if s in _inflight_bgm_stems(ANALYSIS_MODULE)]
-    if isinstance(ctx, AuthContext):
-        conflicts.extend(
-            s for s in stems
-            if s in active_durable_targets(
-                task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db,
-            ) and s not in conflicts
-        )
+    active = active_durable_targets(task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db)
+    conflicts = [stem for stem in stems if stem in active]
+    active_matches = active_durable_targets(
+        task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
+    )
+    active_mixes = active_durable_targets(task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db)
+    conflicts.extend(
+        stem for stem in stems
+        if (stem in active_matches or stem in active_mixes) and stem not in conflicts
+    )
     if conflicts:
         raise HTTPException(409, "以下章节已有分析任务在途：" + "、".join(conflicts))
-    if isinstance(ctx, AuthContext):
-        created = []
-        for stem in stems:
-            task = submit_legacy_engine_task(
-                task_type="bgm.analysis",
-                label=f"{ANALYSIS_LABEL}：{stem}",
-                payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-                ctx=ctx,
-                db=db,
-                idempotency_prefix=f"bgm-analysis:{stem}",
-            )
-            created.append({"stem": stem, "task_id": task["id"]})
-        return {"task_ids": [item["task_id"] for item in created], "chapters": created}
-    set_concurrency(cfg.generation.max_concurrency)
-    mgr = get_task_manager()
-    created = [
-        {"stem": s, "task_id": mgr.create(
-            ANALYSIS_MODULE, f"{ANALYSIS_LABEL}：{s}",
-            Bgm.analyze_chapter, s, cfg.llm, cfg.bgm, start=False,
-        ).id}
-        for s in stems
-    ]
-    threading.Thread(
-        target=_run_bgm_coordinator,
-        args=([c["task_id"] for c in created], gate), daemon=True,
-    ).start()
-    return {"task_ids": [c["task_id"] for c in created], "chapters": created}
+    created = []
+    for stem in stems:
+        task = submit_legacy_engine_task(
+            task_type="bgm.analysis",
+            label=f"{ANALYSIS_LABEL}：{stem}",
+            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"bgm-analysis:{stem}",
+        )
+        created.append({"stem": stem, "task_id": task["id"]})
+    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
 
 
 # --------------------------------------------------------------------------- #
-# LLM 段落分析（PENDING 壳 + 协调者，共享 LLM 闸）
+# Durable task submission and conflict guards.
 # --------------------------------------------------------------------------- #
 
 class SegmentAnalyzeRequest(BaseModel):
@@ -363,19 +296,7 @@ def run_analyze_segment(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Start one paragraph-analysis Task per selected chapter (LLM slot = the
-    shared process-wide gate; slot scope = the whole task — all batches).
-
-    Guards: no workspace 409 → empty selection 400 → per-stem (traversal /
-    missing 02 / missing 03 script) 400 → model not configured 400 →
-    same-chapter paragraph-analysis in-flight 409 (non-conflicting chapters
-    allowed — they queue behind the gate). Returns
-    ``{"task_ids": [...], "chapters": [{stem, task_id}, ...]}``.
-
-    Label contract (承重 — three pinned sites, like analysis/mix): module
-    ``bgm-segment`` with label ``段落分析：{stem}`` — the ``：{stem}`` tail is
-    extracted by ``_inflight_bgm_stems`` / the frontend's ``stemOfLabel``.
-    """
+    """Submit one durable paragraph-analysis task per selected chapter."""
     _common.require_workspace()
     layout = get_layout()
     stems = _segment_validated_stems(layout, req.chapters or [])
@@ -384,48 +305,35 @@ def run_analyze_segment(
     cfg = get_config()
     if not cfg.llm.model_name:
         raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
-    conflicts = [s for s in stems if s in _inflight_bgm_stems(SEGMENT_MODULE)]
-    if isinstance(ctx, AuthContext):
-        conflicts.extend(
-            s for s in stems
-            if s in active_durable_targets(
-                task_type="bgm.segment", payload_key="stem", ctx=ctx, db=db,
-            ) and s not in conflicts
-        )
+    active = active_durable_targets(task_type="bgm.segment", payload_key="stem", ctx=ctx, db=db)
+    conflicts = [stem for stem in stems if stem in active]
+    active_matches = active_durable_targets(
+        task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
+    )
+    active_mixes = active_durable_targets(task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db)
+    conflicts.extend(
+        stem for stem in stems
+        if (stem in active_matches or stem in active_mixes) and stem not in conflicts
+    )
     if conflicts:
         raise HTTPException(409, "以下章节已有段落分析任务在途：" + "、".join(conflicts))
-    audio_conflicts = _inflight_audio_stems(stems)
+    audio_conflicts = _durable_audio_conflicts(stems, ctx, db)
     if audio_conflicts:
         raise HTTPException(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
-    if isinstance(ctx, AuthContext):
-        created = []
-        for stem in stems:
-            task = submit_legacy_engine_task(
-                task_type="bgm.segment",
-                label=f"{SEGMENT_LABEL}：{stem}",
-                payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-                ctx=ctx,
-                db=db,
-                idempotency_prefix=f"bgm-segment:{stem}",
-            )
-            created.append({"stem": stem, "task_id": task["id"]})
-        return {"task_ids": [item["task_id"] for item in created], "chapters": created}
-    set_concurrency(cfg.generation.max_concurrency)
-    mgr = get_task_manager()
-    created = [
-        {"stem": s, "task_id": mgr.create(
-            SEGMENT_MODULE, f"{SEGMENT_LABEL}：{s}",
-            Bgm.analyze_segment_chapter, s, cfg.llm, cfg.bgm, start=False,
-        ).id}
-        for s in stems
-    ]
-    threading.Thread(
-        target=_run_bgm_coordinator,
-        args=([c["task_id"] for c in created], gate), daemon=True,
-    ).start()
-    return {"task_ids": [c["task_id"] for c in created], "chapters": created}
+    created = []
+    for stem in stems:
+        task = submit_legacy_engine_task(
+            task_type="bgm.segment",
+            label=f"{SEGMENT_LABEL}：{stem}",
+            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"bgm-segment:{stem}",
+        )
+        created.append({"stem": stem, "task_id": task["id"]})
+    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
 
 
 # --------------------------------------------------------------------------- #
@@ -443,118 +351,61 @@ def run_match(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """(Re-)match the selected chapters (default: ALL existing) and rewrite the
-    assignments file once.
-
-    * ``mode="llm"`` / ``"random"`` — chapter-level tag matching (LLM analysis
-      cache + mechanical scoring). Guards: no workspace 409 → unknown mode 400
-      → per-stem 400 → same-chapter ANALYSIS in-flight 409 (would read a
-      half-written analysis; mix in-flight is NOT blocked). Locked chapters
-      are skipped wholesale (their entry is preserved verbatim).
-    * ``mode="segment"`` — REGENERATE the paragraph-level timelines (pure,
-      zero LLM: cached paragraph analysis + real 05 durations + the merge
-      pause rule). Guards: no workspace 409 → per-stem 400 (incl. missing 03
-      script) → same-chapter PARAGRAPH-ANALYSIS in-flight 409 (would read a
-      half-written analysis; mix in-flight is NOT blocked). Any engine error
-      (missing/stale analysis, missing 05/06, probe failure) → 400 with the
-      engine's actionable wording — and NOTHING was written (zero drop).
-      Writes ``08_bgm/timelines/<stem>.json`` + the assignment entries
-      (``segment: true``, ``mode="segment"``) in one transaction.
-    """
+    """Submit durable chapter-level matching or paragraph timeline tasks."""
     _common.require_workspace()
     layout = get_layout()
     if req.mode == "segment":
-        if req.chapters is None:
-            stems = Bgm.list_chapter_stems(layout)
-            if not stems:
-                raise HTTPException(400, "未找到任何章节文件（02_split_text/）。")
-        else:
-            stems = _segment_validated_stems(layout, req.chapters)
-            if not stems:
-                raise HTTPException(400, "请选择要匹配的章节。")
-        conflicts = [s for s in stems if s in _inflight_bgm_stems(SEGMENT_MODULE)]
-        if conflicts:
-            raise HTTPException(
-                409, "以下章节有段落分析任务在途（避免读取半成品分析）：" + "、".join(conflicts))
-        audio_conflicts = _inflight_audio_stems(stems)
-        if audio_conflicts:
-            raise HTTPException(
-                409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
-            )
-        cfg = get_config()
-        if isinstance(ctx, AuthContext):
-            conflicts = [
-                stem for stem in stems
-                if stem in active_durable_targets(
-                    task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
-                )
-            ]
-            if conflicts:
-                raise HTTPException(409, "以下章节已有匹配任务在途：" + "、".join(conflicts))
-            task = submit_legacy_engine_task(
-                task_type="bgm.match",
-                label=f"BGM 匹配（{req.mode}）：{len(stems)} 章",
-                payload={
-                    "chapters": stems,
-                    "mode": req.mode,
-                    "config": cfg.model_dump(mode="json"),
-                },
-                ctx=ctx,
-                db=db,
-                idempotency_prefix=f"bgm-match:{req.mode}",
-            )
-            return {"task_id": task["id"]}
-        try:
-            return Bgm.recompute_segment_timelines(
-                layout, stems, cfg.bgm.min_match_score,
-                ffprobe_path=cfg.ffmpeg.ffprobe_path,
-                pause_ms=cfg.tts.pause_between_speakers_ms or 500,
-                same_ms=cfg.tts.pause_same_speaker_ms or 250,
-                volume_base=cfg.bgm.volume,
-                volume_tiers=cfg.bgm.segment_volume_tiers,
-            )
-        except RuntimeError as e:
-            raise HTTPException(400, str(e))
-    if req.mode not in ("llm", "random"):
-        raise HTTPException(400, f"未知匹配模式：{req.mode!r}")
-    if req.chapters is None:
-        stems = Bgm.list_chapter_stems(layout)
-        if not stems:
-            raise HTTPException(400, "未找到任何章节文件（02_split_text/）。")
+        stems = (
+            _segment_validated_stems(layout, req.chapters)
+            if req.chapters is not None
+            else _segment_validated_stems(layout, Bgm.list_chapter_stems(layout))
+        )
     else:
-        stems = _validated_stems(layout, req.chapters)
-        if not stems:
-            raise HTTPException(400, "请选择要匹配的章节。")
-    conflicts = [s for s in stems if s in _inflight_bgm_stems(ANALYSIS_MODULE)]
-    if isinstance(ctx, AuthContext):
-        conflicts.extend(
-            s for s in stems
-            if s in active_durable_targets(
-                task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
-            ) and s not in conflicts
+        if req.mode not in ("llm", "random"):
+            raise HTTPException(400, f"未知匹配模式：{req.mode!r}")
+        stems = (
+            _validated_stems(layout, req.chapters)
+            if req.chapters is not None
+            else _validated_stems(layout, Bgm.list_chapter_stems(layout))
         )
-    if conflicts:
-        raise HTTPException(409, "以下章节有分析任务在途（避免读取半成品分析）：" + "、".join(conflicts))
-    if isinstance(ctx, AuthContext):
-        task = submit_legacy_engine_task(
-            task_type="bgm.match",
-            label=f"BGM 匹配（{req.mode}）：{len(stems)} 章",
-            payload={
-                "chapters": stems,
-                "mode": req.mode,
-                "config": get_config().model_dump(mode="json"),
-            },
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-match:{req.mode}",
+    if not stems:
+        raise HTTPException(400, "请选择要匹配的章节。")
+
+    active_matches = active_durable_targets(
+        task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
+    )
+    active_mixes = active_durable_targets(task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db)
+    mix_conflicts = [stem for stem in stems if stem in active_mixes]
+    if mix_conflicts:
+        raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(mix_conflicts))
+    if req.mode == "segment":
+        active_segments = active_durable_targets(
+            task_type="bgm.segment", payload_key="stem", ctx=ctx, db=db,
         )
-        return {"task_id": task["id"]}
-    return Bgm.match_stems(layout, stems, req.mode, get_config().bgm.min_match_score)
+        conflicts = [stem for stem in stems if stem in active_segments or stem in active_matches]
+        if conflicts:
+            raise HTTPException(409, "以下章节段落分析或匹配任务在途：" + "、".join(conflicts))
+        audio_conflicts = _durable_audio_conflicts(stems, ctx, db)
+        if audio_conflicts:
+            raise HTTPException(409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts))
+    else:
+        active_analyses = active_durable_targets(
+            task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db,
+        )
+        conflicts = [stem for stem in stems if stem in active_analyses or stem in active_matches]
+        if conflicts:
+            raise HTTPException(409, "以下章节分析或匹配任务在途：" + "、".join(conflicts))
 
+    task = submit_legacy_engine_task(
+        task_type="bgm.match",
+        label=f"BGM match ({req.mode}): {len(stems)} chapters",
+        payload={"chapters": stems, "mode": req.mode, "config": get_config().model_dump(mode="json")},
+        ctx=ctx,
+        db=db,
+        idempotency_prefix=f"bgm-match:{req.mode}",
+    )
+    return {"task_id": task["id"]}
 
-# --------------------------------------------------------------------------- #
-# 手动干预（同步写）：编辑标签 / 手动选曲 / 锁定
-# --------------------------------------------------------------------------- #
 
 class ChapterUpdateRequest(BaseModel):
     tags: dict[str, list[str]] | None = None
@@ -642,7 +493,7 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 混音（PENDING 壳 + 协调者，进程级 merge 闸）
+# Durable task submission and conflict guards.
 # --------------------------------------------------------------------------- #
 
 class MixRequest(BaseModel):
@@ -655,17 +506,7 @@ def run_mix(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Start one mix Task per selected chapter (gate = the process-wide
-    ``merge_gate()`` — ffmpeg/CPU/disk bound, same gate as audio merge).
-
-    Guards: no workspace 409 → empty selection 400 → per-stem (traversal /
-    missing 02 file / never matched / narration missing / music deleted /
-    — for ``segment`` chapters: timeline missing or STALE (narration duration
-    drift) / a span's track deleted from the library —) 400 → same-chapter
-    mix in-flight 409. A matched-but-no-BGM chapter (``music`` null) is
-    ALLOWED — its task takes the copy2 path (the 06 narration copied verbatim
-    is a finished product).
-    """
+    """Validate selected assignments and submit one durable mix task per chapter."""
     _common.require_workspace()
     layout = get_layout()
     stems = _validated_stems(layout, req.chapters or [])
@@ -706,48 +547,39 @@ def run_mix(
                     raise HTTPException(
                         400,
                         f"音乐库中找不到 {mid}，请先到「音乐库」页检查或重新匹配（{s}）。")
-    audio_conflicts = _inflight_audio_stems(stems)
+    audio_conflicts = _durable_audio_conflicts(stems, ctx, db)
     if audio_conflicts:
         raise HTTPException(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
-    conflicts = [s for s in stems if s in _inflight_bgm_stems(MIX_MODULE)]
-    if isinstance(ctx, AuthContext):
-        conflicts.extend(
-            s for s in stems
-            if s in active_durable_targets(
-                task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db,
-            ) and s not in conflicts
-        )
+    active = active_durable_targets(task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db)
+    active_analyses = active_durable_targets(
+        task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db,
+    )
+    active_segments = active_durable_targets(
+        task_type="bgm.segment", payload_key="stem", ctx=ctx, db=db,
+    )
+    active_matches = active_durable_targets(
+        task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
+    )
+    conflicts = [
+        stem for stem in stems
+        if stem in active or stem in active_analyses or stem in active_segments or stem in active_matches
+    ]
     if conflicts:
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))
-    if isinstance(ctx, AuthContext):
-        created = []
-        for stem in stems:
-            task = submit_legacy_engine_task(
-                task_type="bgm.mix",
-                label=f"{MIX_LABEL}：{stem}",
-                payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-                ctx=ctx,
-                db=db,
-                idempotency_prefix=f"bgm-mix:{stem}",
-            )
-            created.append({"stem": stem, "task_id": task["id"]})
-        return {"task_ids": [item["task_id"] for item in created], "chapters": created}
-    set_merge_concurrency(Merge.concurrency_limit())
-    mgr = get_task_manager()
-    created = [
-        {"stem": s, "task_id": mgr.create(
-            MIX_MODULE, f"{MIX_LABEL}：{s}",
-            Bgm.mix_chapter, s, cfg.bgm, cfg.ffmpeg, start=False,
-        ).id}
-        for s in stems
-    ]
-    threading.Thread(
-        target=_run_bgm_coordinator,
-        args=([c["task_id"] for c in created], merge_gate), daemon=True,
-    ).start()
-    return {"task_ids": [c["task_id"] for c in created], "chapters": created}
+    created = []
+    for stem in stems:
+        task = submit_legacy_engine_task(
+            task_type="bgm.mix",
+            label=f"{MIX_LABEL}：{stem}",
+            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
+            ctx=ctx,
+            db=db,
+            idempotency_prefix=f"bgm-mix:{stem}",
+        )
+        created.append({"stem": stem, "task_id": task["id"]})
+    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
 
 
 @router.post("/package")

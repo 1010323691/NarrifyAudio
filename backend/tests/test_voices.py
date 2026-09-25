@@ -32,6 +32,7 @@ from backend.api.tts import (
     select_voice,
 )
 import backend.api.tts as tts_api
+from backend.platform.deps import AuthContext
 from backend.core import config as core_config
 from backend.core import paths as core_paths
 from backend.core.tasks import TaskCancelled, TaskStatus
@@ -629,15 +630,8 @@ if __name__ == "__main__":
 
 
 @pytest.fixture(autouse=True)
-def _quiet_task_manager(monkeypatch):
-    """Keep the real (process-wide) task manager out of these tests: endpoints that
-    guard on in-flight phase tasks see an empty task list unless a test says otherwise."""
-
-    class _EmptyManager:
-        def list(self):
-            return []
-
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _EmptyManager())
+def _quiet_durable_task_guard(monkeypatch):
+    monkeypatch.setattr(tts_api, "has_active_durable_tasks", lambda **kwargs: False)
 
 
 @pytest.fixture
@@ -1213,14 +1207,23 @@ def test_select_voice_requires_workspace(tmp_path, monkeypatch):
         core_config.reset_config_cache()
 
 
+def test_phase_task_guard_reads_durable_voice_tasks(monkeypatch):
+    from sqlalchemy.orm import Session
+
+    queried = []
+    monkeypatch.setattr(
+        tts_api, "has_active_durable_tasks",
+        lambda **kwargs: queried.append(kwargs["task_type"]) or kwargs["task_type"] == "voices.clone",
+    )
+    ctx = AuthContext(user=SimpleNamespace(id="u"), session=SimpleNamespace(active_workspace_id="w"))
+    assert tts_api._phase_task_active(ctx, Session()) is True
+    assert queried == ["voices.foundation", "voices.clone"]
+
+
 def test_select_voice_refused_while_phase_task_active(clone_ws, monkeypatch):
     _seed_select_ws(clone_ws)
 
-    class _RunningManager:
-        def list(self):
-            return [SimpleNamespace(module="voices-clone", status=TaskStatus.RUNNING)]
-
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _RunningManager())
+    monkeypatch.setattr(tts_api, "_phase_task_active", lambda *args: True)
     with pytest.raises(HTTPException) as ex:
         select_voice(SelectVoiceRequest(speaker="A", audio_id="2"))
     assert ex.value.status_code == 409
@@ -1228,12 +1231,7 @@ def test_select_voice_refused_while_phase_task_active(clone_ws, monkeypatch):
     assert _load_vc(clone_ws)["A"]["selected_audio_id"] is None
 
     # A finished voices task (or an unrelated running one) does not block the pick.
-    class _ClearedManager:
-        def list(self):
-            return [SimpleNamespace(module="voices-clone", status=TaskStatus.SUCCEEDED),
-                    SimpleNamespace(module="tts-batch", status=TaskStatus.RUNNING)]
-
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _ClearedManager())
+    monkeypatch.setattr(tts_api, "_phase_task_active", lambda *args: False)
     out = select_voice(SelectVoiceRequest(speaker="A", audio_id="2"))
     assert out["ok"] is True and out["selected_audio_id"] == "2"
 
@@ -1403,11 +1401,7 @@ def test_merge_speakers_refused_while_phase_task_active(clone_ws, monkeypatch):
     _seed_script(clone_ws, {"A": 1, "B": 1})
     _seed_foundations(clone_ws, ["A", "B"])
 
-    class _RunningManager:
-        def list(self):
-            return [SimpleNamespace(module="voices-clone", status=TaskStatus.RUNNING)]
-
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _RunningManager())
+    monkeypatch.setattr(tts_api, "_phase_task_active", lambda *args: True)
     with pytest.raises(HTTPException) as ex:
         merge_speakers(MergeSpeakersRequest(source="A", target="B", script="s.json"))
     assert ex.value.status_code == 409
@@ -1415,12 +1409,7 @@ def test_merge_speakers_refused_while_phase_task_active(clone_ws, monkeypatch):
     assert {e["speaker"] for e in _read_script(clone_ws)} == {"A", "B"}
 
     # A finished voices task (or an unrelated running one) does not block the merge.
-    class _ClearedManager:
-        def list(self):
-            return [SimpleNamespace(module="voices-foundation", status=TaskStatus.SUCCEEDED),
-                    SimpleNamespace(module="tts-batch", status=TaskStatus.RUNNING)]
-
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _ClearedManager())
+    monkeypatch.setattr(tts_api, "_phase_task_active", lambda *args: False)
     out = merge_speakers(MergeSpeakersRequest(source="A", target="B", script="s.json"))
     assert out["ok"] is True and out["replaced"] == 1
 
@@ -1500,11 +1489,7 @@ def test_set_gender_refused_while_phase_task_active(clone_ws, monkeypatch):
     _seed_script(clone_ws, {"A": 1})
     _seed_foundations(clone_ws, ["A"])
 
-    class _RunningManager:
-        def list(self):
-            return [SimpleNamespace(module="voices-foundation", status=TaskStatus.RUNNING)]
-
-    monkeypatch.setattr(tts_api, "get_task_manager", lambda: _RunningManager())
+    monkeypatch.setattr(tts_api, "_phase_task_active", lambda *args: True)
     with pytest.raises(HTTPException) as ex:
         tts_api.set_gender(tts_api.SetGenderRequest(speaker="A", gender="male"))
     assert ex.value.status_code == 409

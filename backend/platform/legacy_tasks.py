@@ -65,9 +65,23 @@ def active_durable_targets(
     db: Session,
 ) -> set[str]:
     """Return active target values for one user's current project."""
+    values: set[str] = set()
+    for payload in active_durable_payloads(task_type=task_type, ctx=ctx, db=db):
+        value = payload.get(payload_key)
+        if isinstance(value, list):
+            values.update(str(item) for item in value)
+        elif value is not None:
+            values.add(str(value))
+    return values
+
+
+def active_durable_payloads(
+    *, task_type: str, ctx: AuthContext, db: Session,
+) -> list[dict[str, Any]]:
+    """Return payloads for active tasks in the user's current project."""
     workspace = active_workspace(db, ctx.user, ctx.session)
     if workspace is None:
-        return set()
+        return []
     rows = db.scalars(
         select(Task).where(
             Task.owner_id == ctx.user.id,
@@ -76,16 +90,7 @@ def active_durable_targets(
             Task.status.in_(ACTIVE_TASK_STATUSES),
         )
     ).all()
-    values: set[str] = set()
-    for row in rows:
-        if not isinstance(row.payload, dict):
-            continue
-        value = row.payload.get(payload_key)
-        if isinstance(value, list):
-            values.update(str(item) for item in value)
-        elif value is not None:
-            values.add(str(value))
-    return values
+    return [row.payload for row in rows if isinstance(row.payload, dict)]
 
 
 def has_active_durable_tasks(*, task_type: str, ctx: AuthContext, db: Session) -> bool:

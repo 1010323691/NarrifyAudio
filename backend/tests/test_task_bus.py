@@ -1,21 +1,5 @@
-"""Tests for the process-wide task event bus (core.tasks) that feeds the
-multiplexed ``GET /api/tasks/stream`` SSE endpoint.
-
-One such connection per browser tab must carry the events of ALL tasks: browsers
-cap simultaneous HTTP/1.1 connections per host at ~6, so the old
-one-EventSource-per-task design was exhausted by a few parallel parses (every
-window beyond the cap showed no logs while the backend ran fine). These tests
-lock in the bus semantics: every manager-created task forwards its events to
-bus subscribers as ``(task, event)`` tuples, display-only events
-(``llm_chunk`` / ``llm_rate``) are dropped under queue pressure while critical
-events (``log`` / ``progress`` / ``status`` / ``final``) are kept, and the
-multiplexed route replays a ``snapshot_all`` before going live.
-"""
-import asyncio
-import json
+"""Tests for the retired in-process task manager's event bus utilities."""
 import time
-
-from backend.api.tasks import stream_all_tasks
 from backend.core.tasks import Task, TaskManager
 
 
@@ -120,38 +104,3 @@ def test_full_bus_keeps_critical_events_when_backlog_is_critical():
     items = list(q.queue)
     assert len(items) == cap
     assert all(e["msg"].startswith("old-") for _task, e in items)
-
-
-# -- the multiplexed SSE route ----------------------------------------------------
-def _slow_task(handle, msg: str) -> dict:
-    # Log AFTER the stream has subscribed (the multiplexed route subscribes on
-    # its first iteration, which is milliseconds after task creation).
-    time.sleep(0.5)
-    handle.log(msg)
-    return {"ok": True}
-
-
-def test_stream_all_route_replays_snapshot_then_streams_tagged_events():
-    # The route reads the process-wide singleton — create the task there too.
-    from backend.core.tasks import get_task_manager
-
-    task = get_task_manager().create("script", "stream-all", _slow_task, "stream-hello")
-
-    resp = stream_all_tasks()
-    body = resp.body_iterator  # async iterator (sync gen wrapped in the threadpool)
-
-    async def pull(n: int):
-        out = []
-        for _ in range(n):
-            out.append(await body.__anext__())
-        return out
-
-    frames = asyncio.run(pull(2))
-    e0 = json.loads(frames[0][len("data: "):].strip())
-    e1 = json.loads(frames[1][len("data: "):].strip())
-
-    assert e0["type"] == "snapshot_all"
-    assert any(t["id"] == task.id for t in e0["tasks"])  # the fresh task is replayed
-    assert e1["task_id"] == task.id  # live events are tagged for client dispatch
-    assert e1["type"] in ("log", "progress", "status")
-    assert resp.media_type == "text/event-stream"

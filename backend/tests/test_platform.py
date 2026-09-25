@@ -94,6 +94,41 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     assert all(item["id"] != workspace_id for item in client.get("/api/v1/workspaces").json())
 
 
+def test_legacy_task_ui_adapter_lists_and_controls_durable_tasks(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    workspace = client.post(
+        "/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "Task UI adapter"},
+    )
+    assert workspace.status_code == 201, workspace.text
+    project_id = workspace.json()["id"]
+    selected = client.put(
+        "/api/workspace", headers={"X-CSRF-Token": csrf}, json={"workspace_id": project_id},
+    )
+    assert selected.status_code == 200, selected.text
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={
+            "project_id": project_id,
+            "task_type": "text.format",
+            "payload": {},
+            "estimated_units": 0,
+            "idempotency_key": f"adapter-{uuid.uuid4().hex}",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    listed = client.get("/api/tasks")
+    assert listed.status_code == 200, listed.text
+    assert any(row["id"] == task_id and row["module"] == "text" for row in listed.json())
+    snapshot = client.get(f"/api/tasks/{task_id}")
+    assert snapshot.status_code == 200, snapshot.text
+    assert snapshot.json()["id"] == task_id
+    cancelled = client.post(f"/api/tasks/{task_id}/cancel", headers={"X-CSRF-Token": csrf})
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+
 def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]

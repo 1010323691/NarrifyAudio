@@ -26,7 +26,6 @@ from sqlalchemy.orm import Session
 from ..core import pathio
 from ..core.config import get_config
 from ..core.paths import ALL_PARSED_JSON, get_layout, peek_layout, resolve_parsed_json, resolve_parsed_json_all
-from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
@@ -337,18 +336,24 @@ class SelectVoiceRequest(BaseModel):
     audio_id: str | None = None
 
 
-def _phase_task_active() -> bool:
+def _phase_task_active(ctx: AuthContext | None, db: Session | None) -> bool:
     """Whether a voices-foundation / voices-clone task is in flight. Both rewrite
     ``voice_config.json`` as a whole file, so a concurrent selection write could be
     clobbered (or vice versa) — refuse the write while one runs."""
-    for t in get_task_manager().list():
-        if t.module in ("voices-foundation", "voices-clone") and t.status not in TERMINAL:
+    if not isinstance(ctx, AuthContext) or not isinstance(db, Session):
+        return False
+    for task_type in ("voices.foundation", "voices.clone"):
+        if has_active_durable_tasks(task_type=task_type, ctx=ctx, db=db):
             return True
     return False
 
 
 @router.put("/voices/select")
-def select_voice(req: SelectVoiceRequest) -> dict:
+def select_voice(
+    req: SelectVoiceRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Record the user's clone-candidate pick for a character.
 
     Synchronous (no Task): the chosen candidate becomes the ACTIVE clone reference —
@@ -356,7 +361,7 @@ def select_voice(req: SelectVoiceRequest) -> dict:
     file rewrite, so every downstream stage (音频合成 / worker) uses the picked take.
     """
     _common.require_workspace()
-    if _phase_task_active():
+    if _phase_task_active(ctx, db):
         raise HTTPException(409, "配音任务进行中，请待其结束后再选择音色。")
     layout = get_layout()
     vc_path = layout.voice_profiles / "voice_config.json"
@@ -401,7 +406,11 @@ class SetGenderRequest(BaseModel):
 
 
 @router.post("/voices/gender")
-def set_gender(req: SetGenderRequest) -> dict:
+def set_gender(
+    req: SetGenderRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Record the user's gender pick for a character (the badge next to the name).
 
     Synchronous (no Task): upserts ``gender`` on the character's ``voice_config.json``
@@ -410,7 +419,7 @@ def set_gender(req: SetGenderRequest) -> dict:
     file and would clobber the pick, same guard as the candidate selection.
     """
     _common.require_workspace()
-    if _phase_task_active():
+    if _phase_task_active(ctx, db):
         raise HTTPException(409, "配音任务进行中，请待其结束后再设置性别。")
     sp = (req.speaker or "").strip()
     if not sp:
@@ -456,7 +465,11 @@ class MergeSpeakersRequest(BaseModel):
 
 
 @router.post("/voices/merge-speakers")
-def merge_speakers(req: MergeSpeakersRequest) -> dict:
+def merge_speakers(
+    req: MergeSpeakersRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
     """Merge one character into another by rewriting the parsed source data in place.
 
     Synchronous (no Task): pure deterministic JSON surgery — every entry whose identity
@@ -468,7 +481,7 @@ def merge_speakers(req: MergeSpeakersRequest) -> dict:
     refreshes mtime, which would perturb the most-recent-file / ``__all__`` ordering).
     """
     _common.require_workspace()
-    if _phase_task_active():
+    if _phase_task_active(ctx, db):
         raise HTTPException(409, "配音任务进行中，请待其结束后再合并角色。")
     src = (req.source or "").strip()
     tgt = (req.target or "").strip()
@@ -841,7 +854,7 @@ def batch_status(script: str | None = None,
 
 
 # ---------------------------------------------------------------------------
-# 批量合并（batch merge）：PENDING 壳 + 协调者（无注册表 / 无 stop 标志 —— merge 无
+# Durable package merge task submission.
 # cancel-batch 端点，取消 = 前端逐任务 control；壳被 cancel 就地终结后自然掉出投放搜索）
 # ---------------------------------------------------------------------------
 
