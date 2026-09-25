@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { controlTask, listTasks, streamAllTasks } from '@/api/tasks'
+import { controlTask, streamAllTasks } from '@/api/tasks'
 import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
 
 const ACTIVE: TaskStatus[] = ['pending', 'running']
@@ -9,6 +9,11 @@ const ACTIVE: TaskStatus[] = ['pending', 'running']
 // bounds the in-memory tail; snapshot / terminal events replace the whole task,
 // so any drift self-corrects on the next authoritative replay.
 const LLM_STREAM_CLIENT_CAP = 128 * 1024
+
+// How long refresh() waits for the stream's first snapshot_all before giving up
+// (a healthy server delivers it within one poll tick; the timeout only bounds a
+// dead connection — the stream keeps retrying underneath).
+const SNAPSHOT_WAIT_TIMEOUT_MS = 10_000
 
 export const useTaskStore = defineStore('task', () => {
   const tasks = ref<TaskSnapshot[]>([])
@@ -25,6 +30,23 @@ export const useTaskStore = defineStore('task', () => {
   // whenever work starts.
   let allStream: (() => void) | null = null
   let generation = 0
+  // The v1 stream is user-scoped, but this console is a project console: the
+  // project store binds the current project so snapshot_all carries exactly its
+  // tasks (binding null = the user's tasks across all projects).
+  let boundProjectId: string | null = null
+  // refresh() callers wait here for the stream's snapshot_all replay to land.
+  let snapshotWaiters: Array<() => void> = []
+
+  /** 绑定当前项目 —— 项目切换/登录时由 stores/project.ts 调用（先于 reset/refresh）。 */
+  function bindProject(projectId: string | null) {
+    boundProjectId = projectId
+  }
+
+  function wakeSnapshotWaiters() {
+    const waiters = snapshotWaiters
+    snapshotWaiters = []
+    for (const wake of waiters) wake()
+  }
 
   function isActive(s: TaskStatus) {
     return ACTIVE.includes(s)
@@ -50,6 +72,7 @@ export const useTaskStore = defineStore('task', () => {
       // Connect / reconnect replay: the authoritative full task list — replace
       // wholesale so live events that follow apply to the fresh objects.
       tasks.value = Array.isArray(e.tasks) ? e.tasks : []
+      wakeSnapshotWaiters()
       return
     }
     const t = tasks.value.find((x) => x.id === id)
@@ -137,11 +160,14 @@ export const useTaskStore = defineStore('task', () => {
       },
       () => {
         if (streamGeneration !== generation) return
-        // The connection ended (server closed / abort): resync the list and, if
-        // work is still in flight, reopen the stream.
+        // The connection ended (server closed / abort): settle any refresh()
+        // waiting on the replay, and — if work is still in flight — reopen the
+        // stream; its snapshot_all self-heals the state.
         allStream = null
-        refresh()
+        wakeSnapshotWaiters()
+        if (hasActive()) ensureStream()
       },
+      boundProjectId,
     )
   }
 
@@ -152,31 +178,44 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
+  /** List source of truth is the stream's `snapshot_all` replay (the v1 list
+   *  endpoint returns the lean durable shape, not the UI snapshot): refresh
+   *  opens the stream if needed and resolves once the replay lands (or the
+   *  connection ends / the wait times out). An already-open stream is current
+   *  by construction, so it resolves immediately. */
   async function refresh() {
     const requestGeneration = generation
     loading.value = true
     try {
-      const loadedTasks = await listTasks()
-      if (requestGeneration !== generation) return
-      tasks.value = loadedTasks
-      // Keep the (single, multiplexed) live stream up while any task is in flight.
-      if (hasActive()) ensureStream()
+      if (!allStream) {
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            snapshotWaiters.push(() => {
+              if (requestGeneration === generation) resolve()
+            })
+          }),
+          new Promise<void>((resolve) => setTimeout(resolve, SNAPSHOT_WAIT_TIMEOUT_MS)),
+        ])
+        ensureStream()
+      }
     } finally {
       if (requestGeneration === generation) loading.value = false
     }
   }
 
-  /** Apply the control response immediately; SSE continues to deliver later changes. */
+  /** The v1 control POSTs are fire-and-confirm-over-SSE: the authoritative
+   *  snapshot arrives as the `status` frame that follows the request, so the
+   *  response body is discarded and the stream is (re)opened to receive it. */
   async function control(id: string, action: TaskControl): Promise<void> {
     const requestGeneration = generation
-    const updated = await controlTask(id, action)
+    await controlTask(id, action)
     if (requestGeneration !== generation) return
-    upsert(updated)
-    if (hasActive()) ensureStream()
+    ensureStream()
   }
 
   function reset() {
     generation += 1
+    snapshotWaiters = []
     closeStream()
     tasks.value = []
     loading.value = false
@@ -184,5 +223,5 @@ export const useTaskStore = defineStore('task', () => {
 
   refresh()
 
-  return { tasks, loading, refresh, control, reset, activeTasks }
+  return { tasks, loading, refresh, control, reset, bindProject, activeTasks }
 })

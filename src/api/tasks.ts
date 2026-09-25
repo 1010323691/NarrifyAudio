@@ -1,14 +1,11 @@
 import { API_BASE, http } from './client'
-import type { TaskControl, TaskSnapshot } from '@/types'
+import type { TaskControl } from '@/types'
 
-/** List all tasks (newest first). */
-export function listTasks(): Promise<TaskSnapshot[]> {
-  return http.get<TaskSnapshot[]>('/api/tasks')
-}
-
-/** cancel / retry. */
-export function controlTask(id: string, action: TaskControl): Promise<TaskSnapshot> {
-  return http.post<TaskSnapshot>(`/api/tasks/${id}/${action}`)
+/** v1 task control (cancel / retry). The shared http client attaches the CSRF
+ *  token. The response's durable dict is not consumed — the authoritative
+ *  snapshot arrives as a `status` frame on the stream below. */
+export function controlTask(id: string, action: TaskControl): Promise<unknown> {
+  return http.post(`/api/v1/tasks/${id}/${action}`)
 }
 
 // Shared EventSource plumbing. The backend emits every
@@ -57,18 +54,23 @@ function openSse(
 }
 
 /**
- * Subscribe to the multiplexed task SSE stream: ONE connection carries the live
- * events (progress + logs + status + …) of ALL tasks, each event tagged with
- * `task_id`. The backend replays a `snapshot_all` (every task) on connect, so a
- * reconnect self-heals the full state. This stream never ends on its own; the
- * caller aborts it. Holds exactly one browser connection per tab — the browser
- * caps HTTP/1.1 connections per host at ~6, so one connection *per task* is
- * exhausted by a few parallel parses and every EventSource beyond the cap never
- * connects (its window shows no logs while the backend runs fine).
+ * Subscribe to the multiplexed task SSE stream (v1): ONE connection carries
+ * the live events (progress + logs + status + …) of the user's tasks, each
+ * frame tagged with `task_id`. Passing ``projectId`` narrows the stream to
+ * that project — this console is project-scoped. The backend replays a
+ * `snapshot_all` (every task) on connect, so a reconnect self-heals the full
+ * state. The stream never ends on its own; the caller aborts it. Holds
+ * exactly one browser connection per tab — the browser caps HTTP/1.1
+ * connections per host at ~6, so one connection *per task* would be exhausted
+ * by a few parallel parses.
  */
 export function streamAllTasks(
   onEvent: (e: { type: string; [k: string]: any }) => void,
   onDone?: () => void,
+  projectId: string | null = null,
 ): () => void {
-  return openSse(`${API_BASE}/api/tasks/stream`, onEvent, onDone)
+  const url = projectId
+    ? `${API_BASE}/api/v1/tasks/stream?project_id=${encodeURIComponent(projectId)}`
+    : `${API_BASE}/api/v1/tasks/stream`
+  return openSse(url, onEvent, onDone)
 }
