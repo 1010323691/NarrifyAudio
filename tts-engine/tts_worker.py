@@ -15,11 +15,8 @@ Ported (minimal core, not the whole app) from ``alexandria-audiobook``:
   - WAV save                  (tts.py  _save_wav)  + WAV->MP3 (project.py, via pydub)
   - merge timeline + combine  (combine_audio_with_pauses)
 
-Modes (``--mode``)
-------------------
-  custom   (default)  one segment, CustomVoice model — the original one-shot behaviour
-  design             one VoiceDesign preview wav (used to seed a character voice)
-  clone              one segment via a cloned (Base + reference) voice
+Modes (``--mode``) — every run is a backend-dispatched one-shot subprocess
+----------------------------------------------------------------------
   batch              all segments in a file, one subprocess, needed models loaded once;
                      segments are padded into native tensor batches; --concurrency is only the
                      fixed row ceiling after sorting by length; no automatic length/VRAM
@@ -453,13 +450,6 @@ def _wav_to_mp3(wav_path: str, mp3_path: str) -> bool:
             os.remove(mp3_path)
         return False
     return True
-
-
-def _concat(wavs):
-    """``generate_*`` returns a list of numpy arrays; join into one."""
-    import numpy as np
-
-    return np.concatenate(wavs) if len(wavs) > 1 else wavs[0]
 
 
 def _add_ffmpeg_to_path(ffmpeg: str) -> None:
@@ -1038,145 +1028,6 @@ def combine_audio_with_pauses(audio_segments, speakers, pause_ms=500,
 # Mode implementations
 # ---------------------------------------------------------------------------
 
-def _run_custom(args) -> int:
-    """The original one-shot CustomVoice synthesis (unchanged behaviour)."""
-    if not args.out:
-        print("TTS_WORKER_ERROR: --out is required for custom mode", file=sys.stderr, flush=True)
-        return 2
-
-    if args.text_file:
-        with open(args.text_file, "r", encoding="utf-8") as f:
-            text = f.read().strip()
-    else:
-        text = (args.text or "").strip()
-    if not text:
-        print("TTS_WORKER_ERROR: empty input text (use --text or --text-file)",
-              file=sys.stderr, flush=True)
-        return 2
-
-    _add_ffmpeg_to_path(args.ffmpeg)
-
-    out_path = os.path.abspath(args.out)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    base, _ext = os.path.splitext(out_path)
-    wav_tmp = base + ".wav"  # temp WAV; removed on a successful MP3 encode
-
-    try:
-        progress(0.05, "Preparing")
-        device = resolve_device(args.device)
-        log(f"device = {device}")
-
-        progress(0.10, "Loading model")
-        model = load_model(args.model, device)
-        log("Model ready.")
-
-        progress(0.40, "Synthesizing speech")
-        instruct = args.instruct or "neutral"
-        wavs, sr = model.generate_custom_voice(
-            text=text,
-            language=args.language,
-            speaker=args.speaker,
-            instruct=instruct,
-            non_streaming_mode=True,
-            max_new_tokens=2048,
-        )
-        if not wavs:
-            raise RuntimeError("Model returned no audio.")
-
-        audio = _concat(wavs)
-        _save_wav(audio, sr, wav_tmp)
-        log(f"Synthesized {len(audio) / sr:.1f}s audio @ {sr} Hz.")
-
-        progress(0.80, "Encoding MP3")
-        if _wav_to_mp3(wav_tmp, out_path):
-            produced = out_path
-            if os.path.exists(wav_tmp):
-                os.remove(wav_tmp)
-        else:
-            log("MP3 encoding unavailable (ffmpeg missing?); keeping WAV instead.")
-            produced = wav_tmp
-        log(f"Wrote {produced}")
-        print(f"[result] {produced}", flush=True)
-        progress(1.0, "Done")
-        return 0
-    except Exception as e:  # noqa: BLE001 — surface any failure to the backend
-        import traceback
-
-        traceback.print_exc()
-        print(f"TTS_WORKER_ERROR: {e}", file=sys.stderr, flush=True)
-        return 1
-
-
-def _run_design(args) -> int:
-    """Render a VoiceDesign preview WAV from a text description (seeds a voice)."""
-    if not args.out:
-        print("TTS_WORKER_ERROR: --out is required for design mode", file=sys.stderr, flush=True)
-        return 2
-
-    if args.text_file:
-        with open(args.text_file, "r", encoding="utf-8") as f:
-            sample_text = f.read().strip()
-    else:
-        sample_text = (args.sample_text or args.text or "").strip()
-    if not sample_text:
-        print("TTS_WORKER_ERROR: empty sample text for design mode", file=sys.stderr, flush=True)
-        return 2
-    if args.description_file:
-        with open(args.description_file, "r", encoding="utf-8") as f:
-            description = f.read().strip()
-    else:
-        description = (args.description or "").strip()
-    if not description:
-        description = "A clear, natural speaking voice"
-
-    _add_ffmpeg_to_path(args.ffmpeg)
-
-    out_path = os.path.abspath(args.out)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
-    try:
-        progress(0.10, "Loading VoiceDesign model")
-        device = resolve_device(args.device)
-        log(f"device = {device}")
-        model = load_model(args.design_model, device)
-        log("VoiceDesign model ready.")
-
-        progress(0.40, "Generating voice from description")
-        if args.seed >= 0:
-            import torch
-
-            torch.manual_seed(args.seed)
-        # do_sample=True guards against a checkpoint whose generate_config.json disables
-        # sampling (greedy decode would make every seeded candidate byte-identical).
-        wavs, sr = model.generate_voice_design(
-            text=sample_text,
-            instruct=description,
-            language=args.language,
-            non_streaming_mode=True,
-            max_new_tokens=2048,
-            **({"do_sample": True} if args.seed >= 0 else {}),
-        )
-        if not wavs:
-            raise RuntimeError("VoiceDesign model returned no audio.")
-
-        audio = _concat(wavs)
-        _save_wav(audio, sr, out_path)
-        log(f"Designed voice: {len(audio) / sr:.1f}s audio @ {sr} Hz")
-        print(f"[result] {out_path}", flush=True)
-        progress(1.0, "完成")
-        return 0
-    except Exception as e:  # noqa: BLE001
-        import traceback
-
-        traceback.print_exc()
-        print(f"TTS_WORKER_ERROR: {e}", file=sys.stderr, flush=True)
-        return 1
-
-
 def _workspace_root(args) -> str:
     """The root relative path values resolve against inside ``--voice-config`` /
     ``--segments-file``: the backend passes the live workspace root via ``--workspace``
@@ -1185,77 +1036,6 @@ def _workspace_root(args) -> str:
     """
     ws = getattr(args, "workspace", "") or ""
     return os.path.abspath(ws) if ws else os.getcwd()
-
-
-def _run_clone(args) -> int:
-    """Synthesize one segment with a cloned (Base + reference) voice."""
-    if not args.out:
-        print("TTS_WORKER_ERROR: --out is required for clone mode", file=sys.stderr, flush=True)
-        return 2
-
-    if args.text_file:
-        with open(args.text_file, "r", encoding="utf-8") as f:
-            text = f.read().strip()
-    else:
-        text = (args.text or "").strip()
-    if not text:
-        print("TTS_WORKER_ERROR: empty input text for clone mode", file=sys.stderr, flush=True)
-        return 2
-
-    _add_ffmpeg_to_path(args.ffmpeg)
-
-    out_path = os.path.abspath(args.out)
-    out_dir = os.path.dirname(out_path)
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    base, _ext = os.path.splitext(out_path)
-    wav_tmp = base + ".wav"
-
-    try:
-        progress(0.05, "Preparing")
-        device = resolve_device(args.device)
-        log(f"device = {device}")
-
-        progress(0.10, "Loading Base model (voice cloning)")
-        model = load_model(args.base_model, device)
-        log("Base model ready.")
-
-        progress(0.30, "Building voice clone prompt")
-        voice_data = {"ref_audio": args.ref_audio, "ref_text": args.ref_text}
-        prompt = _build_clone_prompt(model, voice_data, _workspace_root(args), args.speaker or "clone")
-
-        progress(0.50, "Synthesizing cloned speech")
-        wavs, sr = model.generate_voice_clone(
-            text=text,
-            voice_clone_prompt=prompt,
-            non_streaming_mode=True,
-            max_new_tokens=2048,
-        )
-        if not wavs:
-            raise RuntimeError("Model returned no audio.")
-
-        audio = _concat(wavs)
-        _save_wav(audio, sr, wav_tmp)
-        log(f"Synthesized {len(audio) / sr:.1f}s audio @ {sr} Hz.")
-
-        progress(0.80, "Encoding MP3")
-        if _wav_to_mp3(wav_tmp, out_path):
-            produced = out_path
-            if os.path.exists(wav_tmp):
-                os.remove(wav_tmp)
-        else:
-            log("MP3 encoding unavailable (ffmpeg missing?); keeping WAV instead.")
-            produced = wav_tmp
-        log(f"Wrote {produced}")
-        print(f"[result] {produced}", flush=True)
-        progress(1.0, "完成")
-        return 0
-    except Exception as e:  # noqa: BLE001
-        import traceback
-
-        traceback.print_exc()
-        print(f"TTS_WORKER_ERROR: {e}", file=sys.stderr, flush=True)
-        return 1
 
 
 def _effective_instruct(r, vtype):
@@ -2414,33 +2194,24 @@ def _run_merge(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Qwen3-TTS synthesis worker")
-    ap.add_argument("--mode", default="custom",
-                    choices=["custom", "design", "clone", "batch", "design-batch", "merge"])
+    ap.add_argument("--mode", required=True,
+                    choices=["batch", "design-batch", "merge"],
+                    help="durable mode, always passed explicitly by the backend (the former "
+                         "one-shot custom/design/clone modes are retired — A5)")
     # shared
-    ap.add_argument("--text", default="", help="text to synthesize (or use --text-file)")
-    ap.add_argument("--text-file", default="",
-                    help="path to a UTF-8 file holding the text (robust for long / non-ASCII text)")
     ap.add_argument("--out", default="", help="absolute path of the intended output file")
     ap.add_argument("--speaker", default=DEFAULT_SPEAKER)
     ap.add_argument("--language", default=DEFAULT_LANGUAGE)
-    ap.add_argument("--instruct", default="", help="style/delivery instruction")
     ap.add_argument("--device", default="auto", help="auto|cuda|cpu|mps")
     ap.add_argument("--ffmpeg", default="", help="path to ffmpeg (its dir is added to PATH)")
     ap.add_argument("--workspace", default="",
                     help="workspace root: relative path values in --voice-config / "
-                         "--segments-file resolve against this (batch / clone / merge); "
+                         "--segments-file resolve against this (batch / merge); "
                          "empty = legacy cwd-based resolution")
     # model ids
     ap.add_argument("--model", default=DEFAULT_MODEL, help="CustomVoice model id")
     ap.add_argument("--base-model", default=DEFAULT_BASE_MODEL, help="Base (clone) model id")
     ap.add_argument("--design-model", default=DEFAULT_DESIGN_MODEL, help="VoiceDesign model id")
-    # design / clone
-    ap.add_argument("--description", default="", help="voice description (design mode)")
-    ap.add_argument("--description-file", default="",
-                    help="path to a UTF-8 file holding the description (robust for long / non-ASCII)")
-    ap.add_argument("--sample-text", default="", help="sample text to design a voice from")
-    ap.add_argument("--ref-audio", default="", help="clone reference audio path")
-    ap.add_argument("--ref-text", default="", help="clone reference transcript")
     # batch
     ap.add_argument("--segments-file", default="",
                     help="JSON list of segments (batch / design-batch jobs)")
@@ -2463,7 +2234,7 @@ def main() -> int:
                          "cap; after two successful batches at the newest reduced cap, restore it "
                          "(empty = no pending restore)")
     ap.add_argument("--seed", type=int, default=-1,
-                    help="reproducible seed offset per sub-batch (batch / design / design-batch; -1 = random)")
+                    help="reproducible seed offset per sub-batch (batch / design-batch; -1 = random)")
     ap.add_argument("--done-offset", type=int, default=0,
                     help="candidates already settled before this run (design-batch; keeps progress "
                          "continuous across watchdog restarts)")
@@ -2479,7 +2250,7 @@ def main() -> int:
                     help="segments per part WAV in the two-stage merge (merge)")
     ap.add_argument("--threads", type=int, default=0,
                     help="max encoder threads for the final MP3 encode (merge); "
-                         "0/omitted = ffmpeg's own default (manual/legacy runs)")
+                         "0/omitted = ffmpeg's own default (direct invocations)")
     args = ap.parse_args()
 
     if args.mode in ("batch", "design-batch"):
@@ -2489,12 +2260,6 @@ def main() -> int:
             print(f"TTS_WORKER_ERROR: {e}", file=sys.stderr, flush=True)
             return 2
 
-    if args.mode == "custom":
-        return _run_custom(args)
-    if args.mode == "design":
-        return _run_design(args)
-    if args.mode == "clone":
-        return _run_clone(args)
     if args.mode == "batch":
         return _run_batch(args)
     if args.mode == "design-batch":
@@ -2502,8 +2267,7 @@ def main() -> int:
     if args.mode == "merge":
         return _run_merge(args)
 
-    print(f"TTS_WORKER_ERROR: unknown mode {args.mode}", file=sys.stderr, flush=True)
-    return 2
+    raise AssertionError(f"unreachable: mode {args.mode} not in choices")
 
 
 if __name__ == "__main__":
