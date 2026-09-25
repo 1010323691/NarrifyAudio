@@ -29,7 +29,7 @@ from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Project
-from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
+from ..platform.engine_task_submission import active_durable_targets, submit_legacy_engine_task
 from ..platform.storage import configured_storage_root, safe_display_name
 
 router = APIRouter(prefix="/api/music", tags=["music"])

@@ -22,7 +22,7 @@ from ..engines import tts_batch as TtsBatch
 from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.legacy_tasks import active_durable_payloads, active_durable_targets, submit_legacy_engine_task
+from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task
 from ..platform.task_validation import is_safe_bgm_stem
 from . import _common
 

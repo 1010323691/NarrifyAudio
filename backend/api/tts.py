@@ -30,7 +30,7 @@ from ..engines import tts_batch as Batch
 from ..engines import voices as V
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.legacy_tasks import active_durable_targets, has_active_durable_tasks, submit_legacy_engine_task
+from ..platform.engine_task_submission import active_durable_targets, has_active_durable_tasks, submit_legacy_engine_task
 from . import _common
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])

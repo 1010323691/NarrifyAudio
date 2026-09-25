@@ -24,7 +24,7 @@ from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
-from backend.platform.legacy_tasks import estimate_legacy_units
+from backend.platform.engine_task_submission import estimate_legacy_units
 
 
 @pytest.fixture(scope="module")
