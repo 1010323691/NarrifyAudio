@@ -149,65 +149,125 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="resources-page">
-    <header class="page-header resources-header">
-      <div><p class="eyebrow">YOUR LIBRARY</p><h1 class="page-title">我的资源</h1><p class="page-description">只显示你自己的项目文件和生成内容。</p></div>
-      <Button variant="outline" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" />刷新</Button>
+  <div class="space-y-6">
+    <header class="page-header">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p class="text-[10px] font-extrabold tracking-[0.14em] text-primary">YOUR LIBRARY</p>
+          <h1 class="page-title mt-1">我的资源</h1>
+          <p class="page-description">只显示你自己的项目文件和生成内容。</p>
+        </div>
+        <Button variant="outline" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" />刷新</Button>
+      </div>
     </header>
 
-    <div v-if="pageError" class="resource-alert" role="alert">{{ pageError }} <Button variant="outline" size="sm" @click="load">重试</Button></div>
-    <div class="resource-stats">
-      <Card><span>我的项目</span><strong>{{ project.projects.length }}</strong></Card>
-      <Card><span>文件数量</span><strong>{{ loading ? '…' : totalFiles }}</strong></Card>
-      <Card><span>存储占用</span><strong>{{ loading ? '…' : formatBytes(totalBytes) }}</strong><small>{{ allScanned ? '已扫描项目工作空间' : '部分后端仅提供已登记文件统计' }}</small></Card>
+    <div v-if="pageError" class="flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm text-destructive" role="alert">
+      <span>{{ pageError }}</span>
+      <Button variant="outline" size="sm" @click="load">重试</Button>
     </div>
 
-    <section class="resources-section">
-      <div class="section-heading"><div><h2>最近生成</h2><span class="muted">音频、合并结果和最终成品</span></div></div>
-      <Card v-if="loading" class="resource-empty">正在读取项目文件…</Card>
-      <Card v-else-if="recentOutputs.length" class="outputs-list">
-        <div v-for="file in recentOutputs" :key="`${file.projectName}-${file.relative_path}`" class="output-row">
-          <div class="output-icon"><span class="sr-only">音频文件</span>♫</div>
-          <div class="output-copy"><strong>{{ file.name }}</strong><small>{{ file.projectName }} · {{ MODULE_LABELS[file.module] || '其他文件' }}</small></div>
-          <span>{{ formatBytes(file.size_bytes) }}</span><time>{{ formatDate(file.modified_at) }}</time>
+    <div class="grid gap-2.5 sm:grid-cols-3">
+      <Card class="grid gap-1 p-3.5">
+        <span class="text-xs text-muted-foreground">我的项目</span>
+        <strong class="text-xl font-bold tabular-nums">{{ project.projects.length }}</strong>
+      </Card>
+      <Card class="grid gap-1 p-3.5">
+        <span class="text-xs text-muted-foreground">文件数量</span>
+        <strong class="text-xl font-bold tabular-nums">{{ loading ? '…' : totalFiles }}</strong>
+      </Card>
+      <Card class="grid gap-1 p-3.5">
+        <span class="text-xs text-muted-foreground">存储占用</span>
+        <strong class="text-xl font-bold tabular-nums">{{ loading ? '…' : formatBytes(totalBytes) }}</strong>
+        <small class="text-xs text-muted-foreground">{{ allScanned ? '已扫描项目工作空间' : '部分后端仅提供已登记文件统计' }}</small>
+      </Card>
+    </div>
+
+    <section class="space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap items-baseline gap-2">
+          <h2 class="text-[15px] font-bold">最近生成</h2>
+          <span class="text-xs text-muted-foreground">音频、合并结果和最终成品</span>
+        </div>
+      </div>
+      <Card v-if="loading" class="p-6 text-center text-sm text-muted-foreground">正在读取项目文件…</Card>
+      <Card v-else-if="recentOutputs.length" class="px-3.5">
+        <div v-for="file in recentOutputs" :key="`${file.projectName}-${file.relative_path}`" class="flex items-center gap-3 border-b py-2.5 last:border-0">
+          <div class="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-lg bg-primary/10 text-lg text-primary"><span class="sr-only">音频文件</span>♫</div>
+          <div class="min-w-0 flex-1">
+            <strong class="block truncate text-xs">{{ file.name }}</strong>
+            <small class="mt-0.5 block text-[10px] text-muted-foreground">{{ file.projectName }} · {{ MODULE_LABELS[file.module] || '其他文件' }}</small>
+          </div>
+          <span class="shrink-0 text-[10px] text-muted-foreground">{{ formatBytes(file.size_bytes) }}</span>
+          <time class="shrink-0 text-[10px] whitespace-nowrap text-muted-foreground">{{ formatDate(file.modified_at) }}</time>
         </div>
       </Card>
-      <Card v-else class="resource-empty">还没有生成音频。完成制作后，成品会显示在这里。</Card>
+      <Card v-else class="p-6 text-center text-sm text-muted-foreground">还没有生成音频。完成制作后，成品会显示在这里。</Card>
     </section>
 
-    <section class="resources-section">
-      <div class="section-heading resource-files-heading">
-        <div><h2>项目文件</h2><span class="muted">最近更新的文件</span></div>
-        <div class="resource-controls">
-          <div class="resource-search"><Search class="h-4 w-4" /><input v-model="search" aria-label="搜索我的文件" placeholder="搜索项目或文件名" /></div>
-          <select v-model="selectedKind" aria-label="按类型筛选">
+    <section class="space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap items-baseline gap-2">
+          <h2 class="text-[15px] font-bold">项目文件</h2>
+          <span class="text-xs text-muted-foreground">最近更新的文件</span>
+        </div>
+        <div class="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <div class="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg border border-input px-2.5 text-muted-foreground sm:min-w-[230px] sm:flex-none">
+            <Search class="h-4 w-4" />
+            <input v-model="search" aria-label="搜索我的文件" placeholder="搜索项目或文件名" class="w-full bg-transparent text-xs text-foreground outline-none" />
+          </div>
+          <select v-model="selectedKind" aria-label="按类型筛选" class="h-9 min-w-[130px] rounded-lg border border-input bg-background px-2.5 text-xs">
             <option v-for="kind in kinds" :key="kind.key" :value="kind.key">{{ kind.label }}</option>
           </select>
         </div>
       </div>
-      <Card v-if="loading" class="resource-empty">正在加载…</Card>
-      <Card v-else-if="fileRows.length" class="resource-table-card">
-        <div class="resource-table"><table><thead><tr><th>文件</th><th>项目</th><th>类型</th><th>大小</th><th>最近修改</th></tr></thead>
-          <tbody><tr v-for="file in fileRows.slice(0, 100)" :key="`${file.projectName}-${file.relative_path}`"><td><strong>{{ file.name }}</strong></td><td>{{ file.projectName }}</td><td>{{ kinds.find((kind) => kind.key === file.module)?.label || MODULE_LABELS[file.module] || '其他文件' }}</td><td>{{ formatBytes(file.size_bytes) }}</td><td>{{ formatDate(file.modified_at) }}</td></tr></tbody>
-        </table></div>
-        <p v-if="fileRows.length > 100" class="table-footnote">显示最近 100 个匹配文件。</p>
+      <Card v-if="loading" class="p-6 text-center text-sm text-muted-foreground">正在加载…</Card>
+      <Card v-else-if="fileRows.length" class="overflow-hidden">
+        <div class="w-full overflow-x-auto">
+          <table class="w-full min-w-[720px] text-xs">
+            <thead>
+              <tr class="border-b text-left">
+                <th class="max-w-[250px] whitespace-nowrap px-3 py-2.5 font-medium text-muted-foreground">文件</th>
+                <th class="max-w-[250px] whitespace-nowrap px-3 py-2.5 font-medium text-muted-foreground">项目</th>
+                <th class="whitespace-nowrap px-3 py-2.5 font-medium text-muted-foreground">类型</th>
+                <th class="px-3 py-2.5 font-medium text-muted-foreground">大小</th>
+                <th class="px-3 py-2.5 font-medium text-muted-foreground">最近修改</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="file in fileRows.slice(0, 100)" :key="`${file.projectName}-${file.relative_path}`" class="border-b align-middle last:border-0">
+                <td class="max-w-[250px] px-3 py-2.5"><strong class="block truncate font-medium">{{ file.name }}</strong></td>
+                <td class="max-w-[250px] truncate px-3 py-2.5">{{ file.projectName }}</td>
+                <td class="whitespace-nowrap px-3 py-2.5">{{ kinds.find((kind) => kind.key === file.module)?.label || MODULE_LABELS[file.module] || '其他文件' }}</td>
+                <td class="whitespace-nowrap px-3 py-2.5">{{ formatBytes(file.size_bytes) }}</td>
+                <td class="whitespace-nowrap px-3 py-2.5">{{ formatDate(file.modified_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-if="fileRows.length > 100" class="px-3 py-2 text-xs text-muted-foreground">显示最近 100 个匹配文件。</p>
       </Card>
-      <Card v-else class="resource-empty">没有找到匹配文件。</Card>
+      <Card v-else class="p-6 text-center text-sm text-muted-foreground">没有找到匹配文件。</Card>
     </section>
 
-    <section class="resources-section">
-      <div class="section-heading"><div><h2>可清理临时缓存</h2><span class="muted">超过 7 天且项目没有活动任务的临时文件</span></div></div>
-      <Card v-if="!records.length && !loading" class="resource-empty">创建项目后，这里会显示可清理空间。</Card>
-      <Card v-else class="cleanup-list">
-        <div v-for="record in records" :key="record.id" class="cleanup-row">
-          <div><strong>{{ record.name }}</strong><small v-if="record.summary.cleanup_candidates.blocked_by_active_tasks">项目任务正在运行，暂不可清理</small><small v-else-if="record.summary.cleanup_candidates.count">{{ record.summary.cleanup_candidates.count }} 个文件 · {{ formatBytes(record.summary.cleanup_candidates.size_bytes) }}</small><small v-else>{{ record.error || '没有过期临时缓存' }}</small></div>
-          <Button variant="outline" size="sm" :disabled="!record.summary.cleanup_candidates.count || record.summary.cleanup_candidates.blocked_by_active_tasks || cleaningId === record.id" @click="cleanup(record)"><Trash2 class="h-4 w-4" />{{ cleaningId === record.id ? '清理中…' : '清理缓存' }}</Button>
+    <section class="space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap items-baseline gap-2">
+          <h2 class="text-[15px] font-bold">可清理临时缓存</h2>
+          <span class="text-xs text-muted-foreground">超过 7 天且项目没有活动任务的临时文件</span>
+        </div>
+      </div>
+      <Card v-if="!records.length && !loading" class="p-6 text-center text-sm text-muted-foreground">创建项目后，这里会显示可清理空间。</Card>
+      <Card v-else class="px-3.5">
+        <div v-for="record in records" :key="record.id" class="flex items-center justify-between gap-3 border-b py-2.5 last:border-0">
+          <div class="min-w-0">
+            <strong class="block text-xs">{{ record.name }}</strong>
+            <small v-if="record.summary.cleanup_candidates.blocked_by_active_tasks" class="mt-0.5 block text-[10px] text-muted-foreground">项目任务正在运行，暂不可清理</small>
+            <small v-else-if="record.summary.cleanup_candidates.count" class="mt-0.5 block text-[10px] text-muted-foreground">{{ record.summary.cleanup_candidates.count }} 个文件 · {{ formatBytes(record.summary.cleanup_candidates.size_bytes) }}</small>
+            <small v-else class="mt-0.5 block text-[10px] text-muted-foreground">{{ record.error || '没有过期临时缓存' }}</small>
+          </div>
+          <Button variant="outline" size="sm" class="shrink-0" :disabled="!record.summary.cleanup_candidates.count || record.summary.cleanup_candidates.blocked_by_active_tasks || cleaningId === record.id" @click="cleanup(record)"><Trash2 class="h-4 w-4" />{{ cleaningId === record.id ? '清理中…' : '清理缓存' }}</Button>
         </div>
       </Card>
     </section>
   </div>
 </template>
-
-<style scoped>
-.resources-page{display:grid;gap:24px;max-width:1320px;margin:0 auto;padding-bottom:30px}.resources-header{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.14em;color:hsl(var(--primary))}.resources-header h1{margin-top:5px}.resources-header .page-description{margin-top:4px}.resource-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.resource-stats>*{display:grid;gap:4px;padding:14px}.resource-stats span,.resource-stats small,.muted,.table-footnote{color:hsl(var(--muted-foreground));font-size:11px}.resource-stats strong{font-size:20px;font-weight:750;font-variant-numeric:tabular-nums}.resources-section{display:grid;gap:11px}.section-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.section-heading>div:first-child{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}.section-heading h2{font-size:15px;font-weight:750}.outputs-list,.cleanup-list{padding:0 14px}.output-row,.cleanup-row{display:flex;align-items:center;gap:12px;border-bottom:1px solid hsl(var(--border));padding:11px 0}.output-row:last-child,.cleanup-row:last-child{border-bottom:0}.output-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:9px;background:hsl(var(--primary)/.09);color:hsl(var(--primary));font-size:18px}.output-copy{min-width:0;flex:1}.output-copy strong,.output-copy small,.cleanup-row strong,.cleanup-row small{display:block}.output-copy strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.output-copy small,.cleanup-row small{margin-top:3px;color:hsl(var(--muted-foreground));font-size:10px}.output-row>span,.output-row time{color:hsl(var(--muted-foreground));font-size:10px;white-space:nowrap}.resource-files-heading{align-items:flex-end;flex-wrap:wrap}.resource-controls{display:flex;gap:8px;flex-wrap:wrap}.resource-search{display:flex;align-items:center;gap:7px;min-width:230px;height:36px;border:1px solid hsl(var(--input));border-radius:8px;padding:0 9px;color:hsl(var(--muted-foreground))}.resource-search input{width:100%;border:0;outline:0;background:transparent;color:hsl(var(--foreground));font-size:12px}.resource-controls select{height:36px;min-width:130px;border:1px solid hsl(var(--input));border-radius:8px;background:hsl(var(--background));padding:0 9px;font-size:12px}.resource-table-card{overflow:hidden}.resource-table{width:100%;overflow-x:auto}table{width:100%;min-width:720px;border-collapse:collapse;font-size:11px}th,td{padding:10px 12px;border-bottom:1px solid hsl(var(--border));text-align:left;vertical-align:middle}th{color:hsl(var(--muted-foreground));font-weight:650;white-space:nowrap}td{max-width:250px}td strong,td small{display:block}td strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}td small{overflow:hidden;margin-top:3px;color:hsl(var(--muted-foreground));font-size:9px;text-overflow:ellipsis;white-space:nowrap}.table-footnote{padding:9px 12px}.resource-empty{padding:22px;text-align:center;color:hsl(var(--muted-foreground));font-size:12px}.cleanup-row{justify-content:space-between}.cleanup-row>div{min-width:0}.cleanup-row strong{font-size:12px}.resource-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid hsl(var(--destructive)/.25);border-radius:9px;padding:10px 12px;color:hsl(var(--destructive));font-size:12px}@media(max-width:750px){.resource-stats{grid-template-columns:1fr}.output-row{flex-wrap:wrap}.output-copy{min-width:calc(100% - 60px)}.output-row time{margin-left:auto}.resource-controls{width:100%}.resource-search{flex:1}.resource-files-heading{align-items:stretch}}
-</style>
