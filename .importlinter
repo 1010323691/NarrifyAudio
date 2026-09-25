@@ -1,0 +1,25 @@
+# NarrifyAudio backend layering contract (plan S3/Q17, batch 2 "import-linter rule in place").
+# Read by import-linter (dev-only, not in requirements files). Run with:
+#   .venv\Scripts\lint-imports
+# Config syntax: https://import-linter.readthedocs.io/en/latest/reference/user_interface.html
+# Keep this file ASCII-only: the linter reads it with the platform default encoding.
+
+[importlinter]
+root_package = backend
+
+[importlinter:backend_layering]
+name = backend layering api -> services -> platform -> core (engines/worker/main not layered yet)
+type = layers
+layers =
+    backend.api
+    backend.services
+    backend.platform
+    backend.core
+ignore_imports =
+    backend.platform.engine_task_submission -> backend.services.tasks
+    backend.platform.bootstrap -> backend.services.projects
+    backend.core.config -> backend.platform.system_config
+
+# The three ignore_imports above are the known one-way reverse edges (plan S3/Q17
+# documented two; lint-imports surfaced the third in platform.bootstrap).
+# Batch 3 fixes them (move/sink), then removes these lines so the contract is fully strict.
