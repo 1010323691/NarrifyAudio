@@ -108,28 +108,21 @@ def prepare_foundations(
         label = f"生成新增角色语音推理基础{suffix}"
     else:
         label = f"生成所有角色语音推理基础{suffix}"
-    if isinstance(ctx, AuthContext):
-        task = submit_legacy_engine_task(
-            task_type="voices.foundation",
-            label=label,
-            payload={
-                "speakers": req.speakers,
-                "new_only": req.new_only,
-                "overrides": req.overrides or {},
-                "script": req.script,
-                "config": get_config().model_dump(mode="json"),
-            },
-            ctx=ctx,
-            db=db,
-            idempotency_prefix="voices-foundation",
-        )
-        return {"task_id": task["id"]}
-    task = get_task_manager().create(
-        "voices-foundation", label,
-        V.prepare_foundations,
-        req.speakers, req.new_only, req.overrides or {}, req.script,
+    task = submit_legacy_engine_task(
+        task_type="voices.foundation",
+        label=label,
+        payload={
+            "speakers": req.speakers,
+            "new_only": req.new_only,
+            "overrides": req.overrides or {},
+            "script": req.script,
+            "config": get_config().model_dump(mode="json"),
+        },
+        ctx=ctx,
+        db=db,
+        idempotency_prefix="voices-foundation",
     )
-    return {"task_id": task.id}
+    return {"task_id": task["id"]}
 
 
 @router.post("/make-clones")
@@ -148,29 +141,22 @@ def make_clones(
     else:
         label = f"制作所有角色克隆音频{suffix}"
     label += " · 备选 自动" if req.candidate_count is None else f" · 备选 {req.candidate_count}"
-    if isinstance(ctx, AuthContext):
-        task = submit_legacy_engine_task(
-            task_type="voices.clone",
-            label=label,
-            payload={
-                "speakers": req.speakers,
-                "new_only": req.new_only,
-                "concurrency": req.concurrency,
-                "script": req.script,
-                "candidate_count": req.candidate_count,
-                "config": get_config().model_dump(mode="json"),
-            },
-            ctx=ctx,
-            db=db,
-            idempotency_prefix="voices-clone",
-        )
-        return {"task_id": task["id"]}
-    task = get_task_manager().create(
-        "voices-clone", label,
-        V.make_clones,
-        req.speakers, req.new_only, req.concurrency, req.script, req.candidate_count,
+    task = submit_legacy_engine_task(
+        task_type="voices.clone",
+        label=label,
+        payload={
+            "speakers": req.speakers,
+            "new_only": req.new_only,
+            "concurrency": req.concurrency,
+            "script": req.script,
+            "candidate_count": req.candidate_count,
+            "config": get_config().model_dump(mode="json"),
+        },
+        ctx=ctx,
+        db=db,
+        idempotency_prefix="voices-clone",
     )
-    return {"task_id": task.id}
+    return {"task_id": task["id"]}
 
 
 def _voice_usable(entry: dict) -> bool:
