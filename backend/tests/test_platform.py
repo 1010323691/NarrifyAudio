@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import uuid
 import shutil
 import threading
+import zipfile
 from types import SimpleNamespace
 from datetime import timedelta
 from pathlib import Path
@@ -90,6 +92,45 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     assert cancelled.status_code == 200
     assert client.delete(f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
     assert all(item["id"] != workspace_id for item in client.get("/api/v1/workspaces").json())
+
+
+def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "BGM package"},
+    ).json()
+    with SessionLocal() as db:
+        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+    bgm_dir = workspace / "08_bgm"
+    bgm_dir.mkdir(parents=True)
+    (bgm_dir / "chapter-1.mp3").write_bytes(b"audio-one")
+    (bgm_dir / "chapter-2.mp3").write_bytes(b"audio-two")
+    submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"],
+            "task_type": "bgm.package",
+            "payload": {"chapters": ["chapter-1", "chapter-2"], "base": "Book"},
+            "estimated_units": 0,
+            "idempotency_key": f"bgm-package-{uuid.uuid4().hex}",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="bgm-package-worker") == "succeeded"
+    task = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    assert task["result"]["file_count"] == 2
+    download = client.get(
+        f"/api/v1/projects/{project['id']}/files/{task['result']['file_id']}"
+    )
+    assert download.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+        assert archive.namelist() == ["Book/chapter-1.mp3", "Book/chapter-2.mp3"]
+        assert archive.read("Book/chapter-1.mp3") == b"audio-one"
+        assert archive.read("Book/chapter-2.mp3") == b"audio-two"
 
 
 def test_workspace_engine_lock_serializes_project_writers(client: TestClient):

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 import threading
-import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -776,26 +775,15 @@ def package_mixed_audio(
         raise HTTPException(400, "选中的章节尚未完成混音，没有可下载的音频。")
 
     base = _source_txt_base(layout)
-    if isinstance(ctx, AuthContext):
-        task = submit_legacy_engine_task(
-            task_type="bgm.package",
-            label=f"BGM 打包：{base}",
-            payload={"chapters": stems, "base": base},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-package:{base}",
-        )
-        return {"task_id": task["id"]}
-    out_dir = layout.bgm / base
-    out_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = out_dir / f"{base}.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as archive:
-        for stem in stems:
-            archive.write(
-                layout.bgm / f"{stem}.mp3",
-                arcname=f"{base}/{stem}.mp3",
-            )
-    return {"zip_path": str(zip_path), "file_count": len(stems), "base": base}
+    task = submit_legacy_engine_task(
+        task_type="bgm.package",
+        label=f"BGM 打包：{base}",
+        payload={"chapters": stems, "base": base},
+        ctx=ctx,
+        db=db,
+        idempotency_prefix=f"bgm-package:{base}",
+    )
+    return {"task_id": task["id"]}
 
 
 # --------------------------------------------------------------------------- #
