@@ -11,6 +11,7 @@ import pytest
 import sqlalchemy as sa
 
 
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -96,3 +97,63 @@ def test_upgrade_repairs_legacy_project_workspace_orphans(tmp_path):
         assert active_workspace_id == "workspace-only"
     finally:
         engine.dispose()
+
+
+def _reset_public_schema(engine) -> None:
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP SCHEMA IF EXISTS public CASCADE")
+        connection.exec_driver_sql("CREATE SCHEMA public")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("NARRIFY_TEST_POSTGRES_URL"),
+    reason="set NARRIFY_TEST_POSTGRES_URL to run the 0015 downgrade roundtrip on real PostgreSQL",
+)
+def test_drop_quota_reservations_downgrade_roundtrip_on_postgres():
+    """0015's upgrade drops the retired reservation machinery and its downgrade
+    rebuilds it (structural rollback only — plan A1), the PostgreSQL branch
+    restoring the FK upgrade removed. Opt-in: needs a DISPOSEABLE scratch
+    database — its public schema is reset at start and end."""
+    url = os.environ["NARRIFY_TEST_POSTGRES_URL"]
+    engine = sa.create_engine(url)
+    try:
+        if engine.dialect.name != "postgresql":
+            pytest.skip("NARRIFY_TEST_POSTGRES_URL must use PostgreSQL")
+        _reset_public_schema(engine)
+        env = {
+            **os.environ,
+            "NARRIFY_DATABASE_URL": url,
+            "NARRIFY_AUTO_CREATE_SCHEMA": "false",
+        }
+        # 0014 -> 0015 (head): the reservation machinery disappears...
+        _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "0014_project_storage_identity")
+        _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            assert "quota_reservations" not in inspector.get_table_names()
+            assert "reservation_id" not in {column["name"] for column in inspector.get_columns("quota_transactions")}
+            assert "ix_quota_transactions_reservation_id" not in {index["name"] for index in inspector.get_indexes("quota_transactions")}
+        # ...downgrade 0015 rebuilds it, including the PG-only FK.
+        _run(env, "-m", "alembic", "-c", "alembic.ini", "downgrade", "0014_project_storage_identity")
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            assert "quota_reservations" in inspector.get_table_names()
+            assert {"id", "user_id", "task_id", "units", "status", "created_at", "settled_at"} <= {
+                column["name"] for column in inspector.get_columns("quota_reservations")
+            }
+            assert "ix_quota_reservations_user_id" in {index["name"] for index in inspector.get_indexes("quota_reservations")}
+            assert "reservation_id" in {column["name"] for column in inspector.get_columns("quota_transactions")}
+            assert "ix_quota_transactions_reservation_id" in {index["name"] for index in inspector.get_indexes("quota_transactions")}
+            fks = {fk["name"] for fk in inspector.get_foreign_keys("quota_transactions")}
+            assert "fk_quota_transactions_reservation_id" in fks, "PG FK branch did not restore the constraint"
+        # ...and upgrading back to head drops it again.
+        _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
+        with engine.connect() as connection:
+            inspector = sa.inspect(connection)
+            assert "quota_reservations" not in inspector.get_table_names()
+            assert "reservation_id" not in {column["name"] for column in inspector.get_columns("quota_transactions")}
+    finally:
+        try:
+            _reset_public_schema(engine)
+        finally:
+            engine.dispose()
