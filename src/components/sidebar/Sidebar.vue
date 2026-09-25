@@ -8,13 +8,13 @@ import {
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
 import { useSettingsStore } from '@/stores/settings'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 
 const route = useRoute()
 const app = useAppStore()
 const settings = useSettingsStore()
 const auth = useAuthStore()
-const workspace = useWorkspaceStore()
+const workspace = useProjectStore()
 const accountMenuOpen = ref(false)
 const accountTrigger = ref<HTMLButtonElement | null>(null)
 const displayName = computed(() => auth.user?.display_name || auth.user?.username || '账户')

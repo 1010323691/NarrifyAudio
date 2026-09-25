@@ -23,8 +23,8 @@ import Alert from '@/components/ui/Alert.vue'
 import Progress from '@/components/ui/Progress.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useProjectGate } from '@/composables/useProjectGate'
 import {
   Combine,
   Download,
@@ -41,7 +41,7 @@ const router = useRouter()
 const settings = useSettingsStore()
 const project = usePipelineStateStore()
 const taskStore = useTaskStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 
 const status = ref<TTSStatus | null>(null)
@@ -360,7 +360,7 @@ onActivated(() => {
       </p>
     </div>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <Alert v-if="status && !status.implemented" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
@@ -464,7 +464,7 @@ onActivated(() => {
           <div class="flex flex-wrap gap-2">
             <Button
               class="min-w-[10rem] flex-1"
-              :disabled="!workspaceSet || submitting || !selectedNames.length"
+              :disabled="!projectSet || submitting || !selectedNames.length"
               @click="doRun"
             >
               <Loader2 v-if="submitting" class="h-4 w-4 animate-spin" />

@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import * as authApi from '@/api/auth'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import { useSettingsStore } from '@/stores/settings'
 
@@ -31,7 +31,7 @@ export const useAuthStore = defineStore('auth', () => {
       const previousUserId = user.value?.id
       const signedIn = (await authApi.login({ identifier, password })).user
       if (previousUserId !== signedIn.id) {
-        useWorkspaceStore().reset()
+        useProjectStore().reset()
         useTaskStore().reset()
       }
       user.value = signedIn
@@ -52,7 +52,7 @@ export const useAuthStore = defineStore('auth', () => {
       const previousUserId = user.value?.id
       const signedUp = (await authApi.register({ email, password, username, display_name: displayName })).user
       if (previousUserId !== signedUp.id) {
-        useWorkspaceStore().reset()
+        useProjectStore().reset()
         useTaskStore().reset()
       }
       user.value = signedUp
@@ -69,7 +69,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function signOut() {
     await authApi.logout()
     user.value = null
-    useWorkspaceStore().reset()
+    useProjectStore().reset()
     useTaskStore().reset()
   }
 

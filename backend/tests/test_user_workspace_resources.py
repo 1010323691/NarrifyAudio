@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import Task, Workspace
+from backend.platform.models import Project, Task
 from backend.platform.storage import configured_storage_root
 
 
@@ -30,7 +30,7 @@ def _create_workspace(client: TestClient) -> tuple[str, str, Path]:
     )
     assert response.status_code == 201, response.text
     user = response.json()["user"]
-    workspaces = client.get("/api/v1/workspaces")
+    workspaces = client.get("/api/v1/projects")
     assert workspaces.status_code == 200, workspaces.text
     workspace_id = workspaces.json()[0]["id"]
     with SessionLocal() as db:
@@ -49,7 +49,7 @@ def test_user_workspace_summary_only_returns_owned_project_storage(client: TestC
     old_time = time.time() - 8 * 24 * 60 * 60
     os.utime(temp, (old_time, old_time))
 
-    response = client.get(f"/api/v1/workspaces/{workspace_id}/summary")
+    response = client.get(f"/api/v1/projects/{workspace_id}/summary")
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["file_count"] == 2
@@ -62,7 +62,7 @@ def test_user_workspace_summary_only_returns_owned_project_storage(client: TestC
         json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
     )
     assert other.status_code == 201, other.text
-    denied = client.get(f"/api/v1/workspaces/{workspace_id}/summary")
+    denied = client.get(f"/api/v1/projects/{workspace_id}/summary")
     assert denied.status_code == 404
     shutil.rmtree(root, ignore_errors=True)
 
@@ -79,7 +79,7 @@ def test_user_workspace_cleanup_is_limited_to_old_cache_and_blocks_active_task(c
     os.utime(temp, (old_time, old_time))
 
     with SessionLocal.begin() as db:
-        workspace = db.get(Workspace, workspace_id)
+        workspace = db.get(Project, workspace_id)
         assert workspace is not None
         db.add(Task(
             id=str(uuid.uuid4()), owner_id=workspace.owner_id, project_id=workspace_id,
@@ -87,7 +87,7 @@ def test_user_workspace_cleanup_is_limited_to_old_cache_and_blocks_active_task(c
         ))
 
     blocked = client.post(
-        f"/api/v1/workspaces/{workspace_id}/cleanup-temp",
+        f"/api/v1/projects/{workspace_id}/cleanup-temp",
         headers={"X-CSRF-Token": csrf},
     )
     assert blocked.status_code == 409, blocked.text
@@ -99,7 +99,7 @@ def test_user_workspace_cleanup_is_limited_to_old_cache_and_blocks_active_task(c
         assert task is not None
         task.status = "cancelled"
     cleaned = client.post(
-        f"/api/v1/workspaces/{workspace_id}/cleanup-temp",
+        f"/api/v1/projects/{workspace_id}/cleanup-temp",
         headers={"X-CSRF-Token": csrf},
     )
     assert cleaned.status_code == 200, cleaned.text

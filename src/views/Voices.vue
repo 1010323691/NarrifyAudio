@@ -23,8 +23,8 @@ import Alert from '@/components/ui/Alert.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import DirPicker from '@/components/DirPicker.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useProjectGate } from '@/composables/useProjectGate'
 import {
   Users,
   Sparkles,
@@ -46,7 +46,7 @@ const router = useRouter()
 const settings = useSettingsStore()
 const project = usePipelineStateStore()
 const taskStore = useTaskStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 
 const status = ref<TTSStatus | null>(null)
@@ -186,8 +186,8 @@ const cloneRunning = computed(() => taskStore.tasks.some((t) => t.module === 'vo
 
 // Button gating: a phase is blocked while its own launch is in flight, while the OTHER phase
 // is running (so the LLM and TTS never share the GPU), or with no workspace / script.
-const foundationBlocked = computed(() => foundationBusy.value || cloneRunning.value || !hasScript.value || !workspaceSet.value)
-const cloneBlocked = computed(() => cloneBusy.value || foundationRunning.value || !hasScript.value || !workspaceSet.value)
+const foundationBlocked = computed(() => foundationBusy.value || cloneRunning.value || !hasScript.value || !projectSet.value)
+const cloneBlocked = computed(() => cloneBusy.value || foundationRunning.value || !hasScript.value || !projectSet.value)
 
 // Progress + readiness (denominator = non-alias characters).
 const nonAlias = computed(() => speakers.value.filter((s) => !s.alias_of))
@@ -531,7 +531,7 @@ watch(
       </p>
     </div>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <Alert v-if="status && !status.implemented" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>

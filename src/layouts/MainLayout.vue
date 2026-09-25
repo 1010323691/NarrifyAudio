@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import Sidebar from '@/components/sidebar/Sidebar.vue'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 import { useAuthStore } from '@/stores/auth'
 
-const workspace = useWorkspaceStore()
+const workspace = useProjectStore()
 const auth = useAuthStore()
 const workspaceScope = computed(() => `${auth.user?.id || 'guest'}:${workspace.activeProjectId}`)
 

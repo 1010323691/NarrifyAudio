@@ -10,8 +10,7 @@ export interface AdminUser {
   created_at: string
   last_seen_at?: string | null
   project_count?: number
-  workspace_count?: number
-  workspace_file_count?: number
+  project_file_count?: number
   storage_bytes?: number
   file_count?: number
   file_bytes?: number
@@ -41,9 +40,9 @@ export interface ApiSnapshot {
 }
 export interface AdminResources {
   root_path: string; disk_total_bytes: number; disk_used_bytes: number; disk_free_bytes: number
-  workspaces: number; projects: number; files: { kind: string; count: number; size_bytes: number }[]
-  users: { username: string; workspace_count?: number; file_count?: number; count?: number; size_bytes: number; registered_file_count?: number; registered_file_bytes?: number }[]
-  workspace_storage?: {
+  projects: number; files: { kind: string; count: number; size_bytes: number }[]
+  users: { username: string; project_count?: number; file_count?: number; count?: number; size_bytes: number; registered_file_count?: number; registered_file_bytes?: number }[]
+  project_storage?: {
     size_bytes?: number; file_count?: number
     categories?: { kind: string; label: string; count: number; size_bytes: number }[]
     cleanup_candidates?: { count: number; size_bytes: number; older_than_days: number }

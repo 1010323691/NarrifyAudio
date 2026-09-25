@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.api import admin
 from backend.platform.database import Base
-from backend.platform.models import SystemConfig, User, Workspace
+from backend.platform.models import Project, SystemConfig, User
 from backend.platform.storage import lock_storage_migration
 
 
@@ -31,7 +31,7 @@ def storage_db(tmp_path, monkeypatch):
         db.add(actor)
         db.add(SystemConfig(key="storage.root", value={"path": str(root)}))
         for name in ("one", "two"):
-            db.add(Workspace(id=name, owner_id=actor.id, name=name, directory_key=f"admin/{name}"))
+            db.add(Project(id=name, owner_id=actor.id, name=name, directory_key=f"admin/{name}"))
             folder = root / "admin" / name
             folder.mkdir(parents=True)
             (folder / "book.txt").write_text(name, encoding="utf-8")
@@ -161,7 +161,7 @@ def test_postgres_migration_keeps_lock_across_marker_commit(isolated_postgres, t
         actor = User(id="admin", username="admin", email="admin@example.com", password_hash="unused", role="admin")
         db.add(actor)
         db.flush()
-        db.add(Workspace(id="one", owner_id=actor.id, name="one", directory_key="admin/one"))
+        db.add(Project(id="one", owner_id=actor.id, name="one", directory_key="admin/one"))
         db.add(SystemConfig(key="storage.root", value={"path": str(root)}))
         db.commit()
         result = admin.update_storage_settings(admin.StorageRootUpdate(root_path=str(target)), actor, db)

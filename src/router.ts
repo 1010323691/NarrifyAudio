@@ -4,8 +4,8 @@ import AdminLayout from '@/layouts/AdminLayout.vue'
 import Login from '@/views/Login.vue'
 import AccessDenied from '@/views/AccessDenied.vue'
 import { useAuthStore } from '@/stores/auth'
-import { useWorkspaceStore } from '@/stores/workspace'
-import { getWorkspace } from '@/api/workspace'
+import { useProjectStore } from '@/stores/project'
+import { getActiveProject } from '@/api/project'
 
 // The customer workspace and admin console have separate route trees, layouts,
 // login portals, and role guards. Neither shell links into the other.
@@ -51,7 +51,7 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
-  const workspace = useWorkspaceStore()
+  const project = useProjectStore()
   await auth.load()
 
   if (to.path === '/login') {
@@ -72,18 +72,18 @@ router.beforeEach(async (to) => {
     const projectId = String(to.params.projectId || '')
     if (!projectId) return '/dashboard'
     try {
-      const current = await getWorkspace()
-      if (current.workspace_id === projectId) workspace.setCurrent(current)
-      else await workspace.select(projectId)
+      const current = await getActiveProject()
+      if (current.project_id === projectId) project.setCurrent(current)
+      else await project.select(projectId)
     } catch {
       return '/dashboard'
     }
   }
   if (to.meta.projectStage) {
     try {
-      const current = await getWorkspace()
-      workspace.setCurrent(current)
-      if (!current.set || !current.workspace_id) return '/dashboard'
+      const current = await getActiveProject()
+      project.setCurrent(current)
+      if (!current.set || !current.project_id) return '/dashboard'
     } catch {
       return '/dashboard'
     }

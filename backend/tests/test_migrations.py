@@ -36,7 +36,9 @@ def test_upgrade_from_empty_database_to_head(tmp_path, preexisting_hold_table):
     try:
         inspector = sa.inspect(engine)
         assert "quota_holds" in inspector.get_table_names()
+        assert "workspaces" not in inspector.get_table_names()
         assert "next_attempt_at" in {column["name"] for column in inspector.get_columns("tasks")}
+        assert {"directory_key", "last_selected_at"} <= {column["name"] for column in inspector.get_columns("projects")}
         assert "uq_quota_hold_attempt_operation" in {index["name"] for index in inspector.get_indexes("quota_holds")}
     finally:
         engine.dispose()
@@ -52,6 +54,7 @@ def test_upgrade_repairs_legacy_project_workspace_orphans(tmp_path):
         users = sa.Table("users", metadata, autoload_with=engine)
         projects = sa.Table("projects", metadata, autoload_with=engine)
         workspaces = sa.Table("workspaces", metadata, autoload_with=engine)
+        sessions = sa.Table("user_sessions", metadata, autoload_with=engine)
         now = datetime.now(timezone.utc)
         with engine.begin() as connection:
             connection.execute(users.insert().values(
@@ -66,12 +69,30 @@ def test_upgrade_repairs_legacy_project_workspace_orphans(tmp_path):
                 id="workspace-only", owner_id="user-1", name="Old workspace",
                 directory_key="legacy/workspace-only", created_at=now, updated_at=now,
             ))
+            connection.execute(sessions.insert().values(
+                id="session-1", user_id="user-1", token_hash="a" * 64, csrf_hash="b" * 64,
+                expires_at=now, last_seen_at=now, active_workspace_id="workspace-only",
+            ))
         _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
         with engine.connect() as connection:
-            project_ids = set(connection.scalars(sa.select(projects.c.id)))
-            workspace_rows = {row.id: row for row in connection.execute(sa.select(workspaces))}
-        assert project_ids == {"project-only", "workspace-only"}
-        assert set(workspace_rows) == project_ids
-        assert workspace_rows["project-only"].directory_key == "legacy/project-only"
+            inspector = sa.inspect(connection)
+            assert "workspaces" not in inspector.get_table_names()
+            migrated_projects = sa.Table("projects", sa.MetaData(), autoload_with=connection)
+            migrated_sessions = sa.Table("user_sessions", sa.MetaData(), autoload_with=connection)
+            project_rows = {row.id: row for row in connection.execute(sa.select(migrated_projects))}
+            active_project_id = connection.execute(sa.select(migrated_sessions.c.active_project_id)).scalar_one()
+        assert set(project_rows) == {"project-only", "workspace-only"}
+        assert project_rows["project-only"].directory_key == "legacy/project-only"
+        assert project_rows["workspace-only"].directory_key == "legacy/workspace-only"
+        assert project_rows["project-only"].last_selected_at.replace(tzinfo=timezone.utc) == now
+        assert active_project_id == "workspace-only"
+        _run(env, "-m", "alembic", "-c", "alembic.ini", "downgrade", "0013_project_workspace_pairs")
+        with engine.connect() as connection:
+            restored_workspaces = sa.Table("workspaces", sa.MetaData(), autoload_with=connection)
+            session_table = sa.Table("user_sessions", sa.MetaData(), autoload_with=connection)
+            restored = {row.id: row for row in connection.execute(sa.select(restored_workspaces))}
+            active_workspace_id = connection.execute(sa.select(session_table.c.active_workspace_id)).scalar_one()
+        assert restored["workspace-only"].directory_key == "legacy/workspace-only"
+        assert active_workspace_id == "workspace-only"
     finally:
         engine.dispose()

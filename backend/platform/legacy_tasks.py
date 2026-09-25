@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..services.tasks import TaskSubmissionError, submit_task_record, task_dict
 from .deps import AuthContext
-from .legacy_workspace import active_workspace, ensure_project
+from .project_context import active_project
 from .models import Task
 
 
@@ -38,13 +38,9 @@ def submit_legacy_engine_task(
     idempotency_prefix: str,
 ) -> dict:
     """Create one durable task owned by the caller's active workspace."""
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is None:
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
         raise HTTPException(409, "尚未设置工作空间")
-    try:
-        project = ensure_project(db, ctx.user, workspace)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
     try:
         task = submit_task_record(
             db, ctx.user, project_id=project.id, task_type=task_type,
@@ -79,13 +75,13 @@ def active_durable_payloads(
     *, task_type: str, ctx: AuthContext, db: Session,
 ) -> list[dict[str, Any]]:
     """Return payloads for active tasks in the user's current project."""
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is None:
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
         return []
     rows = db.scalars(
         select(Task).where(
             Task.owner_id == ctx.user.id,
-            Task.project_id == workspace.id,
+            Task.project_id == project.id,
             Task.task_type == task_type,
             Task.status.in_(ACTIVE_TASK_STATUSES),
         )
@@ -95,13 +91,13 @@ def active_durable_payloads(
 
 def has_active_durable_tasks(*, task_type: str, ctx: AuthContext, db: Session) -> bool:
     """Return whether the current project has any non-terminal task of this type."""
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is None:
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
         return False
     return db.scalar(
         select(Task.id).where(
             Task.owner_id == ctx.user.id,
-            Task.project_id == workspace.id,
+            Task.project_id == project.id,
             Task.task_type == task_type,
             Task.status.in_(ACTIVE_TASK_STATUSES),
         ).limit(1)

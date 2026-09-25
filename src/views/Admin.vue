@@ -72,8 +72,8 @@ const serviceTaskMetrics = computed(() => ({
   bgm: aggregateTypes(['bgm.']),
 }))
 const taskStatusSummary = computed(() => taskMetrics.value?.status_counts ?? {})
-const resourceCategories = computed(() => resources.value?.workspace_storage?.categories ?? [])
-const cleanupCandidates = computed(() => resources.value?.workspace_storage?.cleanup_candidates)
+const resourceCategories = computed(() => resources.value?.project_storage?.categories ?? [])
+const cleanupCandidates = computed(() => resources.value?.project_storage?.cleanup_candidates)
 
 watch(userSearch, () => { userPage.value = 1 })
 function date(value?: string | null) { return value ? new Date(value).toLocaleString('zh-CN') : '—' }
@@ -334,15 +334,15 @@ async function cleanupTemp() {
           <td><div class="badge-stack"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></div></td>
           <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td><td>未配置</td>
           <td>{{ user.consumed_units ?? 0 }} 已用<small>{{ user.reserved_units ?? 0 }} 预留 · {{ user.available_units ?? 0 }} 可用</small></td>
-          <td>{{ user.project_count ?? 0 }} 项目<small>{{ user.workspace_count ?? '—' }} 工作空间</small></td>
-          <td>{{ bytes(user.storage_bytes) }}<small>{{ user.workspace_file_count ?? '未采集' }} 个目录文件 · {{ user.file_count ?? 0 }} 个已登记</small></td>
+          <td>{{ user.project_count ?? 0 }} 个项目</td>
+          <td>{{ bytes(user.storage_bytes) }}<small>{{ user.project_file_count ?? '未采集' }} 个目录文件 · {{ user.file_count ?? 0 }} 个已登记</small></td>
           <td class="user-actions"><Button variant="outline" size="sm" @click="selectedUser = user">详情 / 操作</Button></td></tr></tbody></table></div>
         <p v-if="!shownUsers.length" class="admin-empty">没有匹配的用户</p>
         <div v-if="matchingUsers.length" class="pager"><Button variant="outline" size="sm" :disabled="userPage <= 1" @click="userPage--">上一页</Button>{{ userPage }} / {{ userPages }}<Button variant="outline" size="sm" :disabled="userPage >= userPages" @click="userPage++">下一页</Button></div>
       </CardContent></Card>
       <Card v-if="selectedUser"><CardHeader><CardTitle>用户详情 · {{ selectedUser.username }}</CardTitle></CardHeader><CardContent class="admin-form">
         <p class="mono">{{ selectedUser.id }}</p><p>{{ selectedUser.email }} · {{ selectedUser.display_name || selectedUser.username }}</p>
-        <p>套餐：未配置 · 项目：{{ selectedUser.project_count ?? 0 }} · 工作空间：{{ selectedUser.workspace_count ?? '—' }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
+        <p>套餐：未配置 · 项目：{{ selectedUser.project_count ?? 0 }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
         <p>额度：{{ selectedUser.consumed_units ?? 0 }} 已用 · {{ selectedUser.reserved_units ?? 0 }} 预留 · {{ selectedUser.available_units ?? 0 }} 可用</p>
         <div class="controls"><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { role: selectedUser.role === 'admin' ? 'user' : 'admin' })">{{ selectedUser.role === 'admin' ? '移除管理员' : '设为管理员' }}</Button><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { is_active: !selectedUser.is_active })">{{ selectedUser.is_active ? '禁用用户' : '启用用户' }}</Button></div>
         <div class="controls"><label for="quota-adjust">额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="输入数量，正数增加 / 负数扣减" class="search" /><Button variant="outline" @click="adjustQuota">确认调整</Button></div>
@@ -353,8 +353,8 @@ async function cleanupTemp() {
       <div class="admin-title"><div><h2>资源与存储</h2><p>{{ resources.scope }}</p></div></div>
       <div class="metric-grid resource-metrics">
         <div class="metric"><span>磁盘已用 / 可用</span><strong>{{ bytes(resources.disk_used_bytes) }}</strong><small>{{ bytes(resources.disk_free_bytes) }} 可用 · 共 {{ bytes(resources.disk_total_bytes) }}</small></div>
-        <div class="metric"><span>工作空间实际占用</span><strong>{{ bytes(resources.workspace_storage?.size_bytes) }}</strong><small>{{ resources.workspace_storage?.file_count ?? '未采集' }} 个文件</small></div>
-        <div class="metric"><span>工作空间 / 项目</span><strong>{{ resources.workspaces }} / {{ resources.projects }}</strong></div>
+        <div class="metric"><span>项目存储占用</span><strong>{{ bytes(resources.project_storage?.size_bytes) }}</strong><small>{{ resources.project_storage?.file_count ?? '未采集' }} 个文件</small></div>
+        <div class="metric"><span>项目总数</span><strong>{{ resources.projects }}</strong></div>
         <div class="metric"><span>公共音乐库</span><strong>{{ resources.music_library.count }} 首</strong><small>{{ bytes(resources.music_library.size_bytes) }} · {{ resources.music_library.assigned_chapters ?? '—' }} 次章节指派</small></div>
       </div>
       <div class="overview-grid">
@@ -364,7 +364,7 @@ async function cleanupTemp() {
         </CardContent></Card>
         <Card><CardHeader><CardTitle>用户占用 · 前 20</CardTitle></CardHeader><CardContent>
           <div class="admin-table"><table><thead><tr><th>用户</th><th>工作空间</th><th>文件数</th><th>实际占用</th><th>登记文件</th></tr></thead>
-            <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.workspace_count ?? '未采集' }}</td><td>{{ resources.workspace_storage ? row.file_count ?? 0 : '未采集' }}</td><td>{{ resources.workspace_storage ? bytes(row.size_bytes) : '未采集' }}</td><td>{{ row.registered_file_count ?? row.count ?? '未采集' }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr></tbody></table></div>
+            <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '未采集' }}</td><td>{{ resources.project_storage ? row.file_count ?? 0 : '未采集' }}</td><td>{{ resources.project_storage ? bytes(row.size_bytes) : '未采集' }}</td><td>{{ row.registered_file_count ?? row.count ?? '未采集' }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr></tbody></table></div>
           <p v-if="!resources.users.length" class="admin-empty">暂无用户资源</p>
         </CardContent></Card>
       </div>

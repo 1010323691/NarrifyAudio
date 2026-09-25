@@ -43,8 +43,8 @@ import Switch from '@/components/ui/Switch.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useProjectGate } from '@/composables/useProjectGate'
 import {
   Eraser,
   ListChecks,
@@ -64,7 +64,7 @@ import {
 
 const settings = useSettingsStore()
 const taskStore = useTaskStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()
 
@@ -439,7 +439,7 @@ function waitForPaint() {
 }
 
 function handlePackageClick() {
-  if (!selectedNames.value.length || packaging.value || !workspaceSet.value) return
+  if (!selectedNames.value.length || packaging.value || !projectSet.value) return
   packageSelection.value = [...selectedNames.value]
   if (selectedMixedNames.value.length !== selectedNames.value.length) {
     packageConfirmOpen.value = true
@@ -449,7 +449,7 @@ function handlePackageClick() {
 }
 
 async function doPackageDownload(chapters: string[]) {
-  if (!chapters.length || packaging.value || !workspaceSet.value) return
+  if (!chapters.length || packaging.value || !projectSet.value) return
   packaging.value = true
   error.value = ''
   try {
@@ -817,7 +817,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
       </p>
     </header>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <!-- 模式 -->
     <div class="bgm-control-card-shell" :class="{ 'is-processing': matching }" :aria-busy="matching">
@@ -989,7 +989,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                   <Button
                     variant="outline"
                     size="sm"
-                    :disabled="!workspaceSet || !row.mixable || submitting"
+                    :disabled="!projectSet || !row.mixable || submitting"
                     :class="mode === 'segment' ? 'order-3' : ''"
                     @click="doMixRow(row.stem)"
                     :title="!row.mixable
@@ -1008,7 +1008,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                     variant="outline"
                     size="sm"
                     :class="mode === 'segment' ? 'order-1' : ''"
-                    :disabled="!workspaceSet || submitting"
+                    :disabled="!projectSet || submitting"
                     @click="mode === 'segment' ? doSegmentAnalyzeRow(row.stem) : doAnalyzeRow(row.stem)"
                   >
                     <Wand2 class="h-3.5 w-3.5" />{{ mode === 'segment' ? '段落分析' : '分析' }}
@@ -1017,7 +1017,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                     v-if="mode !== 'segment'"
                     variant="outline"
                     size="sm"
-                    :disabled="!workspaceSet || matching || mode === 'segment'"
+                    :disabled="!projectSet || matching || mode === 'segment'"
                     :title="mode === 'segment' ? '段落级章的时间轴由段落分析自动生成' : ''"
                     @click="doRematch(row.stem)"
                   >
@@ -1049,7 +1049,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                     variant="outline"
                     size="sm"
                     :class="mode === 'segment' ? 'order-4' : ''"
-                    :disabled="!workspaceSet"
+                    :disabled="!projectSet"
                     @click="doLock(row.stem, !(row.data.assignment?.locked ?? false))"
                   >
                     <Lock v-if="row.data.assignment?.locked" class="h-3.5 w-3.5" />
@@ -1095,7 +1095,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
           <Button
             variant="outline"
             class="min-w-[11rem] flex-1"
-            :disabled="!workspaceSet || submitting || !selectedNames.length"
+            :disabled="!projectSet || submitting || !selectedNames.length"
             @click="mode === 'segment' ? doSegmentAnalyze() : doAnalyze()"
           >
             <Wand2 class="h-4 w-4" />
@@ -1103,7 +1103,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
           </Button>
           <Button
             class="min-w-[11rem] flex-1"
-            :disabled="!workspaceSet || submitting || !selectedNames.length"
+            :disabled="!projectSet || submitting || !selectedNames.length"
             @click="doMix"
           >
             <Loader2 v-if="submitting" class="h-4 w-4 animate-spin" />
@@ -1113,7 +1113,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
           <Button
             variant="outline"
             class="min-w-[11rem] flex-1"
-            :disabled="!workspaceSet || packaging || !selectedNames.length"
+            :disabled="!projectSet || packaging || !selectedNames.length"
             :title="`打包下载已选的 ${selectedNames.length} 个章节`"
             :aria-busy="packaging"
             data-bgm-package-trigger

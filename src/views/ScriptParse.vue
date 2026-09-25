@@ -18,8 +18,8 @@ import Alert from '@/components/ui/Alert.vue'
 import Progress from '@/components/ui/Progress.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import LiveStreamPanel from '@/components/ui/LiveStreamPanel.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useProjectGate } from '@/composables/useProjectGate'
 import {
   FileText,
   ScanText,
@@ -33,7 +33,7 @@ import {
 
 const settings = useSettingsStore()
 const taskStore = useTaskStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 
 // LLM / 生成参数 / Prompt 的配置编辑在「设置」页（含解析内检查的三个开关）；本页
 // 只从 settings.config 读取已保存的值（用于并发数显示与模型名校验），不再本地编辑 / 保存。
@@ -248,7 +248,7 @@ onMounted(async () => {
 })
 
 async function loadFiles() {
-  if (!workspaceSet.value) {
+  if (!projectSet.value) {
     files.value = []
     return
   }
@@ -356,7 +356,7 @@ async function cancelAll() {
       </p>
     </div>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <!-- 选择待解析文件 -->
     <Card>
@@ -466,7 +466,7 @@ async function cancelAll() {
         </Alert>
 
         <div class="flex flex-wrap gap-2">
-          <Button class="min-w-[10rem] flex-1" :disabled="!selectedNames.length || !workspaceSet || busy" @click="startParse">
+          <Button class="min-w-[10rem] flex-1" :disabled="!selectedNames.length || !projectSet || busy" @click="startParse">
             <Loader2 v-if="busy" class="h-4 w-4 animate-spin" />
             <ScanText v-else class="h-4 w-4" />
             {{ busy ? '处理中…' : '开始处理' }}

@@ -5,7 +5,7 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { getQuota, listQuotaTransactions, type QuotaBalance, type QuotaTransaction } from '@/api/quota'
-import { getWorkspaceSummary, listManagedProjects } from '@/api/workspace'
+import { getProjectSummary, listProjects } from '@/api/project'
 import { listProjectFiles } from '@/api/projects'
 
 const balance = ref<QuotaBalance | null>(null)
@@ -54,7 +54,7 @@ async function load() {
   refreshing.value = true
   error.value = ''
   const [balanceResult, transactionResult, projectsResult] = await Promise.allSettled([
-    getQuota(), listQuotaTransactions(), listManagedProjects(),
+    getQuota(), listQuotaTransactions(), listProjects(),
   ])
   if (balanceResult.status === 'fulfilled') balance.value = balanceResult.value
   else error.value = balanceResult.reason?.message || '额度暂时无法读取。'
@@ -62,7 +62,7 @@ async function load() {
   else if (!error.value) error.value = transactionResult.reason?.message || '使用记录暂时无法读取。'
   if (projectsResult.status === 'fulfilled') {
     const usage = await Promise.all(projectsResult.value.map(async (project) => {
-      try { return (await getWorkspaceSummary(project.id)).size_bytes }
+      try { return (await getProjectSummary(project.id)).size_bytes }
       catch {
         try { return (await listProjectFiles(project.id)).reduce((sum, file) => sum + file.size_bytes, 0) }
         catch { return null }

@@ -1,12 +1,12 @@
 import { onActivated, onDeactivated, onUnmounted, watch } from 'vue'
 import { waitForDurableTask } from '@/api/persistentTasks'
 import { useAuthStore } from '@/stores/auth'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 
 /** Stop page-owned polling when its project view or account is disposed. */
 export function useDurableTaskWait() {
   const auth = useAuthStore()
-  const workspace = useWorkspaceStore()
+  const workspace = useProjectStore()
   let controller = new AbortController()
   watch(
     [() => auth.user?.id ?? '', () => workspace.activeProjectId],

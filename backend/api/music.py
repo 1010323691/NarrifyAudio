@@ -26,7 +26,7 @@ from ..engines import music as music_engine
 from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
-from ..platform.models import User, Workspace
+from ..platform.models import User, Project
 from ..platform.legacy_tasks import active_durable_targets, submit_legacy_engine_task
 from ..platform.storage import configured_storage_root, safe_display_name
 
@@ -178,8 +178,8 @@ def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depe
     if is_admin and hasattr(db, "execute"):
         root = configured_storage_root(db).resolve()
         workspaces = db.execute(
-            select(Workspace, User.username).join(User, User.id == Workspace.owner_id)
-            .where(Workspace.deleted_at.is_(None))
+            select(Project, User.username).join(User, User.id == Project.owner_id)
+            .where(Project.deleted_at.is_(None))
         ).all()
         for workspace, username in workspaces:
             workspace_root = root / safe_display_name(username) / workspace.id

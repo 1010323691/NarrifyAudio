@@ -44,12 +44,12 @@ def _submit_echo_task() -> str:
         )
         db.add(user)
         db.flush()
-        db.add(Project(id=project_id, owner_id=user.id, name=f"redis-{project_id[:12]}"))
+        db.add(Project(id=project_id, owner_id=user.id, name=f"redis-{project_id[:12]}", directory_key=f"{user.username}/{project_id}"))
         db.commit()
         task = submit_task_record(
             db, user,
             project_id=project_id,
-            task_type="redis.acceptance.echo",
+            task_type="text.format",
             payload={"value": "recovered"},
             estimated_units=0,
             idempotency_key=f"redis-acceptance-{uuid.uuid4().hex}",

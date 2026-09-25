@@ -4,9 +4,10 @@ from sqlalchemy import select
 
 from .config import settings
 from .database import SessionLocal
-from .models import Project, User, UserQuotaAccount, Workspace, new_id
+from .models import User, UserQuotaAccount
 from .security import hash_password
 from .storage import user_workspace_root
+from ..services.projects import create_project
 
 
 def ensure_bootstrap_admin() -> None:
@@ -25,15 +26,9 @@ def ensure_bootstrap_admin() -> None:
         db.add(user)
         db.flush()
         db.add(UserQuotaAccount(user_id=user.id, available_units=0))
-        workspace_id = new_id()
-        db.add(
-            Workspace(
-                id=workspace_id,
-                owner_id=user.id,
-                name="默认工作空间",
-                directory_key=f"{user.username}/{workspace_id}",
-            )
+        project = create_project(
+            db, owner_id=user.id, username=user.username,
+            name="默认工作空间", description="默认工作空间",
         )
-        db.add(Project(id=workspace_id, owner_id=user.id, name="默认工作空间", description="默认工作空间对应项目"))
         db.flush()
-        user_workspace_root(db, user.username, workspace_id).mkdir(parents=True, exist_ok=True)
+        user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)

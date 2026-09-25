@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -51,8 +51,8 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    active_workspace_id: Mapped[str | None] = mapped_column(
-        ForeignKey("workspaces.id", name="fk_user_sessions_active_workspace_id", ondelete="SET NULL"), index=True
+    active_project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", name="fk_user_sessions_active_project_id", ondelete="SET NULL"), index=True
     )
 
     user: Mapped[User] = relationship(back_populates="sessions")
@@ -66,6 +66,8 @@ class Project(TimestampMixin, Base):
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    directory_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    last_selected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
 
     owner: Mapped[User] = relationship(back_populates="projects")
@@ -75,6 +77,7 @@ class Project(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("id", "owner_id", name="uq_projects_id_owner"),
         UniqueConstraint("owner_id", "name", "deleted_at", name="uq_projects_owner_name_deleted"),
+        UniqueConstraint("directory_key", name="uq_projects_directory_key"),
     )
 
 
@@ -278,18 +281,27 @@ class WorkerHeartbeat(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
-class Workspace(TimestampMixin, Base):
-    """A user-owned workspace directory under the administrator's root."""
+# Revision 0002 imports this table object to create/downgrade historical
+# schemas. Keep it detached from Base.metadata so current create_all no longer
+# recreates the retired Workspace entity.
+class _HistoricalWorkspaceTable:
+    __table__ = Table(
+        "workspaces", MetaData(),
+        Column("id", String(36), primary_key=True),
+        Column("owner_id", String(36), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False),
+        Column("name", String(160), nullable=False),
+        Column("directory_key", String(180), nullable=False, unique=True),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+        Column("updated_at", DateTime(timezone=True), nullable=False),
+        Column("deleted_at", DateTime(timezone=True), nullable=True),
+        UniqueConstraint("owner_id", "name", "deleted_at", name="uq_workspaces_owner_name_deleted"),
+        Index("ix_workspaces_owner_id", "owner_id"),
+        Index("ix_workspaces_deleted_at", "deleted_at"),
+    )
 
-    __tablename__ = "workspaces"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
-    name: Mapped[str] = mapped_column(String(160), nullable=False)
-    directory_key: Mapped[str] = mapped_column(String(180), unique=True, nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-
-    __table_args__ = (UniqueConstraint("owner_id", "name", "deleted_at", name="uq_workspaces_owner_name_deleted"),)
+# Migration-only compatibility export. Runtime code uses Project exclusively.
+Workspace = _HistoricalWorkspaceTable
 
 
 class AuditLog(Base):

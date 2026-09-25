@@ -29,8 +29,8 @@ import Badge from '@/components/ui/Badge.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Progress from '@/components/ui/Progress.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useProjectGate } from '@/composables/useProjectGate'
 import Table from '@/components/ui/Table.vue'
 import TableHeader from '@/components/ui/TableHeader.vue'
 import TableBody from '@/components/ui/TableBody.vue'
@@ -51,7 +51,7 @@ import {
 
 const settings = useSettingsStore()
 const project = usePipelineStateStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()
 
@@ -385,7 +385,7 @@ function download(path: string) {
       </p>
     </div>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <!-- 选择文件 -->
     <Card>
@@ -520,16 +520,16 @@ function download(path: string) {
       </CardHeader>
       <CardContent class="space-y-4">
         <div class="flex flex-wrap items-center gap-3">
-          <Button @click="doCut" :disabled="busyCut || !plan || !workspaceSet">
+          <Button @click="doCut" :disabled="busyCut || !plan || !projectSet">
             <Loader2 v-if="busyCut" class="h-4 w-4 animate-spin" />
             <Scissors v-else class="h-4 w-4" />
             {{ busyCut ? '切割中…' : '开始切割' }}
           </Button>
-          <Button variant="outline" @click="doZip" :disabled="busyZip || !cutResult || !workspaceSet">
+          <Button variant="outline" @click="doZip" :disabled="busyZip || !cutResult || !projectSet">
             <Package class="h-4 w-4" />
             打包下载
           </Button>
-          <Button variant="outline" @click="doExport" :disabled="busyExport || !cutResult || !workspaceSet">
+          <Button variant="outline" @click="doExport" :disabled="busyExport || !cutResult || !projectSet">
             <FolderOutput class="h-4 w-4" />
             输出到音频源文件夹
           </Button>

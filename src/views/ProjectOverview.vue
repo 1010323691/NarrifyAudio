@@ -7,13 +7,13 @@ import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { listDir } from '@/api/files'
 import { listDurableTasks, type DurableTask } from '@/api/persistentTasks'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 
 const route = useRoute()
 const router = useRouter()
-const workspace = useWorkspaceStore()
+const workspace = useProjectStore()
 const settings = useSettingsStore()
 const projectId = computed(() => String(route.params.projectId || ''))
 const loading = ref(true)

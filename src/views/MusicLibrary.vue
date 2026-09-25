@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 音乐库（全局资源，工作空间外、跨工程共享）——曲目上传 / 试听 / 打标 / AI 推荐 /
-// 批量操作 / 标签管理。页面不经 WorkspaceGateAlert（与工作空间无关）。
+// 批量操作 / 标签管理。页面不经 ProjectGateAlert（与工作空间无关）。
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm, showPrompt } from '@/components/ui/dialog'

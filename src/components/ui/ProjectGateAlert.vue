@@ -8,14 +8,14 @@ import { useRouter } from 'vue-router'
 import { FolderX } from 'lucide-vue-next'
 import Alert from '@/components/ui/Alert.vue'
 import Button from '@/components/ui/Button.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import { useProjectGate } from '@/composables/useProjectGate'
 
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const router = useRouter()
 </script>
 
 <template>
-  <Alert v-if="!workspaceSet" variant="warning">
+  <Alert v-if="!projectSet" variant="warning">
     <template #icon>
       <FolderX class="h-5 w-5 shrink-0" />
     </template>

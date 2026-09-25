@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -11,10 +11,12 @@ from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.file_response import file_response
-from ..platform.models import Project, ProjectFile, User, new_id
-from ..services.projects import ActiveProjectTasksError, create_project_workspace, rename_project, soft_delete_project
+from ..platform.models import Project, ProjectFile, User, new_id, utcnow
+from ..platform.deps import AuthContext, get_auth_context
+from ..services.projects import ActiveProjectTasksError, create_project as create_project_record, rename_project, soft_delete_project
 from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, user_workspace_root
-from ..core.paths import WORKSPACE_DIRS
+from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
+from ..core.request_context import bind_workspace
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
@@ -29,8 +31,13 @@ class ProjectUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=2000)
 
 
+class ActiveProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str | None = None
+
+
 def _project_json(project: Project, user: User) -> dict:
-    return {"id": project.id, "name": project.name, "description": project.description, "created_at": project.created_at.isoformat(), "updated_at": project.updated_at.isoformat(), "directory_key": f"{user.username}/{project.id}"}
+    return {"id": project.id, "name": project.name, "description": project.description, "created_at": project.created_at.isoformat(), "updated_at": project.updated_at.isoformat(), "directory_key": project.directory_key}
 
 
 def _owned_project(db: Session, user: User, project_id: str) -> Project:
@@ -50,7 +57,7 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
     name = payload.name.strip()
     if db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.deleted_at.is_(None))) is not None:
         raise HTTPException(409, "项目名称已存在")
-    project, _workspace = create_project_workspace(
+    project = create_project_record(
         db, owner_id=user.id, username=user.username,
         name=name, description=payload.description.strip(),
     )
@@ -62,6 +69,64 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
         raise HTTPException(422, f"无法创建项目工作空间目录：{exc}") from exc
     db.refresh(project)
     return _project_json(project, user)
+
+
+def _active_project(db: Session, ctx: AuthContext) -> Project | None:
+    project = None
+    if ctx.session.active_project_id:
+        project = db.scalar(select(Project).where(
+            Project.id == ctx.session.active_project_id,
+            Project.owner_id == ctx.user.id,
+            Project.deleted_at.is_(None),
+        ))
+    if project is None:
+        project = db.scalar(select(Project).where(
+            Project.owner_id == ctx.user.id, Project.deleted_at.is_(None),
+        ).order_by(Project.last_selected_at.desc().nullslast(), Project.updated_at.desc()))
+    return project
+
+
+def _project_context(db: Session, ctx: AuthContext) -> dict:
+    project = _active_project(db, ctx)
+    if project is None:
+        return {"set": False, "path": "", "exists": False, "is_default": True, "dirs": {}}
+    path = user_workspace_root(db, ctx.user.username, project.id)
+    return {
+        "set": True, "path": str(path), "exists": path.exists(),
+        "is_default": project.name == "默认工作空间", "project_id": project.id,
+        "project_name": project.name, "dirs": Layout(path).dirs(),
+    }
+
+
+@router.get("/active")
+def get_active_project(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
+    return _project_context(db, ctx)
+
+
+@router.put("/active")
+def select_active_project(
+    payload: ActiveProjectRequest, ctx: AuthContext = Depends(get_auth_context),
+    _: User = Depends(require_csrf), db: Session = Depends(get_db),
+) -> dict:
+    project_id = payload.project_id
+    if not project_id:
+        ctx.session.active_project_id = None
+        db.commit()
+        return _project_context(db, ctx)
+    project = _owned_project(db, ctx.user, str(project_id))
+    path = user_workspace_root(db, ctx.user.username, project.id)
+    try:
+        for name in (*WORKSPACE_DIR_NAMES, "logs", "config"):
+            (path / name).mkdir(parents=True, exist_ok=True)
+        from ..core import config as core_config
+        core_config.init_workspace_config(path)
+    except OSError as exc:
+        raise HTTPException(422, f"无法准备项目目录：{exc}") from exc
+    ctx.session.active_project_id = project.id
+    project.last_selected_at = utcnow()
+    db.commit()
+    bind_workspace(path)
+    return _project_context(db, ctx)
 
 
 @router.get("/{project_id}")

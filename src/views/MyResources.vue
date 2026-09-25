@@ -3,8 +3,8 @@ import { computed, onMounted, ref } from 'vue'
 import { RefreshCw, Search, Trash2 } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
-import { useWorkspaceStore } from '@/stores/workspace'
-import { cleanupWorkspaceTemp, getWorkspaceSummary, type WorkspaceFileSummary, type WorkspaceSummary } from '@/api/workspace'
+import { useProjectStore } from '@/stores/project'
+import { cleanupProjectTemp, getProjectSummary, type ProjectFileSummary, type ProjectStorageSummary } from '@/api/project'
 import { listProjectFiles } from '@/api/projects'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
@@ -12,12 +12,12 @@ import { showConfirm } from '@/components/ui/dialog'
 interface ResourceProject {
   id: string
   name: string
-  summary: WorkspaceSummary
+  summary: ProjectStorageSummary
   scope: 'workspace' | 'registered'
   error?: string
 }
 
-const workspace = useWorkspaceStore()
+const workspace = useProjectStore()
 const { push: toast } = useToast()
 const records = ref<ResourceProject[]>([])
 const loading = ref(true)
@@ -75,11 +75,11 @@ async function load() {
   await workspace.refresh()
   const results = await Promise.all(workspace.projects.map(async (project): Promise<ResourceProject> => {
     try {
-      return { id: project.id, name: project.name, summary: await getWorkspaceSummary(project.id), scope: 'workspace' }
+      return { id: project.id, name: project.name, summary: await getProjectSummary(project.id), scope: 'workspace' }
     } catch {
       try {
         const files = await listProjectFiles(project.id)
-        const summaryFiles: WorkspaceFileSummary[] = files.map((file) => ({
+        const summaryFiles: ProjectFileSummary[] = files.map((file) => ({
           name: file.name,
           relative_path: file.name,
           module: file.module || 'other',
@@ -99,7 +99,7 @@ async function load() {
           name: project.name,
           scope: 'registered',
           summary: {
-            workspace_id: project.id, name: project.name, updated_at: project.updated_at,
+            project_id: project.id, name: project.name, updated_at: project.updated_at,
             file_count: summaryFiles.length, size_bytes: summaryFiles.reduce((sum, file) => sum + file.size_bytes, 0), split_volume_count: 0,
           categories: Array.from(totals, ([key, value]) => ({ key, label: MODULE_LABELS[key] || '其他文件', ...value })),
             recent_files: summaryFiles, recent_outputs: audio,
@@ -113,7 +113,7 @@ async function load() {
           name: project.name,
           scope: 'registered',
           summary: {
-            workspace_id: project.id, name: project.name, updated_at: project.updated_at,
+            project_id: project.id, name: project.name, updated_at: project.updated_at,
             file_count: 0, size_bytes: 0, split_volume_count: 0, categories: [], recent_files: [], recent_outputs: [],
             cleanup_candidates: { count: 0, size_bytes: 0, older_than_days: 7, blocked_by_active_tasks: false },
           },
@@ -135,7 +135,7 @@ async function cleanup(record: ResourceProject) {
   if (!await showConfirm(message, { title: '清理项目缓存', destructive: true })) return
   cleaningId.value = record.id
   try {
-    const result = await cleanupWorkspaceTemp(record.id)
+    const result = await cleanupProjectTemp(record.id)
     toast({ title: '临时缓存已清理', variant: 'success', description: `删除 ${result.deleted_count} 个文件，释放 ${formatBytes(result.deleted_bytes)}。` })
     await load()
   } catch (cause: any) {

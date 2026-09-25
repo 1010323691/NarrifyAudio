@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 import { useToast } from '@/components/ui/toast'
 import type { AppConfig, TextToggles } from '@/types'
 import * as adminApi from '@/api/admin'
@@ -39,13 +39,13 @@ import {
 const settings = useSettingsStore()
 const props = withDefaults(defineProps<{ adminOnly?: boolean; adminSection?: string }>(), { adminOnly: false })
 const auth = useAuthStore()
-const workspace = useWorkspaceStore()
+const workspace = useProjectStore()
 const { push: toast } = useToast()
 
 const draft = ref<AppConfig | null>(null)
 const saving = ref(false)
 const section = ref<'account' | 'appearance' | 'text' | 'models' | 'audio'>('account')
-const workspaceSet = computed(() => workspace.hasActiveProject)
+const projectSet = computed(() => workspace.hasActiveProject)
 const settingsTabs = [['account','账号与项目'],['appearance','界面']] as const
 
 watch(() => props.adminSection, (value) => {
@@ -141,7 +141,7 @@ async function save() {
         <h1 class="page-title">设置</h1>
         <p class="page-description">管理账号信息和个人界面偏好。</p>
       </div>
-      <Button v-if="section !== 'account'" @click="save" :disabled="saving || !draft || !workspaceSet">
+      <Button v-if="section !== 'account'" @click="save" :disabled="saving || !draft || !projectSet">
         <Save class="h-4 w-4" />{{ saving ? '保存中…' : '保存设置' }}
       </Button>
     </div>
@@ -174,7 +174,7 @@ async function save() {
         </CardContent>
       </Card>
 
-      <Alert v-if="!adminOnly && section !== 'account' && !workspaceSet" variant="warning">
+      <Alert v-if="!adminOnly && section !== 'account' && !projectSet" variant="warning">
         先在「我的项目」中打开项目，再编辑项目级偏好。<RouterLink to="/dashboard" class="alert-link">选择项目</RouterLink>
       </Alert>
 

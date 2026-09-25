@@ -5,18 +5,18 @@ import { ArrowRight, BookOpen, Clock3, FolderPlus, LoaderCircle, Plus, RefreshCw
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
-import { useWorkspaceStore } from '@/stores/workspace'
+import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { listDurableTasks, type DurableTask } from '@/api/persistentTasks'
-import { deleteManagedProject, getWorkspaceSummary, type WorkspaceSummary } from '@/api/workspace'
-import type { ManagedProject } from '@/api/workspace'
+import { deleteProject, getProjectSummary, type ProjectStorageSummary } from '@/api/project'
+import type { ProjectSummary } from '@/api/project'
 
 const router = useRouter()
-const workspace = useWorkspaceStore()
+const workspace = useProjectStore()
 const settings = useSettingsStore()
 const tasks = ref<DurableTask[]>([])
-const summaries = ref<Record<string, WorkspaceSummary>>({})
+const summaries = ref<Record<string, ProjectStorageSummary>>({})
 const loading = ref(true)
 const refreshing = ref(false)
 const createOpen = ref(false)
@@ -24,7 +24,7 @@ const name = ref('')
 const pageError = ref('')
 const openError = ref('')
 const deletingProjectId = ref('')
-const projectToDelete = ref<ManagedProject | null>(null)
+const projectToDelete = ref<ProjectSummary | null>(null)
 const deleteError = ref('')
 const deleteDialog = ref<HTMLElement | null>(null)
 const deleteTrigger = ref<HTMLElement | null>(null)
@@ -35,7 +35,7 @@ const stageCount = computed(() => visibleStageKeys.value.length)
 
 const projects = computed(() => [...workspace.projects].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)))
 
-function stagesWithOutput(summary?: WorkspaceSummary) {
+function stagesWithOutput(summary?: ProjectStorageSummary) {
   if (!summary) return null
   const completed = new Set(summary.categories.filter((row) => row.count > 0).map((row) => row.key))
   return visibleStageKeys.value.filter((key) =>
@@ -43,7 +43,7 @@ function stagesWithOutput(summary?: WorkspaceSummary) {
   ).length
 }
 
-function projectState(project: ManagedProject) {
+function projectState(project: ProjectSummary) {
   const task = tasks.value.find((item) => item.project_id === project.id && !['succeeded', 'cancelled'].includes(item.status))
   if (!task) return null
   return task
@@ -75,13 +75,13 @@ async function load() {
   if (workspace.error) pageError.value = workspace.error
   else if (tasksResult[0].status === 'rejected') pageError.value = '最近任务暂时无法读取。'
   const visible = projects.value.slice(0, 12)
-  const results = await Promise.allSettled(visible.map((project) => getWorkspaceSummary(project.id)))
-  const next: Record<string, WorkspaceSummary> = {}
+  const results = await Promise.allSettled(visible.map((project) => getProjectSummary(project.id)))
+  const next: Record<string, ProjectStorageSummary> = {}
   results.forEach((result, index) => {
     if (result.status === 'fulfilled') next[visible[index].id] = result.value
   })
   summaries.value = next
-  if (active?.set && !workspace.projects.some((item) => item.id === active.workspace_id)) {
+  if (active?.set && !workspace.projects.some((item) => item.id === active.project_id)) {
     await workspace.refresh()
   }
   refreshing.value = false
@@ -100,7 +100,7 @@ async function createProject() {
   }
 }
 
-async function openProject(project: ManagedProject) {
+async function openProject(project: ProjectSummary) {
   if (workspace.busy) return
   openError.value = ''
   try {
@@ -111,7 +111,7 @@ async function openProject(project: ManagedProject) {
   }
 }
 
-function requestDelete(project: ManagedProject, trigger: HTMLElement) {
+function requestDelete(project: ProjectSummary, trigger: HTMLElement) {
   if (workspace.busy || deletingProjectId.value) return
   projectToDelete.value = project
   deleteError.value = ''
@@ -156,7 +156,7 @@ async function confirmDeleteProject() {
   deleteError.value = ''
   void nextTick(() => deleteDialog.value?.querySelector<HTMLElement>('[role="alertdialog"]')?.focus())
   try {
-    await deleteManagedProject(project.id)
+    await deleteProject(project.id)
     projectToDelete.value = null
     await load()
     void nextTick(() => projectListHeading.value?.focus())

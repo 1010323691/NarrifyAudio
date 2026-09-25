@@ -7,8 +7,8 @@ import { useSettingsStore } from '@/stores/settings'
  * at app start, so it flips reactively as soon as the dashboard saves a new
  * workspace (or clears it).
  */
-export function useWorkspaceGate() {
+export function useProjectGate() {
   const settings = useSettingsStore()
-  const workspaceSet = computed(() => !!(settings.config?.paths?.working_dir || '').trim())
-  return { workspaceSet }
+  const projectSet = computed(() => !!(settings.config?.paths?.working_dir || '').trim())
+  return { projectSet }
 }

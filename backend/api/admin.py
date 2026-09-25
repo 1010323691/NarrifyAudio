@@ -17,12 +17,13 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, OutboxEvent, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, Workspace, utcnow
+from ..platform.models import AuditLog, OutboxEvent, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from ..platform.worker_registry import is_stale
 from ..services.tasks import cancel_task_record, requeue_task_record
+from ..services.project_filesystem import iter_regular_project_files
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
 
@@ -30,7 +31,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 _ACTIVE_TASK_STATUSES = ("pending", "queued", "running", "paused", "cancelling", "retrying")
 _TEMP_CLEANUP_AGE_DAYS = 7
-_WORKSPACE_CATEGORY_LABELS = {
+_PROJECT_CATEGORY_LABELS = {
     "00_temp": "临时文件",
     "cache": "缓存文件",
     ".cache": "缓存文件",
@@ -49,7 +50,7 @@ _WORKSPACE_CATEGORY_LABELS = {
 }
 
 
-def _workspace_path(root: Path, username: str, workspace_id: str) -> Path | None:
+def _project_path(root: Path, username: str, workspace_id: str) -> Path | None:
     """Resolve an indexed workspace without following a user-controlled path."""
     resolved_root = root.resolve()
     candidate = root / safe_display_name(username) / workspace_id
@@ -84,42 +85,31 @@ def _read_bgm_usage(workspace: Path) -> dict[str, int]:
     return counts
 
 
-def _scan_workspace(workspace: Path, *, active: bool = False) -> dict:
+def _scan_project_directory(workspace: Path, *, active: bool = False) -> dict:
     """Measure ordinary files, and identify old 00_temp files eligible for cleanup."""
     result = {"size_bytes": 0, "file_count": 0, "categories": {},
               "cleanup_count": 0, "cleanup_bytes": 0}
     if workspace.is_symlink() or not workspace.is_dir():
         return result
     cutoff = datetime.now().timestamp() - _TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
-    for directory, child_dirs, filenames in os.walk(workspace, topdown=True, followlinks=False):
-        parent = Path(directory)
-        child_dirs[:] = [name for name in child_dirs if not (parent / name).is_symlink()]
-        for filename in filenames:
-            path = parent / filename
-            if path.is_symlink():
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            relative = path.relative_to(workspace)
-            key = relative.parts[0] if relative.parts else "other"
-            category = key if key in _WORKSPACE_CATEGORY_LABELS else "other"
-            bucket = result["categories"].setdefault(category, {"count": 0, "size_bytes": 0})
-            bucket["count"] += 1
-            bucket["size_bytes"] += stat.st_size
-            result["file_count"] += 1
-            result["size_bytes"] += stat.st_size
-            if not active and category == "00_temp" and stat.st_mtime < cutoff:
-                result["cleanup_count"] += 1
-                result["cleanup_bytes"] += stat.st_size
+    for _path, relative, stat in iter_regular_project_files(workspace):
+        key = relative.parts[0] if relative.parts else "other"
+        category = key if key in _PROJECT_CATEGORY_LABELS else "other"
+        bucket = result["categories"].setdefault(category, {"count": 0, "size_bytes": 0})
+        bucket["count"] += 1
+        bucket["size_bytes"] += stat.st_size
+        result["file_count"] += 1
+        result["size_bytes"] += stat.st_size
+        if not active and category == "00_temp" and stat.st_mtime < cutoff:
+            result["cleanup_count"] += 1
+            result["cleanup_bytes"] += stat.st_size
     return result
 
 
-def _music_use_counts(workspaces: list[tuple[Workspace, str]], root: Path) -> dict[str, int]:
+def _music_use_counts(workspaces: list[tuple[Project, str]], root: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     for workspace, username in workspaces:
-        path = _workspace_path(root, username, workspace.id)
+        path = _project_path(root, username, workspace.id)
         if path is None or not path.is_dir():
             continue
         for name, count in _read_bgm_usage(path).items():
@@ -258,7 +248,7 @@ def _update_storage_settings(payload: StorageRootUpdate, actor: User, db: Sessio
     except OSError as exc:
         raise HTTPException(422, f"无法创建存储根目录：{exc}") from exc
     moved: list[tuple[Path, Path]] = []
-    directory_keys = {item.directory_key for item in db.scalars(select(Workspace)).all()}
+    directory_keys = {item.directory_key for item in db.scalars(select(Project)).all()}
     directory_keys.update(
         f"{safe_display_name(username)}/{project.id}"
         for project, username in db.execute(
@@ -413,23 +403,21 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
     workspace_usage: dict[str, dict[str, int]] = {}
     root = configured_storage_root(db)
     workspace_rows = db.execute(
-        select(Workspace, User.id, User.username).join(User, User.id == Workspace.owner_id)
-        .where(Workspace.deleted_at.is_(None))
+        select(Project, User.id, User.username).join(User, User.id == Project.owner_id)
+        .where(Project.deleted_at.is_(None))
     ).all()
     for workspace, user_id, username in workspace_rows:
-        usage = workspace_usage.setdefault(user_id, {"workspace_count": 0, "storage_bytes": 0, "workspace_file_count": 0})
-        usage["workspace_count"] += 1
-        path = _workspace_path(root, username, workspace.id)
+        usage = workspace_usage.setdefault(user_id, {"storage_bytes": 0, "project_file_count": 0})
+        path = _project_path(root, username, workspace.id)
         if path is not None:
-            measured = _scan_workspace(path)
+            measured = _scan_project_directory(path)
             usage["storage_bytes"] += measured["size_bytes"]
-            usage["workspace_file_count"] += measured["file_count"]
+            usage["project_file_count"] += measured["file_count"]
     return [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name,
              "role": item.role, "is_active": item.is_active, "created_at": item.created_at.isoformat(),
              "last_seen_at": last_seen[item.id].isoformat() if item.id in last_seen else None,
              "project_count": projects.get(item.id, 0),
-             "workspace_count": workspace_usage.get(item.id, {}).get("workspace_count", 0),
-             "workspace_file_count": workspace_usage.get(item.id, {}).get("workspace_file_count", 0),
+             "project_file_count": workspace_usage.get(item.id, {}).get("project_file_count", 0),
              "storage_bytes": workspace_usage.get(item.id, {}).get("storage_bytes", 0),
              "file_count": file_usage.get(item.id, {}).get("count", 0),
              "file_bytes": file_usage.get(item.id, {}).get("size_bytes", 0),
@@ -901,122 +889,6 @@ def performance(_: User = Depends(require_admin), db: Session = Depends(get_db))
             "tasks": task_metrics(_, db), "workers": list_workers(_, db), "queue": queue_status(_),
             "api": api_snapshot(),
             "unavailable_metrics": ["LLM Token/TTFT/吞吐", "TTS 字符/实时倍率", "磁盘 I/O/网络"]}
-
-
-@router.get("/resources")
-def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
-    from ..core.paths import MUSIC_LIBRARY_DIR
-    root = configured_storage_root(db)
-    disk = shutil.disk_usage(root)
-    file_rows = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
-    registered = {
-        username: {"count": int(count), "size_bytes": int(size)}
-        for username, count, size in db.execute(
-            select(User.username, func.count(ProjectFile.id), func.coalesce(func.sum(ProjectFile.size_bytes), 0))
-            .join(ProjectFile, ProjectFile.owner_id == User.id)
-            .where(ProjectFile.deleted_at.is_(None)).group_by(User.username)
-        ).all()
-    }
-    workspaces = db.execute(
-        select(Workspace, User.username).join(User, User.id == Workspace.owner_id)
-        .where(Workspace.deleted_at.is_(None))
-    ).all()
-    active_project_ids = set(db.scalars(
-        select(Task.project_id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).distinct()
-    ).all())
-    users: dict[str, dict] = {}
-    category_totals: dict[str, dict[str, int]] = {}
-    cleanup_count = cleanup_bytes = 0
-    for workspace, username in workspaces:
-        row = users.setdefault(username, {"workspace_count": 0, "size_bytes": 0, "file_count": 0})
-        row["workspace_count"] += 1
-        path = _workspace_path(root, username, workspace.id)
-        measured = _scan_workspace(path, active=workspace.id in active_project_ids) if path is not None else {
-            "size_bytes": 0, "file_count": 0, "categories": {}, "cleanup_count": 0, "cleanup_bytes": 0,
-        }
-        row["size_bytes"] += measured["size_bytes"]
-        row["file_count"] += measured["file_count"]
-        cleanup_count += measured["cleanup_count"]
-        cleanup_bytes += measured["cleanup_bytes"]
-        for category, values in measured["categories"].items():
-            total = category_totals.setdefault(category, {"count": 0, "size_bytes": 0})
-            total["count"] += values["count"]
-            total["size_bytes"] += values["size_bytes"]
-    user_rows = [
-        {"username": username, **values, "registered_file_count": registered.get(username, {}).get("count", 0),
-         "registered_file_bytes": registered.get(username, {}).get("size_bytes", 0)}
-        for username, values in sorted(users.items(), key=lambda item: item[1]["size_bytes"], reverse=True)[:20]
-    ]
-    music_usage = _music_use_counts(workspaces, root)
-    music_files = [path for path in MUSIC_LIBRARY_DIR.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".mp3", ".wav", ".flac"}] if MUSIC_LIBRARY_DIR.is_dir() else []
-    return {"root_path": str(root), "disk_total_bytes": disk.total, "disk_used_bytes": disk.used, "disk_free_bytes": disk.free,
-            "workspaces": int(db.scalar(select(func.count()).select_from(Workspace).where(Workspace.deleted_at.is_(None))) or 0),
-            "projects": int(db.scalar(select(func.count()).select_from(Project).where(Project.deleted_at.is_(None))) or 0),
-            "files": [{"kind": kind, "count": count, "size_bytes": size} for kind, count, size in file_rows],
-            "users": user_rows,
-            "workspace_storage": {
-                "size_bytes": sum(row["size_bytes"] for row in users.values()),
-                "file_count": sum(row["file_count"] for row in users.values()),
-                "categories": [
-                    {"kind": key, "label": _WORKSPACE_CATEGORY_LABELS[key], **values}
-                    for key, values in sorted(category_totals.items(), key=lambda item: item[1]["size_bytes"], reverse=True)
-                ],
-                "cleanup_candidates": {"count": cleanup_count, "size_bytes": cleanup_bytes,
-                                       "older_than_days": _TEMP_CLEANUP_AGE_DAYS},
-            },
-            "music_library": {"count": len(music_files), "size_bytes": sum(path.stat().st_size for path in music_files),
-                              "assigned_chapters": sum(music_usage.values())},
-            "scope": "工作空间目录按只读文件扫描（跳过符号链接）；用户的缓存、临时文件、音频、日志均计入。模型位于工作空间之外时不计入此处。"}
-
-
-@router.post("/resources/cleanup-temp")
-def cleanup_stale_temp(actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    """Delete only old regular files in inactive workspaces' 00_temp folders."""
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
-    root = configured_storage_root(db)
-    workspaces = db.execute(
-        select(Workspace, User.username).join(User, User.id == Workspace.owner_id)
-        .where(Workspace.deleted_at.is_(None))
-    ).all()
-    active_project_ids = set(db.scalars(
-        select(Task.project_id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).distinct()
-    ).all())
-    cutoff = datetime.now().timestamp() - _TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
-    removed_count = removed_bytes = skipped = 0
-    root_resolved = root.resolve()
-    for workspace, username in workspaces:
-        if workspace.id in active_project_ids:
-            continue
-        workspace_path = _workspace_path(root, username, workspace.id)
-        if workspace_path is None:
-            continue
-        temp_dir = workspace_path / "00_temp"
-        if temp_dir.is_symlink() or not temp_dir.is_dir():
-            continue
-        for directory, child_dirs, filenames in os.walk(temp_dir, topdown=True, followlinks=False):
-            parent = Path(directory)
-            child_dirs[:] = [name for name in child_dirs if not (parent / name).is_symlink()]
-            for filename in filenames:
-                path = parent / filename
-                if path.is_symlink():
-                    continue
-                try:
-                    resolved = path.resolve()
-                    stat = path.stat()
-                    if not resolved.is_relative_to(root_resolved) or stat.st_mtime >= cutoff:
-                        continue
-                    path.unlink()
-                    removed_count += 1
-                    removed_bytes += stat.st_size
-                except OSError:
-                    skipped += 1
-    db.add(AuditLog(actor_user_id=actor.id, action="admin.temp_cleanup", target_type="storage",
-                    target_id=str(root), metadata_json={"files": removed_count, "bytes": removed_bytes,
-                                                       "age_days": _TEMP_CLEANUP_AGE_DAYS, "skipped": skipped}))
-    db.commit()
-    return {"deleted_count": removed_count, "deleted_bytes": removed_bytes, "skipped_count": skipped,
-            "older_than_days": _TEMP_CLEANUP_AGE_DAYS}
 
 
 @router.get("/events")

@@ -10,11 +10,12 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
-from ..platform.models import AuditLog, Project, User, UserQuotaAccount, Workspace, new_id
+from ..platform.models import AuditLog, User, UserQuotaAccount
 from ..platform.quota_config import initial_quota_units
 from ..platform.registration_config import registration_enabled
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
 from ..platform.storage import user_workspace_root
+from ..services.projects import create_project
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -66,19 +67,12 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
     db.add(user)
     db.flush()
     db.add(UserQuotaAccount(user_id=user.id, available_units=initial_quota_units(db)))
-    workspace_id = new_id()
-    workspace = Workspace(
-        id=workspace_id,
-        owner_id=user.id,
-        name="默认工作空间",
-        directory_key=f"{user.username}/{workspace_id}",
+    project = create_project(
+        db, owner_id=user.id, username=user.username, name="默认工作空间", description="默认工作空间",
     )
-    db.add(workspace)
-    db.add(Project(id=workspace_id, owner_id=user.id, name="默认工作空间", description="默认工作空间对应项目"))
-    db.flush()
-    user_workspace_root(db, user.username, workspace.id).mkdir(parents=True, exist_ok=True)
+    user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
     token, csrf, session = create_session(db, user)
-    session.active_workspace_id = workspace.id
+    session.active_project_id = project.id
     db.commit()
     _set_cookies(response, token, csrf)
     return {"user": _user_json(user), "csrf_token": csrf}

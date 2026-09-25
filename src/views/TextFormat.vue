@@ -25,19 +25,19 @@ import CardContent from '@/components/ui/CardContent.vue'
 import CardFooter from '@/components/ui/CardFooter.vue'
 import Alert from '@/components/ui/Alert.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import Table from '@/components/ui/Table.vue'
 import TableHeader from '@/components/ui/TableHeader.vue'
 import TableBody from '@/components/ui/TableBody.vue'
 import TableRow from '@/components/ui/TableRow.vue'
 import TableHead from '@/components/ui/TableHead.vue'
 import TableCell from '@/components/ui/TableCell.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import { useProjectGate } from '@/composables/useProjectGate'
 import { FileText, ArrowRight, RefreshCw, Download, Scissors, AlertTriangle, Sparkles } from 'lucide-vue-next'
 
 const router = useRouter()
 const settings = useSettingsStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()
 
@@ -83,7 +83,7 @@ const splitEnabled = computed(
     !!analysis.value &&
     analysis.value.chapter_count > 0 &&
     !busySplit.value &&
-    workspaceSet.value,
+    projectSet.value,
 )
 // 智能识别：需要排版产物 + 至少一个章节；任何环节忙碌时禁用。
 const smartEnabled = computed(
@@ -91,7 +91,7 @@ const smartEnabled = computed(
     !!formatResult.value &&
     !!analysis.value &&
     !zeroChapters.value &&
-    workspaceSet.value &&
+    projectSet.value &&
     !busyFormat.value &&
     !busyAnalyze.value &&
     !busySplit.value &&
@@ -271,7 +271,7 @@ async function split() {
 
 // 零章节「不处理，按整本继续」：直接写单个 `<base> 全书.txt`（唯一不经智能识别的分册路径）。
 async function runWholeBook() {
-  if (!formatResult.value || !analysis.value || !workspaceSet.value || busySplit.value) return
+  if (!formatResult.value || !analysis.value || !projectSet.value || busySplit.value) return
   busySplit.value = true
   error.value = ''
   try {
@@ -424,7 +424,7 @@ function download(p: string) {
       </p>
     </div>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <!-- 选择文件 -->
     <Card>
@@ -446,7 +446,7 @@ function download(p: string) {
     <div class="flex flex-wrap items-center gap-x-5 gap-y-3">
       <Button
         @click="formatAndRecognize"
-        :disabled="busyFormat || busyAnalyze || busySmart || busySplit || !file || !workspaceSet"
+        :disabled="busyFormat || busyAnalyze || busySmart || busySplit || !file || !projectSet"
         :class="seqHasIssues && !smartResult ? 'ring-2 ring-amber-400/80' : ''"
         :title="seqHasIssues ? '章节号存在问题（缺号/重号/乱序），点击按物理顺序修复' : ''"
       >
@@ -474,7 +474,7 @@ function download(p: string) {
       <div class="space-y-2">
         <p>{{ analysis?.error }}</p>
         <div class="flex gap-2">
-          <Button size="sm" :disabled="busySplit || !formatResult || !workspaceSet" @click="runWholeBook">
+          <Button size="sm" :disabled="busySplit || !formatResult || !projectSet" @click="runWholeBook">
             不处理，按整本继续
           </Button>
           <Button size="sm" variant="outline" @click="resetPage">重新上传原文</Button>

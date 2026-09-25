@@ -20,7 +20,7 @@ import type {
  * workspace files (03_parsed_json / 04_voice_profiles / 05_audio_chunk), so they need no
  * path handoff — only a "done" marker for the dashboard.
  */
-export const usePipelineStateStore = defineStore('project', () => {
+export const usePipelineStateStore = defineStore('pipelineState', () => {
   // Which parsed JSON (a file name in 03_parsed_json/) the downstream 角色配音 / 音频合成
   // stages should read. Shared by both pages so they operate on the same file.
   // Empty string → the backend falls back to the most recently written JSON.

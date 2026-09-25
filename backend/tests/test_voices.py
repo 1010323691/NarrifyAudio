@@ -1215,7 +1215,7 @@ def test_phase_task_guard_reads_durable_voice_tasks(monkeypatch):
         tts_api, "has_active_durable_tasks",
         lambda **kwargs: queried.append(kwargs["task_type"]) or kwargs["task_type"] == "voices.clone",
     )
-    ctx = AuthContext(user=SimpleNamespace(id="u"), session=SimpleNamespace(active_workspace_id="w"))
+    ctx = AuthContext(user=SimpleNamespace(id="u"), session=SimpleNamespace(active_project_id="w"))
     assert tts_api._phase_task_active(ctx, Session()) is True
     assert queried == ["voices.foundation", "voices.clone"]
 

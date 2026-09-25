@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from ..platform.database import SessionLocal
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.legacy_workspace import active_workspace
+from ..platform.project_context import active_project
 from ..platform.models import Task as DurableTask, TaskEvent, utcnow
 from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
 from .platform_tasks import retry_task as retry_durable_task
@@ -157,8 +157,8 @@ def _durable_snapshot(db, task: DurableTask) -> dict:
 
 
 def _current_project_id(db, ctx: AuthContext) -> str | None:
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    return workspace.id if workspace is not None else None
+    project = active_project(db, ctx.user, ctx.session)
+    return project.id if project is not None else None
 
 
 def _durable_rows(db, ctx: AuthContext) -> list[DurableTask]:

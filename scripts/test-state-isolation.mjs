@@ -25,7 +25,7 @@ function harness(overrides = {}) {
       streamAllTasks: () => () => {},
     },
     '@/api/client': { http: { get: async () => ({ status: 'running' }) } },
-    '@/api/workspace': {},
+    '@/api/project': {},
     ...overrides,
   }
   const modules = new Map()
@@ -92,36 +92,36 @@ test('out-of-order configuration loads retain the newest response', async () => 
   assert.equal(settings.config.version, 2)
 })
 
-test('workspace refresh clears pipeline state when the active project changes', async () => {
-  const load = harness({ '@/api/workspace': {
-    getWorkspace: async () => ({ set: true, workspace_id: 'B' }),
-    listManagedProjects: async () => [],
+test('project refresh clears pipeline state when the active project changes', async () => {
+  const load = harness({ '@/api/project': {
+    getActiveProject: async () => ({ set: true, project_id: 'B' }),
+    listProjects: async () => [],
   } })
-  const workspace = load('@/stores/workspace').useWorkspaceStore()
+  const project = load('@/stores/project').useProjectStore()
   const pipeline = load('@/stores/pipelineState').usePipelineStateStore()
-  workspace.setCurrent({ set: true, workspace_id: 'A' })
+  project.setCurrent({ set: true, project_id: 'A' })
   pipeline.activeScript = 'A.json'
-  await workspace.refresh()
+  await project.refresh()
   assert.equal(pipeline.activeScript, '')
-  assert.equal(workspace.activeProjectId, 'B')
+  assert.equal(project.activeProjectId, 'B')
 })
 
 test('A to B to A project switches clear each previous pipeline result', async () => {
-  const load = harness({ '@/api/workspace': {
-    selectWorkspace: async (id) => ({ set: true, workspace_id: id }),
+  const load = harness({ '@/api/project': {
+    selectProject: async (id) => ({ set: true, project_id: id }),
   } })
-  const workspace = load('@/stores/workspace').useWorkspaceStore()
+  const project = load('@/stores/project').useProjectStore()
   const pipeline = load('@/stores/pipelineState').usePipelineStateStore()
 
-  workspace.setCurrent({ set: true, workspace_id: 'A' })
+  project.setCurrent({ set: true, project_id: 'A' })
   pipeline.setActiveScript('A.json')
-  await workspace.select('B')
-  assert.equal(workspace.activeProjectId, 'B')
+  await project.select('B')
+  assert.equal(project.activeProjectId, 'B')
   assert.equal(pipeline.activeScript, '')
 
   pipeline.setActiveScript('B.json')
-  await workspace.select('A')
-  assert.equal(workspace.activeProjectId, 'A')
+  await project.select('A')
+  assert.equal(project.activeProjectId, 'A')
   assert.equal(pipeline.activeScript, '')
 })
 
@@ -143,16 +143,16 @@ test('aborting a durable task wait stops its next polling request', async () => 
 test('a create response from a signed-out account cannot select its project', async () => {
   const old = deferred()
   let selections = 0
-  const load = harness({ '@/api/workspace': {
-    createManagedWorkspace: () => old.promise,
-    selectWorkspace: async () => { selections += 1; return {} },
-    getWorkspace: async () => ({}), listManagedProjects: async () => [],
+  const load = harness({ '@/api/project': {
+    createProject: () => old.promise,
+    selectProject: async () => { selections += 1; return {} },
+    getActiveProject: async () => ({}), listProjects: async () => [],
   } })
-  const workspace = load('@/stores/workspace').useWorkspaceStore()
-  const pending = workspace.create('Old account project')
-  workspace.reset()
+  const project = load('@/stores/project').useProjectStore()
+  const pending = project.create('Old account project')
+  project.reset()
   old.resolve({ id: 'old-project' })
   await pending
   assert.equal(selections, 0)
-  assert.equal(workspace.current, null)
+  assert.equal(project.current, null)
 })

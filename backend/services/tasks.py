@@ -13,6 +13,7 @@ from ..platform.task_state import (
     suppress_pending_dispatch,
 )
 from ..platform.storage import lock_storage_migration, storage_migration
+from ..platform.task_types import BILLABLE_TASK_TYPES, SUPPORTED_TASK_TYPES
 
 
 class TaskSubmissionError(Exception):
@@ -83,6 +84,8 @@ def submit_task_record(
     db: Session, user: User, *, project_id: str, task_type: str,
     payload: dict, estimated_units: int, idempotency_key: str,
 ) -> Task:
+    if task_type not in SUPPORTED_TASK_TYPES:
+        raise TaskSubmissionError(422, f"不支持的任务类型：{task_type}")
     if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
         raise TaskSubmissionError(409, "存储根目录正在迁移，暂时无法提交任务")
     # Estimated task size remains part of the historical idempotency contract;
@@ -107,7 +110,7 @@ def submit_task_record(
         account = UserQuotaAccount(user_id=user.id, available_units=0)
         db.add(account)
         db.flush()
-    if task_type in {"script.parse", "voices.foundation", "voices.clone", "tts.batch", "bgm.analysis", "bgm.segment", "music.suggest_tags"} and account.available_units <= 0:
+    if task_type in BILLABLE_TASK_TYPES and account.available_units <= 0:
         raise TaskSubmissionError(409, "额度不足")
     # Account row locking serializes concurrent submissions for this user.
     existing = db.scalar(select(Task).where(Task.owner_id == user.id, Task.idempotency_key == idempotency_key))

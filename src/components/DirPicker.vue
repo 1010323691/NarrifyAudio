@@ -14,7 +14,7 @@
  */
 import { onMounted, ref, watch } from 'vue'
 import { listDir } from '@/api/files'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import { useProjectGate } from '@/composables/useProjectGate'
 import { formatBytes } from '@/utils/format'
 import type { DirListResult, FileItem } from '@/types'
 import Label from '@/components/ui/Label.vue'
@@ -67,7 +67,7 @@ const emit = defineEmits<{
   (e: 'scanned', r: DirListResult): void
 }>()
 
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 
 const entries = ref<FileItem[]>([])
 const loading = ref(false)
@@ -84,7 +84,7 @@ function matches(i: FileItem): boolean {
 }
 
 async function scan() {
-  if (!workspaceSet.value) {
+  if (!projectSet.value) {
     entries.value = []
     return
   }
@@ -105,12 +105,12 @@ function select(name: string) {
 }
 
 onMounted(scan)
-watch(workspaceSet, scan)
+watch(projectSet, scan)
 watch(() => props.module, scan)
 </script>
 
 <template>
-  <div v-if="workspaceSet" class="space-y-1.5">
+  <div v-if="projectSet" class="space-y-1.5">
     <Label v-if="label">{{ label }}</Label>
     <div class="flex items-stretch gap-2">
       <div class="max-h-80 min-h-[6rem] flex-1 space-y-1 overflow-y-auto rounded-md border p-2">

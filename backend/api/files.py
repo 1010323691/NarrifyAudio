@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..core.paths import WORKSPACE_DIRS, get_layout, peek_layout, is_workspace_set
 from ..platform.database import get_db
 from ..platform.file_response import file_response
-from ..platform.legacy_workspace import active_workspace, ensure_project
+from ..platform.project_context import active_project
 from ..platform.models import ProjectFile, new_id
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.config import settings
@@ -52,15 +52,15 @@ def list_module(
         return {"path": str(d), "items": []}
     paths = sorted(d.rglob("*") if recursive else d.iterdir())
     catalog: dict[str, ProjectFile] = {}
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is not None:
-        prefix = f"{safe_display_name(ctx.user.username)}/{workspace.id}/{module}/"
+    project = active_project(db, ctx.user, ctx.session)
+    if project is not None:
+        prefix = f"{safe_display_name(ctx.user.username)}/{project.id}/{module}/"
         catalog = {
             item.object_key: item
             for item in db.scalars(
                 select(ProjectFile).where(
                     ProjectFile.owner_id == ctx.user.id,
-                    ProjectFile.project_id == workspace.id,
+                    ProjectFile.project_id == project.id,
                     ProjectFile.object_key.like(prefix + "%"),
                     ProjectFile.deleted_at.is_(None),
                 )
@@ -118,10 +118,9 @@ async def upload_file(
     _common.require_workspace()
     layout = get_layout()
     layout.input.mkdir(parents=True, exist_ok=True)
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is None:
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
         raise HTTPException(409, "尚未设置工作空间")
-    project = ensure_project(db, ctx.user, workspace)
     file_id = new_id()
     name = safe_display_name(Path(filename or file.filename or "upload.bin").name)
     dest = (layout.input / file_id / name).resolve()

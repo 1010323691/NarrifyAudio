@@ -64,24 +64,32 @@ def test_session_cookie_and_project_scope(client: TestClient):
     assert response.status_code == 201, response.text
     project = response.json()
     assert client.get("/api/v1/projects").json()[0]["id"] == project["id"]
-    assert any(item["id"] == project["id"] for item in client.get("/api/v1/workspaces").json())
+    assert any(item["id"] == project["id"] for item in client.get("/api/v1/projects").json())
     assert client.post("/api/v1/projects", json={"name": "No CSRF"}).status_code == 403
 
     client.post("/api/auth/logout", headers={"X-CSRF-Token": csrf})
     assert client.get("/api/v1/projects").status_code == 401
 
 
+def test_retired_filesystem_and_workspace_routes_are_not_registered(client: TestClient):
+    assert client.get("/api/filesystem/drives").status_code == 404
+    assert client.get("/api/v1/workspaces").status_code == 404
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
+    assert not any(path.startswith("/api/filesystem") for path in paths)
+    assert not any(path.startswith("/api/v1/workspaces") for path in paths)
+
+
 def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
-    created = client.post("/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "Original"})
+    created = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Original"})
     assert created.status_code == 201, created.text
     workspace_id = created.json()["id"]
     renamed = client.patch(
         f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}, json={"name": "Renamed"},
     )
     assert renamed.status_code == 200, renamed.text
-    assert any(item["name"] == "Renamed" for item in client.get("/api/v1/workspaces").json())
+    assert any(item["name"] == "Renamed" for item in client.get("/api/v1/projects").json())
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
         json={"project_id": workspace_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
@@ -91,21 +99,28 @@ def test_project_routes_keep_managed_workspace_lifecycle_in_sync(client: TestCli
     cancelled = client.post(f"/api/v1/tasks/{submitted.json()['id']}/cancel", headers={"X-CSRF-Token": csrf})
     assert cancelled.status_code == 200
     assert client.delete(f"/api/v1/projects/{workspace_id}", headers={"X-CSRF-Token": csrf}).status_code == 200
-    assert all(item["id"] != workspace_id for item in client.get("/api/v1/workspaces").json())
+    assert all(item["id"] != workspace_id for item in client.get("/api/v1/projects").json())
 
 
 def test_legacy_task_ui_adapter_lists_and_controls_durable_tasks(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     workspace = client.post(
-        "/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "Task UI adapter"},
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Task UI adapter"},
     )
     assert workspace.status_code == 201, workspace.text
     project_id = workspace.json()["id"]
     selected = client.put(
-        "/api/workspace", headers={"X-CSRF-Token": csrf}, json={"workspace_id": project_id},
+        "/api/v1/projects/active", headers={"X-CSRF-Token": csrf}, json={"project_id": project_id},
     )
     assert selected.status_code == 200, selected.text
+    unsupported = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={
+            "project_id": project_id, "task_type": "unknown.executor", "payload": {},
+            "estimated_units": 0, "idempotency_key": f"unsupported-{uuid.uuid4().hex}",
+        },
+    )
+    assert unsupported.status_code == 422, unsupported.text
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={
             "project_id": project_id,
@@ -237,7 +252,7 @@ def test_workspace_engine_lock_serializes_project_writers(client: TestClient):
 def test_script_batch_http_routes_use_persistent_tasks(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
-    workspace = Path(client.get("/api/workspace").json()["path"])
+    workspace = Path(client.get("/api/v1/projects/active").json()["path"])
     source = workspace / "02_split_text" / "chapter.txt"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("A short chapter.", encoding="utf-8")
@@ -394,7 +409,7 @@ def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestCl
 def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client: TestClient, tmp_path):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
-    created = client.post("/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "My workspace"})
+    created = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "My workspace"})
     assert created.status_code == 201, created.text
     workspace = created.json()
     assert workspace["directory_key"].startswith(f"{first['user']['username']}/")
@@ -422,9 +437,9 @@ def test_workspace_directory_is_user_scoped_and_admin_root_is_persistent(client:
 
 def test_workspaces_for_different_users_have_separate_username_roots(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
-    first_info = client.get("/api/workspace").json()
+    first_info = client.get("/api/v1/projects/active").json()
     second = _register(client, f"{uuid.uuid4()}@example.com")
-    second_info = client.get("/api/workspace").json()
+    second_info = client.get("/api/v1/projects/active").json()
 
     assert first_info["path"] != second_info["path"]
     assert first_info["path"].replace("\\", "/").split("/")[-2] == first["user"]["username"]
@@ -433,22 +448,22 @@ def test_workspaces_for_different_users_have_separate_username_roots(client: Tes
 
 def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: TestClient):
     anonymous = TestClient(app)
-    assert anonymous.get("/api/workspace").status_code == 401
+    assert anonymous.get("/api/v1/projects/active").status_code == 401
 
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
-    current = client.get("/api/workspace")
+    current = client.get("/api/v1/projects/active")
     assert current.status_code == 200, current.text
     info = current.json()
-    assert info["workspace_id"]
+    assert info["project_id"]
     assert info["path"].split("\\")[-2] == first["user"]["username"]
 
     rejected = client.put(
-        "/api/workspace",
+        "/api/v1/projects/active",
         headers={"X-CSRF-Token": csrf},
         json={"path": str(Path.cwd())},
     )
-    assert rejected.status_code == 400, rejected.text
+    assert rejected.status_code == 422, rejected.text
     uploaded = client.post(
         "/api/files/upload",
         headers={"X-CSRF-Token": csrf},
@@ -892,7 +907,7 @@ def test_fair_scheduler_rotates_between_users(client: TestClient):
             response = test_client.post(
                 "/api/v1/tasks",
                 headers={"X-CSRF-Token": csrf},
-                json={"project_id": project_id, "task_type": "scheduler.test", "payload": {}, "estimated_units": 0, "idempotency_key": key},
+                json={"project_id": project_id, "task_type": "text.format", "payload": {}, "estimated_units": 0, "idempotency_key": key},
             )
             assert response.status_code == 201, response.text
             return response.json()["id"]
@@ -901,9 +916,9 @@ def test_fair_scheduler_rotates_between_users(client: TestClient):
         submit(client, first_csrf, first_project["id"], "fair-first-2")
         second_task = submit(second_client, second_csrf, second_project["id"], "fair-second-1")
 
-    claim_one = claim_fair_task("fair-worker-1", task_types=("scheduler.test",))
+    claim_one = claim_fair_task("fair-worker-1", task_types=("text.format",))
     assert claim_one is not None
-    claim_two = claim_fair_task("fair-worker-2", task_types=("scheduler.test",))
+    claim_two = claim_fair_task("fair-worker-2", task_types=("text.format",))
     assert claim_two is not None
     assert claim_one.task_id == first_task
     assert claim_two.task_id == second_task
@@ -973,7 +988,7 @@ def test_retry_deadline_applies_to_direct_and_fair_claims(client: TestClient):
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Backoff book"}).json()
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"], "task_type": "backoff.test", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+        json={"project_id": project["id"], "task_type": "book.analyze", "payload": {}, "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
     )
     assert submitted.status_code == 201, submitted.text
     task_id = submitted.json()["id"]
@@ -982,10 +997,10 @@ def test_retry_deadline_applies_to_direct_and_fair_claims(client: TestClient):
         task.status = "retrying"
         task.next_attempt_at = utcnow() + timedelta(minutes=1)
     assert claim_task(task_id, "direct-worker") is None
-    assert claim_fair_task("fair-worker", task_types=("backoff.test",)) is None
+    assert claim_fair_task("fair-worker", task_types=("book.analyze",)) is None
     with SessionLocal.begin() as db:
         db.get(Task, task_id).next_attempt_at = utcnow() - timedelta(seconds=1)
-    claim = claim_fair_task("fair-worker", task_types=("backoff.test",))
+    claim = claim_fair_task("fair-worker", task_types=("book.analyze",))
     assert claim is not None and claim.task_id == task_id
 
 
@@ -1247,7 +1262,7 @@ def test_tts_reset_restores_deleted_package_when_commit_fails(client: TestClient
 def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestClient, tmp_path):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
-    workspace = client.post("/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": "Storage resume"}).json()
+    workspace = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Storage resume"}).json()
     with SessionLocal.begin() as db:
         db.get(User, first["user"]["id"]).role = "admin"
         for task in db.scalars(select(Task).where(Task.status.in_(("pending", "queued", "running", "paused", "cancelling", "retrying")))).all():
@@ -1260,7 +1275,7 @@ def test_interrupted_storage_migration_blocks_writes_and_resumes(client: TestCli
     target = target_root / workspace["directory_key"]
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(source), str(target))
-    assert client.get("/api/workspace").status_code == 409
+    assert client.get("/api/v1/projects/active").status_code == 409
     assert not source.exists()
     blocked = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},

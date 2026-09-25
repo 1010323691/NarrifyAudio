@@ -1,27 +1,27 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import * as workspaceApi from '@/api/workspace'
-import type { WorkspaceInfo } from '@/types'
+import * as projectApi from '@/api/project'
+import type { ProjectContext } from '@/types'
 import { useSettingsStore } from '@/stores/settings'
 import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useTaskStore } from '@/stores/task'
 
-export const useWorkspaceStore = defineStore('workspace', () => {
-  const current = ref<WorkspaceInfo | null>(null)
-  const projects = ref<workspaceApi.ManagedProject[]>([])
+export const useProjectStore = defineStore('project', () => {
+  const current = ref<ProjectContext | null>(null)
+  const projects = ref<projectApi.ProjectSummary[]>([])
   const loaded = ref(false)
   const loading = ref(false)
   const busy = ref(false)
   const error = ref('')
   let generation = 0
 
-  const activeProjectId = computed(() => current.value?.workspace_id || current.value?.project_id || '')
+  const activeProjectId = computed(() => current.value?.project_id || '')
   const activeProject = computed(() => projects.value.find((item) => item.id === activeProjectId.value) ?? null)
-  const activeProjectName = computed(() => current.value?.workspace_name || activeProject.value?.name || '')
+  const activeProjectName = computed(() => current.value?.project_name || activeProject.value?.name || '')
   const hasActiveProject = computed(() => !!current.value?.set && !!activeProjectId.value)
 
-  function applyCurrent(value: WorkspaceInfo) {
-    const changed = (value.workspace_id || value.project_id || '') !== activeProjectId.value
+  function applyCurrent(value: ProjectContext) {
+    const changed = (value.project_id || '') !== activeProjectId.value
     if (changed) {
       usePipelineStateStore().reset()
       useSettingsStore().reset()
@@ -37,8 +37,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     loading.value = true
     error.value = ''
     const [activeResult, projectsResult] = await Promise.allSettled([
-      workspaceApi.getWorkspace(),
-      workspaceApi.listManagedProjects(),
+      projectApi.getActiveProject(),
+      projectApi.listProjects(),
     ])
     if (requestGeneration !== generation) return current.value
     let scopeChanged = false
@@ -59,7 +59,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     error.value = ''
     const requestGeneration = generation
     try {
-      const selected = await workspaceApi.selectWorkspace(projectId)
+      const selected = await projectApi.selectProject(projectId)
       if (requestGeneration !== generation) return null
       applyCurrent(selected)
       const settings = useSettingsStore()
@@ -80,14 +80,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function create(name: string) {
     const requestGeneration = generation
-    const created = await workspaceApi.createManagedWorkspace(name)
+    const created = await projectApi.createProject(name)
     if (requestGeneration !== generation) return created
     await select(created.id)
     await refresh()
     return created
   }
 
-  function setCurrent(value: WorkspaceInfo) {
+  function setCurrent(value: ProjectContext) {
     generation += 1
     if (applyCurrent(value)) void useSettingsStore().load()
     loading.value = false

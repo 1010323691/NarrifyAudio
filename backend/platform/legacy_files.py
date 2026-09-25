@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .deps import AuthContext
-from .legacy_workspace import active_workspace, ensure_project
+from .project_context import active_project
 from .models import ProjectFile
 from .storage import configured_storage_root, safe_display_name, sha256_file
 
@@ -24,10 +24,9 @@ def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> Project
     source = source.resolve()
     if not source.is_file():
         raise ValueError("不是一个文件")
-    workspace = active_workspace(db, ctx.user, ctx.session)
-    if workspace is None:
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
         raise ValueError("尚未设置工作空间")
-    project = ensure_project(db, ctx.user, workspace)
     root = configured_storage_root(db).resolve()
     try:
         relative = source.relative_to(root)

@@ -539,20 +539,19 @@ export type DeepPartial<T> = {
       : T[K]
 }
 
-/** Workspace state from ``GET /api/workspace``. */
-export interface WorkspaceInfo {
+/** Active project context from ``GET /api/v1/projects/active``. */
+export interface ProjectContext {
   set: boolean
-  /** The workspace folder; empty string when no workspace is set. */
+  /** The project folder; empty string when no project is selected. */
   path: string
   /** Whether the pointed folder still exists on disk (false = moved/deleted → re-select). */
   exists?: boolean
-  /** True when no user workspace is set yet (pipeline is locked). */
+  /** True when no project is selected yet (pipeline is locked). */
   is_default: boolean
   /** Artifact directory name → absolute path (01_input, 02_split_text, …); empty when unset. */
   dirs: Record<string, string>
-  workspace_id?: string
   project_id?: string
-  workspace_name?: string
+  project_name?: string
 }
 
 // ------------------------------ music library（全局音乐库） ------------------------------

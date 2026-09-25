@@ -10,6 +10,7 @@ import redis
 from .platform.outbox import publish_pending
 from .platform.task_worker import recover_database_tasks, run_once
 from .platform.worker_registry import heartbeat, mark_offline
+from .platform.task_types import SUPPORTED_TASK_TYPES
 
 
 def main() -> None:
@@ -21,11 +22,7 @@ def main() -> None:
     client = redis.Redis.from_url(os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
     capabilities = {
         "task_types": [
-            "text.format", "book.analyze", "book.split", "script.parse",
-            "audio.silences", "audio.cut", "voices.foundation", "voices.clone",
-            "tts.batch", "tts.merge", "bgm.analysis", "bgm.segment",
-            "bgm.mix", "bgm.match", "bgm.package", "music.suggest_tags",
-            "audio.zip", "audio.export", "tts.reset",
+            *sorted(SUPPORTED_TASK_TYPES),
         ],
         "queue": "narrify-tasks",
     }

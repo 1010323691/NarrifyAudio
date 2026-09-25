@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api.admin import _scan_workspace, _task_module
+from backend.api.admin import _scan_project_directory, _task_module
 from backend.core import observability
 from backend.main import app
-from backend.platform.config import settings
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import Task, User
+from backend.platform.storage import configured_storage_root
 
 
 @pytest.fixture(scope="module")
@@ -114,10 +114,12 @@ def test_admin_can_retry_failed_zero_cost_task(client: TestClient):
 def test_temp_cleanup_deletes_only_old_files_under_inactive_temp_directory(client: TestClient):
     csrf, _ = _create_admin(client)
     workspace = client.post(
-        "/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": f"Cleanup {uuid.uuid4()}"}
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": f"Cleanup {uuid.uuid4()}"}
     )
     assert workspace.status_code == 201, workspace.text
-    workspace_path = settings.storage_root / workspace.json()["directory_key"]
+    with SessionLocal() as db:
+        storage_root = configured_storage_root(db)
+    workspace_path = storage_root / workspace.json()["directory_key"]
     temp_dir = workspace_path / "00_temp"
     other_dir = workspace_path / "05_audio_chunk"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -143,11 +145,13 @@ def test_temp_cleanup_deletes_only_old_files_under_inactive_temp_directory(clien
 def test_temp_cleanup_skips_workspaces_with_active_tasks(client: TestClient):
     csrf, user_id = _create_admin(client)
     workspace = client.post(
-        "/api/v1/workspaces", headers={"X-CSRF-Token": csrf}, json={"name": f"Active {uuid.uuid4()}"}
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": f"Active {uuid.uuid4()}"}
     )
     assert workspace.status_code == 201, workspace.text
     workspace_data = workspace.json()
-    workspace_path = settings.storage_root / workspace_data["directory_key"]
+    with SessionLocal() as db:
+        storage_root = configured_storage_root(db)
+    workspace_path = storage_root / workspace_data["directory_key"]
     temp_dir = workspace_path / "00_temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     old_file = temp_dir / "in-use.tmp"
@@ -181,13 +185,13 @@ def test_workspace_scan_counts_files_and_only_marks_old_temp_files(tmp_path: Pat
     old_time = time.time() - 8 * 24 * 60 * 60
     os.utime(old_file, (old_time, old_time))
 
-    result = _scan_workspace(workspace)
+    result = _scan_project_directory(workspace)
     assert result["file_count"] == 3
     assert result["size_bytes"] == len(b"oldrecentaudio")
     assert result["cleanup_count"] == 1
     assert result["cleanup_bytes"] == len(b"old")
     assert result["categories"]["05_audio_chunk"]["count"] == 1
-    assert _scan_workspace(workspace, active=True)["cleanup_count"] == 0
+    assert _scan_project_directory(workspace, active=True)["cleanup_count"] == 0
 
 
 def test_workspace_scan_skips_symlinked_directories(tmp_path: Path):
@@ -202,7 +206,7 @@ def test_workspace_scan_skips_symlinked_directories(tmp_path: Path):
     except (OSError, NotImplementedError):
         pytest.skip("directory symlinks are unavailable in this environment")
 
-    result = _scan_workspace(workspace)
+    result = _scan_project_directory(workspace)
     assert result["file_count"] == 0
     assert result["size_bytes"] == 0
 

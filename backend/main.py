@@ -17,22 +17,21 @@ from starlette.concurrency import run_in_threadpool
 
 from .api import audio as api_audio
 from .api import admin as api_admin
+from .api import admin_resources as api_admin_resources
 from .api import auth as api_auth
 from .api import bgm as api_bgm
 from .api import book as api_book
 from .api import config as api_config
 from .api import files as api_files
-from .api import filesystem as api_filesystem
 from .api import music as api_music
 from .api import platform_tasks as api_platform_tasks
+from .api import project_resources as api_project_resources
 from .api import projects as api_projects
 from .api import quota as api_quota
-from .api import workspaces as api_workspaces
 from .api import script as api_script
 from .api import tasks as api_tasks
 from .api import text as api_text
 from .api import tts as api_tts
-from .api import workspace as api_workspace
 from .core import config as core_config
 from .core import logging_setup
 from .core.observability import record_api_request
@@ -43,7 +42,7 @@ from .platform.config import settings
 from .platform.database import initialize_schema
 from .platform.database import SessionLocal
 from .platform.deps import require_legacy_access
-from .platform.models import Workspace
+from .platform.models import Project
 from .platform.security import load_session
 from .platform.storage import lock_storage_migration, storage_migration, user_workspace_root
 from sqlalchemy import select
@@ -56,24 +55,23 @@ PORT = 8642
 PLATFORM_ROUTERS = [
     api_auth.router,
     api_projects.router,
+    api_project_resources.router,
     api_quota.router,
-    api_workspaces.router,
     api_platform_tasks.router,
     api_admin.router,
+    api_admin_resources.router,
 ]
 
 LEGACY_ROUTERS = [
     api_tasks.router,
     api_config.router,
     api_files.router,
-    api_filesystem.router,
     api_text.router,
     api_book.router,
     api_audio.router,
     api_bgm.router,
     api_tts.router,
     api_script.router,
-    api_workspace.router,
     api_music.router,
 ]
 
@@ -122,23 +120,23 @@ async def bind_authenticated_workspace(request, call_next):
         with SessionLocal() as db:
             session = load_session(db, session_token)
             if session is not None:
-                workspace = None
-                if session.active_workspace_id:
-                    workspace = db.scalar(
-                        select(Workspace).where(
-                            Workspace.id == session.active_workspace_id,
-                            Workspace.owner_id == session.user_id,
-                            Workspace.deleted_at.is_(None),
+                project = None
+                if session.active_project_id:
+                    project = db.scalar(
+                        select(Project).where(
+                            Project.id == session.active_project_id,
+                            Project.owner_id == session.user_id,
+                            Project.deleted_at.is_(None),
                         )
                     )
-                if workspace is None:
-                    workspace = db.scalar(
-                        select(Workspace)
-                        .where(Workspace.owner_id == session.user_id, Workspace.deleted_at.is_(None))
-                        .order_by(Workspace.updated_at.desc())
+                if project is None:
+                    project = db.scalar(
+                        select(Project)
+                        .where(Project.owner_id == session.user_id, Project.deleted_at.is_(None))
+                        .order_by(Project.last_selected_at.desc().nullslast(), Project.updated_at.desc())
                     )
-                if workspace is not None:
-                    token = bind_workspace(user_workspace_root(db, session.user.username, workspace.id))
+                if project is not None:
+                    token = bind_workspace(user_workspace_root(db, session.user.username, project.id))
                 else:
                     token = bind_workspace(None)
     try:

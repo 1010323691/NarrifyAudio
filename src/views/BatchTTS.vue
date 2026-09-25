@@ -20,8 +20,8 @@ import Badge from '@/components/ui/Badge.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import Alert from '@/components/ui/Alert.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
-import WorkspaceGateAlert from '@/components/ui/WorkspaceGateAlert.vue'
-import { useWorkspaceGate } from '@/composables/useWorkspaceGate'
+import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useProjectGate } from '@/composables/useProjectGate'
 import { formatNumber } from '@/utils/format'
 import {
   Layers,
@@ -38,7 +38,7 @@ import {
 const router = useRouter()
 const project = usePipelineStateStore()
 const taskStore = useTaskStore()
-const { workspaceSet } = useWorkspaceGate()
+const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()
 
@@ -108,7 +108,7 @@ async function refreshStatusesOnly() {
 }
 
 async function refreshRows() {
-  if (!workspaceSet.value) return
+  if (!projectSet.value) return
   filesLoading.value = true
   try {
     const r = await listDir('03_parsed_json')
@@ -380,7 +380,7 @@ watch(
       </p>
     </div>
 
-    <WorkspaceGateAlert />
+    <ProjectGateAlert />
 
     <Alert v-if="status && !status.implemented" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
@@ -419,7 +419,7 @@ watch(
                 type="checkbox"
                 class="h-4 w-4 accent-primary"
                 :checked="!!selected[r.name]"
-                :disabled="!workspaceSet"
+                :disabled="!projectSet"
                 @change="onRowChange(r.name, $event)"
               />
               <!-- 已合成 badge lives inside the filename cell — it never displaces the numeric columns -->
@@ -454,16 +454,16 @@ watch(
           </div>
 
           <div class="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" :disabled="busy || !workspaceSet || !pendingRows.length" title="选择全部尚未合成的文件" @click="selectPending">
+            <Button variant="outline" size="sm" :disabled="busy || !projectSet || !pendingRows.length" title="选择全部尚未合成的文件" @click="selectPending">
               <ListChecks class="h-3.5 w-3.5" />{{ allPendingSelected ? '已选' : '全选' }}
             </Button>
-            <Button variant="outline" size="sm" :disabled="busy || !workspaceSet || !fileNames.length" title="选择所有文件包括已合成文件" @click="selectAllFiles">
+            <Button variant="outline" size="sm" :disabled="busy || !projectSet || !fileNames.length" title="选择所有文件包括已合成文件" @click="selectAllFiles">
               <ListChecks class="h-3.5 w-3.5" />{{ allFilesSelected ? '已全选' : '全量全选' }}
             </Button>
             <Button variant="outline" size="sm" :disabled="busy || !selectedNames.length" @click="clearSelection">
               <Eraser class="h-3.5 w-3.5" />清空
             </Button>
-            <Button variant="outline" size="sm" :disabled="filesLoading || !workspaceSet" @click="refreshRows">
+            <Button variant="outline" size="sm" :disabled="filesLoading || !projectSet" @click="refreshRows">
               <RefreshCw class="h-3.5 w-3.5" :class="filesLoading && 'animate-spin'" />刷新
             </Button>
             <span class="ml-auto text-xs text-muted-foreground">已选 {{ selectedNames.length }} / {{ fileNames.length }} 个文件</span>
@@ -481,14 +481,14 @@ watch(
         </CardContent>
         <CardContent class="space-y-4 border-t pt-6">
           <div class="flex flex-wrap items-center gap-3">
-            <Button :disabled="busy || !workspaceSet || !selectedNames.length" @click="doRun">
+            <Button :disabled="busy || !projectSet || !selectedNames.length" @click="doRun">
               <Loader2 v-if="busy" class="h-4 w-4 animate-spin" />
               <Layers v-else class="h-4 w-4" />
               {{ busy ? '合成中…' : '音频合成' }}
             </Button>
             <Button
               variant="outline"
-              :disabled="busy || !workspaceSet || !selectedNames.length"
+              :disabled="busy || !projectSet || !selectedNames.length"
               title="清除已生成音频并重新合成"
               @click="doRunAll"
             >
