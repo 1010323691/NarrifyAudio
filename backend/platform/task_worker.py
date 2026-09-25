@@ -86,8 +86,6 @@ from .task_contracts import (
 from .task_lifecycle import (
     TERMINAL_TASK_STATUSES,
     append_task_event,
-    release_reservation,
-    settle_reservation,
     suppress_pending_dispatch,
 )
 
@@ -183,7 +181,6 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
         if task.status == "cancelling":
             task.status = "cancelled"
             task.finished_at = now
-            release_reservation(db, task, note="cancelled before worker claim")
             suppress_pending_dispatch(db, task.id)
             append_task_event(db, task.id, "cancelled", {"reason": "cancel requested"})
             db.commit()
@@ -197,7 +194,6 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
             task.error_code = "max_attempts"
             task.error_message = "任务超过最大尝试次数"
             task.finished_at = now
-            release_reservation(db, task, kind="release", note="maximum attempts exceeded")
             append_task_event(db, task.id, "failed", {"code": task.error_code})
             db.commit()
             return None
@@ -984,7 +980,6 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
             task.updated_at = utcnow()
             from .quota import release_attempt_holds
             release_attempt_holds(task.id, attempt.id, db=db)
-            settle_reservation(db, task, note=f"{claim.task_type} completed")
             append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
             db.commit()
         storage_root = configured_storage_root(db) / safe_display_name(user.username) / task.project_id
@@ -1022,7 +1017,6 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
         if error.code == "cancelled" or task.status == "cancelling":
             task.status = "cancelled"
             task.finished_at = utcnow()
-            release_reservation(db, task, note="task cancelled")
             append_task_event(db, task.id, "cancelled", {"attempt_id": attempt.id})
             db.commit()
             return "cancelled"
@@ -1044,7 +1038,6 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
             return "retrying"
         task.status = "failed"
         task.finished_at = utcnow()
-        release_reservation(db, task, kind="release", note=f"task failed: {error.code}")
         append_task_event(db, task.id, "failed", {"attempt_id": attempt.id, "code": error.code})
         db.commit()
         return "failed"
@@ -1171,7 +1164,6 @@ def recover_database_tasks(limit: int = 100) -> int:
                 task.status = "cancelled"
                 task.finished_at = now
                 task.next_attempt_at = None
-                release_reservation(db, task, note="cancelled during recovery")
                 suppress_pending_dispatch(db, task.id)
                 append_task_event(db, task.id, "cancelled", {"reason": "worker lease expired"})
                 continue
@@ -1181,7 +1173,6 @@ def recover_database_tasks(limit: int = 100) -> int:
                     task.error_code = "lease_expired"
                     task.error_message = "Worker 租约过期且已达到最大尝试次数"
                     task.finished_at = now
-                    release_reservation(db, task, kind="release", note="lease expired")
                     append_task_event(db, task.id, "failed", {"code": task.error_code})
                     continue
                 task.status = "retrying"

@@ -414,7 +414,7 @@ def test_admin_cannot_disable_last_admin(client: TestClient):
                        json={"category": "scene", "name": "restricted"}).status_code == 403
 
 
-def test_admin_can_cancel_persistent_task_and_release_reservation(client: TestClient):
+def test_admin_can_cancel_persistent_task_and_keep_quota_unchanged(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     with SessionLocal.begin() as db:

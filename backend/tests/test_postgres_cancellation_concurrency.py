@@ -1,4 +1,13 @@
-"""Real row-lock regression for concurrent cancellation (opt-in PostgreSQL test)."""
+"""Real row-lock regression for concurrent cancellation + per-operation settlement
+(opt-in PostgreSQL test).
+
+A1 (批次 4): the task-level QuotaReservation is retired; operation-level quota
+holds (QuotaHold / release_attempt_holds) are the settlement path. This test keeps
+the original concurrency skeleton — two sessions cancelling one running task,
+the second blocked on the task row lock — and re-asserts the settlement half
+against operation-level holds: a held TTS reserve is settled exactly once even
+when two settlement paths race inside their own locked transactions.
+"""
 from __future__ import annotations
 
 import os
@@ -13,13 +22,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.platform.database import Base
 from backend.platform.models import (
     Project,
-    QuotaReservation,
+    QuotaHold,
     QuotaTransaction,
     Task,
+    TaskAttempt,
     TaskEvent,
     User,
     UserQuotaAccount,
 )
+from backend.platform.quota import release_attempt_holds
 from backend.services.tasks import cancel_task_record
 
 
@@ -27,7 +38,7 @@ from backend.services.tasks import cancel_task_record
     not os.environ.get("NARRIFY_TEST_POSTGRES_URL"),
     reason="set NARRIFY_TEST_POSTGRES_URL to run the PostgreSQL row-lock regression",
 )
-def test_concurrent_cancel_releases_a_reservation_once():
+def test_concurrent_cancel_settles_operation_holds_once():
     from sqlalchemy import create_engine
 
     url = os.environ["NARRIFY_TEST_POSTGRES_URL"]
@@ -38,6 +49,7 @@ def test_concurrent_cancel_releases_a_reservation_once():
 
     schema = f"narrify_cancel_{uuid.uuid4().hex}"
     tenant_engine = None
+    hold = None
     try:
         with engine.begin() as connection:
             connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
@@ -48,7 +60,7 @@ def test_concurrent_cancel_releases_a_reservation_once():
         owner_id = str(uuid.uuid4())
         project_id = str(uuid.uuid4())
         task_id = str(uuid.uuid4())
-        reservation_id = str(uuid.uuid4())
+        attempt_id = str(uuid.uuid4())
         with sessions.begin() as db:
             db.add(User(
                 id=owner_id,
@@ -72,19 +84,31 @@ def test_concurrent_cancel_releases_a_reservation_once():
                 id=task_id,
                 owner_id=owner_id,
                 project_id=project_id,
-                task_type="script.parse",
-                status="queued",
+                task_type="tts.batch",
+                status="running",
                 payload={},
                 idempotency_key=f"cancel-{task_id}",
             ))
             db.flush()
-            db.add(QuotaReservation(
-                id=reservation_id,
+            db.add(TaskAttempt(
+                id=attempt_id,
+                task_id=task_id,
+                attempt_no=1,
+                worker_id="w",
+                lease_token="tok",
+                status="running",
+            ))
+            db.flush()
+            hold = QuotaHold(
                 user_id=owner_id,
                 task_id=task_id,
+                attempt_id=attempt_id,
+                operation_type="tts.synthesize",
                 units=2,
-                status="reserved",
-            ))
+            )
+            db.add(hold)
+            db.flush()
+            hold_id = hold.id
 
         first_locked = threading.Event()
         release_first = threading.Event()
@@ -93,9 +117,9 @@ def test_concurrent_cancel_releases_a_reservation_once():
         outcomes: dict[str, bool] = {}
         errors: list[BaseException] = []
 
-        def cancel(name: str) -> None:
+        def cancel_and_settle(name: str) -> None:
             try:
-                with sessions() as db:
+                with sessions.begin() as db:
                     if name == "first":
                         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
                         first_locked.set()
@@ -106,12 +130,12 @@ def test_concurrent_cancel_releases_a_reservation_once():
                         second_started.set()
                         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
                     outcomes[name] = cancel_task_record(db, task)
-                    db.commit()
+                    release_attempt_holds(task_id, attempt_id, db=db)
             except BaseException as exc:  # forward worker-thread failures to pytest
                 errors.append(exc)
 
-        first = threading.Thread(target=cancel, args=("first",), daemon=True)
-        second = threading.Thread(target=cancel, args=("second",), daemon=True)
+        first = threading.Thread(target=cancel_and_settle, args=("first",), daemon=True)
+        second = threading.Thread(target=cancel_and_settle, args=("second",), daemon=True)
         first.start()
         assert first_locked.wait(5), "first session did not acquire the task row lock"
         second.start()
@@ -139,7 +163,7 @@ def test_concurrent_cancel_releases_a_reservation_once():
 
         with sessions() as db:
             task = db.get(Task, task_id)
-            reservation = db.get(QuotaReservation, reservation_id)
+            released_hold = db.get(QuotaHold, hold_id)
             account = db.get(UserQuotaAccount, owner_id)
             releases = db.scalar(select(func.count()).select_from(QuotaTransaction).where(
                 QuotaTransaction.task_id == task_id,
@@ -149,8 +173,9 @@ def test_concurrent_cancel_releases_a_reservation_once():
                 TaskEvent.task_id == task_id,
                 TaskEvent.event_type == "cancel_requested",
             ))
-            assert task.status == "cancelled"
-            assert reservation.status == "released"
+            assert task.status == "cancelling"
+            assert released_hold.status == "released"
+            assert released_hold.units == 0
             assert (account.available_units, account.reserved_units) == (2, 0)
             assert releases == 1
             assert cancel_events == 1

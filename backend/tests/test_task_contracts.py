@@ -116,7 +116,6 @@ def test_reconnected_snapshot_uses_latest_events_and_preserves_phase():
 def test_cancel_transition_is_idempotent_and_finishes_unclaimed_task(monkeypatch):
     events = []
     monkeypatch.setattr(task_service, "append_task_event", lambda _db, _id, kind, payload: events.append((kind, payload)))
-    monkeypatch.setattr(task_service, "release_reservation", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(task_service, "suppress_pending_dispatch", lambda *_args, **_kwargs: None)
     task = SimpleNamespace(
         id="task-1", status="pending", finished_at=None, updated_at=None,
@@ -132,9 +131,7 @@ def test_cancel_transition_is_idempotent_and_finishes_unclaimed_task(monkeypatch
 
 def test_cancel_running_task_requests_cooperative_stop_once(monkeypatch):
     events = []
-    released = []
     monkeypatch.setattr(task_service, "append_task_event", lambda _db, _id, kind, payload: events.append((kind, payload)))
-    monkeypatch.setattr(task_service, "release_reservation", lambda *_args, **_kwargs: released.append(True))
     monkeypatch.setattr(task_service, "suppress_pending_dispatch", lambda *_args, **_kwargs: None)
     task = SimpleNamespace(
         id="task-running", status="running", finished_at=None, updated_at=None,
@@ -145,13 +142,11 @@ def test_cancel_running_task_requests_cooperative_stop_once(monkeypatch):
     assert task.finished_at is None
     assert task_service.cancel_task_record(object(), task) is False
     assert events == [("cancel_requested", {"status": "cancelling"})]
-    assert released == []
 
 
-def test_cancel_queued_task_releases_reservation_once(monkeypatch):
-    released = []
-    monkeypatch.setattr(task_service, "append_task_event", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(task_service, "release_reservation", lambda *_args, **_kwargs: released.append(True))
+def test_cancel_queued_task_cancels_immediately_once(monkeypatch):
+    events = []
+    monkeypatch.setattr(task_service, "append_task_event", lambda _db, _id, kind, payload: events.append((kind, payload)))
     monkeypatch.setattr(task_service, "suppress_pending_dispatch", lambda *_args, **_kwargs: None)
     task = SimpleNamespace(id="task-queued", status="queued", finished_at=None, updated_at=None)
 
@@ -159,7 +154,7 @@ def test_cancel_queued_task_releases_reservation_once(monkeypatch):
     assert task_service.cancel_task_record(object(), task) is False
     assert task.status == "cancelled"
     assert task.finished_at is not None
-    assert released == [True]
+    assert events == [("cancel_requested", {"status": "cancelled"})]
 
 
 def test_lifecycle_control_events_emit_authoritative_status_snapshot(monkeypatch):

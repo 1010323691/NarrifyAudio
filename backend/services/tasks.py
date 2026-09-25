@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..platform.models import OutboxEvent, Task, utcnow
 from ..platform.task_lifecycle import (
-    TERMINAL_TASK_STATUSES, append_task_event, release_reservation,
+    TERMINAL_TASK_STATUSES, append_task_event,
     suppress_pending_dispatch,
 )
 
@@ -23,10 +23,6 @@ def cancel_task_record(
     else:
         task.status = "cancelled"
         task.finished_at = task.finished_at or utcnow()
-        release_reservation(
-            db, task, kind="release",
-            note="administrator cancelled task" if admin else "user cancelled before execution",
-        )
         suppress_pending_dispatch(db, task.id)
     task.updated_at = utcnow()
     event_type = "admin_cancel_requested" if admin else "cancel_requested"

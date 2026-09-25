@@ -41,7 +41,6 @@ def list_quota_transactions(user: User = Depends(require_authenticated_user), db
         {
             "id": row.id,
             "task_id": row.task_id,
-            "reservation_id": row.reservation_id,
             "actor_user_id": row.actor_user_id,
             "amount": row.amount,
             "kind": row.kind,

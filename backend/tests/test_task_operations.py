@@ -15,7 +15,7 @@ from sqlalchemy import delete, select
 from backend.platform.config import settings
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import (
-    Project, QuotaReservation, QuotaTransaction, Task, TaskAttempt, User, utcnow,
+    Project, QuotaTransaction, Task, TaskAttempt, User, utcnow,
 )
 from backend.services.task_operations import (
     RetryNotAllowedError,
@@ -39,7 +39,6 @@ def _remove_snapshot_rows():
     with SessionLocal.begin() as db:
         for task_id in set(db.scalars(select(Task.id)).all()) - before:
             db.execute(delete(QuotaTransaction).where(QuotaTransaction.task_id == task_id))
-            db.execute(delete(QuotaReservation).where(QuotaReservation.task_id == task_id))
             db.execute(delete(TaskAttempt).where(TaskAttempt.task_id == task_id))
             db.execute(delete(Task).where(Task.id == task_id))
 
@@ -127,27 +126,6 @@ def test_retry_gate_rejects_non_terminal_status():
         db.flush()
         with pytest.raises(RetryNotAllowedError, match="任务当前不可重试"):
             check_retry_eligible(db, task)
-
-
-def test_retry_gate_rejects_reserved_units():
-    with SessionLocal.begin() as db:
-        owner, project = _fresh_owner(db)
-        task = _failed_task(db, owner, project)
-        db.add(QuotaReservation(user_id=owner.id, task_id=task.id, units=5))
-        db.flush()
-        with pytest.raises(RetryNotAllowedError, match="带额度预留"):
-            check_retry_eligible(db, task)
-
-
-def test_retry_gate_allows_zero_unit_reservation():
-    # Old rule was truthiness of ``reservation.units`` — a 0-unit reservation
-    # does not block the retry.
-    with SessionLocal.begin() as db:
-        owner, project = _fresh_owner(db)
-        task = _failed_task(db, owner, project)
-        db.add(QuotaReservation(user_id=owner.id, task_id=task.id, units=0))
-        db.flush()
-        assert check_retry_eligible(db, task) == 0
 
 
 def test_retry_gate_rejects_metered_consumption():

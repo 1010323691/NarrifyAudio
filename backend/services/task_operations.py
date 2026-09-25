@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..platform.config import settings
-from ..platform.models import Project, QuotaReservation, QuotaTransaction, Task, TaskAttempt
+from ..platform.models import Project, QuotaTransaction, Task, TaskAttempt
 
 
 class RetryNotAllowedError(ValueError):
@@ -93,9 +93,6 @@ def check_retry_eligible(db: Session, task: Task) -> int:
     """
     if task.status not in {"failed", "cancelled", "timeout"}:
         raise RetryNotAllowedError("任务当前不可重试")
-    reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
-    if reservation is not None and reservation.units:
-        raise RetryNotAllowedError("带额度预留的任务暂不支持原任务重试")
     metered = db.scalar(select(QuotaTransaction.id).where(
         QuotaTransaction.task_id == task.id,
         QuotaTransaction.resource_type.in_(["LLM", "TTS"]),

@@ -194,18 +194,6 @@ class UserQuotaAccount(Base):
     __table_args__ = (CheckConstraint("available_units >= 0 and reserved_units >= 0 and frozen_units >= 0 and consumed_units >= 0", name="ck_quota_nonnegative"),)
 
 
-class QuotaReservation(Base):
-    __tablename__ = "quota_reservations"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
-    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), unique=True, nullable=False)
-    units: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="reserved", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
-    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class QuotaHold(Base):
     __tablename__ = "quota_holds"
 
@@ -229,7 +217,6 @@ class QuotaTransaction(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True, nullable=False)
     task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True)
-    reservation_id: Mapped[str | None] = mapped_column(ForeignKey("quota_reservations.id", name="fk_quota_transactions_reservation_id", ondelete="RESTRICT"), index=True)
     actor_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", name="fk_quota_transactions_actor_user_id", ondelete="SET NULL"), index=True)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)
     kind: Mapped[str] = mapped_column(String(30), nullable=False)
