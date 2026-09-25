@@ -19,7 +19,7 @@ watch(() => dialogState.current, async (current, previous) => {
   if (!current) return
   await nextTick()
   if (current.kind === 'prompt') promptInput.value?.focus()
-  else if (current.kind === 'confirm') cancelButton.value?.focus()
+  else if (current.kind === 'confirm' && !current.hideCancel) cancelButton.value?.focus()
   else confirmButton.value?.focus()
 }, { flush: 'post' })
 
@@ -103,6 +103,7 @@ onBeforeUnmount(() => {
       </label>
       <div class="mt-6 flex justify-end gap-2">
         <button
+          v-if="!dialogState.current.hideCancel"
           ref="cancelButton"
           type="button"
           class="inline-flex h-11 items-center justify-center rounded-lg border border-input bg-card px-4 text-sm font-semibold text-foreground shadow-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"

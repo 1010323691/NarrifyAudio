@@ -5,7 +5,6 @@ import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 import { useToast } from '@/components/ui/toast'
 import type { AppConfig, TextToggles } from '@/types'
-import * as adminApi from '@/api/admin'
 
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
@@ -74,12 +73,10 @@ const THEMES = [
 onMounted(async () => {
   if (props.adminOnly) {
     section.value = props.adminSection === 'models' || props.adminSection === 'audio' ? props.adminSection : 'text'
-    try {
-      const result = await adminApi.getApplicationSettings()
-      draft.value = JSON.parse(JSON.stringify(result.config))
-    } catch {
-      draft.value = null
-    }
+    // Root (admin) channel — the store keeps it apart from the project config
+    // store field, so saving it below can never overwrite the project values.
+    await settings.loadRoot()
+    draft.value = settings.rootConfig ? JSON.parse(JSON.stringify(settings.rootConfig)) : null
     return
   }
   if (!project.loaded) await project.refresh()
@@ -107,7 +104,7 @@ async function save() {
       batch_seed: Math.max(-1, Math.min(2147483647, Math.trunc(seed))),
     }
     try {
-      const result = await adminApi.updateApplicationSettings({
+      ok = await settings.saveRoot({
         text: config.text,
         audio: config.audio,
         tts,
@@ -118,9 +115,9 @@ async function save() {
         ffmpeg: config.ffmpeg,
         bgm: config.bgm,
       })
-      draft.value = result.config
-      settings.config = result.config
-      ok = true
+      // Server-echoed values win for the sent sections (Q10: root channel
+      // only — the project store's `config` is deliberately not written).
+      if (ok && settings.rootConfig) draft.value = JSON.parse(JSON.stringify(settings.rootConfig))
     } catch {
       ok = false
     }

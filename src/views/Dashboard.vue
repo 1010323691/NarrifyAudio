@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowRight, BookOpen, Clock3, FolderPlus, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
+import { useToast } from '@/components/ui/toast'
+import { showConfirm } from '@/components/ui/dialog'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
@@ -15,6 +17,7 @@ import type { ProjectSummary } from '@/api/project'
 const router = useRouter()
 const projectStore = useProjectStore()
 const settings = useSettingsStore()
+const { push: toast } = useToast()
 const tasks = ref<DurableTask[]>([])
 const summaries = ref<Record<string, ProjectStorageSummary>>({})
 const loading = ref(true)
@@ -24,11 +27,6 @@ const name = ref('')
 const pageError = ref('')
 const openError = ref('')
 const deletingProjectId = ref('')
-const projectToDelete = ref<ProjectSummary | null>(null)
-const deleteError = ref('')
-const deleteDialog = ref<HTMLElement | null>(null)
-const deleteTrigger = ref<HTMLElement | null>(null)
-const projectListHeading = ref<HTMLElement | null>(null)
 const STAGE_KEYS = ['02_split_text', '03_parsed_json', '04_voice_profiles', '05_audio_chunk', '06_audio_merge', '07_output', '08_bgm']
 const visibleStageKeys = computed(() => STAGE_KEYS.filter((key) => key !== '07_output' || settings.config?.ui.show_audio_split))
 const stageCount = computed(() => visibleStageKeys.value.length)
@@ -111,62 +109,24 @@ async function openProject(project: ProjectSummary) {
   }
 }
 
-function requestDelete(project: ProjectSummary, trigger: HTMLElement) {
+// Shared confirm dialog (Q21): the shared host owns focus return / Esc /
+// Tab trap; a failed delete surfaces as a toast instead of an in-dialog
+// error, and the list reloads on success.
+async function requestDelete(project: ProjectSummary) {
   if (projectStore.busy || deletingProjectId.value) return
-  projectToDelete.value = project
-  deleteError.value = ''
-  deleteTrigger.value = trigger
-  void nextTick(() => deleteDialog.value?.querySelector<HTMLButtonElement>('[data-dialog-cancel]')?.focus())
-}
-
-function closeDeleteDialog() {
-  if (deletingProjectId.value) return
-  projectToDelete.value = null
-  deleteError.value = ''
-  void nextTick(() => deleteTrigger.value?.focus())
-}
-
-function trapDeleteDialogFocus(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    closeDeleteDialog()
-    return
-  }
-  if (event.key !== 'Tab' || !deleteDialog.value) return
-
-  const focusable = [...deleteDialog.value.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  )]
-  if (!focusable.length) return
-  const first = focusable[0]
-  const last = focusable[focusable.length - 1]
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault()
-    first.focus()
-  }
-}
-
-async function confirmDeleteProject() {
-  const project = projectToDelete.value
-  if (!project || projectStore.busy || deletingProjectId.value) return
+  const confirmed = await showConfirm(
+    `删除项目「${project.name}」？删除后，项目会从你的列表中移除。项目文件会保留在存储目录中；如果项目有未完成任务，需要先等待任务完成或取消任务。`,
+    { title: '删除项目', confirmText: '删除项目', destructive: true },
+  )
+  if (!confirmed) return
   deletingProjectId.value = project.id
-  deleteError.value = ''
-  void nextTick(() => deleteDialog.value?.querySelector<HTMLElement>('[role="alertdialog"]')?.focus())
   try {
     await deleteProject(project.id)
-    projectToDelete.value = null
     await load()
-    void nextTick(() => projectListHeading.value?.focus())
   } catch (cause: any) {
-    deleteError.value = cause?.message || '删除项目失败，请稍后重试。'
+    toast({ title: '删除项目失败', variant: 'destructive', description: cause?.message || '请稍后重试。' })
   } finally {
     deletingProjectId.value = ''
-    if (projectToDelete.value) {
-      void nextTick(() => deleteDialog.value?.querySelector<HTMLButtonElement>('[data-dialog-cancel]')?.focus())
-    }
   }
 }
 
@@ -205,7 +165,7 @@ onMounted(load)
 
     <section class="project-center__section">
       <div class="section-heading">
-        <div><h2 ref="projectListHeading" tabindex="-1">项目列表</h2><span v-if="!loading" class="muted">{{ projects.length }} 个项目</span></div>
+        <div><h2>项目列表</h2><span v-if="!loading" class="muted">{{ projects.length }} 个项目</span></div>
         <Button variant="ghost" size="sm" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" />刷新</Button>
       </div>
 
@@ -223,7 +183,7 @@ onMounted(load)
               </div>
               <ArrowRight class="project-card__arrow h-4 w-4" />
             </button>
-            <Button variant="ghost" size="icon" class="project-card__delete" :disabled="projectStore.busy || !!deletingProjectId" :aria-label="`删除项目 ${project.name}`" title="删除项目" @click="requestDelete(project, $event.currentTarget as HTMLElement)">
+            <Button variant="ghost" size="icon" class="project-card__delete" :disabled="projectStore.busy || !!deletingProjectId" :aria-label="`删除项目 ${project.name}`" title="删除项目" @click="requestDelete(project)">
               <LoaderCircle v-if="deletingProjectId === project.id" class="h-4 w-4 animate-spin" />
               <Trash2 v-else class="h-4 w-4" />
             </Button>
@@ -249,46 +209,6 @@ onMounted(load)
         <Button @click="createOpen = true"><FolderPlus class="h-4 w-4" />创建第一个项目</Button>
       </div>
     </section>
-
-    <div
-      v-if="projectToDelete"
-      ref="deleteDialog"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      tabindex="-1"
-      @click.self="closeDeleteDialog"
-      @keydown="trapDeleteDialogFocus"
-    >
-      <section
-        class="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-xl"
-        role="alertdialog"
-        tabindex="-1"
-        aria-modal="true"
-        aria-labelledby="delete-project-title"
-        aria-describedby="delete-project-description"
-      >
-        <div class="flex items-start gap-3">
-          <div class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-destructive/10 text-destructive">
-            <Trash2 class="h-5 w-5" aria-hidden="true" />
-          </div>
-          <div class="min-w-0 flex-1">
-            <h2 id="delete-project-title" class="text-base font-semibold">删除项目</h2>
-            <p class="mt-1 break-words text-sm font-medium">{{ projectToDelete.name }}</p>
-            <p id="delete-project-description" class="mt-3 text-sm text-muted-foreground">
-              删除后，项目会从你的列表中移除。项目文件会保留在存储目录中；如果项目有未完成任务，需要先等待任务完成或取消任务。
-            </p>
-          </div>
-        </div>
-        <p v-if="deleteError" class="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">{{ deleteError }}</p>
-        <div class="mt-5 flex justify-end gap-2">
-          <Button data-dialog-cancel variant="outline" :disabled="!!deletingProjectId" @click="closeDeleteDialog">取消</Button>
-          <Button variant="destructive" :disabled="!!deletingProjectId" @click="confirmDeleteProject">
-            <LoaderCircle v-if="deletingProjectId" class="h-4 w-4 animate-spin" />
-            <Trash2 v-else class="h-4 w-4" />
-            {{ deletingProjectId ? '正在删除…' : '删除项目' }}
-          </Button>
-        </div>
-      </section>
-    </div>
 
   </div>
 </template>

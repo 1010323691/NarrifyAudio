@@ -7,6 +7,8 @@ export interface DialogOptions {
   confirmText?: string
   cancelText?: string
   destructive?: boolean
+  /** Single-button notice: render only the confirm button (Esc/backdrop still close). */
+  hideCancel?: boolean
   inputLabel?: string
   placeholder?: string
 }
@@ -19,6 +21,7 @@ export interface DialogRequest {
   confirmText: string
   cancelText: string
   destructive: boolean
+  hideCancel: boolean
   inputLabel: string
   placeholder: string
   inputValue: string
@@ -47,6 +50,7 @@ function openDialog<T>(
       confirmText: options.confirmText || '确定',
       cancelText: options.cancelText || '取消',
       destructive: options.destructive ?? false,
+      hideCancel: options.hideCancel ?? false,
       inputLabel: options.inputLabel || '输入内容',
       placeholder: options.placeholder || '',
       inputValue,

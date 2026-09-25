@@ -6,6 +6,7 @@ import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from
 import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
+import { showConfirm } from '@/components/ui/dialog'
 import {
   analyzeChapters,
   analyzeSegmentChapters,
@@ -91,7 +92,6 @@ const error = ref('')
 const selected = reactive<Record<string, boolean>>({})
 const submitting = ref(false)
 const packaging = ref(false)
-const packageConfirmOpen = ref(false)
 const packageSelection = ref<string[]>([])
 
 // ---------------------------------------------------------------------------
@@ -227,7 +227,6 @@ const selectedMixedNames = computed(() => rows.value
 const selectedUnmixedCount = computed(() => Math.max(0, packageSelection.value.length - packageSelection.value.filter((stem) =>
   isMixReady(stem),
 ).length))
-const packageReadyCount = computed(() => packageSelection.value.length - selectedUnmixedCount.value)
 const matchedRows = computed(() => rows.value.filter((r) => r.matched))
 const mixedCount = computed(() => rowsData.value.filter((r) => r.mix_exists).length)
 const pendingAnalysisStems = computed(() =>
@@ -414,14 +413,29 @@ function waitForPaint() {
   return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
 }
 
-function handlePackageClick() {
+async function handlePackageClick() {
   if (!selectedNames.value.length || packaging.value || !projectSet.value) return
   packageSelection.value = [...selectedNames.value]
-  if (selectedMixedNames.value.length !== selectedNames.value.length) {
-    packageConfirmOpen.value = true
+  if (selectedMixedNames.value.length === selectedNames.value.length) {
+    void doPackageDownload([...selectedNames.value])
     return
   }
-  void doPackageDownload([...selectedNames.value])
+  // Partial / zero mixing coverage — confirm through the shared dialog
+  // (Q21): the zero-ready case is a single-button notice.
+  const ready = packageSelection.value.filter(isMixReady)
+  const message = ready.length
+    ? `所选章节中有 ${selectedUnmixedCount.value} 个尚未完成混音。继续后只会打包 ${ready.length} 个已完成混音的章节，是否下载？`
+    : '所选章节均尚未完成混音，当前没有可下载的音频。请完成混音后再打包。'
+  const confirmed = await showConfirm(message, {
+    title: '确认打包下载',
+    confirmText: ready.length ? '继续下载' : '知道了',
+    hideCancel: !ready.length,
+  })
+  if (confirmed && ready.length) void doPackageDownload(ready)
+}
+
+function isMixReady(stem: string) {
+  return rows.value.some((row) => row.stem === stem && row.data.mix_exists && !row.mixTask)
 }
 
 async function doPackageDownload(chapters: string[]) {
@@ -444,48 +458,6 @@ async function doPackageDownload(chapters: string[]) {
     packaging.value = false
   }
 }
-
-function confirmPackageDownload() {
-  packageConfirmOpen.value = false
-  const ready = packageSelection.value.filter(isMixReady)
-  void doPackageDownload(ready)
-}
-
-function isMixReady(stem: string) {
-  return rows.value.some((row) => row.stem === stem && row.data.mix_exists && !row.mixTask)
-}
-
-function closePackageConfirm() {
-  packageConfirmOpen.value = false
-}
-
-function trapPackageDialogTab(event: KeyboardEvent) {
-  if (event.key !== 'Tab') return
-  const dialog = (event.currentTarget as HTMLElement).querySelector<HTMLElement>('[data-bgm-package-dialog]')
-  if (!dialog) return
-  const controls = [...dialog.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
-  )]
-  if (!controls.length) return
-  const first = controls[0]
-  const last = controls[controls.length - 1]
-  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-    event.preventDefault()
-    last.focus()
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault()
-    first.focus()
-  }
-}
-
-watch(packageConfirmOpen, async (open) => {
-  await nextTick()
-  if (open) {
-    document.querySelector<HTMLElement>('[data-bgm-package-dialog]')?.focus()
-  } else {
-    document.querySelector<HTMLElement>('[data-bgm-package-trigger]')?.focus()
-  }
-})
 
 function rowTags(row: BgmRow): TrackTags {
   const tags = mode.value === 'segment'
@@ -1092,7 +1064,6 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
             :disabled="!projectSet || packaging || !selectedNames.length"
             :title="`打包下载已选的 ${selectedNames.length} 个章节`"
             :aria-busy="packaging"
-            data-bgm-package-trigger
             @click="handlePackageClick"
           >
             <Loader2 v-if="packaging" class="h-4 w-4 animate-spin" />
@@ -1115,40 +1086,6 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
       {{ error }}
     </Alert>
-
-    <!-- 手动选曲弹层 -->
-    <div
-      v-if="packageConfirmOpen"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      @click.self="closePackageConfirm"
-      @keydown.esc.stop="closePackageConfirm"
-      @keydown.tab="trapPackageDialogTab"
-    >
-      <section
-        data-bgm-package-dialog
-        class="w-full max-w-md rounded-xl border bg-background p-5 shadow-xl"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="bgm-package-confirm-title"
-        aria-describedby="bgm-package-confirm-description"
-        tabindex="-1"
-      >
-        <h2 id="bgm-package-confirm-title" class="text-lg font-semibold">确认打包下载</h2>
-        <p id="bgm-package-confirm-description" class="mt-2 text-sm leading-6 text-muted-foreground">
-          <template v-if="packageReadyCount">
-            所选章节中有 {{ selectedUnmixedCount }} 个尚未完成混音。继续后只会打包 {{ packageReadyCount }} 个已完成混音的章节，是否下载？
-          </template>
-          <template v-else>
-            所选章节均尚未完成混音，当前没有可下载的音频。请完成混音后再打包。
-          </template>
-        </p>
-        <div class="mt-5 flex justify-end gap-2">
-          <Button variant="outline" @click="closePackageConfirm">取消</Button>
-          <Button v-if="packageReadyCount" @click="confirmPackageDownload">继续下载</Button>
-          <Button v-else @click="closePackageConfirm">知道了</Button>
-        </div>
-      </section>
-    </div>
 
     <div
       v-if="manualStem"
