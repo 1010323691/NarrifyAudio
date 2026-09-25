@@ -1,14 +1,14 @@
 # NarrifyAudio 代码治理方案（第一阶段成果 + 实施计划）
 
-> 本文档由第一阶段只读治理审查整理而成，取代此前的早期迁移规格（旧版可从 `git show HEAD:plan.md` 取回；其中仍有效的实施约束已并入文末"持续生效的约束"）。
+> 本文档由第一阶段只读治理审查整理而成，取代此前的早期迁移规格（旧版可从 `git show d053c05^:plan.md` 取回，d053c05 为将其移入 docs/ 的提交；其中仍有效的实施约束已并入文末"持续生效的约束"）。
 >
 > **状态**：第一阶段（调查、分析、论证、规划）已完成；8 项待确认事项已由项目负责人裁决完毕（见第六节）；5b（legacy 业务路由整体收敛进 v1）经裁决**暂缓**，不在本轮范围。
 >
-> **当前阶段（2026-09-25 负责人指示）**：现阶段**只维护本 plan，不落地代码**。此前按批准开始实施的批次 0 部分改动已全部回滚（工作区恢复为仅本文件变更），批次 0–6 的实施设计已按侦察结果细化完毕（见第八节），**待负责人再次明确批准后**从批次 0 开始按序执行。
+> **当前阶段（2026-09-26）**：批次 0–6 **已全部实施完成**（origin/main..HEAD 43 提交，至 b882e54）；对那 43 个提交的全量审核留下 1 高 + 6 中 + 13 低指摘，其**收口修复已完成**（13 个可独立 revert 的提交，hash 见文末"验收记录"）。5b 维持暂缓。
 >
 > **异议核实记录（2026-09-25）**：负责人对本 plan 提出 8 条异议，已逐条对照代码核实并**全部采纳**（详见三/四/六/八节对应修订）：① Q7/A1 迁移 0015 只删 `quota_reservations` 表，`reserved_units`（QuotaHold 实写）与 `frozen_units` 账户列保留；② Q2 BGM 读-改-发布改跨进程锁保护（`music.py:455` 模式，两侧同改）；③ Q5 撤销"`safe_display_name` 未被使用"，收窄为 tts_manifest 模块内两处内联去重；④ A-1 降为 P3 残留参数清理（无 UI 勾选项）；⑤ Q4 修正线程占用表述，批次 1 先行最小修复（非占用等待），5a 仍退役该表面；⑥ Q11 `formatBytes` 4 副本互不等价，移出批次 0，批次 2 参数化保真统一或保留现状；⑦ Q17 撤销"包级循环/eager 化即炸"断言，改列两条单向反向边；⑧ Q15 diff 测试只比共同业务参数，`stream`/`stream_options` 豁免，extra_body 不对称保留为修复决策项。
 >
-> **第二轮异议（2026-09-25，7 条）**：前 6 条采纳并已落入正文——`estimated_units` 参与幂等哈希、保留哈希项与回放回归（Q7/4.2/A1/批次 4）；BGM 锁扩展覆盖 artifact 发布/回滚/恢复全生命周期，含"worker 发布 → API 修改 → worker 回滚"场景测试（Q2/批次 1）；SSE 同步操作（认证 + 每轮事件查询）封装 `anyio.to_thread.run_sync` 交线程池、Session 在封装内开闭，5s 认证缓存只限认证频率的表述修正（Q4/批次 1）；Q15 改述为"参数扩展能力不一致"（主解析流式与非流式分支均不传 `enable_thinking`，截断归因不成立），补透传与默认关思考分开决策（Q15/批次 3）；`format.ts` `i === 0` 对应 KB（非 B）（Q11）；`core/config.py:250` 为裸延迟导入、不推定设计意图（Q17）。第 7 条（"eager 化在 `core.paths` 上成环、启动即炸、延迟导入是断环必需"）**经完整导入链 + 实证复现排除**：eager 链零回边指回 `core.config`；预置半初始化 `core.config` 后 import `platform.feature_config` 成功；真正的环对是 `core.config(:31)` ↔ `core.paths`，由 `core/paths.py:117/139` 局部导入断开，与 `config.py` 两处函数级导入无关（详见 Q17）。
+> **第二轮异议（2026-09-25，7 条）**：前 6 条采纳并已落入正文——`estimated_units` 参与幂等哈希（**后经 2026-09-26 裁决改为彻底删除**：请求面 + `estimate_legacy_units` 删除，哈希键固定为常量 0 + 回放回归，收口 f0d05f8，见 4.2/A1）；BGM 锁扩展覆盖 artifact 发布/回滚/恢复全生命周期，含"worker 发布 → API 修改 → worker 回滚"场景测试（Q2/批次 1，回滚守卫由收口 07fb247 补齐）；SSE 同步操作（认证 + 每轮事件查询）封装 `anyio.to_thread.run_sync` 交线程池、Session 在封装内开闭，5s 认证缓存只限认证频率的表述修正（Q4/批次 1）；Q15 改述为"参数扩展能力不一致"（主解析流式与非流式分支均不传 `enable_thinking`，截断归因不成立），补透传与默认关思考分开决策（Q15/批次 3）；`format.ts` `i === 0` 对应 KB（非 B）（Q11）；`core/config.py:250` 为裸延迟导入、不推定设计意图（Q17）。第 7 条（"eager 化在 `core.paths` 上成环、启动即炸、延迟导入是断环必需"）**经完整导入链 + 实证复现排除**：eager 链零回边指回 `core.config`；预置半初始化 `core.config` 后 import `platform.feature_config` 成功；真正的环对是 `core.config(:31)` ↔ `core.paths`，由 `core/paths.py:117/139` 局部导入断开，与 `config.py` 两处函数级导入无关（详见 Q17）。
 >
 > **执行纪律**：每批独立可回滚（一批一提交范围，回滚 = revert 该批提交）；前置条件为上一批验收通过且工作区干净；后端改动完成后运行完整后端测试，涉及前端时运行 `npm run typecheck` 与 `npm run build`；不可逆数据库变更执行前先备份。
 
@@ -30,7 +30,7 @@
 | API | FastAPI（端口 8642），托管 `dist/` 构建产物 | `backend/main.py` |
 | Worker | 独立进程：事务 Outbox → Redis Streams，租约 + XAUTOCLAIM 恢复 | `backend/worker.py`、`backend/platform/task_worker.py` |
 | TTS | 隔离子进程（Qwen3-TTS / qwen-tts + torch），CLI + 磁盘 JSON + stdout 行协议，退出码 124 = 看门狗超时 | `tts-engine/tts_worker.py`（2490 行） |
-| 数据库 | PostgreSQL 16 + Alembic（14 个迁移，head 与 models 一致） | `backend/migrations/` |
+| 数据库 | PostgreSQL 16 + Alembic（15 个迁移，head 与 models 一致） | `backend/migrations/` |
 | 缓存/队列 | Memurai（Redis 协议兼容） | `worker.py`、README |
 
 **规模**：248 个受跟踪文件；生产代码约 5.9 万行（backend Python 约 3 万行；前端约 1.3 万行；tts_worker 2490 行）；测试约 2 万行（32 个文件，`from backend…` 导入 315 处全部可解析）。
@@ -43,7 +43,7 @@
 4. 额度：按操作计费（`platform/quota.py`）为现行生效路径；任务级 `QuotaReservation` 为休眠子系统（已裁决退役）。
 5. 工作区绑定：请求级 ContextVar（`main.py:106-131`）+ 任务级配置快照（`bind_task_config`），无"执行前切换全局 workspace"。
 
-**当前健康面（保留不动）**：14 个迁移版本链完整且被测试证明承力；`task_control.py`、`pathio.py`、`file_lock.py`、`observability.py` 全部在用；`book.py`/`text.py` 职责边界有文档化划分；启动/构建脚本有效；`taskLabels.ts` 与后端任务类型 19/19 对齐；前端 15 个 api 文件 98 个导出在 ef89a79 清理后无死导出。
+**当前健康面（保留不动）**：15 个迁移版本链完整且被测试证明承力；`task_control.py`、`pathio.py`、`file_lock.py`、`observability.py` 全部在用；`book.py`/`text.py` 职责边界有文档化划分；启动/构建脚本有效；`taskLabels.ts` 与后端任务类型 19/19 对齐；前端 15 个 api 文件 98 个导出在 ef89a79 清理后无死导出。
 
 ---
 
@@ -55,7 +55,7 @@
 |---|---|
 | `backend/main.py`、`worker.py` | 全文阅读 + 主审复核 |
 | `backend/core/*`（config、paths、pathio、tasks、concurrency、request_context、logging_setup、observability、file_lock） | 逐文件全文阅读 |
-| `backend/platform/*`（task_types、task_worker、engine_task_executor、task_state、task_context、legacy_tasks、legacy_files、deps、storage、bootstrap、outbox、models、quota、feature_config 等）+ 迁移 0001–0014 全链 | 逐文件全文阅读 |
+| `backend/platform/*`（task_types、task_worker、engine_task_executor、task_state、task_context、legacy_tasks、legacy_files、deps、storage、bootstrap、outbox、models、quota、feature_config 等）+ 迁移 0001–0015 全链 | 逐文件全文阅读 |
 | `backend/engines/*`（script、tts、tts_batch、tts_manifest、voices、book、text、audio、merge、bgm、music、llm_transport 等） | 逐文件全文阅读 |
 | `backend/api/*`（18 个路由文件，68 个端点） | 端点全枚举：前端字符串、测试、脚本、文档、.env、app.json 模板逐一核对调用方 |
 | `tts-engine/tts_worker.py`（2490 行） | 全文阅读（模式分发、子批重试、stdout 协议、看门狗） |
@@ -75,9 +75,9 @@
 | # | 类别 | 位置 | 证据 | 影响 | 处置 | 优先级 | 置信度 |
 |---|---|---|---|---|---|---|---|
 | Q1 | 缺陷 | `tts-engine/tts_worker.py:1833-1834`（`_run_batch` 内嵌 `run_planned_group`，:1793-1843） | `log()`（L157）只收 1 参，调用处传 2 参（隐式拼接 + `"WARNING"`） | 多角色 TTS 子批失败且 `len(half_rows)>1` 时，except 块内抛 TypeError：降并发重试不执行，原异常被替换，整段批次失败 | **批次 0 修复**（见批次 0 细则：日志单参化 + 提升循环为可注入依赖的模块级函数 + 失败注入回归测试） | P1 | 高 |
-| Q2 | 缺陷 | `api/music.py:650`（`_propagate_chapter_analysis`，调用点 :673 标签改名、:714 标签删除） | 直接 `f.write_bytes` 写 `08_bgm/chapter_music_analysis.json`，绕过 `engines/bgm_storage.py` 的 `_BGMS_LOCK`（L13，**进程内** `threading.RLock`）与原子发布 | 进程内锁无法协调**独立运行的 API 与 Worker**；且原子写入只保证最后一步原子，读→改→发布**全过程**不受保护，旧快照可覆盖新数据（丢失写窗口） | **批次 1**：改**跨进程**保护（复用 `engines/music.py:455` 的 `RLock` + `exclusive_file_lock` 模式，覆盖完整 load→修改→发布）+ 原子发布；worker 侧 `bgm_storage` 与 API 侧 `_propagate_chapter_analysis` 两侧同改 | P1 | 高 |
+| Q2 | 缺陷 | `api/music.py:650`（`_propagate_chapter_analysis`，调用点 :673 标签改名、:714 标签删除） | 直接 `f.write_bytes` 写 `08_bgm/chapter_music_analysis.json`，绕过 `engines/bgm_storage.py` 的 `_BGMS_LOCK`（L13，**进程内** `threading.RLock`）与原子发布 | 进程内锁无法协调**独立运行的 API 与 Worker**；且原子写入只保证最后一步原子，读→改→发布**全过程**不受保护，旧快照可覆盖新数据（丢失写窗口） | **批次 1**：改**跨进程**保护（复用 `engines/music.py:455` 的 `RLock` + `exclusive_file_lock` 模式，覆盖完整 load→修改→发布）+ 原子发布；worker 侧 `bgm_storage` 与 API 侧 `_propagate_chapter_analysis` 两侧同改。**收口修复**：回滚侧补内容守卫——worker 失败回滚恢复共享缓存前，须在同一把跨进程锁内比对文件指纹仍等于本任务发布的字节，并发写者（API 标签传播/手动编辑）胜出则跳过恢复（指摘 M1，收口提交 07fb247，含"worker 发布 → API 修改 → worker 回滚"真子进程场景测试） | P1 | 高 |
 | Q3 | 健壮 | `api/music.py:234` `await file.read()` 无大小上限（端点 `require_admin`，:212） | 对照 `files.py:108` 有上限且流式 | 管理员上传超大文件可耗尽 API 进程内存（非通用 DoS，已定级修正） | **批次 1**：流式落盘 + 上限 | P2 | 高 |
-| Q4 | 资源 | `api/tasks.py:263/328` 同步生成器 SSE 内 `time.sleep(0.5)` | Starlette 按生成器**每次迭代**借用线程池 worker；`time.sleep` 等待期间占用该 worker，稳态下每连接近似持续占用一个 worker（认证检查走 5 秒缓存窗，单次迭代开销有限，主要压力在占用线程数） | 多标签页线程池耗尽风险 | **批次 1 最小修复**：循环内 0.5s 轮询睡眠改**非占用等待**（生成器协程化、`await asyncio.sleep`——同步生成器内不存在不占线程的等待，协程化即最小改法；循环逻辑、5s 认证缓存、端点表面均不变）→ **5a 根治**（legacy 表面退役） | P2 | 高 |
+| Q4 | 资源 | `api/tasks.py:263/328` 同步生成器 SSE 内 `time.sleep(0.5)` | Starlette 按生成器**每次迭代**借用线程池 worker；`time.sleep` 等待期间占用该 worker，稳态下每连接近似持续占用一个 worker（认证检查走 5 秒缓存窗，单次迭代开销有限，主要压力在占用线程数） | 多标签页线程池耗尽风险 | **批次 1 最小修复**：循环内 0.5s 轮询睡眠改**非占用等待**（生成器协程化、`await asyncio.sleep`——同步生成器内不存在不占线程的等待，协程化即最小改法；循环逻辑、5s 认证缓存、端点表面均不变）→ **5a 根治**（legacy 表面退役）。**收口修复**：v1 聚合/单任务两条 SSE 体内剩余的同步 DB 单元（初始快照、5s 认证复查、0.5s 轮询查询）经 `anyio.to_thread.run_sync` 交线程池（自开闭 Session 的模块级同步函数），慢查询不再冻结事件循环上其它连接（指摘 M3，收口提交 3f883cf，含"单元在非事件循环线程执行 + 循环心跳不饿死 + 生成器关闭后无排队泄漏"测试） | P2 | 高 |
 | Q5 | 一致性 | `tts_manifest.py:209`、`:277-278` 两处相同内联副本（替换 Windows 保留字符集、`.strip()`、兜底 `audiobook`、无截断）；`safe_display_name`（`platform/storage.py:34-37`）**生产在用**（约 15 处：工作区路径、对象键、任务产物路径：`admin/files/music/projects/text/legacy_files/engine_task_executor/task_context`），且规则**不等价**（`[^\w.()\- ]+`→`_`、`strip(" .")`、180 字符截断、兜底 `upload.bin`） | 全库 grep + 规则逐行比对 | 两处内联副本可漂移 → 产物路径不一致；两规则不等价，强行统一会改变现网路径 | **批次 2**：tts_manifest 两处内联收敛为模块内单一私有函数（行为不变、注明与 `safe_display_name` 的规则差异）；**不**与 `safe_display_name` 合并 | P2 | 高 |
 | Q6 | 重复 | `ACTIVE_TASK_STATUSES` 4 处（`legacy_tasks.py:23`、`services/projects.py:10`、`services/admin_storage.py:13`、`api/project_resources.py:43`）；归属校验 4 处（`projects.py:44`、`project_resources.py:20`、`tasks.py:181`、`task_submission.py`）；task_type→模块映射 2 处（`admin.py:715`、`tasks.py:45`）；重试门禁 2 处（`task_submission.py:51-73` vs `admin.py:602-632` 逐行重复）；文件下载 2 种（`platform/file_response.py:18` vs `music.py:287`） | 逐一核对 | 状态/权限规则改动需同步多处 | **批次 2**：各收敛单一实现 | P2 | 高 |
 | Q7 | 休眠子系统 | 任务级额度预留 `platform/task_state.py:49-120`；7 处空转调用（`task_worker.py:185,199,936,974,996,1123,1133`、`services/tasks.py:40`）；`frozen_units` 0 写点（仅展示面 `admin.py:373`、`api/quota.py:18`）；重试门禁 `api/task_submission.py:58-60`、`admin.py:611` 永不触发。注意：`reserved_units` **不是**恒 0——按操作计费 `QuotaHold` 实写该字段（预留 `quota.py:86`、消费 `:132`、释放 `:162`），不可随表删除 | `quota_reservations` 表 0 个生产构造点（唯一构造在 `tests/test_postgres_cancellation_concurrency.py:81`） | plan.md 早期要求的任务级冻结语义未生效；按操作计费（QuotaHold）才是实际路径 | **批次 4 退役**（裁决 A1；迁移 0015 **只删 `quota_reservations` 表**，两个账户列与约束保留） | P1（已裁决） | 高 |
@@ -112,11 +112,11 @@
 | `engines/tts.py:29` `DEFAULT_MODEL`、`:264` `run_worker` 别名；`engines/voices.py:1140` `make_clones` 别名 | 历史别名 | 无 |
 | `engines/script.py:878` `check_text_alignment`、`:2042` `_validate_instructs_batch` | 早期校验 | 跑 script 测试 |
 | `IMPLEMENTED` 常量 ×3（`merge.py:34`、`script.py:39`、`tts_batch.py:62`、`voices.py:67` 中未被读取者） | 特性开关残留；仅 `tts.IMPLEMENTED` 被 `api/tts.py:42,49` 读取（保留，批次 2 改名 READY） | 无 |
-| `core/paths.py:277-278` `get_layout`/`peek_layout`；`core/config.py:402-404` `clear_workspace`、`:383` `set_workspace_pointer` | 单用户时代 API | 无 |
+| `core/paths.py:277-278` `get_layout`/`peek_layout`；`core/config.py:402-404` `clear_workspace`、`:383` `set_workspace_pointer` | 单用户时代 API | 无；`set_workspace_pointer` **核验后保留**（20+ 测试在用，为受管工作区指针的现行 setter） |
 | `core/config.py:63` `tts.enabled`、`:68` `tts.speaker` | 0 读取配置字段 | 更新 config 测试；旧 app.json 中残留键由 pydantic extra=ignore 安全忽略 |
 | `engines/book.py:878` `build_zip`（+ `tests/test_book.py:297`）；`engines/merge.py:337-338` `run` 别名（+ `test_merge.py:325`、`bgm.py:1520` 过期注释） | 旧入口/别名 | 连带删测试 |
-| `engines/audio.py:42-43` `TOLERANCE_MIN/MAX`；`:72/89/223` `format_bytes`/`format_duration`/`output_name`（测试引用）；`book.py:1723` 局部 `import re` | 残留 | 更新测试 |
-| `music.find_tag_category`（music.py:133，测试引用）；`legacy_tasks.py:26-28` `estimate_legacy_units`（恒 0，随 Q7 批次 4） | 残留 | 更新测试 |
+| `engines/audio.py:42-43` `TOLERANCE_MIN/MAX`；`:72/89/223` `format_bytes`/`format_duration`/`output_name`（测试引用）；`book.py:1723` 局部 `import re` | 残留 | 更新测试；`output_name` **核验后保留**（`engines/audio.py:367` 生产在用） |
+| `music.find_tag_category`（music.py:133，测试引用）；`legacy_tasks.py:26-28` `estimate_legacy_units`（恒 0，随 Q7 批次 4） | 残留 | 更新测试；`estimate_legacy_units` **已删**（收口 f0d05f8：请求面与估计函数彻底删除，幂等哈希键固定为常量 0 + 回放回归） |
 | app.json 模板 6 个已退役键（`tts.parallel_workers/api_base/api_key/voice/concurrency`、`persona_prompts.advanced_prompt`）+ `test_config.py:48-63` 钉扎 | 已退役配置 | 更新测试断言 |
 | `tts_worker.py:861` 孤儿 `@contextlib.contextmanager`（benchmark 残片） | 清理残骸 | TTS 冒烟 |
 | `tts-engine/__pycache__/benchmark*.pyc` | 已删 benchmark 的字节码 | 无 |
@@ -133,7 +133,7 @@
 |---|---|---|
 | `POST /api/text/format`（`text.py:30`）、`POST /api/book/split`（`book.py:64`）、`POST /api/script/generate-files` 非 durable 别名（`script.py:60`）、`GET /api/tasks/{task_id}`（`tasks.py:298`）、admin `/workers` `/queue` `/task-activity`、projects upload/download（`projects.py:168/195`，前端用 `/api/files` 等价路径） | 无外部访问（A3）；仅测试引用；前端走 v1/-durable 等价路径 | 0（纯测试引用者）/ 5a（随任务表面退役者） |
 | `tts_worker.py` custom/design/clone 三模式（约 350 行 + CLI choices L2397-2398 收窄 + `--model` CustomVoice 默认值 L2414 核对） | A5：无手动 CLI 用法 | 4 |
-| `QuotaReservation` 模型 + **迁移 0015 只删 `quota_reservations` 表**（`reserved_units`/`frozen_units` 账户列与 `ck_quota_nonnegative` 约束**保留**——前者由现行 QuotaHold 计费实写，后者 0 写点但属同一账本展示面/约束）+ `task_state.py:49-120` + 7 处空转调用 + 重试门禁 2 处 + `TaskSubmit.estimated_units` + `estimate_legacy_units` + `test_postgres_cancellation_concurrency.py:81` 重写 | A1 | 4 |
+| `QuotaReservation` 模型 + **迁移 0015 只删 `quota_reservations` 表**（`reserved_units`/`frozen_units` 账户列与 `ck_quota_nonnegative` 约束**保留**——前者由现行 QuotaHold 计费实写，后者 0 写点但属同一账本展示面/约束）+ `task_state.py:49-120` + 7 处空转调用 + 重试门禁 2 处 + `TaskSubmit.estimated_units`（**已按裁决彻底删除**，收口 f0d05f8：请求面字段 + `estimate_legacy_units` 删除，幂等哈希中该键固定为常量 0 保住历史回放 + 回放回归测试）+ `test_postgres_cancellation_concurrency.py:81` 重写 | A1 | 4 |
 | `core/concurrency.py:85-88` `set_concurrency`、`:99-101` `set_merge_concurrency`（`ConcurrencyGate` 类与 `gate()`/`merge_gate()` 保留，恒 limit=1，文档改写） | A4 | 4 |
 | m4b 半分支：`src/api/tts.ts:115-120`、UI 调用点、`api/tts.py:878/909/914`、`engines/merge.py:188/220` | A6 | 4 |
 | `src/types.ts:426` `'pause'\|'resume'` + `ScriptParse.vue:82-84` 已暂停分支 + `"paused"` 状态值（无持久化写入方） | A7 | 4 |
@@ -143,7 +143,7 @@
 
 | 位置 | 理由 |
 |---|---|
-| 14 个 Alembic 迁移（0001–0014） | 链完整无 no-op；0008/0013 数据迁移被 `test_migrations.py` 证明承力；head 与 models 一致 |
+| 15 个 Alembic 迁移（0001–0015） | 链完整无 no-op；0008/0013 数据迁移被 `test_migrations.py` 证明承力；0015 的 upgrade/downgrade 往返被真实 PostgreSQL 回归证明（收口 0e4bac8）；head 与 models 一致 |
 | `core/concurrency.py` 的 `ConcurrencyGate` 类与 `gate()`/`merge_gate()` | 机制在用（LLM/merge 串行限流），仅 resize 表面退役 |
 | `engines/tts_manifest.py` 定位 | 跨引擎产物清单职责清晰；问题是私有符号外泄（批次 3），不是模块本身 |
 | `book.py`/`text.py` 职责划分 | `text.py:86-90` 文档化的刻意边界 |
@@ -190,13 +190,13 @@
 
 | # | 事项 | 裁决 | 落地范围（已核实边界） | 批次 |
 |---|---|---|---|---|
-| A1 | QuotaReservation 去留 | **退役** | `platform/models.py:197` 模型 + `task_state.py:49-120`；7 处空转调用；`api/task_submission.py:58-60`、`admin.py:611` 门禁；`TaskSubmit.estimated_units`；`estimate_legacy_units`；`test_postgres_cancellation_concurrency.py:81` 重写为按操作结算断言。**保留**：`UserQuotaAccount.reserved_units`（按操作计费 `QuotaHold` 的预留/消费/释放实写该列，`quota.py:86/132/162`，删除会破坏计费）、`frozen_units`（当前 0 写点，仅展示面 `admin.py:373`、`api/quota.py:18`，同属账本展示面与约束，本轮保留）、`ck_quota_nonnegative` 约束、按操作计费（`quota.py` consume 路径）、`QuotaTransaction` 流水、管理员调整。**DB**：迁移 0015 只删 `quota_reservations` 表（不可逆，执行前先备份数据库） | 4 |
+| A1 | QuotaReservation 去留 | **退役** | `platform/models.py:197` 模型 + `task_state.py:49-120`；7 处空转调用；`api/task_submission.py:58-60`、`admin.py:611` 门禁；`TaskSubmit.estimated_units`（**裁决更新 2026-09-26：彻底删除**——请求面字段 + `estimate_legacy_units` 删除，幂等哈希中该键固定为常量 0，历史回放不破，收口提交 f0d05f8）；`test_postgres_cancellation_concurrency.py:81` 重写为按操作结算断言。**保留**：`UserQuotaAccount.reserved_units`（按操作计费 `QuotaHold` 的预留/消费/释放实写该列，`quota.py:86/132/162`，删除会破坏计费）、`frozen_units`（当前 0 写点，仅展示面 `admin.py:373`、`api/quota.py:18`，同属账本展示面与约束，本轮保留）、`ck_quota_nonnegative` 约束、按操作计费（`quota.py` consume 路径）、`QuotaTransaction` 流水、管理员调整。**DB**：迁移 0015 只删 `quota_reservations` 表（不可逆，执行前先备份数据库） | 4 |
 | A2 | core/tasks.py 外部集成 | **删除**（无外部调用方） | `backend/core/tasks.py`（611 行）+ 2 个专用测试删除、6 个借用测试迁移到测试专用执行器（见批次 0 细则） | 0 |
 | A3 | legacy 表面去留 | **可退役，无需兼容窗口** | **5a（列入计划）**：前端 6 视图任务跟踪切 v1 事件流（v1 补聚合事件端点）→ 删 `api/tasks.py` 适配层、`-durable` 混合端点、`generate-files`/`cancel-batch` 别名、`main.py` 对应注册；Q4 由批次 1 先行最小修复（非占用等待），5a 仍按原计划退役该表面。**5b（暂缓）**：9 个 legacy 业务路由（text/book/audio/bgm/tts/script/music/files/config）整体收敛进 v1——这些端点当前接线且前端在用，不属于"未接线功能"，收益/成本比低，待 5a 落地后另行评估 | 5a→5；5b→本轮不做 |
 | A4 | 并发 limit=1 意图 | **按有意保守；退役 resize 表面** | 删 `concurrency.py:85-88`、`:99-101` 及测试调用；`ConcurrencyGate` 类保留（文档改为"恒 1，有意限流"）；修 `merge.py:242` 注释。未来若要可调并发，作为新功能加回 | 4 |
 | A5 | tts 死模式 | **删除**（无手动 CLI 用法） | custom/design/clone 三模式实现（约 350 行）+ CLI choices 收窄（L2397-2398）+ `--model` 默认值核对（L2414）。前置核验：grep 脚本/文档零引用 + 真实 TTS 冒烟 | 4 |
 | A6 | m4b 半分支 | **隐藏并删除**（残留参数清理，非用户可感缺陷） | `src/api/tts.ts:115-120` + UI 调用点（`Merge.vue:249` 固定传 `false` 的硬编码调用）；`api/tts.py:878/909/914`；`engines/merge.py:188/220`。前端无勾选项（全库无 m4b UI），引擎恒 MP3 | 4 |
-| A7 | pause/resume | **按远期处理，移除声明** | `src/types.ts:426` 删 `'pause'\|'resume'`；`ScriptParse.vue:82-84` 已暂停分支删除；`"paused"` 状态值删除（无持久化写入方）；后端 400 文案已明确（"持久化任务当前只支持取消或重试"），不动。暂停能力未来按 plan.md 早期 §7.2 要求作为独立功能重新设计 | 4 |
+| A7 | pause/resume | **按远期处理，移除声明** | `src/types.ts:426` 删 `'pause'\|'resume'`；`ScriptParse.vue:82-84` 已暂停分支删除；`"paused"` 状态值删除（无持久化写入方）——**收口补充**：后端派生集合中的 `"paused"` 死值（`task_lifecycle.py` ACTIVE 集合、admin 两处计数）已清理（收口提交 d0c4bc2）；`models.py` 的 DB CHECK 约束仍含 `'paused'`（删除需迁移，超出本轮范围，保留）；后端 400 文案已明确（"持久化任务当前只支持取消或重试"），不动。暂停能力未来按 plan.md 早期 §7.2 要求作为独立功能重新设计 | 4 |
 | A8 | POSTGRES_PASSWORD | **从模板退役** | `.env.example` 删除变量；README 变量表删行，改注"postgres 管理员密码仅供人工 psql 运维使用，应用不读取、无需存入 .env" | 0 |
 
 **连带升级**：原"需进一步验证"清单整体转为可删除（无外部访问前提已满足）——`/api/text/format`、`/api/book/split`、script 非 durable 别名、`GET /api/tasks/{id}`、admin `/workers /queue /task-activity`、projects upload/download、`audio.py:72/89/223`、`music.find_tag_category`、`set_workspace_pointer`、`tts.enabled/tts.speaker`、6 个退役 app.json 模板键（含 `test_config.py:48-63` 更新）、`"paused"` 状态值。端点类随批次 0/5a，符号/配置类随批次 0/4。
@@ -290,10 +290,17 @@
 
 ### 批次 5（5a）：legacy 任务表面退役
 
-- **范围**：v1 补"单连接多任务、按用户过滤"的聚合事件端点 → 前端 6 视图逐页切换（ScriptParse → Voices/BatchTTS/Merge/BGM → MusicLibrary，含 `stores/task.ts` 与 `tasks.ts` 退役）→ 删 `api/tasks.py` 适配层、`-durable` 混合端点、`generate-files`/`cancel-batch` 非后缀别名、4.2 中归 5a 的端点 → S9（Settings 双通道修复 Q10、对话框统一 Q21 前半）。
+- **范围**：v1 补"单连接多任务、按用户过滤"的聚合事件端点 → 前端 6 视图逐页切换（ScriptParse → Voices/BatchTTS/Merge/BGM → MusicLibrary）→ 删 `api/tasks.py` 适配层、`-durable` 混合端点、`generate-files`/`cancel-batch` 非后缀别名、4.2 中归 5a 的端点 → S9（Settings 双通道修复 Q10、对话框统一 Q21 前半）。
 - **前置**：批次 4。
 - **验收**：每页切换后跑"F5 重挂 + 项目切换 + 取消/重试"三件套回归；全量回归。
 - **回滚**：按页面粒度回滚（每页一提交）；v1 端点只增不删。
+
+**实施与计划的偏差记录（910cf50/1c0355f/2381f24，2026-09-26 裁决记录）**：
+
+1. 本节的"含 `stores/task.ts` 与 `tasks.ts` 退役"**与实际不符，以实际为准**：`src/stores/task.ts`、`src/api/tasks.ts` **文件保留**——5a-2 后二者是 v1 表面的前端封装层（legacy `/api/tasks` 调用方已清零）；实际退役的是 `backend/api/tasks.py` 适配层（5a-3 删文件）与 `-durable` 混合端点（5a-3 清命名）。
+2. "按页面粒度回滚（每页一提交）"**退化为三提交**（5a-1 聚合端点 + 共享任务视图模块 / 5a-2 前端 6 视图切换 / 5a-3 后端表面退役 + 命名清理）：逐页切换是 5a-2 内的纯接线改动，独立页提交无额外回滚价值，裁决接受三提交粒度。
+3. **回滚顺序约束**：revert 5a-2 前必须先 revert 5a-3——单独 revert 5a-2 会把前端切回 legacy `/api/tasks` 表面，而 5a-3 未同时 revert 时该表面已删，整面 404；"先 revert 5a-3"的中间态功能完整（FE 已在 v1 表面，即当前状态）。
+4. `persistentTasks.ts` 的 500ms 轮询（AudioSplit/Dashboard/ProjectOverview 仍用）本轮**不动**，属后续范围。
 
 ### 批次 6：性能与收尾（可选）
 
@@ -313,3 +320,56 @@
 4. 不可逆数据库变更（本方案仅批次 4 的迁移 0015）执行前必须备份。
 5. API 不执行长时间任务，不以进程内线程承担持久任务；核心业务状态不得仅存在于内存、Redis 或 JSON 文件；Redis 丢失后能依数据库恢复调度。
 6. 测试：后端改动跑完整后端测试；涉及前端跑 typecheck + build；关键一致性测试用真实 PostgreSQL 和 Redis；Mock 只隔离昂贵的模型调用，不替代事务/锁/队列验证；未执行的测试明确写"未验证"并说明原因。
+7. 不依赖 API 实例内存完成认证、任务查询或状态协调（旧约束 4）。
+8. 不依赖进程内锁保护跨进程业务一致性——API 与 Worker 是独立进程，跨进程一致性由数据库约束与文件锁承担（旧约束 5；收口修复的 M2 取锁序统一与 M1 回滚指纹守卫均落实本条）。
+9. 所有耗时操作必须有明确的任务入口和资源限制（旧约束 7）。
+
+---
+
+## 十、明确不做（逐项声明，2026-09-26 收口裁决）
+
+- 不动 `models.py` 的 DB CHECK 约束（其含 `'paused'` 值）——删除需迁移，超出本轮；后端派生集合的死值已清（收口 d0c4bc2）。
+- 不改 S1 影子双跑机制（旧分发链按 plan 保留一个版本周期）。
+- 不动 `persistentTasks.ts` 的 500ms 轮询（AudioSplit/Dashboard/ProjectOverview 仍用，属后续范围）。
+- `src/api/tasks.ts`/`src/stores/task.ts` 更名为 `platformTasks.*` 属可选项，默认不做（文件保留为 v1 表面封装层，见批次 5 偏差记录）。
+- **P3-11**：`.bgm_storage.lock` 落在 08_bgm 目录——保持：跨进程锁必须各进程锁同一物理路径、按 workspace 归属；打包/导出流程只收指定产物、不收点文件。
+- **P3-12**：`llm_transport` 的 HTTPError 类型不一致——保持现状：流式分支的 `RuntimeError` message 已内嵌 `e.code`，调用方（如 `script.py` 的 `llm_json_with_retry`）不依赖异常类型/status 字段、仅记录 `last_err`；统一错误类型属传输层改造项。
+- **P3-13**：`core.config` provider 注册时序硬断言——不加：模块级注册表加时序断言会与测试执行顺序耦合；维持"先用后注册即 KeyError"的现有约定 + 既有测试。
+- **P3-9**：v1 聚合流 snapshot 后逐任务取事件（N+1）——声明可接受：200 任务 cap + 0.5s 节奏 + 本机单用户场景，量级可控；出现真实压力再改批量查询。
+- **P3-7**：`formatBytes` 统一后 Usage 对 NaN 渲染为"未采集"（旧实现渲染 `"NaN undefined"`，属显示 bug）——保持新行为，不写代码。
+- 音乐库共享 journal（`stage_shared_file` → 库索引）的回滚守卫：机制已通用（M1 的 `guard` 字段 + `guarded_lock`），库索引自身的跨进程锁（`engines/music.py`）接线属后续范围，登记为残留风险。
+
+---
+
+## 十一、验收记录（2026-09-26 收口修复）
+
+对 origin/main..HEAD 43 个未推送提交（批次 0–6 实施，至 b882e54）的全量审核留下 1 高 + 6 中 + 13 低指摘；全部由下列收口提交处置，一项一提交、独立可 revert：
+
+| 指摘 | 收口提交 |
+|---|---|
+| H1：task store `refresh()` 时序（流未开先等快照，一次性重挂落空） | ee71556 |
+| M2 + L6：BGM 传播路径取锁序统一 + best-effort（含锁超时不 500） | d9409da |
+| M6：v1 流绑定项目后才开（消除无 scope 重帧） | 63df7c2 |
+| M1：共享 BGM 缓存回滚守卫（锁内指纹比对 + 真子进程跨进程场景测试） | 07fb247 |
+| M3：SSE 同步 DB 单元交线程池（线程断言 + 队列无泄漏测试） | 3f883cf |
+| M5：`estimated_units` 彻底删除（哈希键固定 0 + 回放回归） | f0d05f8 |
+| L1：`"paused"` 派生集合清理（DB CHECK 约束保留） | d0c4bc2 |
+| M4 + L13a：GPU 采样 TTL 覆盖 15s 刷新 + single-flight + 注释修正 | e08592a |
+| L7：DialogHost 背景点击关闭恢复 | d7c1eb9 |
+| L8 + L7b + L11 + P3-6：±Infinity 显示、BGM 确认前重验混音就绪、测试卫生、`"\j"` raw string | c7cded1 |
+| P2-5 + L12 + L9 + L4：lint-imports 门禁接入 build:all + npm 脚本；.importlinter/.gitignore/foundation_schema 修正 | 560784e |
+| P2-3：0015 downgrade 真实 PG 往返回归（opt-in） | 0e4bac8 |
+| P1-1 + P2-4 + P3-14 + 本文销项 | （本提交） |
+
+**执行记录**（均核对真实退出码）：
+
+- `pytest` 全量：无 PG 变量 **979 passed / 4 skipped**（symlink 环境项 + Redis 验收 + 两项 opt-in PG 回归）；带 `NARRIFY_TEST_POSTGRES_URL`（`narrify_pg_test`）**981 passed / 2 skipped**——含 A1 取消并发与 0015 downgrade 往返，两项 opt-in PG 回归实跑 PASSED（往返约 3 s）。
+- `npm run typecheck` / `npm run build`：前端改动后全绿。
+- `npm run build:all`：全绿（含新接入的 lint-imports 段）；`npm run lint:imports` 单独运行 **KEPT**（1 contract, 0 broken）。
+- 收尾 grep 销项：`estimated_units` 在 `src/` 零残留；`"paused"` Python 集合零残留；`/api/tasks` 路由表面零残留（注释/docstring 中的说明性文字保留）。
+
+**未验证项（明确写出 + 原因 + 计划）**：
+
+- Redis 验收（批次 3 验收项）：本机 127.0.0.1:6379 为**应用实例**，无专用 loopback Redis 可 flushdb——未执行；计划：部署机补跑。
+- TTS 三模式冒烟（batch/design-batch/merge）：需 TTS 推理运行时/GPU 环境，本验证环境不具备——未执行；计划：交付机按批次 3 验收清单各跑一次并记录。
+- 手动点检（H1"F5 重挂/项目切换/取消-重试"三件套、DialogHost 四路径、admin 多标签观察）：需真实浏览器 + 全栈环境——未执行；对应代码路径已由单元测试/线程断言/TTL 单元测试覆盖。
