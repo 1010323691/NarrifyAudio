@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import anyio
 import asyncio
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -78,6 +79,28 @@ def get_task(task_id: str, user: User = Depends(require_authenticated_user), db:
     return _task_json(task)
 
 
+def _stream_session_valid(cookie: str | None, user_id: str) -> bool:
+    with SessionLocal() as db:
+        return session_is_valid_for_user(db, cookie, user_id)
+
+
+def _stream_poll(task_id: str, user_id: str, after: int) -> tuple[Task | None, list[TaskEvent], bool]:
+    """One poll tick's data on a single self-opened session: the task
+    (``None`` once the row is gone), its events after ``after``, and whether
+    it is terminal."""
+    with SessionLocal() as db:
+        current = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user_id))
+        if current is None:
+            return None, [], False
+        events = db.scalars(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task_id, TaskEvent.sequence > after)
+            .order_by(TaskEvent.sequence)
+            .limit(100)
+        ).all()
+        return current, events, current.status in TERMINAL_TASK_STATUSES
+
+
 @router.get("/{task_id}/events")
 def stream_task_events(
     task_id: str,
@@ -103,23 +126,14 @@ def stream_task_events(
                 return
             now = asyncio.get_running_loop().time()
             if now >= next_auth_check:
-                with SessionLocal() as db:
-                    if not session_is_valid_for_user(
-                        db, request.cookies.get(settings.session_cookie), user.id,
-                    ):
-                        return
-                next_auth_check = now + 5.0
-            with SessionLocal() as db:
-                current = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id))
-                if current is None:
+                if not await anyio.to_thread.run_sync(
+                    _stream_session_valid, request.cookies.get(settings.session_cookie), user.id,
+                ):
                     return
-                events = db.scalars(
-                    select(TaskEvent)
-                    .where(TaskEvent.task_id == task_id, TaskEvent.sequence > sequence)
-                    .order_by(TaskEvent.sequence)
-                    .limit(100)
-                ).all()
-                terminal = current.status in TERMINAL_TASK_STATUSES
+                next_auth_check = now + 5.0
+            current, events, terminal = await anyio.to_thread.run_sync(_stream_poll, task_id, user.id, sequence)
+            if current is None:
+                return
             for event in events:
                 sequence = event.sequence
                 yield f"id: {sequence}\ndata: {json.dumps({'type': event.event_type, 'task_id': task_id, 'sequence': sequence, 'payload': event.payload}, ensure_ascii=False)}\n\n"

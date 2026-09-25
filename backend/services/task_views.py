@@ -13,6 +13,7 @@ retired (5a) — this is the only copy. Frame contract (all frames are
 """
 from __future__ import annotations
 
+import anyio
 import asyncio
 import json
 import time
@@ -216,6 +217,23 @@ def _new_frames(rows_fn, seen: dict[str, int]) -> list[dict]:
     return emitted
 
 
+def snapshot_payload(rows_fn) -> tuple[list[dict], dict[str, int]]:
+    """Initial replay on one self-opened session: the ``snapshot_all`` task
+    snapshots and the per-task seen-sequence map the poll ticks resume from."""
+    seen: dict[str, int] = {}
+    with SessionLocal() as db:
+        rows = rows_fn(db)
+        for task in rows:
+            events = task_events(db, task.id)
+            seen[task.id] = events[-1].sequence if events else 0
+        return [task_snapshot(db, t) for t in rows], seen
+
+
+def session_still_valid(auth_token: str, user_id: str) -> bool:
+    with SessionLocal() as db:
+        return session_is_valid_for_user(db, auth_token, user_id)
+
+
 async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnected):
     """The shared aggregate SSE body: replay ``snapshot_all`` for every row
     ``rows_fn(db)`` returns (the caller scopes it — current project for the
@@ -225,26 +243,22 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
     Starlette runs sync generators by borrowing a thread-pool worker for EVERY
     iteration, so the 0.5 s poll would hold a worker per idle connection
     (a handful of open tabs exhausts the pool); an async generator sleeps on
-    the event loop instead.
+    the event loop instead. The synchronous DB units (snapshot, auth check,
+    poll) are handed to the pool via ``anyio.to_thread`` so a slow query
+    cannot freeze the event loop for every other connection on it.
     """
-    seen: dict[str, int] = {}
     next_auth_check = 0.0
-    with SessionLocal() as db:
-        rows = rows_fn(db)
-        for task in rows:
-            events = task_events(db, task.id)
-            seen[task.id] = events[-1].sequence if events else 0
-        yield sse({"type": "snapshot_all", "tasks": [task_snapshot(db, t) for t in rows]})
+    snapshots, seen = await anyio.to_thread.run_sync(snapshot_payload, rows_fn)
+    yield sse({"type": "snapshot_all", "tasks": snapshots})
     while True:
         if await is_disconnected():
             return
         now = time.monotonic()
         if now >= next_auth_check:
-            with SessionLocal() as auth_db:
-                if not session_is_valid_for_user(auth_db, auth_token, user_id):
-                    return
+            if not await anyio.to_thread.run_sync(session_still_valid, auth_token, user_id):
+                return
             next_auth_check = now + 5.0
-        frames = _new_frames(rows_fn, seen)
+        frames = await anyio.to_thread.run_sync(_new_frames, rows_fn, seen)
         for frame in frames:
             yield sse(frame)
         if not frames:

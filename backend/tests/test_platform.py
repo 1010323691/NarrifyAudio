@@ -1649,6 +1649,196 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
         assert b"ping" in chunks[1]  # the 0.5 s poll ticked while the reader was idle
 
 
+def test_task_stream_poll_units_run_in_worker_threads(client: TestClient, monkeypatch):
+    """M3: aggregate_stream's synchronous DB units run in pool threads, not on
+    the event loop — a slow poll cannot freeze every other connection — and
+    closing the stream leaves every submitted unit completed (no abandoned
+    pool work queued behind a dead reader)."""
+    import asyncio
+    import threading
+    import time
+
+    from backend.services import task_views
+
+    state = {"submitted": 0, "completed": 0}
+    heartbeats = 0
+    windows: list[tuple[int, int, int]] = []
+    frames: list[str] = []
+
+    def slow_frames(rows_fn, seen):
+        state["submitted"] += 1
+        before = heartbeats
+        ident = threading.get_ident()
+        time.sleep(0.25)  # stands in for a slow query
+        state["completed"] += 1
+        windows.append((ident, before, heartbeats))
+        return []
+
+    def ok_auth(auth_token, user_id):
+        state["submitted"] += 1
+        state["completed"] += 1
+        return True
+
+    monkeypatch.setattr(task_views, "_new_frames", slow_frames)
+    monkeypatch.setattr(task_views, "session_still_valid", ok_auth)
+
+    async def drive():
+        nonlocal heartbeats
+        loop_ident = threading.get_ident()
+        stop = asyncio.Event()
+        disconnected = asyncio.Event()
+
+        async def heartbeat():
+            nonlocal heartbeats
+            while not stop.is_set():
+                heartbeats += 1
+                await asyncio.sleep(0.02)
+
+        async def is_disconnected():
+            return disconnected.is_set()
+
+        hb = asyncio.create_task(heartbeat())
+
+        async def consume():
+            gen = task_views.aggregate_stream(lambda db: [], "tok", "user-1", is_disconnected)
+            try:
+                while True:
+                    frames.append(await asyncio.wait_for(gen.__anext__(), timeout=10))
+            except StopAsyncIteration:
+                pass
+
+        cons = asyncio.create_task(consume())
+        await asyncio.sleep(1.6)  # ~two 0.5 s ticks, each with the 0.25 s unit
+        disconnected.set()
+        await cons
+        stop.set()
+        await hb
+        return loop_ident, heartbeats
+
+    loop_ident, total_heartbeats = asyncio.run(drive())
+
+    assert len(windows) >= 2, f"expected several poll ticks, saw {len(windows)}"
+    # Every unit ran off the event-loop thread.
+    assert all(ident != loop_ident for ident, _b, _a in windows)
+    # The loop stayed responsive DURING each unit's sleep: a frozen loop
+    # would show 0 heartbeats inside the window (the floor accounts for
+    # Windows' ~15 ms event-loop timer granularity on the 0.02 s heartbeat).
+    assert all(after - before >= 3 for _ident, before, after in windows), \
+        f"event loop starved while a poll unit ran: {windows}"
+    assert total_heartbeats >= 20, f"heartbeat itself starved: {total_heartbeats}"
+    # The stream actually ticked.
+    assert "snapshot_all" in frames[0] and any("ping" in f for f in frames[1:])
+    # No queue leak: everything submitted before the close has completed.
+    deadline = time.monotonic() + 5
+    while state["completed"] < state["submitted"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert state["completed"] == state["submitted"]
+
+
+def test_task_event_stream_poll_runs_in_worker_threads(client: TestClient, monkeypatch):
+    """M3 (second surface): the per-task ``/{task_id}/events`` loop hands its
+    auth + poll units to pool threads the same way the aggregate stream does."""
+    import asyncio
+    import threading
+    import time
+
+    from starlette.requests import Request
+
+    from backend.api import platform_tasks as api_platform_tasks
+    from backend.platform.config import settings
+    from backend.platform.security import load_session
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    token = client.cookies.get(settings.session_cookie)
+    assert token
+    with SessionLocal() as db:
+        session = load_session(db, token, touch=False)
+        user = session.user
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": first["csrf_token"]}, json={"name": "evt"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": first["csrf_token"]},
+        json={"project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
+              "estimated_units": 0, "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    state = {"submitted": 0, "completed": 0}
+    idents: list[int] = []
+
+    def fake_auth(cookie, user_id):
+        state["submitted"] += 1
+        idents.append(threading.get_ident())
+        time.sleep(0.1)
+        state["completed"] += 1
+        return True
+
+    class _Event:
+        sequence = 1
+        event_type = "progress"
+        payload = {"progress": 50, "current": "x"}
+
+    def fake_poll(tid, uid, after):
+        # One event on the first poll, then silence — keeps the generator
+        # alive (non-terminal, no yield is fine) without ending it.
+        state["submitted"] += 1
+        idents.append(threading.get_ident())
+        time.sleep(0.1)
+        state["completed"] += 1
+        return SimpleNamespace(status="running"), ([_Event()] if after == 0 else []), False
+
+    monkeypatch.setattr(api_platform_tasks, "_stream_session_valid", fake_auth)
+    monkeypatch.setattr(api_platform_tasks, "_stream_poll", fake_poll)
+
+    # Starlette's is_disconnected peeks the receive channel non-blocking: the
+    # wire stays silent until the test reports the disconnect.
+    disconnected = asyncio.Event()
+
+    async def wire_receive():
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    request = Request(
+        {
+            "type": "http", "method": "GET", "path": f"/api/v1/tasks/{task_id}/events",
+            "headers": [(b"cookie", f"{settings.session_cookie}={token}".encode("ascii"))],
+            "query_string": b"",
+        },
+        receive=wire_receive,
+    )
+
+    body = api_platform_tasks.stream_task_events(task_id, request, user, last_event_id=None).body_iterator
+
+    async def drive():
+        loop_ident = threading.get_ident()
+        chunks: list[str] = []
+
+        async def consume():
+            try:
+                while True:
+                    chunks.append(await asyncio.wait_for(body.__anext__(), timeout=10))
+            except StopAsyncIteration:
+                pass
+
+        cons = asyncio.create_task(consume())
+        await asyncio.sleep(1.8)
+        disconnected.set()
+        await cons
+        return loop_ident, chunks
+
+    loop_ident, chunks = asyncio.run(drive())
+
+    assert len(idents) >= 4, f"expected auth + several poll ticks, saw {len(idents)}"
+    assert all(ident != loop_ident for ident in idents)
+    assert any("progress" in c for c in chunks)
+    deadline = time.monotonic() + 5
+    while state["completed"] < state["submitted"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert state["completed"] == state["submitted"]
+
+
 def test_workspace_rollback_guard_uses_task_lock_and_fingerprint(client: TestClient):
     """M1 wiring on the real handle: the engine registers mark_workspace_guarded
     + set_rollback_lock, and rollback restores the guarded shared-cache entry
