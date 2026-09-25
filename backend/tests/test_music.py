@@ -79,7 +79,6 @@ def sandbox(monkeypatch, tmp_path):
     ws = tmp_path / "Book"
     ws.mkdir(parents=True)
     core_config.set_workspace_pointer(str(ws))
-    gate_limit = concurrency.gate().limit
     yield {"root": tmp_path, "ws": ws, "lib": tmp_path / "music_library"}
     # The suggest_track_tags worker tests run real tasks on the shared LLM gate:
     # cancel any still-active AI-tag task and drain the gate before the next test.
@@ -100,7 +99,6 @@ def sandbox(monkeypatch, tmp_path):
         time.sleep(0.05)
     assert not stuck, f"music-ai-tags tasks leaked: {[t.label for t in stuck]}"
     assert concurrency.gate().active == 0
-    concurrency.set_concurrency(gate_limit)
     core_config.reset_config_cache()
 
 
@@ -1101,7 +1099,6 @@ def test_suggest_track_tags_cancel_while_queued(sandbox, monkeypatch):
     core_config.update_config({"llm": {"model_name": "test-model"}})
     monkeypatch.setattr(music_engine, "_llm_chat_completion", _fake_llm("{}"))
     g = concurrency.gate()
-    concurrency.set_concurrency(1)
     g.acquire()  # the test holds the only slot
     try:
         cfg = core_config.get_config()

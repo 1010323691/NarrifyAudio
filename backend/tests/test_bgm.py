@@ -851,7 +851,6 @@ def test_analyze_cancel_while_queued(sandbox, monkeypatch):
     core_config.update_config({"llm": {"model_name": "test-model"}})
     monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm("{}"))
     g = concurrency.gate()
-    concurrency.set_concurrency(1)
     g.acquire()  # the test holds the only slot
     try:
         cfg = core_config.get_config()
@@ -977,7 +976,6 @@ def test_mix_cancel_kills_process(sandbox, monkeypatch):
     monkeypatch.setattr(bgm_engine.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(bgm_engine, "probe_duration", lambda path, ffprobe="": (100.0, None))
     g = concurrency.merge_gate()
-    concurrency.set_merge_concurrency(1)
     g.acquire()  # hold the only mix slot so the task parks in the cooperative wait
     try:
         cfg = core_config.get_config()
@@ -2607,7 +2605,6 @@ def test_analyze_segment_cancel_while_queued(sandbox, monkeypatch):
     fake, _calls = _segment_llm(3)
     monkeypatch.setattr(bgm_engine, "_llm_chat_completion", fake)
     g = concurrency.gate()
-    concurrency.set_concurrency(1)
     g.acquire()  # 测试持有唯一槽位
     try:
         cfg = core_config.get_config()

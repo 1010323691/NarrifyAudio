@@ -2,14 +2,16 @@
 
 These gates limit concurrent callers within one Python process. They do not
 configure cross-task parallelism in the durable queue; that depends on the
-number of Worker processes. The LLM gate defaults to one permit and can be
-resized by an explicit caller.
+number of Worker processes.
 
-It is a ``threading.Condition``-based gate rather than a ``threading.Semaphore`` so the
-limit can grow *or* shrink between batches. The limit is always clamped to ``>= 1`` —
-there is deliberately no "unlimited" mode (the whole point is to cap in-flight LLM
-calls) — so ``acquire``/``release`` stay perfectly balanced: every ``acquire`` that
-takes a slot is matched by exactly one ``release``.
+A4 (批次 4): the process-wide resize surface (``set_concurrency`` /
+``set_merge_concurrency``) had zero production callers and hid a permanent
+limit=1 behind a fake knob, so it is retired — in production both gates run
+at one permit (deliberately conservative serialization of LLM / merge work).
+:class:`ConcurrencyGate` is kept as the permit-gate building block; its
+``set_limit``/``limit`` remain only as a test seam for exercising the
+multi-permit mechanics. If a tunable production limit is ever wanted,
+reintroduce the resize surface as an explicit feature.
 """
 from __future__ import annotations
 
@@ -18,12 +20,13 @@ from typing import Callable
 
 
 class ConcurrencyGate:
-    """A resizable permit gate.
+    """A permit gate with a configurable limit (production gates stay at 1).
 
-    ``set_limit(n)`` clamps to ``>= 1`` and wakes any waiters (so a raised limit lets
-    queued jobs in, and a lowered one simply stops admitting new ones until the active
-    count drops below it). ``acquire`` blocks until a slot is free; ``release`` frees a
-    slot and wakes one waiter. ``active`` reports how many slots are currently held.
+    ``set_limit(n)`` clamps to ``>= 1`` and wakes any waiters. ``acquire``
+    blocks until a slot is free; ``release`` frees a slot and wakes one
+    waiter. ``active`` reports how many slots are currently held. There is
+    deliberately no "unlimited" mode — the whole point is to cap in-flight
+    work — so ``acquire``/``release`` stay perfectly balanced.
     """
 
     def __init__(self) -> None:
@@ -55,9 +58,8 @@ class ConcurrencyGate:
         re-checked every 0.2 s while blocked, and once it returns ``True`` the wait is
         abandoned WITHOUT taking a slot (returns ``False``). The caller must then abort
         (e.g. raise ``TaskCancelled``) and must NOT call ``release`` — no slot was
-        taken. ``stop_check=None`` keeps the original notify-driven blocking
-        semantics (also returns ``True``). Existing callers ignore the return value,
-        so the ``None`` path is byte-for-byte the old behaviour.
+        taken. ``stop_check=None`` keeps the notify-driven blocking semantics
+        (also returns ``True``).
         """
         with self._cond:
             while self._active >= self._limit:
@@ -78,17 +80,13 @@ class ConcurrencyGate:
             self._cond.notify_all()
 
 
-# Module-level singleton shared by callers in this process.
+# Module-level singletons shared by callers in this process. Both run at the
+# default limit of 1 (A4: the resize surface is retired — no production caller).
 _gate = ConcurrencyGate()
 
 
-def set_concurrency(n: int) -> None:
-    """Size the process-wide gate (call at the start of a parse batch)."""
-    _gate.set_limit(n)
-
-
 def gate() -> ConcurrencyGate:
-    """The process-wide gate."""
+    """The process-wide LLM gate (fixed limit 1 in production)."""
     return _gate
 
 
@@ -96,11 +94,6 @@ def gate() -> ConcurrencyGate:
 _merge_gate = ConcurrencyGate()
 
 
-def set_merge_concurrency(n: int) -> None:
-    """Size the process-wide merge gate (call at the start of a merge batch)."""
-    _merge_gate.set_limit(n)
-
-
 def merge_gate() -> ConcurrencyGate:
-    """The process-wide merge gate."""
+    """The process-wide merge gate (fixed limit 1 in production)."""
     return _merge_gate

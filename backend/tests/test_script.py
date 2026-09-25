@@ -3414,10 +3414,8 @@ def test_generate_file_cancel_while_queued(tmp_path, monkeypatch, workspace):
     src = workspace / "02_split_text" / "chapter.txt"
     src.write_bytes(source.encode("utf-8"))
 
-    saved = concurrency.gate().limit
     g = concurrency.gate()
     try:
-        concurrency.set_concurrency(1)
         g.acquire()  # 主线程持有唯一槽位
         mgr = TaskManager()
         task = mgr.create(
@@ -3443,7 +3441,6 @@ def test_generate_file_cancel_while_queued(tmp_path, monkeypatch, workspace):
         assert g.active == 1  # 排队中的任务从未取走槽位
     finally:
         g.release()
-        concurrency.set_concurrency(saved)
     assert not (workspace / "03_parsed_json" / "chapter.json").exists()
 
 
@@ -3476,9 +3473,7 @@ def test_generate_file_cancel_mid_chunk_releases_once(tmp_path, monkeypatch, wor
     src = workspace / "02_split_text" / "chapter.txt"
     src.write_bytes(source.encode("utf-8"))
 
-    saved = concurrency.gate().limit
     try:
-        concurrency.set_concurrency(1)
         mgr = TaskManager()
         task = mgr.create(
             "script", "文本解析（chapter.txt）",
@@ -3504,5 +3499,4 @@ def test_generate_file_cancel_mid_chunk_releases_once(tmp_path, monkeypatch, wor
         assert real_gate.active == 0
     finally:
         hold.set()
-        concurrency.set_concurrency(saved)
     assert not (workspace / "03_parsed_json" / "chapter.json").exists()

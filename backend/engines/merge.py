@@ -237,11 +237,12 @@ def merge_audio_package(handle, m4b: bool = False, package: str | None = None) -
     if m > 1:
         handle.log(f"两阶段合并：{len(segs)} 段 → {m} 批（每批 {MERGE_BATCH_SIZE} 段）→ 整书")
 
-    # Concurrency gate (process-wide hard cap, sized by concurrency_limit): acquired only
-    # AFTER every fast-fail validation (missing/corrupt/empty manifest, no ok segments)
-    # and BEFORE any staging file is written — a cancel while queued (cooperative
-    # stop_check polling) aborts with zero file residue. Release is balanced in the
-    # finally below (no throwable statement sits between the acquire and the try).
+    # Concurrency gate (process-wide hard cap, fixed at 1 — deliberately
+    # conservative, A4): acquired only AFTER every fast-fail validation
+    # (missing/corrupt/empty manifest, no ok segments) and BEFORE any staging
+    # file is written — a cancel while queued (cooperative stop_check polling)
+    # aborts with zero file residue. Release is balanced in the finally below
+    # (no throwable statement sits between the acquire and the try).
     handle.progress(0.02, "排队中（等待合并槽位）")
     acquired = merge_gate().acquire(stop_check=lambda: handle.cancelled)
     if not acquired:

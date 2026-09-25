@@ -1,9 +1,9 @@
 """Tests for the global LLM concurrency gate (``core/concurrency.py``).
 
 The gate bounds how many parse tasks may run their LLM job at once; the rest of a
-batch queue behind it. Fresh :class:`ConcurrencyGate` instances are used so the tests
-never disturb the process's shared gate — except one wiring check, which restores the
-previous limit on its way out.
+batch queue behind it. Production gates run at the fixed limit of 1 (A4); fresh
+:class:`ConcurrencyGate` instances are used so the tests never disturb the
+process's shared gate.
 """
 from __future__ import annotations
 
@@ -71,17 +71,6 @@ def test_excess_acquire_blocks_until_release():
     t.join(timeout=5)
     assert not t.is_alive(), "worker should have acquired after the release"
     assert got.is_set()
-
-
-def test_set_concurrency_sizes_the_shared_gate():
-    before = concurrency.gate().limit
-    try:
-        concurrency.set_concurrency(4)
-        assert concurrency.gate().limit == 4
-        concurrency.set_concurrency(0)  # clamped
-        assert concurrency.gate().limit == 1
-    finally:
-        concurrency.set_concurrency(before)  # restore for any other test
 
 
 # -- cooperative (stop_check) acquire -------------------------------------------------
