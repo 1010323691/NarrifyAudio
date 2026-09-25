@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
@@ -16,6 +16,7 @@ const settings = useSettingsStore()
 const auth = useAuthStore()
 const project = useProjectStore()
 const accountMenuOpen = ref(false)
+const accountMenuRoot = ref<HTMLDivElement | null>(null)
 const accountTrigger = ref<HTMLButtonElement | null>(null)
 const displayName = computed(() => auth.user?.display_name || auth.user?.username || '账户')
 const username = computed(() => auth.user?.username || displayName.value)
@@ -74,6 +75,13 @@ function closeAccountMenu() {
   accountTrigger.value?.focus()
 }
 
+function handleDocumentPointerDown(event: PointerEvent) {
+  const target = event.target
+  if (target instanceof Node && !accountMenuRoot.value?.contains(target)) {
+    accountMenuOpen.value = false
+  }
+}
+
 async function setTheme(theme: (typeof themeOptions)[number]['key']) {
   const previousTheme = activeTheme.value
   if (theme === previousTheme) return
@@ -91,7 +99,11 @@ async function signOut() {
   }
 }
 
-onMounted(() => { if (!isAdminArea.value && !project.loaded) void project.refresh() })
+onMounted(() => {
+  document.addEventListener('pointerdown', handleDocumentPointerDown)
+  if (!isAdminArea.value && !project.loaded) void project.refresh()
+})
+onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocumentPointerDown))
 </script>
 
 <template>
@@ -139,6 +151,7 @@ onMounted(() => { if (!isAdminArea.value && !project.loaded) void project.refres
       <div v-if="app.lastError" class="app-status__error">{{ app.lastError }}</div>
     </div>
     <div
+      ref="accountMenuRoot"
       class="app-account"
       @keydown.esc.prevent="closeAccountMenu"
     >
