@@ -153,6 +153,12 @@ export const useTaskStore = defineStore('task', () => {
 
   function ensureStream() {
     if (allStream) return
+    // The v1 stream is user-scoped but this is a project console: while no
+    // project is bound (the App boot window) there is nothing to stream —
+    // opening the unscoped stream would replay the user's 200 tasks × up to
+    // 1000 log lines, while the legacy console semantics said "no project →
+    // empty". It is (re)opened by refresh() once bindProject has landed.
+    if (boundProjectId === null) return
     const streamGeneration = generation
     allStream = streamAllTasks(
       (e) => {
@@ -184,6 +190,10 @@ export const useTaskStore = defineStore('task', () => {
    *  connection ends / the wait times out). An already-open stream is current
    *  by construction, so it resolves immediately. */
   async function refresh() {
+    // No project bound yet (boot window): the console is empty by legacy
+    // semantics — the project store's applyCurrent binds first and the views'
+    // refresh() that follows opens the scoped stream.
+    if (boundProjectId === null) return
     const requestGeneration = generation
     loading.value = true
     try {
