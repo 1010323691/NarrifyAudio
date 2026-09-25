@@ -27,11 +27,6 @@ from ..core.concurrency import gate, set_concurrency
 from ..core.tasks import TERMINAL, get_task_manager
 from ..engines import music as music_engine
 from ..engines.audio import probe_duration
-from ..engines.script import (
-    LLMJSONRetryExhausted,
-    _llm_chat_completion,
-    llm_json_with_retry,
-)
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Workspace
@@ -733,56 +728,10 @@ def _delete_tag(idx: dict, category: str, name: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# AI tag recommendation (text-only: filename + description + vocabulary)
+# AI tag recommendation (durable Worker task)
 # --------------------------------------------------------------------------- #
 
 @router.post("/suggest-tags", dependencies=[Depends(require_admin)])
-def suggest_tags(
-    body: SuggestTagsReq,
-    ctx: AuthContext = Depends(get_auth_context),
-    db: Session = Depends(get_db),
-) -> dict:
-    """LLM-recommended tags from the file NAME + user DESCRIPTION only — the
-    LLM never reads the audio. Results are candidates (filtered to the
-    in-vocabulary names per category) for the user to confirm.
-
-    Direct Python calls retain the synchronous compatibility path; real HTTP
-    requests are submitted to the durable Worker task used by the UI.
-    The batch one-click path is ``/suggest-tags-batch`` (one Task per track)."""
-    if isinstance(ctx, AuthContext):
-        return suggest_tags_durable(body, ctx=ctx, db=db)
-    p = _track_path(body.name)
-    if not p.is_file():
-        raise HTTPException(404, f"音乐库中找不到 {body.name}")
-    cfg = get_config()
-    if not cfg.llm.model_name:
-        raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
-    idx = music_engine.load_index()
-    tr = idx["tracks"].get(body.name)
-    description = (body.description or (tr or {}).get("description") or "").strip()
-
-    system, user = music_engine.build_suggestion_prompts(p.stem, description, idx["tags"])
-
-    try:
-        parsed, _attempts = llm_json_with_retry(
-            cfg.llm, system, user,
-            lambda c: music_engine.parse_suggestion_reply(c, idx["tags"]),
-            llm_call=_llm_chat_completion,
-            max_attempts=2,
-            # 同 suggest_track_tags：思考模型关思考 + 加大预算作安全网
-            # （传输层对拒绝额外键的严格网关自动单次退化重试）。
-            max_tokens=2048,
-            extra_body={"enable_thinking": False},
-            format_hint='{"scene": [...], "mood": [...], "emotion": [...]}',
-        )
-    except LLMJSONRetryExhausted as e:
-        if e.last_err == "回复不可解析":
-            raise HTTPException(502, "AI 推荐失败，请手动打标。")
-        raise HTTPException(502, f"AI 推荐失败，请手动打标（{e.last_err}）")
-    return {"tags": parsed}
-
-
-@router.post("/suggest-tags-durable", dependencies=[Depends(require_admin)])
 def suggest_tags_durable(
     body: SuggestTagsReq,
     ctx: AuthContext = Depends(get_auth_context),

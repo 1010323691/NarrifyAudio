@@ -6,8 +6,7 @@
   concurrent read-modify-write without lost updates);
 * ``api.music`` endpoints called directly (no HTTP layer): upload 409/400,
   preview traversal 400, locked-reference delete skip, batch ops, tag
-  management with analysis-cache propagation, and suggest-tags (fake LLM:
-  in-vocabulary filtering, caps, 400 model-empty, 502 failure);
+  management with analysis-cache propagation, and batch task submission;
 * the AI suggestion cache (``music_tag_suggestions.json`` — candidates only):
   IO (missing-not-written / corrupt downgrade / ``write_bytes`` no CRLF /
   atomic abort), prompt/parse pure functions, ``clear_suggestion`` semantics,
@@ -629,8 +628,8 @@ def test_delete_tag_propagates_and_keeps_files(sandbox):
 
 
 # --------------------------------------------------------------------------- #
-# API: suggest-tags (fake LLM)
-# --------------------------------------------------------------------------- #
+# The former synchronous single-track endpoint was retired. Equivalent behavior
+# is exercised through suggest_track_tags worker tests below.
 
 def _fake_llm(reply):
     calls = {"n": 0}
@@ -644,110 +643,6 @@ def _fake_llm(reply):
     return _call, calls
 
 
-def test_suggest_tags_model_empty_400(sandbox):
-    _upload("a.mp3")
-    with pytest.raises(HTTPException) as ei:
-        api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3"))
-    assert ei.value.status_code == 400
-    assert "model_name" in str(ei.value.detail)
-
-
-def test_suggest_tags_missing_track_404(sandbox):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    with pytest.raises(HTTPException) as ei:
-        api_music.suggest_tags(api_music.SuggestTagsReq(name="missing.mp3"))
-    assert ei.value.status_code == 404
-
-
-def test_suggest_tags_filters_to_vocabulary_and_caps(sandbox, monkeypatch):
-    _upload("a.mp3")
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    reply = (
-        '```json\n'
-        '{"scene": ["战斗", "编造的"], "mood": ["紧张", "热血", "史诗", "恐怖"], '
-        '"emotion": ["愤怒", "希望", "喜悦"]}\n'
-        '```'
-    )
-    fake, calls = _fake_llm(reply)
-    monkeypatch.setattr(api_music, "_llm_chat_completion", fake)
-    r = api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3", description="激烈的鼓点"))
-    assert calls["n"] == 1
-    # out-of-vocabulary dropped; per-bucket caps scene≤2 / mood≤3 / emotion≤2 (first-seen order)
-    assert r["tags"]["scene"] == ["战斗"]
-    assert r["tags"]["mood"] == ["紧张", "热血", "史诗"]
-    assert r["tags"]["emotion"] == ["愤怒", "希望"]
-
-
-def test_suggest_tags_retry_then_success(sandbox, monkeypatch):
-    _upload("a.mp3")
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-
-    seq = {"i": 0}
-
-    def _flaky(*args, **kwargs):
-        seq["i"] += 1
-        if seq["i"] == 1:
-            raise RuntimeError("connection reset")
-        return '{"scene": ["战斗"]}', "stop", None
-
-    monkeypatch.setattr(api_music, "_llm_chat_completion", _flaky)
-    r = api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3"))
-    assert seq["i"] == 2
-    assert r["tags"]["scene"] == ["战斗"]
-
-
-def test_suggest_tags_all_fail_502(sandbox, monkeypatch):
-    _upload("a.mp3")
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    fake, calls = _fake_llm(RuntimeError("boom"))
-    monkeypatch.setattr(api_music, "_llm_chat_completion", fake)
-    with pytest.raises(HTTPException) as ei:
-        api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3"))
-    assert ei.value.status_code == 502
-    assert calls["n"] == 2
-    assert "boom" in str(ei.value.detail)
-
-    # unparseable replies (both attempts) -> generic 502
-    fake2, calls2 = _fake_llm("这不是 JSON")
-    monkeypatch.setattr(api_music, "_llm_chat_completion", fake2)
-    with pytest.raises(HTTPException) as ei:
-        api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3"))
-    assert ei.value.status_code == 502
-    assert calls2["n"] == 2
-    assert str(ei.value.detail) == "AI 推荐失败，请手动打标。"
-
-
-def test_suggest_tags_non_dict_reply_502(sandbox, monkeypatch):
-    _upload("a.mp3")
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    fake, _calls = _fake_llm('["scene", "战斗"]')
-    monkeypatch.setattr(api_music, "_llm_chat_completion", fake)
-    with pytest.raises(HTTPException) as ei:
-        api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3"))
-    assert ei.value.status_code == 502
-
-
-def test_suggest_tags_thinking_off_and_budget(sandbox, monkeypatch):
-    # 思考模型加固（稳定失败根因修复）：同步端点必须关思考
-    # （extra_body={"enable_thinking": False}）且预算充足（max_tokens=2048）——
-    # 否则推理 token 吃满旧预算 300 → content 为空 → 回复不可解析。
-    _upload("a.mp3")
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    seen = []
-
-    def fake(*args, **kwargs):
-        seen.append(kwargs)
-        return ('{"scene": ["战斗"]}', "stop", None)
-
-    monkeypatch.setattr(api_music, "_llm_chat_completion", fake)
-    r = api_music.suggest_tags(api_music.SuggestTagsReq(name="a.mp3"))
-    assert r["tags"]["scene"] == ["战斗"]
-    assert len(seen) == 1
-    assert seen[0]["extra_body"] == {"enable_thinking": False}
-    assert seen[0]["max_tokens"] == 2048
-
-
-# --------------------------------------------------------------------------- #
 # AI suggestion prompts / parsing (shared by the sync endpoint and the worker)
 # --------------------------------------------------------------------------- #
 
