@@ -24,12 +24,14 @@ function harness(overrides = {}) {
       listTasks: async () => [],
       streamAllTasks: () => () => {},
     },
+    '@/api/client': { http: { get: async () => ({ status: 'running' }) } },
     '@/api/workspace': {},
     ...overrides,
   }
   const modules = new Map()
   function load(name) {
     if (api[name]) return api[name]
+    if (name === './client' && api['@/api/client']) return api['@/api/client']
     if (!name.startsWith('@/')) return require(name)
     if (modules.has(name)) return modules.get(name).exports
     const module = { exports: {} }
@@ -41,6 +43,7 @@ function harness(overrides = {}) {
     runInNewContext(outputText, {
       module, exports: module.exports, require: load,
       document: { documentElement: { classList: { toggle() {} } } },
+      setTimeout, clearTimeout, DOMException, AbortController,
     }, { filename: path })
     return module.exports
   }
@@ -101,6 +104,40 @@ test('workspace refresh clears pipeline state when the active project changes', 
   await workspace.refresh()
   assert.equal(pipeline.activeScript, '')
   assert.equal(workspace.activeProjectId, 'B')
+})
+
+test('A to B to A project switches clear each previous pipeline result', async () => {
+  const load = harness({ '@/api/workspace': {
+    selectWorkspace: async (id) => ({ set: true, workspace_id: id }),
+  } })
+  const workspace = load('@/stores/workspace').useWorkspaceStore()
+  const pipeline = load('@/stores/pipelineState').usePipelineStateStore()
+
+  workspace.setCurrent({ set: true, workspace_id: 'A' })
+  pipeline.setActiveScript('A.json')
+  await workspace.select('B')
+  assert.equal(workspace.activeProjectId, 'B')
+  assert.equal(pipeline.activeScript, '')
+
+  pipeline.setActiveScript('B.json')
+  await workspace.select('A')
+  assert.equal(workspace.activeProjectId, 'A')
+  assert.equal(pipeline.activeScript, '')
+})
+
+test('aborting a durable task wait stops its next polling request', async () => {
+  let calls = 0
+  const load = harness({ '@/api/client': {
+    http: { get: async () => { calls += 1; return { status: 'running' } } },
+  } })
+  const { waitForDurableTask } = load('@/api/persistentTasks')
+  const controller = new AbortController()
+  const waiting = waitForDurableTask('task-1', 50, controller.signal)
+  await Promise.resolve()
+  controller.abort()
+  await assert.rejects(waiting, { name: 'AbortError' })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(calls, 1)
 })
 
 test('a create response from a signed-out account cannot select its project', async () => {
