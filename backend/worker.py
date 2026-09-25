@@ -8,6 +8,7 @@ import time
 import redis
 
 from .platform.outbox import publish_pending
+from .platform import system_config  # registers core.config's feature-defaults provider
 from .platform.task_worker import recover_database_tasks, run_once
 from .platform.worker_registry import heartbeat, mark_offline
 from .platform.task_types import SUPPORTED_TASK_TYPES

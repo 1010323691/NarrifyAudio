@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .database import SessionLocal
 from .models import SystemConfig
+from ..core.config import set_platform_defaults_provider
 
 
 def initial_quota_units(db: Session) -> int:
@@ -59,3 +60,9 @@ def update_feature_defaults_cache(value: dict[str, Any]) -> None:
     """Publish an administrator save immediately to this process's readers."""
     with _lock:
         _cache.update(value=value, expires=time.monotonic() + _CACHE_TTL_SECONDS)
+
+
+# core.config merges administrator feature defaults on every read; it must not
+# import platform (S3 direction), so this module registers its loader instead.
+# Both entry points (main/worker) import this module before first use.
+set_platform_defaults_provider(load_feature_defaults)

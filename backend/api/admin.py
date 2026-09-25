@@ -16,6 +16,7 @@ from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
+from ..platform.system_config import update_feature_defaults_cache
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
 from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, task_worker_group
@@ -101,7 +102,7 @@ def update_application_settings(payload: dict, actor: User = Depends(require_csr
     }}
     db.add(AuditLog(actor_user_id=actor.id, action="admin.application_features_changed", target_type="system_config", target_id="application.features", metadata_json={"sections": sorted(patch)}))
     db.commit()
-    core_config.set_platform_config_cache(config.value)
+    update_feature_defaults_cache(config.value)
     return {"config": core_config.get_config().model_dump(), "source": "admin"}
 
 

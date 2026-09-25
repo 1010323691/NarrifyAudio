@@ -23,7 +23,7 @@ import json
 import threading
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
@@ -233,21 +233,25 @@ def bind_task_config(config: AppConfig):
 
 def reset_task_config(token) -> None:
     _task_config.reset(token)
-def _platform_config() -> dict[str, Any]:
-    """Read administrator defaults without owning platform database access."""
-    try:
-        from ..platform.system_config import load_feature_defaults
+_platform_defaults_provider: Callable[[], dict[str, Any]] | None = None
 
-        return load_feature_defaults()
+
+def set_platform_defaults_provider(provider: Callable[[], dict[str, Any]] | None) -> None:
+    """Registration seam for the platform layer (direction inversion, S3/Q17):
+    core must not import platform, so the platform module registers itself."""
+    global _platform_defaults_provider
+    _platform_defaults_provider = provider
+
+
+def _platform_config() -> dict[str, Any]:
+    """Read administrator feature defaults from the platform-registered source."""
+    provider = _platform_defaults_provider
+    if provider is None:
+        return {}
+    try:
+        return provider()
     except Exception:
         return {}
-
-
-def set_platform_config_cache(value: dict[str, Any]) -> None:
-    """Compatibility adapter for invalidating the platform feature-config cache."""
-    from ..platform.system_config import update_feature_defaults_cache
-
-    update_feature_defaults_cache(value)
 
 
 class WorkspaceNotSetError(RuntimeError):

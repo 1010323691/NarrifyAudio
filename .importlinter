@@ -17,9 +17,7 @@ layers =
     backend.core
 ignore_imports =
     backend.platform.bootstrap -> backend.services.projects
-    backend.core.config -> backend.platform.system_config
 
-# The two ignore_imports above are the known one-way reverse edges (plan S3/Q17
-# documented two; lint-imports surfaced the third in platform.bootstrap, fixed
-# separately). Batch 3 fixes them (move/sink), then removes these lines so the
-# contract is fully strict.
+# The one ignore_import above is the third reverse edge lint-imports surfaced
+# in platform.bootstrap (plan S3/Q17 documented only two). Batch 3 fixes it,
+# then removes this line so the contract is fully strict.
