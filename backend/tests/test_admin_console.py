@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.api.admin import _scan_project_directory, _task_module
+from backend.api.admin import _task_module
+from backend.services.admin_storage import scan_project_directory
 from backend.core import observability
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import Task, User
+from backend.platform.models import QuotaTransaction, Task, User
 from backend.platform.storage import configured_storage_root
 
 
@@ -111,6 +112,31 @@ def test_admin_can_retry_failed_zero_cost_task(client: TestClient):
     assert task_id in {row["id"] for row in queued.json()}
 
 
+def test_admin_cannot_retry_a_task_after_metered_model_consumption(client: TestClient):
+    csrf, _ = _create_admin(client)
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Metered retry test"}
+    )
+    assert project.status_code == 201, project.text
+    task_id = _create_task(client, csrf, project.json()["id"], f"metered-retry-{uuid.uuid4()}")
+    with SessionLocal.begin() as db:
+        task = db.get(Task, task_id)
+        task.status = "failed"
+        db.add(QuotaTransaction(
+            user_id=task.owner_id,
+            task_id=task.id,
+            amount=-1,
+            kind="consume",
+            resource_type="LLM",
+            idempotency_key=f"metered-retry-{uuid.uuid4()}",
+        ))
+
+    response = client.post(f"/api/v1/admin/tasks/{task_id}/retry", headers={"X-CSRF-Token": csrf})
+
+    assert response.status_code == 409
+    assert "已有模型消费" in response.json()["detail"]
+
+
 def test_temp_cleanup_deletes_only_old_files_under_inactive_temp_directory(client: TestClient):
     csrf, _ = _create_admin(client)
     workspace = client.post(
@@ -185,13 +211,13 @@ def test_workspace_scan_counts_files_and_only_marks_old_temp_files(tmp_path: Pat
     old_time = time.time() - 8 * 24 * 60 * 60
     os.utime(old_file, (old_time, old_time))
 
-    result = _scan_project_directory(workspace)
+    result = scan_project_directory(workspace)
     assert result["file_count"] == 3
     assert result["size_bytes"] == len(b"oldrecentaudio")
     assert result["cleanup_count"] == 1
     assert result["cleanup_bytes"] == len(b"old")
     assert result["categories"]["05_audio_chunk"]["count"] == 1
-    assert _scan_project_directory(workspace, active=True)["cleanup_count"] == 0
+    assert scan_project_directory(workspace, active=True)["cleanup_count"] == 0
 
 
 def test_workspace_scan_skips_symlinked_directories(tmp_path: Path):
@@ -206,7 +232,7 @@ def test_workspace_scan_skips_symlinked_directories(tmp_path: Path):
     except (OSError, NotImplementedError):
         pytest.skip("directory symlinks are unavailable in this environment")
 
-    result = _scan_project_directory(workspace)
+    result = scan_project_directory(workspace)
     assert result["file_count"] == 0
     assert result["size_bytes"] == 0
 

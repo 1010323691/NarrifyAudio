@@ -119,8 +119,8 @@ def is_workspace_set() -> bool:
     return _workspace_path() is not None
 
 
-# -- get_layout memoization ------------------------------------------------------
-# ``get_layout()`` sits on every hot path (the 待合成 poll resolves one layout per package
+# -- get_or_prepare_layout memoization ------------------------------------------------------
+# ``get_or_prepare_layout()`` sits on every hot path (the 待合成 poll resolves one layout per package
 # AND per completed segment), and each uncached call re-reads the root ``app.json`` pointer
 # plus re-runs the 11 mkdir probes. The pointer only changes when the root file itself is
 # rewritten (``set_workspace_pointer`` / ``clear_workspace`` both rewrite it), so the file's
@@ -145,7 +145,7 @@ def _root_pointer_key():
         return _MISSING_KEY
 
 
-def get_layout() -> Layout:
+def get_or_prepare_layout() -> Layout:
     """Return the Layout for the configured workspace (memoized on the root file).
 
     The workspace root (artifact dirs + logs + config) is created idempotently only
@@ -197,7 +197,7 @@ def get_layout() -> Layout:
     return layout
 
 
-def peek_layout() -> Layout:
+def resolve_layout() -> Layout:
     """Resolve the current layout without creating workspace directories."""
     scoped = bound_workspace()
     if scoped is _UNSET:
@@ -210,7 +210,7 @@ def peek_layout() -> Layout:
 
 
 def reset_layout_cache() -> None:
-    """Drop the memoized layout; the next ``get_layout()`` re-reads the pointer.
+    """Drop the memoized layout; the next ``get_or_prepare_layout()`` re-reads the pointer.
 
     A test / debug seam — a real pointer change already invalidates via the root file's
     ``mtime_ns``/``size``. Mirrors ``core.config.reset_config_cache``.
@@ -239,7 +239,7 @@ def resolve_parsed_json(script: str | None = None) -> Path:
     degrade cleanly. Callers validate existence and raise a clear error when nothing
     resolves.
     """
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     d = layout.parsed_json
     if d is None:  # no workspace: inert (read-only callers see "no script")
         return Path("annotated_script.json")
@@ -264,10 +264,15 @@ def resolve_parsed_json_all() -> list[Path]:
     tiebreaker — the same mtime semantic the single-file "most recent" fallback uses. With
     no workspace set or an empty directory it returns ``[]`` so callers degrade cleanly.
     """
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     d = layout.parsed_json
     if d is None or not d.exists():
         return []
     base = [p for p in d.glob("*.json") if p.is_file() and not p.name.endswith("_checked.json")]
     base.sort(key=lambda p: (p.stat().st_mtime, p.name))
     return base
+
+
+# Compatibility aliases retained for external scripts during the internal rename.
+get_layout = get_or_prepare_layout
+peek_layout = resolve_layout

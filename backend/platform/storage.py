@@ -46,9 +46,9 @@ def configured_storage_root(db: Session | None = None) -> Path:
     return settings.storage_root.resolve()
 
 
-def user_workspace_root(db: Session | None, username: str, workspace_id: str) -> Path:
+def project_workspace_path(db: Session | None, username: str, project_id: str) -> Path:
     root = configured_storage_root(db)
-    return (root / safe_display_name(username) / workspace_id).resolve()
+    return (root / safe_display_name(username) / project_id).resolve()
 
 
 def object_path(object_key: str, root: Path | None = None) -> Path:
@@ -92,3 +92,7 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# Compatibility alias for scripts that still use the workspace-era name.
+user_workspace_root = project_workspace_path

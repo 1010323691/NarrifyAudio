@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
-import { usePipelineStateStore } from '@/stores/pipelineState'
+import { useProjectStore } from '@/stores/project'
 import { useToast } from '@/components/ui/toast'
 import { cutAudio, detectSilences, exportAudio, planAudio, probeAudio, zipAudio } from '@/api/audio'
-import { cancelDurableTask, getDurableTask, listDurableTasks } from '@/api/persistentTasks'
+import { cancelDurableTask, findActiveDurableTask, getDurableTask, listDurableTasks } from '@/api/persistentTasks'
 import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import type { DurableTask } from '@/api/persistentTasks'
 import { downloadFile } from '@/utils/fileops'
@@ -37,7 +37,7 @@ import TableBody from '@/components/ui/TableBody.vue'
 import TableRow from '@/components/ui/TableRow.vue'
 import TableHead from '@/components/ui/TableHead.vue'
 import TableCell from '@/components/ui/TableCell.vue'
-import DirPicker from '@/components/DirPicker.vue'
+import WorkspaceEntryPicker from '@/components/WorkspaceEntryPicker.vue'
 import {
   AudioLines,
   Scissors,
@@ -50,7 +50,7 @@ import {
 } from 'lucide-vue-next'
 
 const settings = useSettingsStore()
-const project = usePipelineStateStore()
+const projectStore = useProjectStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()
@@ -100,7 +100,11 @@ const cutTaskId = ref<string | null>(null)
 const planTask = ref<DurableTask | null>(null)
 const cutTask = ref<DurableTask | null>(null)
 let trackingController = new AbortController()
-onDeactivated(() => trackingController.abort())
+onDeactivated(() => {
+  trackingController.abort()
+  busyPlan.value = false
+  busyCut.value = false
+})
 onUnmounted(() => trackingController.abort())
 onActivated(() => {
   if (trackingController.signal.aborted) {
@@ -109,37 +113,65 @@ onActivated(() => {
   }
 })
 
+watch(() => projectStore.activeProjectId, (projectId, previousProjectId) => {
+  if (projectId === previousProjectId) return
+  trackingController.abort()
+  trackingController = new AbortController()
+  planTaskId.value = null
+  cutTaskId.value = null
+  planTask.value = null
+  cutTask.value = null
+  selectedName.value = ''
+  dirPath.value = ''
+  file.value = null
+  probe.value = null
+  plan.value = null
+  cutResult.value = null
+  error.value = ''
+  busyProbe.value = false
+  busyPlan.value = false
+  busyCut.value = false
+  busyZip.value = false
+  busyExport.value = false
+  if (projectId) reattachTasks()
+})
+
 // 刷新恢复：页面重载后本地 taskId 丢失，但后端持久化任务仍在跑。
 // 按持久化 task_type 区分两种在途任务重新挂接。
 function reattachTasks() {
+  const projectId = projectStore.activeProjectId
+  if (!projectId) return
   const signal = trackingController.signal
   void listDurableTasks().then((tasks) => {
-    if (signal.aborted) return
-    const active = tasks.filter((t) => ['pending', 'queued', 'running', 'cancelling', 'retrying'].includes(t.status))
-    const planning = active.find((t) => t.task_type === 'audio.silences')
-    const cutting = active.find((t) => t.task_type === 'audio.cut')
+    if (signal.aborted || projectStore.activeProjectId !== projectId) return
+    const planning = findActiveDurableTask(tasks, projectId, 'audio.silences')
+    const cutting = findActiveDurableTask(tasks, projectId, 'audio.cut')
     if (planning) {
       planTaskId.value = planning.id
       planTask.value = planning
       busyPlan.value = true
-      void trackTask(planning.id, 'plan')
+      void trackTask(planning.id, 'plan', signal)
     }
     if (cutting) {
       cutTaskId.value = cutting.id
       cutTask.value = cutting
       busyCut.value = true
-      void trackTask(cutting.id, 'cut')
+      void trackTask(cutting.id, 'cut', signal)
     }
-  })
+  }).catch(() => undefined)
 }
 
-async function trackTask(id: string, kind: 'plan' | 'cut') {
-  const signal = trackingController.signal
+async function trackTask(id: string, kind: 'plan' | 'cut', signal = trackingController.signal) {
+  const projectId = projectStore.activeProjectId
+  const isCurrentTracking = () => !signal.aborted
+    && projectId !== null
+    && projectStore.activeProjectId === projectId
+    && (kind === 'plan' ? planTaskId.value === id : cutTaskId.value === id)
   try {
     while (true) {
       signal.throwIfAborted()
       const task = await getDurableTask(id, signal)
-      signal.throwIfAborted()
+      if (!isCurrentTracking()) return
       if (kind === 'plan') planTask.value = task
       else cutTask.value = task
       if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(task.status)) return
@@ -147,6 +179,7 @@ async function trackTask(id: string, kind: 'plan' | 'cut') {
     }
   } catch (e: any) {
     if (e?.name === 'AbortError') return
+    if (!isCurrentTracking()) return
     error.value = e?.message || '持久化任务状态读取失败'
     if (kind === 'plan') {
       busyPlan.value = false
@@ -192,16 +225,23 @@ watch(selectedName, (name) => {
 
 async function doProbe() {
   if (!file.value) return
+  const source = file.value
+  const projectId = projectStore.activeProjectId
   busyProbe.value = true
   error.value = ''
   try {
-    probe.value = await probeAudio(file.value.path)
+    const result = await probeAudio(source.path)
+    if (projectStore.activeProjectId !== projectId || file.value?.path !== source.path) return
+    probe.value = result
   } catch (e: any) {
     if (e?.name === 'AbortError') return
+    if (projectStore.activeProjectId !== projectId || file.value?.path !== source.path) return
     error.value = e?.message || '无法读取音频'
     probe.value = null
   } finally {
-    busyProbe.value = false
+    if (projectStore.activeProjectId === projectId && file.value?.path === source.path) {
+      busyProbe.value = false
+    }
   }
 }
 
@@ -222,22 +262,35 @@ function rememberParams() {
 
 async function buildPlan() {
   if (!file.value || busyPlan.value) return
+  const projectId = projectStore.activeProjectId
+  const signal = trackingController.signal
+  if (!projectId) return
+  const source = file.value
+  const isCurrent = () => !signal.aborted
+    && projectStore.activeProjectId === projectId
+    && file.value?.path === source.path
   busyPlan.value = true
   error.value = ''
   cutResult.value = null
   try {
     if (smartAlign.value) {
       // Long-running: pause detection + pause-aligned plan (a backend task).
-      const { task_id } = await detectSilences(file.value.path, {
+      const { task_id } = await detectSilences(source.path, {
         targetDuration: targetDuration.value,
         alignTolerance: tolerance.value,
-      })
+      }, signal)
+      signal.throwIfAborted()
+      if (!isCurrent()) return
       planTaskId.value = task_id
-      planTask.value = await getDurableTask(task_id)
-      void trackTask(task_id, 'plan')
+      planTask.value = await getDurableTask(task_id, signal)
+      signal.throwIfAborted()
+      if (!isCurrent()) return
+      void trackTask(task_id, 'plan', signal)
       // Completion is handled by the watcher on planTask.status.
     } else {
-      const r = await planAudio(file.value.path, targetDuration.value)
+      const r = await planAudio(source.path, targetDuration.value)
+      signal.throwIfAborted()
+      if (!isCurrent()) return
       plan.value = { segments: r.segments, count: r.count, aligned: false, snapped: 0, fallbacks: 0 }
       rememberParams()
     }
@@ -246,6 +299,8 @@ async function buildPlan() {
     error.value = e?.message || '生成方案失败'
     planTaskId.value = null
     busyPlan.value = false
+  } finally {
+    if (!isCurrent()) busyPlan.value = false
   }
 }
 
@@ -276,18 +331,30 @@ watch(
 
 async function doCut() {
   if (!file.value || !plan.value || busyCut.value) return
+  const projectId = projectStore.activeProjectId
+  const signal = trackingController.signal
+  if (!projectId) return
+  const source = file.value
+  const segments = plan.value.segments
+  const isCurrent = () => !signal.aborted
+    && projectStore.activeProjectId === projectId
+    && file.value?.path === source.path
   busyCut.value = true
   error.value = ''
   try {
     // Pass the pre-computed segments so the cut matches exactly what was previewed.
-    const { task_id } = await cutAudio(file.value.path, {
-      segments: plan.value.segments,
+    const { task_id } = await cutAudio(source.path, {
+      segments,
       namingFormat: namingFormat.value,
       startNumber: startNumber.value,
-      })
-      cutTaskId.value = task_id
-      cutTask.value = await getDurableTask(task_id)
-      void trackTask(task_id, 'cut')
+    }, signal)
+    signal.throwIfAborted()
+    if (!isCurrent()) return
+    cutTaskId.value = task_id
+    cutTask.value = await getDurableTask(task_id, signal)
+    signal.throwIfAborted()
+    if (!isCurrent()) return
+    void trackTask(task_id, 'cut', signal)
     // Remember the cut parameters (fire-and-forget; the cut above already carries them).
     rememberParams()
     // Completion is handled by the watcher on cutTask.status.
@@ -296,6 +363,8 @@ async function doCut() {
     error.value = e?.message || '启动切割失败'
     cutTaskId.value = null
     busyCut.value = false
+  } finally {
+    if (!isCurrent()) busyCut.value = false
   }
 }
 
@@ -308,7 +377,6 @@ watch(
     if (st === 'succeeded') {
       const r = t.result as unknown as AudioCutResult
       cutResult.value = r
-      project.recordAudio(r)
       cutTaskId.value = null
       cutTask.value = null
       toast({ title: '切割完成', variant: 'success', description: `生成 ${r.file_count} 个文件` })
@@ -395,7 +463,7 @@ function download(path: string) {
         </CardTitle>
       </CardHeader>
       <CardContent class="space-y-3">
-        <DirPicker
+        <WorkspaceEntryPicker
           module="06_audio_merge"
           :extensions="['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'webm']"
           :show-default="false"

@@ -64,7 +64,7 @@ def create_session(db: Session, user: User) -> tuple[str, str, UserSession]:
     return token, csrf, session
 
 
-def load_session(db: Session, token: str | None) -> UserSession | None:
+def load_session(db: Session, token: str | None, *, touch: bool = True) -> UserSession | None:
     if not token:
         return None
     session = db.scalar(select(UserSession).where(UserSession.token_hash == token_digest(token)))
@@ -72,8 +72,17 @@ def load_session(db: Session, token: str | None) -> UserSession | None:
         return None
     if not session.user.is_active:
         return None
-    session.last_seen_at = utcnow()
+    if touch:
+        session.last_seen_at = utcnow()
     return session
+
+
+def session_is_valid_for_user(db: Session, token: str | None, user_id: str) -> bool:
+    """Recheck an already-open request's session without trusting its stale context."""
+    # Long-lived stream checks are authorization reads, not new user activity.
+    # Avoid dirtying last_seen_at in a short-lived session that will roll back.
+    session = load_session(db, token, touch=False)
+    return session is not None and session.user_id == user_id
 
 
 def revoke_session(session: UserSession) -> None:

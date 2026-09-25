@@ -32,11 +32,9 @@ import hashlib
 import json
 import logging
 import math
-import os
 import random
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from datetime import datetime
@@ -45,10 +43,17 @@ from pathlib import Path
 from backend.core import paths as core_paths
 from backend.core.config import get_config
 from backend.core.concurrency import gate, merge_gate
-from backend.core.tasks import TaskCancelled
+from backend.core.task_control import TaskCancelled
 from backend.engines.audio import probe_duration
 from backend.engines.book import decode_buffer
 from backend.engines import music as music_engine
+from .bgm_storage import (
+    ANALYSIS_NAME, ASSIGNMENTS_NAME, SEGMENT_ANALYSIS_NAME, TIMELINE_DIR,
+    _atomic_write_json, _bgm_dir, load_analysis, load_assignments,
+    load_segment_analysis, save_analysis, save_assignments,
+    save_segment_analysis, update_analysis, update_assignments,
+    update_segment_analysis,
+)
 from backend.engines import tts_batch
 from backend.engines.merge import boundary_gap_ms, collect_segments, thread_budget
 from backend.engines.llm_transport import request_chat_completion as _llm_chat_completion
@@ -62,11 +67,6 @@ from backend.engines.voices import extract_json_object
 log = logging.getLogger("audiobook.bgm")
 
 # -- artifact file names (inside ``08_bgm/``) -------------------------------- #
-
-ANALYSIS_NAME = "chapter_music_analysis.json"
-ASSIGNMENTS_NAME = "bgm_assignments.json"
-SEGMENT_ANALYSIS_NAME = "segment_music_analysis.json"
-TIMELINE_DIR = "timelines"
 
 #: Tolerance (seconds) for the narration-duration freshness check at mix time:
 #: the timeline's recorded duration vs a fresh probe of the 06 file.
@@ -100,11 +100,6 @@ _MIN_SPAN_S = 20.0
 
 #: Match weights, heaviest first (reason strings list categories in this order).
 _WEIGHT_ORDER = ("mood", "scene", "emotion", "custom")
-
-# Module lock for the two 08_bgm JSON caches (parallel analysis tasks each
-# rewrite the whole analysis file — the voice_config.json precedent).
-_BGMS_LOCK = threading.RLock()
-
 
 # --------------------------------------------------------------------------- #
 # pure functions (rng injectable — everything here is unit-testable)
@@ -767,75 +762,6 @@ def load_timeline(layout, stem: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-# --------------------------------------------------------------------------- #
-# 08_bgm JSON caches (module lock + tmp + os.replace; reads never write)
-# --------------------------------------------------------------------------- #
-
-def _bgm_dir(layout) -> Path:
-    return layout.bgm
-
-
-def _default_analysis() -> dict:
-    return {"version": 1, "model": "", "chapters": {}}
-
-
-def _default_assignments() -> dict:
-    return {"version": 1, "mode": "llm", "updated_at": "", "chapters": {}}
-
-
-def _default_segment_analysis() -> dict:
-    return {"version": 1, "model": "", "chapters": {}}
-
-
-def _atomic_write_json(p: Path, data: dict, handle=None) -> None:
-    payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    stage_file = getattr(handle, "stage_workspace_file", None)
-    if callable(stage_file):
-        stage_file(p, payload)
-        return
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".bgm_", suffix=".tmp", dir=str(p.parent))
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
-        os.replace(tmp, p)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
-def _load_cached(layout, name: str, default_factory) -> dict:
-    p = _bgm_dir(layout) / name
-    if not p.exists():
-        return default_factory()
-    try:
-        data = json.loads(p.read_bytes().decode("utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError("not an object")
-        chapters = data.get("chapters")
-        if not isinstance(chapters, dict):
-            data["chapters"] = {}
-        return data
-    except Exception as e:
-        log.warning("08_bgm 缓存 %s 损坏，降级为空：%s", name, e)
-        return default_factory()
-
-
-def load_analysis(layout) -> dict:
-    return _load_cached(layout, ANALYSIS_NAME, _default_analysis)
-
-
-def load_assignments(layout) -> dict:
-    return _load_cached(layout, ASSIGNMENTS_NAME, _default_assignments)
-
-
-def load_segment_analysis(layout) -> dict:
-    return _load_cached(layout, SEGMENT_ANALYSIS_NAME, _default_segment_analysis)
-
-
 def load_segment_timeline(layout, stem: str, assignment: dict | None = None) -> dict | None:
     """Return the timeline when it is authoritative for the chapter.
 
@@ -986,58 +912,6 @@ def _copy_narration_after_merge_gate(handle, layout, stem: str, out: Path,
         shutil.copy2(narration, out)
     finally:
         merge_gate().release()
-
-
-def save_analysis(layout, data: dict, handle=None) -> None:
-    with _BGMS_LOCK:
-        _atomic_write_json(_bgm_dir(layout) / ANALYSIS_NAME, data, handle)
-
-
-def save_assignments(layout, data: dict, handle=None) -> None:
-    with _BGMS_LOCK:
-        _atomic_write_json(_bgm_dir(layout) / ASSIGNMENTS_NAME, data, handle)
-
-
-def save_segment_analysis(layout, data: dict, handle=None) -> None:
-    with _BGMS_LOCK:
-        _atomic_write_json(_bgm_dir(layout) / SEGMENT_ANALYSIS_NAME, data, handle)
-
-
-def update_analysis(layout, mutator, handle=None) -> dict:
-    """Atomic read → mutate → write on the analysis cache.
-
-    Mirrors :func:`backend.engines.music.update_index`: the module lock is
-    held across load → mutator → save, so parallel analyze tasks (each
-    rewriting the whole file) cannot lose each other's entries. ``mutator``
-    may raise to abort — nothing is written. Returns the saved data.
-    """
-    with _BGMS_LOCK:
-        data = load_analysis(layout)
-        mutator(data)
-        save_analysis(layout, data, handle)
-        return data
-
-
-def update_assignments(layout, mutator, handle=None) -> dict:
-    """Atomic read → mutate → write on the assignments file (same pattern as
-    :func:`update_analysis` — concurrent matches on disjoint stems can't
-    lose each other's entries)."""
-    with _BGMS_LOCK:
-        data = load_assignments(layout)
-        mutator(data)
-        save_assignments(layout, data, handle)
-        return data
-
-
-def update_segment_analysis(layout, mutator, handle=None) -> dict:
-    """Atomic read → mutate → write on the segment-analysis cache (same pattern
-    as :func:`update_analysis` — parallel paragraph-analysis tasks on disjoint
-    chapters can't lose each other's entries)."""
-    with _BGMS_LOCK:
-        data = load_segment_analysis(layout)
-        mutator(data)
-        save_segment_analysis(layout, data, handle)
-        return data
 
 
 def list_chapter_stems(layout) -> list[str]:
@@ -1277,7 +1151,7 @@ def analyze_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
     tags by hand, or matches manually; a chapter is never hard-blocked.
     """
     handle.check()
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     if layout.split_text is None:
         raise RuntimeError("未设置工作空间。")
     src = layout.split_text / f"{stem}.txt"
@@ -1378,7 +1252,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
     LLM calls (``POST /api/bgm/match`` mode="segment").
     """
     handle.check()
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     if layout.parsed_json is None:
         raise RuntimeError("未设置工作空间。")
     if not llm_cfg.model_name:
@@ -2027,7 +1901,7 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
       ``audio.detect_silences``).
     """
     handle.check()
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     if layout.bgm is None:
         raise RuntimeError("未设置工作空间。")
     narration = _find_narration(layout, stem)

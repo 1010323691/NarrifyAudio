@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from pathlib import Path
 from typing import Annotated
@@ -25,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.paths import ALL_PARSED_JSON, get_layout, peek_layout, resolve_parsed_json, resolve_parsed_json_all
+from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
@@ -39,10 +38,20 @@ router = APIRouter(prefix="/api/tts", tags=["tts"])
 
 @router.get("/status")
 def status() -> dict:
-    """Let the UI show an accurate badge (ready vs. engine-not-installed)."""
+    """Report the worker substrate without loading model packages or weights."""
+    ready = T.IMPLEMENTED
+    if ready:
+        try:
+            T.resolve_engine()
+        except (RuntimeError, OSError):
+            ready = False
     return {
         "implemented": T.IMPLEMENTED,
-        "message": T.NOT_READY_MSG if not T.IMPLEMENTED else "TTS 合成可用。",
+        "ready": ready,
+        "message": (
+            "TTS 工作进程文件可用；模型依赖和权重将在任务启动时检查。"
+            if ready else T.NOT_READY_MSG
+        ),
     }
 
 
@@ -229,7 +238,7 @@ def list_voices(script: str | None = None) -> dict:
     ``speakers`` is sorted by ``line_count`` descending (stable — ties keep
     first-appearance order), so the leads top the page list.
     """
-    layout = peek_layout()
+    layout = resolve_layout()
     if layout.parsed_json is None:  # no workspace: nothing to read (read-only, degrades)
         return {"has_script": False, "script_path": "", "voice_config_path": "", "speakers": []}
     out_voices = layout.voice_profiles
@@ -363,7 +372,7 @@ def select_voice(
     _common.require_workspace()
     if _phase_task_active(ctx, db):
         raise HTTPException(409, "配音任务进行中，请待其结束后再选择音色。")
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     vc_path = layout.voice_profiles / "voice_config.json"
     if not vc_path.exists():
         raise HTTPException(404, "未找到声音配置，请先运行阶段 1 / 阶段 2。")
@@ -427,7 +436,7 @@ def set_gender(
     g = (req.gender or "").strip()
     if g not in ("male", "female", ""):
         raise HTTPException(400, "无效的性别值。")
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     vc_path = layout.voice_profiles / "voice_config.json"
     voice_config: dict = {}
     if vc_path.exists():
@@ -489,7 +498,7 @@ def merge_speakers(
         raise HTTPException(400, "角色名不能为空。")
     if src == tgt:
         raise HTTPException(400, "源角色与目标角色相同。")
-    layout = get_layout()
+    layout = get_or_prepare_layout()
 
     # Which script(s) to read/rewrite (mirrors list_voices' scope resolution).
     if req.script == ALL_PARSED_JSON:
@@ -647,9 +656,11 @@ def reset_batch(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """「重新全部合成」第一步（同步、非任务）：删除选中解析 JSON 的合成包
-    （``05_audio_chunk/<包名>/``：逐行 mp3 + manifest.json），使随后的一键合成请求
-    （与默认续合同一条线路、同一请求形状）从头重做全部段落。
+    """Queue package removal before the ordinary synthesis task recreates each segment.
+
+    The task deletes the selected parsed JSON files' synthesis packages from
+    ``05_audio_chunk/<包名>/``; the following resume-style synthesis then
+    regenerates all segments.
 
     Deleting generated, regenerable output is the app's only deliberate delete path —
     user-initiated here, and confined by construction to ``05_audio_chunk/<包名>/``: the
@@ -826,7 +837,7 @@ def batch_status(script: str | None = None,
     the same rule as ``/voices``). ``"__all__"`` is rejected (400), as in ``POST /batch``.
     Degrades to zeros with no workspace / no files, like ``/voices``.
     """
-    layout = peek_layout()
+    layout = resolve_layout()
     if scripts:
         if any(s == ALL_PARSED_JSON for s in scripts):
             raise HTTPException(status_code=400, detail="“全部文件”只用于「角色配音」——请逐个列出解析 JSON。")
@@ -969,7 +980,7 @@ def merge_status(packages: Annotated[list[str] | None, Query()] = None) -> dict:
     for p in names:
         if not p or p != Path(p).name:
             raise HTTPException(400, f"非法包名：{p}")
-    layout = peek_layout()
+    layout = resolve_layout()
     if layout.audio_chunk is None:  # no workspace: nothing to read (read-only, degrades)
         return {"packages": [
             {"name": p, "total": 0, "completed": 0, "remaining": 0, "complete": False}

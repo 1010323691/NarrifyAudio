@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Reques
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.paths import WORKSPACE_DIRS, get_layout, peek_layout, is_workspace_set
+from ..core.paths import WORKSPACE_DIRS, get_or_prepare_layout, resolve_layout, is_workspace_set
 from ..platform.database import get_db
 from ..platform.file_response import file_response
 from ..platform.project_context import active_project
@@ -27,7 +27,7 @@ _MODULE_ATTRS = {name: attr for attr, name in WORKSPACE_DIRS if attr != "temp"}
 
 
 def _module_dir(module: str) -> Path:
-    layout = peek_layout()
+    layout = resolve_layout()
     attr = _MODULE_ATTRS.get(module)
     d = getattr(layout, attr, None) if attr else None
     if d is None:
@@ -116,7 +116,7 @@ async def upload_file(
     path. The frontend's hidden ``<input type=file>`` hands the file here, so this
     is the entry point into the ``01_input/`` directory."""
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     layout.input.mkdir(parents=True, exist_ok=True)
     project = active_project(db, ctx.user, ctx.session)
     if project is None:

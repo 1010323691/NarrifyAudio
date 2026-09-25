@@ -22,7 +22,7 @@ from backend.core import paths as core_paths
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
-from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, user_workspace_root
+from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
 from backend.platform.legacy_tasks import estimate_legacy_units
 
@@ -46,7 +46,7 @@ def test_persistent_handle_journals_shared_music_file(monkeypatch, tmp_path):
     index_path = library / "music_index.json"
     index_path.write_text("old", encoding="utf-8")
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", library)
-    monkeypatch.setattr("backend.platform.task_worker.cancellation_requested", lambda _claim: False)
+    monkeypatch.setattr("backend.platform.task_context.cancellation_requested", lambda _claim: False)
     handle = PersistentTaskHandle(SimpleNamespace(task_id="task", attempt_id="attempt"))
 
     handle.stage_shared_file(index_path, b"new")
@@ -151,7 +151,7 @@ def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient
         "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "BGM package"},
     ).json()
     with SessionLocal() as db:
-        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
     bgm_dir = workspace / "08_bgm"
     bgm_dir.mkdir(parents=True)
     (bgm_dir / "chapter-1.mp3").write_bytes(b"audio-one")
@@ -181,6 +181,108 @@ def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient
         assert archive.namelist() == ["Book/chapter-1.mp3", "Book/chapter-2.mp3"]
         assert archive.read("Book/chapter-1.mp3") == b"audio-one"
         assert archive.read("Book/chapter-2.mp3") == b"audio-two"
+
+
+def test_generic_task_submission_rejects_unsafe_legacy_task_paths(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Unsafe package"},
+    ).json()
+    invalid_payloads = [
+        ("bgm.analysis", {"stem": "../outside"}),
+        ("bgm.segment", {"stem": r"folder\outside"}),
+        ("bgm.mix", {"stem": ".."}),
+        ("bgm.match", {"chapters": ["safe", "../outside"]}),
+        ("bgm.package", {"chapters": [""]}),
+        ("tts.merge", {"package": "../outside"}),
+        ("tts.batch", {"scripts": [r"folder\outside.json"]}),
+        ("voices.clone", {"script": "../outside.json"}),
+    ]
+    for index, (task_type, payload) in enumerate(invalid_payloads):
+        response = client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "project_id": project["id"], "task_type": task_type,
+                "payload": payload,
+                "estimated_units": 0, "idempotency_key": f"unsafe-bgm-{index}-{uuid.uuid4().hex}",
+            },
+        )
+        assert response.status_code == 422, response.text
+
+
+def test_generic_music_tag_task_requires_admin(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Restricted tags"},
+    ).json()
+    response = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"], "task_type": "music.suggest_tags",
+            "payload": {"name": "track.mp3"}, "estimated_units": 0,
+            "idempotency_key": f"music-tags-user-{uuid.uuid4().hex}",
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_music_tag_task_fails_if_owner_is_demoted_before_execution(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Demoted admin task"},
+    ).json()
+    with SessionLocal.begin() as db:
+        user = db.get(User, first["user"]["id"])
+        user.role = "admin"
+        account = db.get(UserQuotaAccount, user.id)
+        if account is None:
+            account = UserQuotaAccount(user_id=user.id, available_units=1)
+            db.add(account)
+        else:
+            account.available_units = 1
+    submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"], "task_type": "music.suggest_tags",
+            "payload": {"name": "track.mp3"}, "estimated_units": 0,
+            "idempotency_key": f"demoted-music-task-{uuid.uuid4().hex}",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    with SessionLocal.begin() as db:
+        user = db.get(User, first["user"]["id"])
+        user.role = "user"
+
+    assert process_task_message(
+        {"payload": {"task_id": submitted.json()["id"]}}, worker_id="demoted-music-worker",
+    ) == "permission_revoked"
+    task = client.get(f"/api/v1/tasks/{submitted.json()['id']}").json()
+    assert task["status"] == "failed"
+    assert task["error_code"] == "permission_revoked"
+
+
+def test_tts_status_reports_worker_file_readiness_without_loading_models(client: TestClient, monkeypatch):
+    from backend.api import tts as tts_api
+
+    monkeypatch.setattr(tts_api.T, "resolve_engine", lambda: (Path("python"), Path("worker.py")))
+    ready = client.get("/api/tts/status").json()
+    assert ready["implemented"] is True
+    assert ready["ready"] is True
+    assert "任务启动时检查" in ready["message"]
+
+    def missing_engine():
+        raise RuntimeError("engine not installed")
+
+    monkeypatch.setattr(tts_api.T, "resolve_engine", missing_engine)
+    unavailable = client.get("/api/tts/status").json()
+    assert unavailable["implemented"] is True
+    assert unavailable["ready"] is False
 
 
 def test_workspace_engine_lock_serializes_project_writers(client: TestClient):
@@ -1051,7 +1153,7 @@ def test_failed_result_commit_restores_previous_workspace_file(client: TestClien
     claim = claim_task(submitted.json()["id"], "publish-rollback-worker")
     assert claim is not None
     with SessionLocal() as db:
-        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
         staged = task_attempt_path(db, first["user"]["username"], project["id"], claim.task_id, claim.attempt_id, "staged.txt")
     final = workspace / "01_input" / "chapter.txt"
     final.parent.mkdir(parents=True, exist_ok=True)
@@ -1079,6 +1181,42 @@ def test_failed_result_commit_restores_previous_workspace_file(client: TestClien
         assert db.get(Task, claim.task_id).status == "running"
 
 
+def test_invalid_publish_module_fails_task_with_actionable_code(client: TestClient, monkeypatch, tmp_path):
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Invalid publish module"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": project["id"], "task_type": "text.format", "payload": {},
+            "estimated_units": 0, "idempotency_key": uuid.uuid4().hex,
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    staged = tmp_path / "bad-module.txt"
+    staged.write_text("result", encoding="utf-8")
+    monkeypatch.setattr(task_worker, "execute_claim", lambda _claim: TaskOutcome(
+        temp_path=staged, output_name="bad-module.txt", content_type="text/plain",
+        size_bytes=staged.stat().st_size, sha256=sha256_file(staged), metadata={},
+        publish_module="outside",
+    ))
+
+    result = process_task_message(
+        {"payload": {"task_id": submitted.json()["id"]}}, worker_id="bad-publish-module-worker",
+    )
+
+    assert result == "invalid_publish_module"
+    with SessionLocal() as db:
+        task = db.get(Task, submitted.json()["id"])
+        assert task.status == "failed"
+        assert task.error_code == "invalid_publish_module"
+    assert not staged.exists()
+
+
 def test_incremental_legacy_workspace_write_rolls_back_with_task_commit(client: TestClient, monkeypatch):
     from backend.platform import task_worker
 
@@ -1094,7 +1232,7 @@ def test_incremental_legacy_workspace_write_rolls_back_with_task_commit(client: 
     claim = claim_task(submitted.json()["id"], "incremental-journal-worker")
     assert claim is not None
     with SessionLocal() as db:
-        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
         staged = task_attempt_path(db, first["user"]["username"], project["id"], claim.task_id, claim.attempt_id, "result.json")
     final = workspace / "04_voice_profiles" / "voice_config.json"
     final.parent.mkdir(parents=True, exist_ok=True)
@@ -1137,7 +1275,7 @@ def test_expired_attempt_restores_interrupted_publication(client: TestClient):
     assert claim is not None
     with SessionLocal() as db:
         root = configured_storage_root(db)
-        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
         journal_path = task_attempt_path(db, first["user"]["username"], project["id"], claim.task_id, claim.attempt_id, "publication.json")
     final = workspace / "01_input" / "chapter.txt"
     final.parent.mkdir(parents=True, exist_ok=True)
@@ -1194,7 +1332,7 @@ def test_audio_export_stages_replacement_until_commit(client: TestClient, monkey
     claim = claim_task(submitted.json()["id"], "export-journal-worker")
     assert claim is not None
     with SessionLocal() as db:
-        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
     source = workspace / "07_output" / "source.wav"
     final = workspace / "07_output" / "分集" / "take.wav"
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -1237,7 +1375,7 @@ def test_tts_reset_restores_deleted_package_when_commit_fails(client: TestClient
     claim = claim_task(submitted.json()["id"], "reset-journal-worker")
     assert claim is not None
     with SessionLocal() as db:
-        workspace = user_workspace_root(db, first["user"]["username"], project["id"])
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
     package = workspace / "05_audio_chunk" / "chapter"
     package.mkdir(parents=True, exist_ok=True)
     (package / "keep.wav").write_bytes(b"existing audio")

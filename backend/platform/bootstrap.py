@@ -6,7 +6,7 @@ from .config import settings
 from .database import SessionLocal
 from .models import User, UserQuotaAccount
 from .security import hash_password
-from .storage import user_workspace_root
+from .storage import project_workspace_path
 from ..services.projects import create_project
 
 
@@ -31,4 +31,4 @@ def ensure_bootstrap_admin() -> None:
             name="默认工作空间", description="默认工作空间",
         )
         db.flush()
-        user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
+        project_workspace_path(db, user.username, project.id).mkdir(parents=True, exist_ok=True)

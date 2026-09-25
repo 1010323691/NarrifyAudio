@@ -26,7 +26,7 @@ watch(() => dialogState.current, async (current, previous) => {
 function closeAsCancel() {
   const current = dialogState.current
   if (!current) return
-  settleDialog(current.kind === 'confirm' ? false : current.kind === 'prompt' ? null : undefined)
+  settleDialog(current.kind === 'confirm' ? false : null)
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -54,8 +54,7 @@ function onKeydown(event: KeyboardEvent) {
 function acceptDialog() {
   const current = dialogState.current
   if (!current) return
-  if (current.kind === 'alert') settleDialog(undefined)
-  else if (current.kind === 'prompt') settleDialog(current.inputValue)
+  if (current.kind === 'prompt') settleDialog(current.inputValue)
   else settleDialog(true)
 }
 
@@ -104,7 +103,6 @@ onBeforeUnmount(() => {
       </label>
       <div class="mt-6 flex justify-end gap-2">
         <button
-          v-if="dialogState.current.kind !== 'alert'"
           ref="cancelButton"
           type="button"
           class="inline-flex h-11 items-center justify-center rounded-lg border border-input bg-card px-4 text-sm font-semibold text-foreground shadow-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50"

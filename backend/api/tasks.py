@@ -1,26 +1,27 @@
 """Unified task endpoints for legacy pages and PostgreSQL-backed tasks.
 
-The original UI consumes the in-process task snapshot/SSE contract. During the
-worker migration durable tasks must remain visible through that same contract,
-otherwise a page appears idle after its work moves to Redis. This module adapts
-durable Task/TaskEvent rows to the legacy snapshot shape while keeping ownership
-checks in the database.
+The UI still uses the original task snapshot/SSE shape. This module adapts durable
+Task/TaskEvent rows to that response contract while keeping ownership checks in the
+database, so tasks remain visible across API and Worker restarts.
 """
 from __future__ import annotations
 
 import json
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from ..platform.database import SessionLocal
+from ..platform.config import settings
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.project_context import active_project
-from ..platform.models import Task as DurableTask, TaskEvent, utcnow
-from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
-from .platform_tasks import retry_task as retry_durable_task
+from ..platform.models import Task as DurableTask, TaskEvent
+from ..platform.security import session_is_valid_for_user
+from ..platform.task_state import TERMINAL_TASK_STATUSES
+from ..services.tasks import cancel_task_record
+from .task_submission import retry_task as retry_durable_task
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -173,21 +174,24 @@ def _durable_rows(db, ctx: AuthContext) -> list[DurableTask]:
     ).all()
 
 
-def _combined_snapshot(db, ctx: AuthContext) -> list[dict]:
+def _project_task_snapshots(db, ctx: AuthContext) -> list[dict]:
     return [_durable_snapshot(db, task) for task in _durable_rows(db, ctx)]
 
 
-def _durable_owned(db, ctx: AuthContext, task_id: str) -> DurableTask | None:
+def _durable_owned(
+    db, ctx: AuthContext, task_id: str, *, lock: bool = False,
+) -> DurableTask | None:
     project_id = _current_project_id(db, ctx)
     if project_id is None:
         return None
-    return db.scalar(
-        select(DurableTask).where(
-            DurableTask.id == task_id,
-            DurableTask.owner_id == ctx.user.id,
-            DurableTask.project_id == project_id,
-        ).with_for_update()
+    statement = select(DurableTask).where(
+        DurableTask.id == task_id,
+        DurableTask.owner_id == ctx.user.id,
+        DurableTask.project_id == project_id,
     )
+    if lock:
+        statement = statement.with_for_update()
+    return db.scalar(statement)
 
 
 def _durable_event_payload(db, task: DurableTask, event: TaskEvent) -> dict | None:
@@ -212,7 +216,17 @@ def _durable_event_payload(db, task: DurableTask, event: TaskEvent) -> dict | No
     if event.event_type in {"succeeded", "failed", "cancelled"}:
         status = _legacy_status("cancelled" if event.event_type == "cancelled" else event.event_type)
         return {"type": "status", "status": status, "task": _durable_snapshot(db, task)}
-    if event.event_type == "submitted":
+    if event.event_type in {
+        "submitted", "cancel_requested", "admin_cancel_requested",
+        "retry_requested", "admin_retry_requested",
+        "retry_scheduled", "attempt_expired", "dispatch_recovered", "attempt_started",
+    }:
+        if event.event_type != "submitted":
+            return {
+                "type": "status",
+                "status": _legacy_status(task.status),
+                "task": _durable_snapshot(db, task),
+            }
         return {"type": "snapshot", "task": _durable_snapshot(db, task)}
     return None
 
@@ -243,21 +257,29 @@ def _persistent_events(ctx: AuthContext, seen: dict[str, int]) -> list[tuple[str
 @router.get("")
 def list_tasks(ctx: AuthContext = Depends(get_auth_context)) -> list[dict]:
     with SessionLocal() as db:
-        return _combined_snapshot(db, ctx)
+        return _project_task_snapshots(db, ctx)
 
 
 @router.get("/stream")
-def stream_all_tasks(ctx: AuthContext = Depends(get_auth_context)):
+def stream_all_tasks(request: Request, ctx: AuthContext = Depends(get_auth_context)):
     """Stream snapshots and lifecycle events for the current project's tasks."""
 
     def gen():
         seen: dict[str, int] = {}
+        token = request.cookies.get(settings.session_cookie)
+        next_auth_check = 0.0
         with SessionLocal() as db:
             for task in _durable_rows(db, ctx):
                 events = _durable_events(db, task.id)
                 seen[task.id] = events[-1].sequence if events else 0
-            yield _sse({"type": "snapshot_all", "tasks": _combined_snapshot(db, ctx)})
+            yield _sse({"type": "snapshot_all", "tasks": _project_task_snapshots(db, ctx)})
         while True:
+            now = time.monotonic()
+            if now >= next_auth_check:
+                with SessionLocal() as auth_db:
+                    if not session_is_valid_for_user(auth_db, token, ctx.user.id):
+                        return
+                next_auth_check = now + 5.0
             events = _persistent_events(ctx, seen)
             for task_id, event in events:
                 event["task_id"] = task_id
@@ -286,28 +308,25 @@ def get_task(task_id: str, ctx: AuthContext = Depends(get_auth_context)) -> dict
 def control_task(task_id: str, action: str, ctx: AuthContext = Depends(get_auth_context)) -> dict:
     if action == "retry":
         with SessionLocal() as db:
-            return retry_durable_task(task_id, user=ctx.user, db=db)
+            durable = _durable_owned(db, ctx, task_id, lock=True)
+            if durable is None:
+                raise HTTPException(404, "任务不存在")
+            retry_durable_task(task_id, user=ctx.user, db=db)
+            return _durable_snapshot(db, durable)
     if action != "cancel":
         raise HTTPException(400, "持久化任务当前只支持取消或重试")
     with SessionLocal() as db:
-        durable = _durable_owned(db, ctx, task_id)
+        durable = _durable_owned(db, ctx, task_id, lock=True)
         if durable is None:
             raise HTTPException(404, "任务不存在")
         if durable.status not in TERMINAL_TASK_STATUSES:
-            now = utcnow()
-            durable.status = "cancelling" if durable.status in {"running", "queued"} else "cancelled"
-            if durable.status == "cancelled":
-                durable.finished_at = now
-                release_reservation(db, durable, kind="release", note="user cancelled before execution")
-                suppress_pending_dispatch(db, durable.id)
-            durable.updated_at = now
-            append_task_event(db, durable.id, "cancel_requested", {"status": durable.status})
+            cancel_task_record(db, durable)
             db.commit()
         return _durable_snapshot(db, durable)
 
 
 @router.get("/{task_id}/stream")
-def stream_task(task_id: str, ctx: AuthContext = Depends(get_auth_context)):
+def stream_task(task_id: str, request: Request, ctx: AuthContext = Depends(get_auth_context)):
     with SessionLocal() as db:
         durable = _durable_owned(db, ctx, task_id)
         if durable is None:
@@ -318,8 +337,16 @@ def stream_task(task_id: str, ctx: AuthContext = Depends(get_auth_context)):
 
     def durable_gen():
         nonlocal sequence
+        token = request.cookies.get(settings.session_cookie)
+        next_auth_check = 0.0
         yield _sse({"type": "snapshot", "task": initial})
         while True:
+            now = time.monotonic()
+            if now >= next_auth_check:
+                with SessionLocal() as auth_db:
+                    if not session_is_valid_for_user(auth_db, token, ctx.user.id):
+                        return
+                next_auth_check = now + 5.0
             with SessionLocal() as current_db:
                 current = _durable_owned(current_db, ctx, task_id)
                 if current is None:

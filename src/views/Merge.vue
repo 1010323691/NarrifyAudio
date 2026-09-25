@@ -350,9 +350,9 @@ onActivated(() => {
       <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
         <Combine class="h-6 w-6" />音频合并
         <StatusPill
-          :label="status?.implemented ? '可用' : '引擎未就绪'"
-          :tone="status?.implemented ? 'positive' : 'neutral'"
-          :aria-label="status?.implemented ? '引擎可用' : '引擎未就绪'"
+          :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
+          :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
+          :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
         />
       </h1>
       <p class="mt-1 text-muted-foreground">
@@ -362,7 +362,7 @@ onActivated(() => {
 
     <ProjectGateAlert />
 
-    <Alert v-if="status && !status.implemented" variant="destructive">
+    <Alert v-if="status && !(status.ready ?? status.implemented)" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
       {{ status.message }}
     </Alert>

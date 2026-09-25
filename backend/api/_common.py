@@ -6,8 +6,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from ..core import pathio
-from ..core.paths import get_layout, peek_layout
-from ..engines.book import decode_buffer
+from ..core.paths import get_or_prepare_layout, resolve_layout
 
 
 def require_workspace() -> None:
@@ -23,7 +22,7 @@ def require_workspace() -> None:
 
     if not is_workspace_set():
         raise HTTPException(409, "尚未设置工作空间——请先在「开始」页选择文件夹。")
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     if layout.workspace is not None and not layout.workspace.exists():
         raise HTTPException(
             409,
@@ -44,7 +43,7 @@ def resolve_inbound_path(path: str, *, label: str = "文件") -> Path:
     v = (path or "").strip()
     if not v:
         raise HTTPException(400, "未提供路径。")
-    ws = peek_layout().workspace
+    ws = resolve_layout().workspace
     if ws is not None:
         try:
             return pathio.resolve_path(v, ws, strict=True, label=label)
@@ -56,28 +55,6 @@ def resolve_inbound_path(path: str, *, label: str = "文件") -> Path:
     if not p.exists():
         raise HTTPException(400, f"文件不存在：{path}")
     return p
-
-
-def read_decoded_file(path: str) -> tuple[str, str, Path]:
-    """Read the file at ``path`` and auto-detect its encoding.
-
-    The frontend is a thin client: it hands the backend a file path (the file
-    is uploaded into ``01_input/`` first); the backend does the reading /
-    decoding. The path resolves against the current workspace (a stale absolute
-    path from a moved workspace is recovered, see ``resolve_inbound_path``).
-    Returns ``(text, encoding_label, resolved_path)``.
-    """
-    p = resolve_inbound_path(path, label="文件")
-    if not p.is_file():
-        raise HTTPException(400, f"不是一个文件：{path}")
-    data = p.read_bytes()
-    if not data:
-        raise HTTPException(400, "文件为空。")
-    try:
-        text, enc = decode_buffer(data)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return text, enc, p
 
 
 def partial_copy(model, overrides: dict):

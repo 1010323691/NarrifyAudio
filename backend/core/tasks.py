@@ -1,10 +1,7 @@
-"""Unified asynchronous task system.
+"""Compatibility in-memory task system retained for older Python integrations.
 
-Long-running work (audio silence-detection / cutting, and future TTS) runs as a
-:class:`Task` in a worker thread. Each task exposes status, progress, a live log
-buffer and start / pause / resume / cancel / retry controls, and streams events
-to the UI over SSE. A failing task is marked failed and isolated — it never takes
-the console down (requirement #7).
+Production work uses the durable task platform in ``backend.platform``. This
+module stays available until external Python callers have been accounted for.
 """
 from __future__ import annotations
 
@@ -47,8 +44,7 @@ LLM_STREAM_CAP = 128 * 1024
 RATE_WINDOW = 10.0
 
 
-class TaskCancelled(Exception):
-    """Raised by engine code to abort a task cleanly."""
+from .task_control import TaskCancelled
 
 
 class TaskHandle:

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import os
-import json
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -17,105 +16,23 @@ from sqlalchemy.orm import Session
 from ..platform.config import settings
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
-from ..platform.models import AuditLog, OutboxEvent, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
+from ..platform.models import AuditLog, Project, ProjectFile, QuotaReservation, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.outbox import STREAM_NAME
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
-from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
+from ..platform.task_state import TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
 from ..services.tasks import cancel_task_record, requeue_task_record
-from ..services.project_filesystem import iter_regular_project_files
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
+from ..services.admin_storage import (
+    ACTIVE_TASK_STATUSES,
+    scan_project_directory,
+    project_storage_path,
+)
+
+
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
-
-_ACTIVE_TASK_STATUSES = ("pending", "queued", "running", "paused", "cancelling", "retrying")
-_TEMP_CLEANUP_AGE_DAYS = 7
-_PROJECT_CATEGORY_LABELS = {
-    "00_temp": "临时文件",
-    "cache": "缓存文件",
-    ".cache": "缓存文件",
-    "01_input": "输入文件",
-    "02_split_text": "章节文本",
-    "03_parsed_json": "解析结果",
-    "04_voice_profiles": "角色资料",
-    "05_audio_chunk": "合成片段",
-    "06_audio_merge": "合并音频",
-    "07_output": "最终音频",
-    "08_bgm": "BGM 缓存与混音",
-    "logs": "工作空间日志",
-    "config": "工作空间配置",
-    "models": "模型文件",
-    "other": "其他文件",
-}
-
-
-def _project_path(root: Path, username: str, workspace_id: str) -> Path | None:
-    """Resolve an indexed workspace without following a user-controlled path."""
-    resolved_root = root.resolve()
-    candidate = root / safe_display_name(username) / workspace_id
-    if candidate.is_symlink() or candidate.parent.is_symlink():
-        return None
-    try:
-        resolved = candidate.resolve()
-        if not resolved.is_relative_to(resolved_root):
-            return None
-    except (OSError, RuntimeError):
-        return None
-    return candidate
-
-
-def _read_bgm_usage(workspace: Path) -> dict[str, int]:
-    """Count saved chapter assignments without reading audio or analysis content."""
-    path = workspace / "08_bgm" / "bgm_assignments.json"
-    try:
-        if path.is_symlink() or path.parent.is_symlink() or not path.is_file() or path.stat().st_size > 5 * 1024 * 1024:
-            return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return {}
-    chapters = data.get("chapters") if isinstance(data, dict) else None
-    if not isinstance(chapters, dict):
-        return {}
-    counts: dict[str, int] = {}
-    for entry in chapters.values():
-        if isinstance(entry, dict) and isinstance(entry.get("music"), str):
-            name = entry["music"]
-            counts[name] = counts.get(name, 0) + 1
-    return counts
-
-
-def _scan_project_directory(workspace: Path, *, active: bool = False) -> dict:
-    """Measure ordinary files, and identify old 00_temp files eligible for cleanup."""
-    result = {"size_bytes": 0, "file_count": 0, "categories": {},
-              "cleanup_count": 0, "cleanup_bytes": 0}
-    if workspace.is_symlink() or not workspace.is_dir():
-        return result
-    cutoff = datetime.now().timestamp() - _TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
-    for _path, relative, stat in iter_regular_project_files(workspace):
-        key = relative.parts[0] if relative.parts else "other"
-        category = key if key in _PROJECT_CATEGORY_LABELS else "other"
-        bucket = result["categories"].setdefault(category, {"count": 0, "size_bytes": 0})
-        bucket["count"] += 1
-        bucket["size_bytes"] += stat.st_size
-        result["file_count"] += 1
-        result["size_bytes"] += stat.st_size
-        if not active and category == "00_temp" and stat.st_mtime < cutoff:
-            result["cleanup_count"] += 1
-            result["cleanup_bytes"] += stat.st_size
-    return result
-
-
-def _music_use_counts(workspaces: list[tuple[Project, str]], root: Path) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for workspace, username in workspaces:
-        path = _project_path(root, username, workspace.id)
-        if path is None or not path.is_dir():
-            continue
-        for name, count in _read_bgm_usage(path).items():
-            counts[name] = counts.get(name, 0) + count
-    return counts
-
 
 def _memory_usage(host_total_bytes: int, cgroup_root: Path = Path("/sys/fs/cgroup")) -> tuple[int, int]:
     """Prefer the current container's cgroup memory usage/limit when available."""
@@ -240,7 +157,7 @@ def _update_storage_settings(payload: StorageRootUpdate, actor: User, db: Sessio
         raise HTTPException(422, "新旧存储根目录不能互相嵌套")
     new_migration = migration is None
     if new_migration:
-        active_task = db.scalar(select(Task.id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).limit(1))
+        active_task = db.scalar(select(Task.id).where(Task.status.in_(ACTIVE_TASK_STATUSES)).limit(1))
         if active_task is not None:
             raise HTTPException(409, "仍有未完成任务，存储迁移需在任务排空后进行")
     try:
@@ -408,9 +325,9 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
     ).all()
     for workspace, user_id, username in workspace_rows:
         usage = workspace_usage.setdefault(user_id, {"storage_bytes": 0, "project_file_count": 0})
-        path = _project_path(root, username, workspace.id)
+        path = project_storage_path(root, username, workspace.id)
         if path is not None:
-            measured = _scan_project_directory(path)
+            measured = scan_project_directory(path)
             usage["storage_bytes"] += measured["size_bytes"]
             usage["project_file_count"] += measured["file_count"]
     return [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name,
@@ -674,8 +591,9 @@ def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session =
     if task.status in TERMINAL_TASK_STATUSES:
         return {"id": task.id, "status": task.status}
     previous_status = task.status
-    cancel_task_record(db, task, admin=True, actor_user_id=actor.id)
-    db.add(AuditLog(actor_user_id=actor.id, action="admin.task_cancelled", target_type="task", target_id=task.id, metadata_json={"previous_status": previous_status}))
+    changed = cancel_task_record(db, task, admin=True, actor_user_id=actor.id)
+    if changed:
+        db.add(AuditLog(actor_user_id=actor.id, action="admin.task_cancelled", target_type="task", target_id=task.id, metadata_json={"previous_status": previous_status}))
     db.commit()
     return {"id": task.id, "status": task.status}
 
@@ -693,6 +611,13 @@ def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = 
     reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
     if reservation is not None and reservation.units:
         raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
+    metered = db.scalar(select(QuotaTransaction.id).where(
+        QuotaTransaction.task_id == task.id,
+        QuotaTransaction.resource_type.in_(["LLM", "TTS"]),
+        QuotaTransaction.kind == "consume",
+    ).limit(1))
+    if metered:
+        raise HTTPException(409, "已有模型消费的任务请重新提交，以创建新的计费操作")
     attempts = int(db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0)
     if attempts >= settings.task_max_attempts:
         raise HTTPException(409, "任务已达到最大尝试次数")

@@ -23,12 +23,13 @@ export function planAudio(path: string, targetDuration?: string): Promise<AudioP
 export function detectSilences(
   path: string,
   opts: { targetDuration?: string; alignTolerance?: number } = {},
+  signal?: AbortSignal,
 ): Promise<{ task_id: string }> {
   return http.post<{ task_id: string }>('/api/audio/silences', {
     path,
     target_duration: opts.targetDuration ?? null,
     align_tolerance: opts.alignTolerance ?? null,
-  })
+  }, { signal })
 }
 
 export interface CutOptions {
@@ -41,7 +42,7 @@ export interface CutOptions {
 }
 
 /** Long-running: lossless ``-c copy`` cut to the workspace's 07_output/. Returns a task id. */
-export function cutAudio(path: string, opts: CutOptions = {}): Promise<{ task_id: string }> {
+export function cutAudio(path: string, opts: CutOptions = {}, signal?: AbortSignal): Promise<{ task_id: string }> {
   return http.post<{ task_id: string }>('/api/audio/cut', {
     path,
     target_duration: opts.targetDuration ?? null,
@@ -50,7 +51,7 @@ export function cutAudio(path: string, opts: CutOptions = {}): Promise<{ task_id
     naming_format: opts.namingFormat ?? null,
     start_number: opts.startNumber ?? null,
     segments: opts.segments ?? null,
-  })
+  }, { signal })
 }
 
 /** One cut file, as the packaging/export endpoints expect it. */

@@ -12,7 +12,7 @@ across the book (front / middle / back), each carrying its ±window local contex
 (surrounding narration and other characters). The foundation is persisted to
 ``voice_config.json`` as ``type: "foundation"``. No TTS runs in this phase.
 
-**Phase 2 — ``make_clones`` (TTS only, no LLM).** Reads back the persisted
+**Phase 2 — ``generate_voice_candidates`` (TTS only, no LLM).** Reads back the persisted
 foundations and renders every character's clone *candidate* seed WAVs in ONE
 long-lived shared ``.venv`` subprocess (the worker's ``design-batch`` mode: the
 VoiceDesign model is loaded once, and the candidates run as native tensor
@@ -34,8 +34,8 @@ The book's per-line synthesis remains the separate 音频合成 (``tts_batch``) 
 consumes the finished ``voice_config.json``. A single character's foundation / clone can
 be (re)generated in isolation via ``speakers`` (+ an optional ``description`` override).
 
-Both workers are Task workers (first arg is a :class:`TaskHandle`); each streams rich
-progress/logs over SSE and honours cooperative cancel between characters. A per-character
+Both operations receive the durable task context, report progress and logs to task history,
+and honour cooperative cancellation between characters. A per-character
 failure is recorded (and, in phase 2, that character falls back to ``design``) — it never
 aborts the whole run; only a *fatal* error (no script, no engine) raises.
 """
@@ -54,10 +54,10 @@ from pathlib import Path
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.paths import ALL_PARSED_JSON, get_layout, resolve_parsed_json, resolve_parsed_json_all
+from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..platform.quota import QuotaInsufficientError
 from .persona_prompts import PERSONA_SYSTEM_PROMPT, PERSONA_USER_PROMPT
-from .tts import WorkerWatchdogTimeout, resolve_engine, run_worker
+from .tts import WorkerWatchdogTimeout, resolve_engine, run_tts_subprocess
 from .tts_batch import (
     _parse_watchdog_indices,
     clamp_concurrency,
@@ -392,7 +392,7 @@ def _load_voice_config(handle):
     migrated to the workspace-relative form on load (and the file rewritten),
     so the config keeps working after the workspace folder moves.
     """
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     vc_path = layout.voice_profiles / "voice_config.json"
     voice_config = {}
     if vc_path.exists():
@@ -551,14 +551,14 @@ def _clone_have(entry) -> int:
 def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, script_name=None) -> dict:
     """Phase 1 (LLM only): generate each character's voice *foundation* and persist it.
 
-    First arg is the :class:`TaskHandle`. ``speakers`` is an optional allowlist (single-
+    The first argument is the durable task context. ``speakers`` is an optional allowlist (single-
     character regeneration); ``new_only`` regenerates only characters without a foundation
     yet; ``overrides`` maps a speaker → a user description (skips the LLM for that
     character); ``script_name`` selects which parsed JSON to read (None → most recent).
 
     The persona LLM calls run in parallel (bounded by ``generation.max_concurrency``) so
     the LLM runs at full concurrency on its own. **No TTS is started** — the VoiceDesign
-    seed render is Phase 2 (``make_clones``). A per-character failure is recorded; only a
+    seed render is Phase 2 (``generate_voice_candidates``). A per-character failure is recorded; only a
     *fatal* error (no script) raises.
     """
     overrides = overrides or {}
@@ -576,7 +576,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         handle.log("警告：未配置 LLM 模型——未提供提示词的角色将使用兜底描述。", "WARNING")
 
     vc_path, voice_config = _load_voice_config(handle)
-    layout = get_layout()
+    layout = get_or_prepare_layout()
 
     # Characters to (re)generate a foundation for: everyone, or (new_only) only those
     # without a foundation yet; an explicit ``speakers`` allowlist narrows it further.
@@ -647,7 +647,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         # Single-threaded incremental persist: every finished character is written back the
         # moment it completes, so the 角色配音 list (status / preview) refreshes in real time.
         data = json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8")
-        stage_workspace_file = getattr(handle, "stage_workspace_file", None)
+        stage_workspace_file = getattr(handle, "publish_workspace_bytes", None) or getattr(handle, "stage_workspace_file", None)
         if callable(stage_workspace_file):
             stage_workspace_file(vc_path, data)
         else:
@@ -720,11 +720,11 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     }
 
 
-def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_name=None,
+def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency=None, script_name=None,
                 candidate_count: int | None = None) -> dict:
     """Phase 2 (TTS only): render each foundation-bearing character's clone candidates.
 
-    First arg is the :class:`TaskHandle`. Reads back the foundations persisted by Phase 1
+    The first argument is the durable task context. Reads back the foundations persisted by Phase 1
     and, for every in-scope non-alias character that has a foundation, renders its clone
     *candidate* seed WAVs — all candidates in ONE long-lived shared ``.venv`` subprocess
     (the worker's ``design-batch`` mode: the VoiceDesign model loads once, the candidates
@@ -754,7 +754,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
     handle.log(f"检测到 {len(order)} 个角色：{'、'.join(order)}")
 
     vc_path, voice_config = _load_voice_config(handle)
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     ws = layout.workspace
 
     # Characters eligible for a clone: in-scope, non-alias, already carrying a foundation.
@@ -785,7 +785,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
         handle.log("没有可制作克隆音频的角色（请先运行阶段 1 生成语音推理基础）。", "WARNING")
         return {"count": 0, "ok": 0, "failed": 0, "speakers": order,
                 "voice_config_path": str(vc_path),
-                "output_dir": str(get_layout().voice_profiles / "designed_voices"),
+                "output_dir": str(get_or_prepare_layout().voice_profiles / "designed_voices"),
                 "results": []}
 
     n = len(selected)
@@ -842,7 +842,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
         # candidate set settles, so the 角色配音 list (status / preview / candidates)
         # refreshes in real time.
         data = json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8")
-        stage_workspace_file = getattr(handle, "stage_workspace_file", None)
+        stage_workspace_file = getattr(handle, "publish_workspace_bytes", None) or getattr(handle, "stage_workspace_file", None)
         if callable(stage_workspace_file):
             stage_workspace_file(vc_path, data)
         else:
@@ -946,7 +946,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
             "failed": failed,
             "speakers": order,
             "voice_config_path": str(vc_path),
-            "output_dir": str(get_layout().voice_profiles / "designed_voices"),
+            "output_dir": str(get_or_prepare_layout().voice_profiles / "designed_voices"),
             "results": results,
         }
 
@@ -963,8 +963,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
 
     python, worker = resolve_engine()
     handle.log(f"引擎：.venv（一次性子进程，模型只加载一次）· 批内上限 {rows_cap} 行")
-    # A persistent per-run transcript: the task log is SSE-only and vanishes with the
-    # session, so every line the engine emits is also mirrored to this file (one per run,
+    # A persistent per-run transcript: selected events persist in task history; raw child output is also mirrored to this file (one per run,
     # appended per restart attempt) — a run that dies mid-batch leaves its exact
     # batch / watchdog / error trail on disk for diagnosis.
     run_log = layout.logs / f"tts_clone_{time.strftime('%Y%m%d_%H%M%S')}.log"
@@ -1077,7 +1076,7 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
         try:
             from ..platform.quota import require_quota
             require_quota("TTS", "voices.clone")
-            run_worker(cmd, handle, on_line, temp_files=(job_file,),
+            run_tts_subprocess(cmd, handle, on_line, temp_files=(job_file,),
                        fail_prefix="角色克隆引擎", watchdog_code=124, log_file=run_log)
             break  # a clean exit (0)
         except WorkerWatchdogTimeout:
@@ -1132,6 +1131,10 @@ def make_clones(handle, speakers=None, new_only=False, concurrency=None, script_
         "failed": failed,
         "speakers": order,
         "voice_config_path": str(vc_path),
-        "output_dir": str(get_layout().voice_profiles / "designed_voices"),
+        "output_dir": str(get_or_prepare_layout().voice_profiles / "designed_voices"),
         "results": results,
     }
+
+
+# Compatibility alias for callers using the historical engine function name.
+make_clones = generate_voice_candidates

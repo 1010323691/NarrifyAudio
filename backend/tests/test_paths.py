@@ -114,11 +114,11 @@ def test_ensure_creates_everything_and_is_idempotent(tmp_path):
     core_paths.Layout(ws).ensure()  # second pass must not raise
 
 
-# -- get_layout resolution ----------------------------------------------------
+# -- get_or_prepare_layout resolution ----------------------------------------------------
 
-def test_get_layout_unset_is_inert(sandbox, set_pointer):
+def test_get_or_prepare_layout_unset_is_inert(sandbox, set_pointer):
     set_pointer("")
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert layout.workspace is None
     # Nothing is planted in the project directory while unset:
     for name in core_paths.WORKSPACE_DIR_NAMES:
@@ -127,36 +127,36 @@ def test_get_layout_unset_is_inert(sandbox, set_pointer):
     assert not (sandbox / "config").exists()
 
 
-def test_get_layout_set_creates_workspace_dirs(sandbox, set_pointer):
+def test_get_or_prepare_layout_set_creates_workspace_dirs(sandbox, set_pointer):
     ws = sandbox / "MyBook"
-    ws.mkdir()  # the workspace endpoint creates the root folder; get_layout fills in the rest
+    ws.mkdir()  # the workspace endpoint creates the root folder; get_or_prepare_layout fills in the rest
     set_pointer(str(ws))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert layout.workspace == ws
     for name in core_paths.WORKSPACE_DIR_NAMES:
         assert (ws / name).is_dir()
     assert (ws / "logs").is_dir()
     assert (ws / "config").is_dir()
     # Second call is a no-op (exist_ok), not an error:
-    core_paths.get_layout()
+    core_paths.get_or_prepare_layout()
 
 
-def test_peek_layout_resolves_workspace_without_creating_directories(sandbox, set_pointer):
+def test_resolve_layout_resolves_workspace_without_creating_directories(sandbox, set_pointer):
     ws = sandbox / "book"
     ws.mkdir()
     set_pointer(str(ws))
-    layout = core_paths.peek_layout()
+    layout = core_paths.resolve_layout()
     assert layout.workspace == ws
     assert layout.audio_chunk == ws / "05_audio_chunk"
     assert list(ws.iterdir()) == []
 
 
-def test_get_layout_missing_root_is_inert(sandbox, set_pointer):
+def test_get_or_prepare_layout_missing_root_is_inert(sandbox, set_pointer):
     """A pointer to a folder that no longer exists (the workspace was moved / deleted)
     must NOT resurrect an empty skeleton at the old location — the dashboard reports
     it (``exists: false``) and the write endpoints answer 409 until re-selection."""
     set_pointer(str(sandbox / "Gone"))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert layout.workspace == sandbox / "Gone"  # still "set" …
     assert not (sandbox / "Gone").exists()       # … but nothing is planted on disk
     assert not (sandbox / "Gone" / "01_input").exists()
@@ -164,25 +164,25 @@ def test_get_layout_missing_root_is_inert(sandbox, set_pointer):
     assert not (sandbox / "Gone" / "config").exists()
 
 
-def test_get_layout_relative_working_dir_resolves_against_project(sandbox, set_pointer):
+def test_get_or_prepare_layout_relative_working_dir_resolves_against_project(sandbox, set_pointer):
     ws = sandbox / "rel" / "ws"
     ws.mkdir(parents=True)  # a relative pointer names a folder that (was) created by the endpoint
     set_pointer("rel/ws")
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert layout.workspace == ws
     assert (ws / "01_input").is_dir()
 
 
-def test_get_layout_is_idempotent_across_calls(sandbox, set_pointer):
+def test_get_or_prepare_layout_is_idempotent_across_calls(sandbox, set_pointer):
     ws = sandbox / "MyBook"
     set_pointer(str(ws))
-    first = core_paths.get_layout()
-    second = core_paths.get_layout()
+    first = core_paths.get_or_prepare_layout()
+    second = core_paths.get_or_prepare_layout()
     assert first.workspace == second.workspace
     assert first.input == second.input
 
 
-def test_get_layout_cache_hit_does_not_replant_after_workspace_deleted(sandbox, set_pointer):
+def test_get_or_prepare_layout_cache_hit_does_not_replant_after_workspace_deleted(sandbox, set_pointer):
     """A cached hit must NOT re-run ``ensure()``: once the workspace folder is gone
     (moved / deleted), later calls stay inert and must not resurrect the skeleton at the
     old location (the pre-cache behavior was guarded by ``exists()``; the memoization keeps
@@ -190,38 +190,38 @@ def test_get_layout_cache_hit_does_not_replant_after_workspace_deleted(sandbox, 
     ws = sandbox / "MyBook"
     ws.mkdir()
     set_pointer(str(ws))
-    core_paths.get_layout()  # plants the skeleton and memoizes (ensured)
+    core_paths.get_or_prepare_layout()  # plants the skeleton and memoizes (ensured)
     for name in core_paths.WORKSPACE_DIR_NAMES:
         assert (ws / name).is_dir()
     shutil.rmtree(ws)  # the folder vanishes under the pointer
     for _ in range(3):  # repeated cached hits
-        core_paths.get_layout()
+        core_paths.get_or_prepare_layout()
     assert not (ws / "01_input").exists()  # no ghost skeleton replanted
     assert not (ws / "logs").exists()
     assert not (ws / "config").exists()
 
 
-def test_get_layout_stale_pointer_folder_comeback_plants_skeleton_once(sandbox, set_pointer):
+def test_get_or_prepare_layout_stale_pointer_folder_comeback_plants_skeleton_once(sandbox, set_pointer):
     """A cached stale-pointer entry (the folder was gone when it was memoized) plants the
     skeleton EXACTLY ONCE when the folder comes back — same skeleton-planting as an uncached
     call, but no mkdir probes on the subsequent hits."""
     ws = sandbox / "Gone"
     set_pointer(str(ws))  # pointer to a folder that does not exist
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert layout.workspace == ws
     assert not (ws / "01_input").exists()  # stale: nothing planted
     ws.mkdir()  # the folder comes back (the moved project was restored / recreated)
-    layout2 = core_paths.get_layout()  # cached entry -> plants the skeleton once
+    layout2 = core_paths.get_or_prepare_layout()  # cached entry -> plants the skeleton once
     assert layout2 is layout  # the same memoized object, now ensured
     for name in core_paths.WORKSPACE_DIR_NAMES:
         assert (ws / name).is_dir()
     assert (ws / "logs").is_dir()
     assert (ws / "config").is_dir()
     # Further hits: still the same object, no exception, no re-planting.
-    assert core_paths.get_layout() is layout
+    assert core_paths.get_or_prepare_layout() is layout
 
 
-def test_get_layout_pointer_change_invalidates_cache(sandbox, set_pointer):
+def test_get_or_prepare_layout_pointer_change_invalidates_cache(sandbox, set_pointer):
     """Every real pointer set/clear rewrites the root ``app.json`` — the new
     ``(mtime_ns, size)`` key must invalidate the memoized layout (no ``reset_*`` call)."""
     ws1 = sandbox / "one"
@@ -229,26 +229,26 @@ def test_get_layout_pointer_change_invalidates_cache(sandbox, set_pointer):
     ws2 = sandbox / "another-longer-name"  # different length -> different root-file size too
     ws2.mkdir()
     set_pointer(str(ws1))
-    first = core_paths.get_layout()
+    first = core_paths.get_or_prepare_layout()
     assert first.workspace == ws1
     set_pointer(str(ws2))  # rewrites the root app.json -> a new cache key
-    second = core_paths.get_layout()
+    second = core_paths.get_or_prepare_layout()
     assert second.workspace == ws2
     for name in core_paths.WORKSPACE_DIR_NAMES:  # the new workspace's skeleton is planted
         assert (ws2 / name).is_dir()
     set_pointer("")  # clearing the pointer invalidates as well
-    third = core_paths.get_layout()
+    third = core_paths.get_or_prepare_layout()
     assert third.workspace is None
-    assert core_paths.get_layout().workspace is None  # the inert hit stays inert
+    assert core_paths.get_or_prepare_layout().workspace is None  # the inert hit stays inert
 
 
 def test_reset_layout_cache_forces_reread(sandbox, set_pointer):
     ws = sandbox / "ws"
     ws.mkdir()
     set_pointer(str(ws))
-    first = core_paths.get_layout()
+    first = core_paths.get_or_prepare_layout()
     core_paths.reset_layout_cache()
-    second = core_paths.get_layout()  # re-resolves from the pointer
+    second = core_paths.get_or_prepare_layout()  # re-resolves from the pointer
     assert second.workspace == ws
     assert second.input == first.input
 

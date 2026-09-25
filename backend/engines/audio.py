@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from ..core.tasks import TaskCancelled
+from ..core.task_control import TaskCancelled
 
 # ============================ Constants ============================
 

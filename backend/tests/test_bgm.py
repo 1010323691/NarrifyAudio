@@ -44,12 +44,17 @@ from backend.core import paths as core_paths
 from backend.core import concurrency
 from backend.core.tasks import TERMINAL, TaskStatus, get_task_manager
 from backend.engines import bgm as bgm_engine
+from backend.engines import bgm_storage
 from backend.engines import merge as merge_engine
 from backend.engines import music as music_engine
 from backend.engines import tts_batch
 
 STEM = "第 001 章 测试"
 STEM2 = "第 002 章 夜袭"
+
+
+def test_bgm_storage_keeps_existing_logger_namespace():
+    assert bgm_storage.log.name == "audiobook.bgm"
 
 
 @pytest.fixture
@@ -359,7 +364,7 @@ def test_build_mix_cmd_short_chapter_fade_clamp():
 # --------------------------------------------------------------------------- #
 
 def test_analysis_missing_not_written(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_analysis(layout)
     assert data == {"version": 1, "model": "", "chapters": {}}
     assert not (sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME).exists()
@@ -371,14 +376,14 @@ def test_analysis_corrupt_downgrades(sandbox):
     ws = sandbox["ws"] / "08_bgm"
     ws.mkdir(parents=True, exist_ok=True)
     (ws / bgm_engine.ANALYSIS_NAME).write_bytes(b"{not json")
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert bgm_engine.load_analysis(layout)["chapters"] == {}
     (ws / bgm_engine.ASSIGNMENTS_NAME).write_bytes(b"[1, 2]")
     assert bgm_engine.load_assignments(layout)["chapters"] == {}
 
 
 def test_analysis_save_roundtrip_no_crlf(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_analysis(layout)
     data["model"] = "test-model"
     data["chapters"][STEM] = {"scene": ["战斗"], "mood": ["紧张"], "emotion": [],
@@ -392,7 +397,7 @@ def test_analysis_save_roundtrip_no_crlf(sandbox):
 
 
 def test_analysis_cache_update_uses_task_publication_handle(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     staged = []
 
     class _JournalHandle:
@@ -413,7 +418,7 @@ def test_analysis_cache_update_uses_task_publication_handle(sandbox):
 
 
 def test_list_chapter_stems(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert bgm_engine.list_chapter_stems(layout) == [STEM, STEM2]
     (sandbox["ws"] / "02_split_text" / "子目录").mkdir()
     (sandbox["ws"] / "02_split_text" / "notes.md").write_bytes(b"x")
@@ -426,7 +431,7 @@ def test_list_chapter_stems(sandbox):
 
 def test_match_stems_llm_pass_prev_is_fresh_result(sandbox):
     # Both chapters match 战斗/紧张; the first pick excludes the second's → no repeat.
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     analysis = bgm_engine.load_analysis(layout)
     for stem in (STEM, STEM2):
         analysis["chapters"][stem] = {"scene": ["战斗"], "mood": ["紧张", "热血"],
@@ -448,7 +453,7 @@ def test_match_stems_llm_pass_prev_is_fresh_result(sandbox):
 
 
 def test_match_stems_locked_skipped_whole(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # Pre-seed: STEM locked with calm.mp3, STEM2 fresh.
     data = bgm_engine.load_assignments(layout)
     data["chapters"][STEM] = {"tags": {}, "music": "calm.mp3", "locked": True,
@@ -471,7 +476,7 @@ def test_match_stems_locked_skipped_whole(sandbox):
 def test_match_stems_single_chapter_boundary_uses_existing_neighbours(sandbox):
     # Re-matching ONLY STEM2 must read prev/next from the EXISTING assignments and
     # never touch the neighbours' entries.
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     analysis = bgm_engine.load_analysis(layout)
     analysis["chapters"][STEM2] = {"scene": ["战斗"], "mood": ["紧张"], "emotion": [],
                                    "custom": [], "analyzed_at": "t", "edited": False}
@@ -492,7 +497,7 @@ def test_match_stems_single_chapter_boundary_uses_existing_neighbours(sandbox):
 
 
 def test_match_stems_no_bgm_and_random_mode(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # disable everything → every chapter gets music=None (still a matched entry)
     music_engine.update_index(lambda idx: idx["tracks"].update(
         {n: {**t, "enabled": False} for n, t in idx["tracks"].items()}))
@@ -531,7 +536,7 @@ def _fake_llm(reply, calls=None, fail_times=0):
 
 def test_analyze_success_updates_only_own_stem(sandbox, monkeypatch):
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # pre-seed another stem's entry — it must survive verbatim
     analysis = bgm_engine.load_analysis(layout)
     analysis["chapters"][STEM2] = {"scene": ["森林"], "mood": [], "emotion": [],
@@ -648,7 +653,7 @@ def test_analyze_retry_feedback_carries_error_and_last_reply(sandbox, monkeypatc
 
 def test_analyze_registers_new_tags_globally(sandbox, monkeypatch):
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm(
         '{"scene": [], "mood": [], "emotion": [], "custom": ["赛博朋克"]}'))
     cfg = core_config.get_config()
@@ -675,7 +680,7 @@ def test_analyze_registers_new_tags_globally(sandbox, monkeypatch):
 
 def test_analyze_new_tag_cross_bucket_clash_not_registered(sandbox, monkeypatch):
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # 「悲伤」= 内置词表 mood + emotion 双桶已注册（grandfathered）→ 回复再出现也跳过；
     # 「霓虹」= 新名同时出现在 scene 与 mood → 只入首桶（TAG_CATEGORIES 序 = scene）
     reply = ('{"scene": ["霓虹"], "mood": ["霓虹", "悲伤"], '
@@ -697,7 +702,7 @@ def test_analyze_new_tag_cross_bucket_clash_not_registered(sandbox, monkeypatch)
 
 def test_analyze_locked_chapter_auto_match_skipped(sandbox, monkeypatch):
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     locked = {
         "tags": {c: [] for c in music_engine.TAG_CATEGORIES},
         "music": "calm.mp3", "locked": True, "manual": True,
@@ -726,7 +731,7 @@ def test_analyze_parallel_tasks_no_lost_updates(sandbox):
     事务（barrier + sleep 拉开 读→写 窗口，修复前 load 在锁外时必丢写）的整文件
     重写不得互相丢条目——analyze 尾部（写 analysis + 自动匹配写 assignments）
     正是这两个事务的调用方。"""
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
 
     def run_pair(update_fn, entry):
         barrier = threading.Barrier(2)
@@ -809,10 +814,10 @@ def _seed_mix_inputs(sandbox, stem=STEM, music="battle.mp3", narration_bytes=b"N
     ws = sandbox["ws"]
     (ws / "06_audio_merge").mkdir(parents=True, exist_ok=True)
     (ws / "06_audio_merge" / f"{stem}.mp3").write_bytes(narration_bytes)
-    data = bgm_engine.load_assignments(core_paths.get_layout())
+    data = bgm_engine.load_assignments(core_paths.get_or_prepare_layout())
     data["chapters"][stem] = {"tags": {}, "music": music, "locked": False,
                               "manual": False, "score": 3, "reason": "r", "matched_at": "t"}
-    bgm_engine.save_assignments(core_paths.get_layout(), data)
+    bgm_engine.save_assignments(core_paths.get_or_prepare_layout(), data)
 
 
 class _FakeProc:
@@ -840,7 +845,7 @@ def test_mix_success_and_gate_balance(sandbox, monkeypatch):
     procs = []
 
     def fake_popen(cmd, **kw):
-        p = _FakeProc(cmd, core_paths.get_layout().bgm / f"{STEM}.mp3")
+        p = _FakeProc(cmd, core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3")
         procs.append(p)
         return p
 
@@ -865,7 +870,7 @@ def test_mix_success_and_gate_balance(sandbox, monkeypatch):
 def test_mix_rc_nonzero_fails_with_stderr(sandbox, monkeypatch):
     _seed_mix_inputs(sandbox)
     monkeypatch.setattr(bgm_engine.subprocess, "Popen",
-                        lambda cmd, **kw: _FakeProc(cmd, core_paths.get_layout().bgm / f"{STEM}.mp3", rc=1))
+                        lambda cmd, **kw: _FakeProc(cmd, core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3", rc=1))
     monkeypatch.setattr(bgm_engine, "probe_duration", lambda path, ffprobe="": (100.0, None))
     cfg = core_config.get_config()
     mgr = sandbox["mgr"]
@@ -880,7 +885,7 @@ def test_mix_rc_nonzero_fails_with_stderr(sandbox, monkeypatch):
 def test_mix_output_too_small_fails(sandbox, monkeypatch):
     _seed_mix_inputs(sandbox)
     monkeypatch.setattr(bgm_engine.subprocess, "Popen",
-                        lambda cmd, **kw: _FakeProc(cmd, core_paths.get_layout().bgm / f"{STEM}.mp3", out_size=100))
+                        lambda cmd, **kw: _FakeProc(cmd, core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3", out_size=100))
     monkeypatch.setattr(bgm_engine, "probe_duration", lambda path, ffprobe="": (100.0, None))
     cfg = core_config.get_config()
     mgr = sandbox["mgr"]
@@ -902,7 +907,7 @@ def test_mix_cancel_kills_process(sandbox, monkeypatch):
             return None  # still running
 
     def fake_popen(cmd, **kw):
-        p = SlowProc(cmd, core_paths.get_layout().bgm / f"{STEM}.mp3")
+        p = SlowProc(cmd, core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3")
         return p
 
     monkeypatch.setattr(bgm_engine.subprocess, "Popen", fake_popen)
@@ -938,7 +943,7 @@ def test_mix_stderr_pumped_while_running(sandbox, monkeypatch):
     the writer stays blocked and the task never reaches a terminal state
     (``_wait_terminal`` asserts the timeout → the old code fails this test)."""
     _seed_mix_inputs(sandbox)
-    out = core_paths.get_layout().bgm / f"{STEM}.mp3"
+    out = core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3"
     rd_fd, wr_fd = os.pipe()
     stderr_file = os.fdopen(rd_fd, "rb")
     payload = b"ffmpeg stderr line \n" * 5000  # 80KB > 64KB / > 4KB
@@ -998,7 +1003,7 @@ def test_mix_stderr_pumped_while_running(sandbox, monkeypatch):
 
 
 def test_mix_narration_missing(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_assignments(layout)
     data["chapters"][STEM] = {"tags": {}, "music": "battle.mp3", "locked": False,
                               "manual": False, "score": 3, "reason": "r", "matched_at": "t"}
@@ -1464,7 +1469,7 @@ def _seed_segment_inputs(sandbox, stem=STEM, n=6, speakers=None,
 
 def _seed_segment_analysis(sandbox, stem, entries, blocks,
                            fingerprint=None, model="test-model"):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_segment_analysis(layout)
     data["chapters"][stem] = {
         "fingerprint": fingerprint or bgm_engine.segment_fingerprint(entries),
@@ -1489,7 +1494,7 @@ def _fake_probe(segs_dur: dict, total: float):
 
 
 def _write_timeline(sandbox, stem, spans, duration=14.25, source_duration=None):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     tl = {"version": 2, "stem": stem, "generated_at": "t0", "model": "test-model",
           "fingerprint": "fp", "entry_count": 6,
           "duration": duration, "timeline": spans}
@@ -1514,7 +1519,7 @@ def _write_timeline(sandbox, stem, spans, duration=14.25, source_duration=None):
 
 
 def _seed_segment_assignment(sandbox, stem, locked=False, music=None):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_assignments(layout)
     data["chapters"][stem] = {
         "tags": {c: [] for c in music_engine.TAG_CATEGORIES},
@@ -1525,13 +1530,13 @@ def _seed_segment_assignment(sandbox, stem, locked=False, music=None):
 
 
 def _assignments_before(sandbox):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     p = layout.bgm / bgm_engine.ASSIGNMENTS_NAME
     return p.read_bytes() if p.is_file() else None
 
 
 def _assert_zero_drop(sandbox, stem, before):
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     assert not bgm_engine._timeline_path(layout, stem).exists()  # 无时间轴文件
     p = layout.bgm / bgm_engine.ASSIGNMENTS_NAME
     assert (p.read_bytes() if p.is_file() else None) == before  # assignments 字节不变
@@ -1557,7 +1562,7 @@ def test_recompute_cursor_walk_and_scene_spans(sandbox, monkeypatch):
     #       121.75（同人 250）/ 152.25（换人 500）；6 段 × 30s + 2.25 间隙
     #       = 总时长 182.25
     monkeypatch.setattr(bgm_engine, "probe_duration", _fake_probe({i: 30.0 for i in range(6)}, 182.25))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     res = bgm_engine.recompute_segment_timelines(layout, [STEM], 1)
     assert res == {"mode": "segment", "matched": 1, "no_bgm": 0, "skipped_locked": 0}
     tl = bgm_engine.load_timeline(layout, STEM)
@@ -1600,7 +1605,7 @@ def test_recompute_trailing_and_leading_gap(sandbox, monkeypatch):
     # 3 段同人 × 30s + 两条同人间隙 0.25s = 总时长 90.5
     monkeypatch.setattr(bgm_engine, "probe_duration", _fake_probe(
         {0: 30.0, 1: 30.0, 2: 30.0}, 90.5))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # ① 尾部空隙：块只到条目 1 → span 末 = starts[1]+30 = 60.25（≠ total 90.5）
     _seed_segment_analysis(sandbox, STEM, entries,
                            [_segment_block(0, 1, intensity=3, scene=["战斗"])])
@@ -1638,7 +1643,7 @@ def test_recompute_merges_adjacent_same_track(sandbox, monkeypatch):
     _seed_segment_analysis(sandbox, STEM, entries, blocks)
     # 4 段同人 × 30s + 三条同人间隙 0.25s = 总时长 120.75
     monkeypatch.setattr(bgm_engine, "probe_duration", _fake_probe({i: 30.0 for i in range(4)}, 120.75))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     res = bgm_engine.recompute_segment_timelines(layout, [STEM], 1)
     assert res["matched"] == 1
     tl = bgm_engine.load_timeline(layout, STEM)
@@ -1660,7 +1665,7 @@ def test_recompute_min_score_generic_and_no_candidate(sandbox, monkeypatch):
     blocks = [_segment_block(0, 1, scene=["战斗"]), _segment_block(2, 3, scene=["战斗"])]
     _seed_segment_analysis(sandbox, STEM, entries, blocks)
     monkeypatch.setattr(bgm_engine, "probe_duration", _fake_probe({i: 30.0 for i in range(4)}, 120.75))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # ① min_score=99 滤掉全部标签候选（战斗 仅 2 分）→ 两场景落通用池 calm；
     #    相同标签短路 + 相邻同曲合并 → 一个 span，无放宽注记
     res = bgm_engine.recompute_segment_timelines(layout, [STEM], 99, rng=random.Random(5))
@@ -1691,7 +1696,7 @@ def test_recompute_min_score_generic_and_no_candidate(sandbox, monkeypatch):
 def test_recompute_error_paths_zero_drop(sandbox, monkeypatch):
     """任一章节错误中止整个调用、任何写之前：无时间轴文件 + assignments 字节不变。
     ⑦ 升级前的旧 entries 格式缓存（指纹仍有效）也判「已失效」。"""
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     monkeypatch.setattr(bgm_engine, "probe_duration",
                         _fake_probe({i: 30.0 for i in range(6)}, 152.25))
     recs6 = [_segment_block(0, 5)]
@@ -1802,7 +1807,7 @@ def test_recompute_error_paths_zero_drop(sandbox, monkeypatch):
 
 def test_recompute_locked_preserved_and_rng_determinism(sandbox, monkeypatch):
     """locked 章整条保留（skipped_locked 计数、条目逐字节不动）；rng 种子 → 跨次同形。"""
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     entries = _seed_segment_inputs(sandbox, n=4, speakers=["老道"] * 4)
     _seed_segment_analysis(sandbox, STEM, entries, [_segment_block(0, 3, scene=["战斗"])])
     monkeypatch.setattr(bgm_engine, "probe_duration", _fake_probe({i: 30.0 for i in range(4)}, 120.75))
@@ -1852,7 +1857,7 @@ def test_recompute_no_adjacent_exclusion_reuses_track(sandbox, monkeypatch):
                     rng=rng, mode=mode)
 
     monkeypatch.setattr(bgm_engine, "match_chapter", spy)
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     bgm_engine.recompute_segment_timelines(layout, [STEM], 1, rng=random.Random(42))
     assert len(calls) == 1  # 场景 1 的相同标签短路未消耗第二次选曲
     assert calls[0][1] is None and calls[0][2] is None
@@ -1876,7 +1881,7 @@ def test_recompute_gap_blocks_same_track_merge(sandbox, monkeypatch):
     _seed_segment_analysis(sandbox, STEM, entries, blocks)
     # 4 段同人 × 30s + 三条同人间隙 0.25s = 总时长 120.75
     monkeypatch.setattr(bgm_engine, "probe_duration", _fake_probe({i: 30.0 for i in range(4)}, 120.75))
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     res = bgm_engine.recompute_segment_timelines(layout, [STEM], 1)
     assert res["matched"] == 1
     tl = bgm_engine.load_timeline(layout, STEM)
@@ -1897,7 +1902,7 @@ def test_recompute_short_span_merge(sandbox, monkeypatch):
     """校验 A 短段并入（< _MIN_SPAN_S = 20s）：条目邻接 → 时域并；
     条目有隙 → 邻居保留原时域（短段区间变静音）；孤立短段原样保留；
     reason 加（短段并入）注记。"""
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # ① 条目邻接的两个短 span（5s 段）→ 并入邻域并域
     entries = _seed_segment_inputs(sandbox, n=2, speakers=["老道"] * 2)
     _seed_segment_analysis(sandbox, STEM, entries,
@@ -1944,7 +1949,7 @@ def test_recompute_short_span_merge(sandbox, monkeypatch):
 def test_recompute_cap_merge(sandbox, monkeypatch):
     """校验 B 时长上限（cap = max(3, ceil(分钟数))）：超 cap 只合并标签最相似
     （平手取条目邻接、再取最早）的一对、保留较长 span；绝不凑下限。"""
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # 六首互异标签曲目（各场景命中各自唯一曲目 → 六 span 六不同曲目，
     # 先于校验 B 的同曲合并不生效）
     _tags = ["探索", "情感", "悬疑", "静谧", "史诗"]
@@ -2053,7 +2058,7 @@ def test_analyze_segment_success_batches_and_pin_kwargs(sandbox, monkeypatch):
     第 2 批 user 带上一批开放场景上下文 + 末 3 条原文；写 blocks 缓存 + 自动时间轴
     （三批同标签 → 短路复用 + 相邻同曲合并 → 单 span [0, 50]）。"""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     n = 45
     entries = _seed_segment_inputs(sandbox, n=n)
     fake, calls = _segment_llm(n)
@@ -2129,7 +2134,7 @@ def test_analyze_segment_silent_batch_then_extend(sandbox, monkeypatch):
     绝不被同曲合并桥接）→ 恰 2 span（0~39 两场景同曲邻接合并 + 60~79 独立），
     全 battle.mp3（相同标签短路复用上一 pick）。"""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     n = 80
     entries = _seed_segment_inputs(sandbox, n=n)
 
@@ -2284,7 +2289,7 @@ def test_analyze_segment_scene_continues_past_batch_end(sandbox, monkeypatch):
     assert any("已钳制到 59" in e["msg"] for e in t.logs)
     # 缓存 blocks = 5 块：广场新块 + 偏厅新块 + 偏厅 extend + 死牢钳制块
     # （end 67 → 59）+ 死牢 extend
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     seg = bgm_engine.load_segment_analysis(layout)["chapters"][STEM]
     assert seg["entry_count"] == 68 and seg["edited"] is False
     assert [(b["start"], b["end"]) for b in seg["blocks"]] == \
@@ -2373,7 +2378,7 @@ def test_analyze_segment_all_failures_zero_writes(sandbox, monkeypatch):
     """某批 3 次全败 → 任务 failed、错误带「段落分析失败（第 k/M 批）」、
     零落盘（分析缓存 / 词表 / 时间轴 / assignments 全不动）。"""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     _seed_segment_inputs(sandbox, n=45)
     seen = []
 
@@ -2404,7 +2409,7 @@ def test_analyze_segment_all_failures_zero_writes(sandbox, monkeypatch):
 def test_analyze_segment_all_empty_replies_fail_without_writing(sandbox, monkeypatch):
     """A whole chapter of ``[]`` replies is a model refusal, not valid analysis."""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     _seed_segment_inputs(sandbox, n=45)
     calls = []
 
@@ -2437,7 +2442,7 @@ def test_analyze_segment_missing_05_still_succeeds(sandbox, monkeypatch):
     """05 缺失 → 自动时间轴失败但任务仍成功（分析是持久产物），result 带
     timeline=False + 可操作注记；缓存正常写出。"""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     entries = _seed_segment_inputs(sandbox, n=3, with_05=False)
     fake, calls = _segment_llm(3)
     monkeypatch.setattr(bgm_engine, "_llm_chat_completion", fake)
@@ -2460,7 +2465,7 @@ def test_analyze_segment_missing_06_degrades_prompt(sandbox, monkeypatch):
     """06 缺失 → 06 探测降级 minutes=None：user 无「分钟」/K 参考行、含「章节时长
     未知」降级行；分析仍成功、缓存照写（探测 hiccup 不得杀死分析）。"""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     entries = _seed_segment_inputs(sandbox, n=3, with_06=False)
     fake, calls = _segment_llm(3)
     monkeypatch.setattr(bgm_engine, "_llm_chat_completion", fake)
@@ -2533,7 +2538,7 @@ def test_analyze_segment_model_empty_and_missing_script(sandbox):
 def test_analyze_segment_cancel_while_queued(sandbox, monkeypatch):
     """排队中被取消 ≤~1s：未取槽、零落盘（gate 无下溢）。"""
     core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     _seed_segment_inputs(sandbox, n=3)
     fake, _calls = _segment_llm(3)
     monkeypatch.setattr(bgm_engine, "_llm_chat_completion", fake)
@@ -2577,7 +2582,7 @@ def test_mix_timeline_fresh_success(sandbox, monkeypatch):
     procs = []
 
     def fake_popen(cmd, **kw):
-        p = _FakeProc(cmd, core_paths.get_layout().bgm / f"{STEM}.mp3")
+        p = _FakeProc(cmd, core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3")
         procs.append(p)
         return p
 
@@ -2669,7 +2674,7 @@ def test_mix_non_segment_entry_ignores_leftover_timeline(sandbox, monkeypatch):
     procs = []
 
     def fake_popen(cmd, **kw):
-        p = _FakeProc(cmd, core_paths.get_layout().bgm / f"{STEM}.mp3")
+        p = _FakeProc(cmd, core_paths.get_or_prepare_layout().bgm / f"{STEM}.mp3")
         procs.append(p)
         return p
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -74,9 +73,9 @@ def _locked_references(name: str) -> list[str]:
     """Current workspace's chapter stems whose assignment is LOCKED and points
     at ``name`` (from ``08_bgm/bgm_assignments.json``). No workspace / no file
     -> no references. Read-only, best-effort (a corrupt file degrades to [])."""
-    from ..core.paths import peek_layout
+    from ..core.paths import resolve_layout
 
-    layout = peek_layout()
+    layout = resolve_layout()
     bgm = layout.bgm
     if bgm is None or not bgm.exists():
         return []
@@ -619,9 +618,9 @@ def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> Non
     (``08_bgm/chapter_music_analysis.json``). Best-effort: no workspace / no
     file / corrupt file -> nothing to do. Assignments snapshots are NOT
     rewritten (they are a historical record)."""
-    from ..core.paths import get_layout
+    from ..core.paths import get_or_prepare_layout
 
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     bgm = layout.bgm
     if bgm is None or not bgm.exists():
         return

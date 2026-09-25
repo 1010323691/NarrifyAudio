@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
 from ..core.config import get_config
-from ..core.paths import get_layout, peek_layout
+from ..core.paths import get_or_prepare_layout, resolve_layout
 from ..engines import bgm as Bgm
 from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
@@ -23,6 +23,7 @@ from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_tasks import active_durable_payloads, active_durable_targets, submit_legacy_engine_task
+from ..platform.task_validation import is_safe_bgm_stem
 from . import _common
 
 router = APIRouter(prefix="/api/bgm", tags=["bgm"])
@@ -71,7 +72,7 @@ def _validated_stems(layout, stems: list[str]) -> list[str]:
     """Guard + dedupe chapter stems: no traversal, the 02 file must exist."""
     out: list[str] = []
     for s in stems:
-        if not isinstance(s, str) or not s or s != Path(s).name:
+        if not is_safe_bgm_stem(s) or s != Path(s).name:
             raise HTTPException(400, f"非法章节名：{s!r}")
         if not (layout.split_text / f"{s}.txt").is_file():
             raise HTTPException(400, f"未找到章节文件（02_split_text/{s}.txt）。")
@@ -108,7 +109,7 @@ def list_chapters() -> dict:
     * ``music_missing`` — the assignment points at a music file that no longer
       exists in the library (frontend: 「⚠ 已删除」, mixing blocked, re-match allowed).
     """
-    layout = peek_layout()
+    layout = resolve_layout()
     if layout.split_text is None:
         return {"chapters": [], "mode": "llm"}
     lib_dir = core_paths.MUSIC_LIBRARY_DIR
@@ -249,7 +250,7 @@ def run_analyze(
 ) -> dict:
     """Submit one durable analysis task per selected chapter."""
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     stems = _validated_stems(layout, req.chapters or [])
     if not stems:
         raise HTTPException(400, "请选择要分析的章节。")
@@ -298,7 +299,7 @@ def run_analyze_segment(
 ) -> dict:
     """Submit one durable paragraph-analysis task per selected chapter."""
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     stems = _segment_validated_stems(layout, req.chapters or [])
     if not stems:
         raise HTTPException(400, "请选择要段落分析的章节。")
@@ -353,7 +354,7 @@ def run_match(
 ) -> dict:
     """Submit durable chapter-level matching or paragraph timeline tasks."""
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     if req.mode == "segment":
         stems = (
             _segment_validated_stems(layout, req.chapters)
@@ -426,7 +427,7 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
     * ``locked`` → the lock flag (locked chapters are skipped by any re-match).
     """
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     if not stem or stem != Path(stem).name:
         raise HTTPException(400, f"非法章节名：{stem!r}")
     idx = music_engine.load_index()
@@ -508,7 +509,7 @@ def run_mix(
 ) -> dict:
     """Validate selected assignments and submit one durable mix task per chapter."""
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     stems = _validated_stems(layout, req.chapters or [])
     if not stems:
         raise HTTPException(400, "请选择要混音的章节。")
@@ -595,7 +596,7 @@ def package_mixed_audio(
     ``08_bgm/`` so the shared file download endpoint can serve the result.
     """
     _common.require_workspace()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     if req is None or req.chapters is None:
         stems = Bgm.list_chapter_stems(layout)
     else:
@@ -631,7 +632,7 @@ def get_timeline(stem: str) -> dict:
     (degrade, like /chapters); file missing/corrupt → 404 with the actionable
     wording (the chapter needs a paragraph analysis + a segment match first).
     """
-    layout = peek_layout()
+    layout = resolve_layout()
     if layout.bgm is None:
         return {"timeline": None}
     if not stem or stem != Path(stem).name:

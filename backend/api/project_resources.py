@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, Task, User
-from ..platform.storage import configured_storage_root, safe_display_name, user_workspace_root
+from ..platform.storage import configured_storage_root, safe_display_name
 from ..services.project_filesystem import iter_regular_project_files
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])

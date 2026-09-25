@@ -9,12 +9,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..core.config import PromptsConfig, get_config
-from ..core.paths import get_layout
+from ..core.paths import get_or_prepare_layout
 from ..engines.script_prompts import load_default_prompts
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_files import catalog_managed_file
-from .platform_tasks import TaskSubmit, cancel_task as cancel_durable_task, submit_task
+from .task_submission import TaskSubmit, cancel_task as cancel_durable_task, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/script", tags=["script"])
@@ -40,7 +40,7 @@ def _resolve_split_file(name: str) -> Path:
     The frontend sends bare file names (from ``GET /api/files/list/02_split_text``);
     anything that resolves outside the ``02_split_text`` directory is refused.
     """
-    base = get_layout().split_text
+    base = get_or_prepare_layout().split_text
     if base is None:
         raise HTTPException(409, "尚未设置工作空间——请先在「开始」页选择文件夹。")
     candidate = base / name

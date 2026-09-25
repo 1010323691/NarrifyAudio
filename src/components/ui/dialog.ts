@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 
-export type DialogKind = 'alert' | 'confirm' | 'prompt'
+export type DialogKind = 'confirm' | 'prompt'
 
 export interface DialogOptions {
   title?: string
@@ -42,9 +42,9 @@ function openDialog<T>(
     const request: DialogRequest = {
       id: ++nextDialogId,
       kind,
-      title: options.title || (kind === 'alert' ? '提示' : kind === 'confirm' ? '确认操作' : '输入内容'),
+      title: options.title || (kind === 'confirm' ? '确认操作' : '输入内容'),
       message,
-      confirmText: options.confirmText || (kind === 'alert' ? '知道了' : '确定'),
+      confirmText: options.confirmText || '确定',
       cancelText: options.cancelText || '取消',
       destructive: options.destructive ?? false,
       inputLabel: options.inputLabel || '输入内容',
@@ -55,10 +55,6 @@ function openDialog<T>(
     if (dialogState.current) dialogState.queue.push(request)
     else dialogState.current = request
   })
-}
-
-export function showAlert(message: string, options: Omit<DialogOptions, 'destructive' | 'inputLabel' | 'placeholder'> = {}): Promise<void> {
-  return openDialog<void>('alert', message, options)
 }
 
 export function showConfirm(message: string, options: Omit<DialogOptions, 'inputLabel' | 'placeholder'> = {}): Promise<boolean> {

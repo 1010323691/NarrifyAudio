@@ -3,7 +3,7 @@ import type {
   TTSStatus,
   VoicesListResult,
   PrepareFoundationsOptions,
-  MakeClonesOptions,
+  GenerateVoiceCandidatesOptions,
   BatchRunOptions,
   BatchStatusFiles,
   MergeStatusPackages,
@@ -26,7 +26,7 @@ export function prepareFoundations(opts: PrepareFoundationsOptions = {}): Promis
 }
 
 /** 角色配音 · 阶段 2（TTS only）：start the clone-seed Task (all / new-only / a subset; N parallel). */
-export function makeClones(opts: MakeClonesOptions = {}): Promise<{ task_id: string }> {
+export function generateVoiceCandidates(opts: GenerateVoiceCandidatesOptions = {}): Promise<{ task_id: string }> {
   return http.post<{ task_id: string }>('/api/tts/make-clones', {
     speakers: opts.speakers ?? null,
     new_only: opts.new_only ?? false,
@@ -83,7 +83,7 @@ export function setGender(speaker: string, gender: 'male' | 'female' | ''): Prom
  *  or a whole selection of scripts, the 待合成 card's multi-select: one task synthesizes
  *  the files one by one, each in its own package). The run is a resume: it skips segments
  *  already done (omitted → the administrator-configured TTS defaults for concurrency / seed;
- *  ``seed`` -1 → random). Re-doing everything = call :func:`resetBatch` first (deletes the
+ *  ``seed`` -1 → random). Re-doing everything = call :func:`submitBatchReset` first (deletes the
  *  packages), then this exact same call. */
 export function runBatch(opts: BatchRunOptions = {}): Promise<{ task_id: string }> {
   return http.post<{ task_id: string }>('/api/tts/batch', {
@@ -93,11 +93,10 @@ export function runBatch(opts: BatchRunOptions = {}): Promise<{ task_id: string 
   })
 }
 
-/** 音频合成 · 重新全部合成 · 第一步（同步、非任务）：删除选中文件的合成包
- *  （``05_audio_chunk/<包>/``——逐行 mp3 + manifest），随后的「一键音频合成」（默认续合
- *  语义，与一键合成完全同一条线路）即从头重做全部段落。 */
-export function resetBatch(scripts: string[]): Promise<{ ok: boolean; removed: string[] } | { task_id: string }> {
-  return http.post<{ ok: boolean; removed: string[] } | { task_id: string }>('/api/tts/batch-reset', { scripts })
+/** Queue package removal before the ordinary synthesis task recreates each segment. */
+
+export function submitBatchReset(scripts: string[]): Promise<{ task_id: string }> {
+  return http.post<{ task_id: string }>('/api/tts/batch-reset', { scripts })
 }
 
 /** 音频合成进度（每文件）：each file's 【已合成 / 总段落】· 角色 · 已就绪声音, plus the

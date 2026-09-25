@@ -15,3 +15,8 @@ BILLABLE_TASK_TYPES = frozenset({
     "script.parse", "voices.foundation", "voices.clone", "tts.batch",
     "bgm.analysis", "bgm.segment", "music.suggest_tags",
 })
+
+# These jobs mutate the shared music library, which is visible across projects.
+# Keep the policy at the durable submission boundary so alternate HTTP adapters
+# cannot bypass the route-level admin dependency.
+ADMIN_ONLY_TASK_TYPES = frozenset({"music.suggest_tags"})

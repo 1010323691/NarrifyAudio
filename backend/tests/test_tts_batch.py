@@ -173,7 +173,7 @@ def test_manifest_writer_uses_workspace_publication_handle(tmp_path):
 
 @pytest.fixture
 def workspace(monkeypatch, tmp_path):
-    """A throwaway project root + workspace so get_layout()/resolve_parsed_json() resolve.
+    """A throwaway project root + workspace so get_or_prepare_layout()/resolve_parsed_json() resolve.
 
     Seeds one parsed script: two non-empty lines + one empty (which ``_build_segments``
     skips). No voice_config is written — the run still completes because ``run_worker``
@@ -219,7 +219,7 @@ def _fake_run_worker(captured):
 def _stub_engine(monkeypatch, captured):
     """Point the engine at fakes so no real shared .venv subprocess is spawned."""
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", _fake_run_worker(captured))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", _fake_run_worker(captured))
 
 
 def _cmd_flag(cmd, flag):
@@ -317,7 +317,7 @@ def test_synthesize_watchdog_shrinks_and_restarts(workspace, monkeypatch):
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "s.json", 4)
     assert len(calls) == 2  # one restart, not a fatal failure
@@ -345,7 +345,7 @@ def test_synthesize_watchdog_isolates_poison_segment_at_workers_one(workspace, m
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "s.json", 1)
     assert len(calls) == 3
@@ -371,7 +371,7 @@ def test_synthesize_watchdog_attempt_cap_raises(workspace, monkeypatch):
         raise WorkerWatchdogTimeout("音频合成引擎失败（退出码 124）")
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     with pytest.raises(RuntimeError):
         tts_batch.synthesize(h, None, "s.json", 1)
@@ -431,7 +431,7 @@ def test_synthesize_watchdog_records_timeout_chars(workspace, monkeypatch):
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "long.json", 4)
     assert len(calls) == 2
@@ -469,7 +469,7 @@ def test_synthesize_restore_line_pops_before_next_record(workspace, monkeypatch)
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "long.json", 4)
     assert len(calls) == 3
@@ -503,7 +503,7 @@ def test_synthesize_cascade_demotions_encode_oldest_first(workspace, monkeypatch
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "long.json", 4)
     assert len(calls) == 3
@@ -542,7 +542,7 @@ def test_synthesize_strike_at_one_records_nothing(workspace, monkeypatch):
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "long.json", 4)
     assert len(calls) == 5
@@ -574,7 +574,7 @@ def test_synthesize_unknown_inflight_index_records_nothing(workspace, monkeypatc
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "s.json", 4)
     assert len(calls) == 2
@@ -603,7 +603,7 @@ def test_synthesize_restore_line_without_record_still_syncs(workspace, monkeypat
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "s.json", 4)
     assert len(calls) == 2
@@ -630,8 +630,8 @@ def test_synthesize_aggregates_segment_logs(workspace, monkeypatch):
 
 def test_synthesize_persists_run_log(workspace, monkeypatch):
     """synthesize mirrors the child transcript to a per-run log file under <workspace>/logs
-    (the task log is SSE-only and vanishes with the session; a run that dies mid-batch must
-    leave its trail on disk)."""
+    (the durable task event stream carries UI progress; a run that dies mid-batch must still
+    leave the child transcript on disk for diagnosis)."""
     captured = {}
 
     def run_worker(cmd, handle, on_line, *, temp_files=(), fail_prefix="TTS 引擎", **kw):
@@ -653,7 +653,7 @@ def test_synthesize_persists_run_log(workspace, monkeypatch):
 
     monkeypatch.setattr(tts_batch, "resolve_engine",
                         lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     tts_batch.synthesize(h, None, "s.json", 4)
 
@@ -693,7 +693,7 @@ def test_synthesize_logs_batch_performance_to_task_and_workspace_log(workspace, 
 
     monkeypatch.setattr(tts_batch, "resolve_engine",
                         lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     tts_batch.synthesize(h, None, "s.json", 4)
 
@@ -717,7 +717,7 @@ def test_run_worker_filters_per_segment_protocol_from_log_file(tmp_path):
             "print('[segment] 0 ok /x.mp3', flush=True); "
             "print('boom-line', file=sys.stderr, flush=True)")
     h = _Handle()
-    tail = tts_eng.run_worker([sys.executable, "-c", code], h, lambda line: None,
+    tail = tts_eng.run_tts_subprocess([sys.executable, "-c", code], h, lambda line: None,
                               log_file=log_file, log_line=tts_batch._format_batch_log_line)
     text = log_file.read_text(encoding="utf-8")
     assert "=== attempt started" in text
@@ -737,7 +737,7 @@ def test_run_worker_can_transform_stdout_in_persistent_log(tmp_path):
     code = "print('[perf] {\\\"internal\\\": true}', flush=True)"
     seen = []
     h = _Handle()
-    tts_eng.run_worker(
+    tts_eng.run_tts_subprocess(
         [sys.executable, "-c", code], h, seen.append, log_file=log_file,
         log_line=lambda line: "性能摘要" if line.startswith("[perf]") else line,
     )
@@ -793,7 +793,7 @@ def test_run_worker_cancel_not_stalled_by_backlog(tmp_path):
     h = _LateCancel(after=120)
     t0 = time.monotonic()
     with pytest.raises(core_tasks.TaskCancelled):
-        tts_eng.run_worker([sys.executable, "-c", code], h,
+        tts_eng.run_tts_subprocess([sys.executable, "-c", code], h,
                            lambda line: (time.sleep(0.02), h.note_line()))
     assert time.monotonic() - t0 < 10, "cancel stalled behind the output backlog"
 
@@ -1069,7 +1069,7 @@ def test_synthesize_writes_manifest_incrementally(workspace, monkeypatch):
         on_line(f"[segment] 1 ok {os.path.join(out, '0002.mp3')}")
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     tts_batch.synthesize(_Handle(), None, "s.json", None)
 
     # The completion force-flush covers the throttled line: the manifest is complete at rest.
@@ -1098,7 +1098,7 @@ def test_synthesize_manifest_flush_is_throttled(workspace, monkeypatch):
         real_write(path, manifest, handle)
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     monkeypatch.setattr(tts_batch, "_write_manifest_file", counting)
     tts_batch.synthesize(_Handle(), None, "s.json", None)
 
@@ -1127,7 +1127,7 @@ def test_synthesize_resume_all_done_short_circuits(workspace, monkeypatch):
         calls.append(cmd)  # must never be called when a resume has nothing left
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "s.json", None)
     assert calls == []  # no engine spawned (no wasted model load)
@@ -1205,7 +1205,7 @@ def test_synthesize_segment_stats_failed_segments_not_counted(workspace, monkeyp
         on_line("[segment] 1 error 引擎炸了")
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize(h, None, "s.json", 4)
     assert result["completed"] == 1 and len(result["failed"]) == 1  # the run succeeds
@@ -1371,6 +1371,18 @@ def test_done_indices_missing_out_dir_is_empty(workspace):
     assert tts_batch.done_indices(entries, out, ws) == set()
 
 
+def test_done_indices_falls_back_to_exact_checks_when_listing_fails(workspace, monkeypatch):
+    from backend.engines import tts_manifest
+
+    ws = workspace
+    out = ws / "05_audio_chunk" / "s"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "0001.mp3").write_bytes(b"fake")
+    monkeypatch.setattr(tts_manifest.os, "listdir", lambda _path: (_ for _ in ()).throw(PermissionError()))
+
+    assert tts_batch.done_indices({0: {"ok": True, "path": "05_audio_chunk/s/0001.mp3"}}, out, ws) == {0}
+
+
 def test_done_indices_no_workspace_uses_is_done_fallback(workspace):
     """With no workspace the fast path is unavailable: every entry takes the exact
     per-entry is_done rule (absolute values judged as-is)."""
@@ -1491,7 +1503,7 @@ def _fake_run_worker_pool(calls, errors=(), progress=False):
 def _stub_engine_pool(monkeypatch, calls, errors=(), progress=False):
     """Point the engine at the pooled fake worker (no real shared .venv subprocess)."""
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", _fake_run_worker_pool(calls, errors, progress))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", _fake_run_worker_pool(calls, errors, progress))
 
 
 def test_pool_rows_carry_per_row_out_dir_and_file_index():
@@ -1560,7 +1572,7 @@ def test_synthesize_multi_all_done_no_engine(workspace, monkeypatch):
         calls.append(cmd)
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize_multi(h, ["s.json"], 4)
     assert calls == []
@@ -1579,7 +1591,7 @@ def test_synthesize_multi_zero_segment_files_succeed(workspace, monkeypatch):
         calls.append(cmd)
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize_multi(h, ["empty.json"], 4)
     assert calls == []
@@ -1695,7 +1707,7 @@ def test_synthesize_multi_cancel_in_prep_never_reaches_engine(workspace, monkeyp
     the engine never spawns."""
     ws = workspace
     _seed_second_file(ws)
-    from backend.core.tasks import TaskCancelled
+    from backend.core.task_control import TaskCancelled
 
     calls = []
     _stub_engine_pool(monkeypatch, calls)
@@ -1719,7 +1731,7 @@ def test_synthesize_multi_cancel_keeps_finished_pool_work(workspace, monkeypatch
     kept."""
     ws = workspace
     _seed_second_file(ws)
-    from backend.core.tasks import TaskCancelled
+    from backend.core.task_control import TaskCancelled
 
     calls = []
 
@@ -1738,7 +1750,7 @@ def test_synthesize_multi_cancel_keeps_finished_pool_work(workspace, monkeypatch
         handle.check()  # the cancel arrives while the child is still draining
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     n = 0
 
@@ -1762,7 +1774,7 @@ def test_synthesize_multi_cancel_flushes_all_manifests(workspace, monkeypatch):
     child never reported (its manifest is written with all rows not-done)."""
     ws = workspace
     _seed_second_file(ws)
-    from backend.core.tasks import TaskCancelled
+    from backend.core.task_control import TaskCancelled
 
     calls = []
 
@@ -1782,7 +1794,7 @@ def test_synthesize_multi_cancel_flushes_all_manifests(workspace, monkeypatch):
         handle.check()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     n = 0
 
@@ -1861,7 +1873,7 @@ def test_synthesize_multi_watchdog_pool_index_mapping(workspace, monkeypatch):
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize_multi(h, ["s.json", "t.json"], 1)
 
@@ -1908,7 +1920,7 @@ def test_synthesize_multi_watchdog_records_and_restore(workspace, monkeypatch):
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     h = _Handle()
     result = tts_batch.synthesize_multi(h, ["s.json", "t.json"], 4)
 
@@ -2347,7 +2359,7 @@ def test_single_file_width_stable_across_watchdog_restart(workspace, monkeypatch
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
     result = tts_batch.synthesize(_Handle(), None, "long.json", 4)
     assert len(calls) == 2
     (cmd0, rows0), (cmd1, rows1) = calls

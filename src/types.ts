@@ -206,6 +206,8 @@ export interface AudioCutResult {
 // ------------------------------ tts ------------------------------
 export interface TTSStatus {
   implemented: boolean
+  /** Worker interpreter/script exist; model packages and weights are checked on task start. */
+  ready?: boolean
   message: string
 }
 
@@ -250,7 +252,7 @@ export interface PrepareFoundationsOptions {
   script?: string
 }
 /** Phase 2 (TTS only): options for ``POST /api/tts/make-clones`` (批量制作克隆音频). */
-export interface MakeClonesOptions {
+export interface GenerateVoiceCandidatesOptions {
   speakers?: string[]
   new_only?: boolean
   /** 批内行数上限（单个 worker 进程内的 GPU 张量批；1 = 逐条串行；1..64）；
@@ -747,3 +749,6 @@ export interface BgmPackageResult {
   file_count: number
   base: string
 }
+
+
+/** Compatibility name for voice clone candidate-generation options. */

@@ -637,7 +637,7 @@ def _quiet_durable_task_guard(monkeypatch):
 @pytest.fixture
 def clone_ws(monkeypatch, tmp_path):
     """A throwaway project root + workspace wired into core.config/paths so
-    ``get_layout()`` / ``get_config()`` / script resolution all resolve — the e2e tests
+    ``get_or_prepare_layout()`` / ``get_config()`` / script resolution all resolve — the e2e tests
     run the real make_clones / select / list_voices code against it (engine stubbed)."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
@@ -775,7 +775,7 @@ def test_make_clones_fixed_two_candidates(clone_ws, monkeypatch):
     _seed_foundations(clone_ws, ["A", "B"])
     _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    res = V.make_clones(h, concurrency=2, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=2, candidate_count=2)
 
     assert res["count"] == 2 and res["ok"] == 2 and res["failed"] == 0
     assert {r["speaker"]: r["candidates"] for r in res["results"]} == {"A": 2, "B": 2}
@@ -803,7 +803,7 @@ def test_make_clones_publishes_staged_candidates_to_final_paths(clone_ws, monkey
     _stub_design_engine(monkeypatch, clone_ws)
     handle = _StagingHandle(clone_ws)
 
-    result = V.make_clones(handle, concurrency=2, candidate_count=2)
+    result = V.generate_voice_candidates(handle, concurrency=2, candidate_count=2)
 
     voice = _load_vc(clone_ws)["A"]
     assert result["ok"] == 1
@@ -821,7 +821,7 @@ def test_make_clones_auto_counts_follow_ladder(clone_ws, monkeypatch):
     _seed_foundations(clone_ws, ["N", "A", "B", "C", "D", "E"])
     _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    res = V.make_clones(h, concurrency=4)
+    res = V.generate_voice_candidates(h, concurrency=4)
     vc = _load_vc(clone_ws)
     assert {sp: len(vc[sp]["candidates"]) for sp in "NABCDE"} == {
         "N": 8, "A": 8, "B": 7, "C": 5, "D": 3, "E": 1,
@@ -835,7 +835,7 @@ def test_make_clones_partial_failure_keeps_character_usable(clone_ws, monkeypatc
     _seed_foundations(clone_ws, ["A"])
     _stub_design_engine(monkeypatch, clone_ws, fail="odd")  # odd-seeded candidates fail
     h = _Handle()
-    res = V.make_clones(h, concurrency=2, candidate_count=4)
+    res = V.generate_voice_candidates(h, concurrency=2, candidate_count=4)
     assert res["ok"] == 1 and res["failed"] == 0  # the character still succeeds
     e = _load_vc(clone_ws)["A"]
     assert e["type"] == "clone" and e["clone_status"] == "done"
@@ -861,7 +861,7 @@ def test_make_clones_total_failure_falls_back_and_keeps_ref_audio(clone_ws, monk
     })
     _stub_design_engine(monkeypatch, clone_ws, fail="all")
     h = _Handle()
-    res = V.make_clones(h, concurrency=1, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=1, candidate_count=2)
     assert res["ok"] == 0 and res["failed"] == 1
     e = _load_vc(clone_ws)["A"]
     assert e["type"] == "design"
@@ -877,7 +877,7 @@ def test_make_clones_cancel_leaves_untouched_entries(clone_ws, monkeypatch):
     before = _load_vc(clone_ws)
     _stub_design_engine(monkeypatch, clone_ws)
     with pytest.raises(TaskCancelled):
-        V.make_clones(_CancelHandle(), concurrency=2, candidate_count=2)
+        V.generate_voice_candidates(_CancelHandle(), concurrency=2, candidate_count=2)
     # With two candidates per character, no character's full set can have settled by the
     # time the first check() fires — so the file is exactly as it was before the run.
     assert _load_vc(clone_ws) == before
@@ -909,7 +909,7 @@ def test_make_clones_new_only_skips_satisfied(clone_ws, monkeypatch):
     })
     _worker, capture = _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    res = V.make_clones(h, new_only=True, concurrency=2, candidate_count=4)
+    res = V.generate_voice_candidates(h, new_only=True, concurrency=2, candidate_count=4)
 
     assert res["count"] == 1 and res["ok"] == 1  # only B is re-rendered
     vc = _load_vc(clone_ws)
@@ -936,7 +936,7 @@ def test_make_clones_new_only_upgrades_legacy_single_clone(clone_ws, monkeypatch
     })
     _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    res = V.make_clones(h, new_only=True, concurrency=1, candidate_count=2)
+    res = V.generate_voice_candidates(h, new_only=True, concurrency=1, candidate_count=2)
     assert res["count"] == 1 and res["ok"] == 1
     e = _load_vc(clone_ws)["A"]
     assert [c["id"] for c in e["candidates"]] == ["1", "2"]
@@ -949,7 +949,7 @@ def test_make_clones_progress_worker_driven_monotone(clone_ws, monkeypatch):
     _seed_foundations(clone_ws, ["A", "B"])
     _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    V.make_clones(h, concurrency=1, candidate_count=2)  # single attempt: deterministic
+    V.generate_voice_candidates(h, concurrency=1, candidate_count=2)  # single attempt: deterministic
     fracs = [f for f, _l in h.progresses]
     labels = [l for _f, l in h.progresses]
     # The worker drives the progress bar: its [progress] lines are forwarded verbatim
@@ -975,7 +975,7 @@ def test_make_clones_watchdog_shrink_restart(clone_ws, monkeypatch):
     _seed_foundations(clone_ws, ["A", "B"])
     _stub_design_engine(monkeypatch, clone_ws, watchdog="once")  # first attempt dies 124
     h = _Handle()
-    res = V.make_clones(h, concurrency=2, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=2, candidate_count=2)
     assert res["ok"] == 2 and res["failed"] == 0
     fracs = [f for f, _l in h.progresses]
     assert fracs == sorted(fracs)  # no backward jump across the restart
@@ -1002,7 +1002,7 @@ def test_make_clones_poison_isolated_at_cap_one(clone_ws, monkeypatch):
     _seed_foundations(clone_ws, ["A", "B"])
     _stub_design_engine(monkeypatch, clone_ws, poison="A:1")
     h = _Handle()
-    res = V.make_clones(h, concurrency=1, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=1, candidate_count=2)
     assert res["ok"] == 2 and res["failed"] == 0  # isolation is not a task failure
     vc = _load_vc(clone_ws)
     a = vc["A"]
@@ -1028,7 +1028,7 @@ def test_make_clones_watchdog_attempt_cap_raises(clone_ws, monkeypatch):
     _stub_design_engine(monkeypatch, clone_ws, watchdog="always")
     h = _Handle()
     with pytest.raises(RuntimeError, match="反复超时"):
-        V.make_clones(h, concurrency=1, candidate_count=2)
+        V.generate_voice_candidates(h, concurrency=1, candidate_count=2)
     vc = _load_vc(clone_ws)
     # The first two characters' candidates were all isolated -> settled as design fallback.
     assert vc["A"]["type"] == "design" and vc["A"]["clone_status"] == "failed"
@@ -1051,7 +1051,7 @@ def test_make_clones_resume_adoption_zero_jobs(clone_ws, monkeypatch):
         (dv / f"a_111_c{k}.wav").write_bytes(b"0" * 2048)
     _worker, capture = _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    res = V.make_clones(h, concurrency=2, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=2, candidate_count=2)
     assert res["ok"] == 1 and res["failed"] == 0
     assert not capture.exists()  # the engine never ran (zero-jobs short-circuit)
     e = _load_vc(clone_ws)["A"]
@@ -1068,7 +1068,7 @@ def test_make_clones_batched_layout_shares_seed(clone_ws, monkeypatch):
     _seed_foundations(clone_ws, ["A"])
     _stub_design_engine(monkeypatch, clone_ws, rows_per_batch=2)
     h = _Handle()
-    res = V.make_clones(h, concurrency=4, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=4, candidate_count=2)
     assert res["ok"] == 1 and res["failed"] == 0
     e = _load_vc(clone_ws)["A"]
     assert e["candidates"][0]["seed"] == e["candidates"][1]["seed"] >= 0
@@ -1092,14 +1092,14 @@ def test_make_clones_disabled_checks_in_cmd(clone_ws, monkeypatch):
         for i in range(len(rows)):
             on_line(f"[design] {i} error 测试桩（未渲染）")
 
-    monkeypatch.setattr(V, "run_worker", _record)
+    monkeypatch.setattr(V, "run_tts_subprocess", _record)
     h = _Handle()
-    res = V.make_clones(h, concurrency=1, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=1, candidate_count=2)
     assert res["ok"] == 0 and res["failed"] == 1  # the stubbed run settles as failed
     assert "--disabled-checks" not in cmds[0]  # all checks on (default) -> flag omitted
 
     core_config.update_config({"tts": {"planner_vram": False}})
-    res = V.make_clones(h, concurrency=1, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=1, candidate_count=2)
     assert res["ok"] == 0 and res["failed"] == 1
     assert "--disabled-checks" not in cmds[1]
 
@@ -1115,7 +1115,7 @@ def test_make_clones_disabled_checks_survive_fake_worker(clone_ws, monkeypatch):
     core_config.update_config({"tts": {"planner_vram": False}})
     _stub_design_engine(monkeypatch, clone_ws)
     h = _Handle()
-    res = V.make_clones(h, concurrency=2, candidate_count=2)
+    res = V.generate_voice_candidates(h, concurrency=2, candidate_count=2)
     assert res["ok"] == 2 and res["failed"] == 0
     logs = sorted((clone_ws / "logs").glob("tts_clone_*.log"))
     assert logs  # the run mirrored its transcript to disk

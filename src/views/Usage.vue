@@ -6,7 +6,7 @@ import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { getQuota, listQuotaTransactions, type QuotaBalance, type QuotaTransaction } from '@/api/quota'
 import { getProjectSummary, listProjects } from '@/api/project'
-import { listProjectFiles } from '@/api/projects'
+import { listProjectFiles } from '@/api/projectFiles'
 
 const balance = ref<QuotaBalance | null>(null)
 const transactions = ref<QuotaTransaction[]>([])

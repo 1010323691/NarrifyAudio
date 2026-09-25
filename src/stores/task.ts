@@ -166,17 +166,13 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
-  /** Issue a control; the SSE stream confirms the resulting state. */
+  /** Apply the control response immediately; SSE continues to deliver later changes. */
   async function control(id: string, action: TaskControl): Promise<void> {
     const requestGeneration = generation
-    await controlTask(id, action)
+    const updated = await controlTask(id, action)
     if (requestGeneration !== generation) return
-    // A retry flips the task back to running — make sure the live stream is up.
-    ensureStream()
-  }
-
-  function stopAll() {
-    closeStream()
+    upsert(updated)
+    if (hasActive()) ensureStream()
   }
 
   function reset() {
@@ -186,13 +182,7 @@ export const useTaskStore = defineStore('task', () => {
     loading.value = false
   }
 
-  // Legacy alias (the per-task stream design): the multiplexed stream already
-  // covers every task, so opening "a stream for id" just ensures the app stream.
-  function startStream(_id: string) {
-    ensureStream()
-  }
-
   refresh()
 
-  return { tasks, loading, refresh, startStream, control, stopAll, reset, activeTasks }
+  return { tasks, loading, refresh, control, reset, activeTasks }
 })

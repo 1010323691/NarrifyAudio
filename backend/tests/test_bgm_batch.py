@@ -60,7 +60,7 @@ def _seed_mix(ws, stems: list[str], music: str | None = "t1.mp3") -> None:
     (ws / "06_audio_merge").mkdir(parents=True, exist_ok=True)
     for s in stems:
         (ws / "06_audio_merge" / f"{s}.mp3").write_bytes(b"NARR" * 16)
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_assignments(layout)
     for s in stems:
         data["chapters"][s] = {"tags": {}, "music": music, "locked": False,
@@ -101,7 +101,7 @@ def _segment_block(start: int, end: int, intensity: int = 2, **tags) -> dict:
 
 def _seed_segment_analysis(stem: str, entries, blocks,
                            fingerprint: str | None = None) -> None:
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_segment_analysis(layout)
     data["chapters"][stem] = {
         "fingerprint": fingerprint or bgm_engine.segment_fingerprint(entries),
@@ -115,7 +115,7 @@ def _seed_segment_analysis(stem: str, entries, blocks,
 
 
 def _write_timeline(stem: str, spans: list[dict], duration: float) -> dict:
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     for sp in spans:  # v2 时间轴的三个描述字段（缺省空串，旧调用方无需感知）
         sp.setdefault("scene_desc", "")
         sp.setdefault("mood_desc", "")
@@ -218,7 +218,7 @@ def test_bgm_routes_keep_input_and_configuration_guards(workspace, monkeypatch):
 
 def test_chapters_rows(workspace):
     ws = workspace
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     # ch1: full pipeline state (06 + 08 + analysis + assignment with live music)
     (ws / "08_bgm").mkdir(parents=True, exist_ok=True)
     (ws / "08_bgm" / "ch1.mp3").write_bytes(b"MIXED")
@@ -263,7 +263,7 @@ def test_chapters_segment_row_fields(workspace):
     # analysis — the fingerprint must mismatch); a fresh cached timeline remains
     # viewable after a chapter-mode assignment reset, while stale leftovers stay
     # hidden; segment_music_missing = a span's track left the library.
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     e1 = _seed_scripts(workspace, ["ch1"])["ch1"]
     e3 = _seed_scripts(workspace, ["ch3"])["ch3"]
     _seed_segment_analysis("ch1", e1, [_segment_block(0, 0, mood=["紧张"])])
@@ -375,7 +375,7 @@ def test_timeline_no_workspace(monkeypatch, tmp_path):
 
 def test_update_chapter_tags(workspace):
     ws = workspace
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     analysis = bgm_engine.load_analysis(layout)
     analysis["chapters"]["ch1"] = {"scene": [], "mood": ["旧标签"], "emotion": [],
                                    "custom": [], "analyzed_at": "t0", "edited": False}
@@ -405,7 +405,7 @@ def test_update_chapter_music_and_lock(workspace):
     assert e2["music"] is None and e2["manual"] is True and e2["reason"] == "手动指定"
     assert e2["locked"] is True  # the lock survived (key absent)
     # an unmatched chapter gets an entry created on demand
-    layout = core_paths.get_layout()
+    layout = core_paths.get_or_prepare_layout()
     data = bgm_engine.load_assignments(layout)
     data["chapters"].pop("ch3")
     bgm_engine.save_assignments(layout, data)
@@ -430,7 +430,7 @@ def test_update_chapter_guard_400s(workspace):
     assert e.value.status_code == 400
     assert "音乐库中找不到 ghost.mp3" in e.value.detail
     # a failed update must not have touched anything
-    e0 = bgm_engine.load_assignments(core_paths.get_layout())["chapters"]["ch1"]
+    e0 = bgm_engine.load_assignments(core_paths.get_or_prepare_layout())["chapters"]["ch1"]
     assert e0["music"] == "t1.mp3" and e0["reason"] == "r"
 
 

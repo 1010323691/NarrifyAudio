@@ -14,7 +14,7 @@ from ..platform.models import AuditLog, User, UserQuotaAccount
 from ..platform.quota_config import initial_quota_units
 from ..platform.registration_config import registration_enabled
 from ..platform.security import create_session, hash_password, revoke_session, verify_password
-from ..platform.storage import user_workspace_root
+from ..platform.storage import project_workspace_path
 from ..services.projects import create_project
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -70,7 +70,7 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
     project = create_project(
         db, owner_id=user.id, username=user.username, name="默认工作空间", description="默认工作空间",
     )
-    user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
+    project_workspace_path(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
     token, csrf, session = create_session(db, user)
     session.active_project_id = project.id
     db.commit()

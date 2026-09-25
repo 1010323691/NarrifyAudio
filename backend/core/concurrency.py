@@ -1,9 +1,9 @@
-"""Global, resizable concurrency gate for LLM-bound work (text-parse jobs).
+"""Process-local concurrency gates for LLM-bound and merge work.
 
-The task system (``core/tasks.py``) spawns one daemon thread per task with no throttle,
-so an N-file parse batch would open N simultaneous LLM requests. This gate bounds how
-many parse jobs run LLM work at once (sized from ``config.generation.max_concurrency``
-at the start of a batch) so a large batch can't saturate the LLM service / CPU.
+These gates limit concurrent callers within one Python process. They do not
+configure cross-task parallelism in the durable queue; that depends on the
+number of Worker processes. The LLM gate defaults to one permit and can be
+resized by an explicit caller.
 
 It is a ``threading.Condition``-based gate rather than a ``threading.Semaphore`` so the
 limit can grow *or* shrink between batches. The limit is always clamped to ``>= 1`` —
@@ -78,7 +78,7 @@ class ConcurrencyGate:
             self._cond.notify_all()
 
 
-# Module-level singleton shared by every parse worker in this process.
+# Module-level singleton shared by callers in this process.
 _gate = ConcurrencyGate()
 
 
@@ -92,10 +92,7 @@ def gate() -> ConcurrencyGate:
     return _gate
 
 
-# A second, independent gate for the audio-merge engine (batch merge). Kept fully
-# separate from the parse LLM gate: merges are CPU/ffmpeg/disk bound (no LLM, no GPU),
-# so they must not share the LLM slot budget — a big parse batch and a batch merge can
-# safely run side by side. Sized from the logical CPU count (see merge.concurrency_limit).
+# A second, independent gate for CPU/ffmpeg/disk-bound merge work.
 _merge_gate = ConcurrencyGate()
 
 

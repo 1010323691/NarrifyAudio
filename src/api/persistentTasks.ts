@@ -23,6 +23,19 @@ export interface DurableTask {
   result: DurableTaskResult | null
 }
 
+const ACTIVE_DURABLE_STATUSES = new Set(['pending', 'queued', 'running', 'cancelling', 'retrying'])
+
+export function findActiveDurableTask(
+  tasks: DurableTask[], projectId: string, taskType: string,
+): DurableTask | undefined {
+  if (!projectId) return undefined
+  return tasks.find((task) =>
+    task.project_id === projectId
+    && task.task_type === taskType
+    && ACTIVE_DURABLE_STATUSES.has(task.status),
+  )
+}
+
 export function submitDurableTask(payload: {
   project_id: string
   task_type: string

@@ -12,9 +12,10 @@ from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.file_response import file_response
 from ..platform.models import Project, ProjectFile, User, new_id, utcnow
+from ..platform.project_context import active_project
 from ..platform.deps import AuthContext, get_auth_context
 from ..services.projects import ActiveProjectTasksError, create_project as create_project_record, rename_project, soft_delete_project
-from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, user_workspace_root
+from ..platform.storage import configured_storage_root, object_path, project_object_key, safe_display_name, project_workspace_path
 from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
 from ..core.request_context import bind_workspace
 
@@ -62,7 +63,7 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
         name=name, description=payload.description.strip(),
     )
     try:
-        user_workspace_root(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
+        project_workspace_path(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
         db.commit()
     except OSError as exc:
         db.rollback()
@@ -72,25 +73,14 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
 
 
 def _active_project(db: Session, ctx: AuthContext) -> Project | None:
-    project = None
-    if ctx.session.active_project_id:
-        project = db.scalar(select(Project).where(
-            Project.id == ctx.session.active_project_id,
-            Project.owner_id == ctx.user.id,
-            Project.deleted_at.is_(None),
-        ))
-    if project is None:
-        project = db.scalar(select(Project).where(
-            Project.owner_id == ctx.user.id, Project.deleted_at.is_(None),
-        ).order_by(Project.last_selected_at.desc().nullslast(), Project.updated_at.desc()))
-    return project
+    return active_project(db, ctx.user, ctx.session)
 
 
 def _project_context(db: Session, ctx: AuthContext) -> dict:
     project = _active_project(db, ctx)
     if project is None:
         return {"set": False, "path": "", "exists": False, "is_default": True, "dirs": {}}
-    path = user_workspace_root(db, ctx.user.username, project.id)
+    path = project_workspace_path(db, ctx.user.username, project.id)
     return {
         "set": True, "path": str(path), "exists": path.exists(),
         "is_default": project.name == "默认工作空间", "project_id": project.id,
@@ -114,7 +104,7 @@ def select_active_project(
         db.commit()
         return _project_context(db, ctx)
     project = _owned_project(db, ctx.user, str(project_id))
-    path = user_workspace_root(db, ctx.user.username, project.id)
+    path = project_workspace_path(db, ctx.user.username, project.id)
     try:
         for name in (*WORKSPACE_DIR_NAMES, "logs", "config"):
             (path / name).mkdir(parents=True, exist_ok=True)

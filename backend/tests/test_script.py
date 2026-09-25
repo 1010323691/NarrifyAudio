@@ -1636,7 +1636,7 @@ def test_retry_grouping_gap_and_batch_cap():
 @pytest.fixture
 def workspace(monkeypatch, tmp_path):
     """A throwaway project root + workspace (mirrors ``test_merge.py``) —
-    ``generate_file`` writes its output through ``get_layout().parsed_json``."""
+    ``generate_file`` writes its output through ``get_or_prepare_layout().parsed_json``."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")

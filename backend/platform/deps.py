@@ -4,14 +4,14 @@ import hmac
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import get_db
-from .models import Project, User, UserSession
+from .models import User, UserSession
+from .project_context import active_project
 from .security import load_session, token_digest
-from .storage import user_workspace_root
+from .storage import project_workspace_path
 from ..core.request_context import bind_workspace
 
 
@@ -25,23 +25,9 @@ def get_auth_context(request: Request, db: Session = Depends(get_db)) -> AuthCon
     session = load_session(db, request.cookies.get(settings.session_cookie))
     if session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要登录")
-    project = None
-    if session.active_project_id:
-        project = db.scalar(
-            select(Project).where(
-                Project.id == session.active_project_id,
-                Project.owner_id == session.user_id,
-                Project.deleted_at.is_(None),
-            )
-        )
-    if project is None:
-        project = db.scalar(
-            select(Project)
-            .where(Project.owner_id == session.user_id, Project.deleted_at.is_(None))
-            .order_by(Project.last_selected_at.desc().nullslast(), Project.updated_at.desc())
-        )
+    project = active_project(db, session.user, session)
     bind_workspace(
-        user_workspace_root(db, session.user.username, project.id)
+        project_workspace_path(db, session.user.username, project.id)
         if project is not None
         else None
     )

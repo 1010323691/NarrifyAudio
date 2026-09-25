@@ -13,14 +13,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
-from ..core.paths import get_layout
+from ..core.paths import get_or_prepare_layout
 from ..engines import audio as A
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_files import catalog_managed_file
 from ..platform.legacy_tasks import estimate_legacy_units, submit_legacy_engine_task
 from ..platform.models import ProjectFile
-from .platform_tasks import TaskSubmit, submit_task
+from .task_submission import TaskSubmit, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
@@ -202,7 +202,7 @@ def zip_files(
     _common.require_workspace()
     if not req.files:
         raise HTTPException(400, "没有可打包的文件。")
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     base = (req.base or "").strip() or "audio"
     workspace = layout.workspace
     if workspace is None:
@@ -246,7 +246,7 @@ def export_to_source(
         raise HTTPException(400, "源音频不是一个文件。")
     if not req.files:
         raise HTTPException(400, "没有可输出的文件。")
-    workspace = get_layout().workspace
+    workspace = get_or_prepare_layout().workspace
     if workspace is None:
         raise HTTPException(409, "尚未设置工作空间")
     entries = []

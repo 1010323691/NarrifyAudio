@@ -36,16 +36,15 @@ from .core import config as core_config
 from .core import logging_setup
 from .core.observability import record_api_request
 from .core.request_context import bind_workspace, reset_workspace
-from .core.paths import get_layout
+from .core.paths import get_or_prepare_layout
 from .platform.bootstrap import ensure_bootstrap_admin
 from .platform.config import settings
 from .platform.database import initialize_schema
 from .platform.database import SessionLocal
 from .platform.deps import require_legacy_access
-from .platform.models import Project
+from .platform.project_context import active_project
 from .platform.security import load_session
-from .platform.storage import lock_storage_migration, storage_migration, user_workspace_root
-from sqlalchemy import select
+from .platform.storage import lock_storage_migration, storage_migration, project_workspace_path
 from time import monotonic
 
 PORT = 8642
@@ -80,7 +79,7 @@ LEGACY_ROUTERS = [
 async def lifespan(_: FastAPI):
     initialize_schema()
     ensure_bootstrap_admin()
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     logging_setup.setup_logging(layout.logs, core_config.get_config().log.level)
     yield
 
@@ -120,23 +119,9 @@ async def bind_authenticated_workspace(request, call_next):
         with SessionLocal() as db:
             session = load_session(db, session_token)
             if session is not None:
-                project = None
-                if session.active_project_id:
-                    project = db.scalar(
-                        select(Project).where(
-                            Project.id == session.active_project_id,
-                            Project.owner_id == session.user_id,
-                            Project.deleted_at.is_(None),
-                        )
-                    )
-                if project is None:
-                    project = db.scalar(
-                        select(Project)
-                        .where(Project.owner_id == session.user_id, Project.deleted_at.is_(None))
-                        .order_by(Project.last_selected_at.desc().nullslast(), Project.updated_at.desc())
-                    )
+                project = active_project(db, session.user, session)
                 if project is not None:
-                    token = bind_workspace(user_workspace_root(db, session.user.username, project.id))
+                    token = bind_workspace(project_workspace_path(db, session.user.username, project.id))
                 else:
                     token = bind_workspace(None)
     try:

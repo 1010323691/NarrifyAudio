@@ -7,8 +7,8 @@ CUDA/model isolation without requiring a second Python environment. The engine
 core is ``tts-engine/tts_worker.py`` (prepared by ``install_tts_env.ps1``).
 
 This module is the shared base of the TTS-family stages (``tts_batch`` /
-``merge``): interpreter + child-env resolution, and :func:`run_worker` — the
-one-shot subprocess orchestration every stage's Task worker is built on (pump
+``merge``): interpreter + child-env resolution, and :func:`run_tts_subprocess` — the
+one-shot subprocess orchestration every synthesis stage is built on (pump
 threads, progress/log streaming, cooperative cancel/pause, child + temp cleanup).
 """
 from __future__ import annotations
@@ -91,11 +91,11 @@ class WorkerWatchdogTimeout(RuntimeError):
     """The one-shot worker died on its *watchdog* exit code (a sub-batch produced no output
     within its budget and the process ``os._exit``'d). Distinct from a plain failure so a stage
     (``tts_batch``) can shrink the batch and restart a fresh subprocess instead of failing the
-    whole task. ``run_worker`` raises this when ``watchdog_code`` is set and matches the exit.
+    whole task. ``run_tts_subprocess`` raises this when ``watchdog_code`` is set and matches the exit.
     """
 
 
-def run_worker(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = "TTS 引擎",
+def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = "TTS 引擎",
               watchdog_code: int | None = None,
               log_file: Path | None = None, log_line=None) -> deque:
     """Run a one-shot shared-``.venv`` worker and stream its output into a Task.
@@ -123,8 +123,7 @@ def run_worker(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = 
     * When ``log_file`` is given, the whole transcript is mirrored to that file
       (append mode, line-buffered) — stdout lines as ``[out] …``, stderr lines as
       ``[err] …``, bracketed by ``=== attempt started/ended ===`` markers — so a
-      run leaves a persistent, on-disk trail (the Task log itself is SSE-only and
-      vanishes with the session). ``None`` (the default) changes nothing.
+      run leaves a persistent, on-disk trail (the task events remain queryable in the durable task history). ``None`` (the default) changes nothing.
     * ``log_line``, when supplied, transforms stdout lines before they are mirrored to
       ``log_file``; returning ``None`` filters a line. The Task still receives the original
       line through ``on_line`` so a stage can parse structured worker events without exposing
@@ -146,8 +145,8 @@ def run_worker(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = 
     err_q: "queue.Queue" = queue.Queue()
     stderr_tail: deque = deque(maxlen=40)
 
-    # Persistent run mirror: the Task log is SSE-only (it vanishes with the session), so a
-    # failed run leaves no trail on disk. When a stage names a log file, every stdout line
+    # Persistent run mirror: the task history persists selected events, while this file keeps the raw child transcript
+    # for diagnosis after a failed run. When a stage names a log file, every stdout line
     # ([out]), stderr line ([err]) and the attempt boundary markers are also appended there
     # (line-buffered, append mode) — each restart attempt appends its own section, so the
     # file is the forensic record of what the engine actually said before it died.
@@ -259,3 +258,7 @@ def run_worker(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = 
             raise WorkerWatchdogTimeout(msg)
         raise RuntimeError(msg)
     return stderr_tail
+
+
+# Compatibility alias for Python integrations using the former name.
+run_worker = run_tts_subprocess

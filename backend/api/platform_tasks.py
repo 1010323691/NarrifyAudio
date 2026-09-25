@@ -5,26 +5,24 @@ import asyncio
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.database import SessionLocal, get_db
-from ..platform.deps import require_csrf, require_authenticated_user
-from ..platform.models import OutboxEvent, QuotaReservation, QuotaTransaction, Task, TaskAttempt, TaskEvent, User, utcnow
 from ..platform.config import settings
-from ..platform.task_state import TERMINAL_TASK_STATUSES, append_task_event, release_reservation, suppress_pending_dispatch
-from ..services.tasks import TaskSubmissionError, cancel_task_record, requeue_task_record, submit_task_record, task_dict
+from ..platform.deps import require_csrf, require_authenticated_user
+from ..platform.models import Task, TaskEvent, User
+from ..platform.security import session_is_valid_for_user
+from ..platform.task_state import TERMINAL_TASK_STATUSES
+from ..services.tasks import task_dict
+from .task_submission import (
+    TaskSubmit,
+    cancel_task as cancel_task_for_user,
+    retry_task as retry_task_for_user,
+    submit_task as submit_task_for_user,
+)
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
-
-
-class TaskSubmit(BaseModel):
-    project_id: str
-    task_type: str = Field(min_length=1, max_length=80)
-    payload: dict = Field(default_factory=dict)
-    estimated_units: int = Field(default=0, ge=0, le=10_000_000)
-    idempotency_key: str = Field(min_length=8, max_length=180)
 
 
 def _task_json(task: Task) -> dict:
@@ -64,9 +62,18 @@ def stream_task_events(
 
     async def generate():
         sequence = after
+        next_auth_check = 0.0
         while True:
             if await request.is_disconnected():
                 return
+            now = asyncio.get_running_loop().time()
+            if now >= next_auth_check:
+                with SessionLocal() as db:
+                    if not session_is_valid_for_user(
+                        db, request.cookies.get(settings.session_cookie), user.id,
+                    ):
+                        return
+                next_auth_check = now + 5.0
             with SessionLocal() as db:
                 current = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id))
                 if current is None:
@@ -94,48 +101,14 @@ def stream_task_events(
 
 @router.post("", status_code=201)
 def submit_task(payload: TaskSubmit, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    try:
-        task = submit_task_record(
-            db, user, project_id=payload.project_id, task_type=payload.task_type,
-            payload=payload.payload, estimated_units=payload.estimated_units,
-            idempotency_key=payload.idempotency_key,
-        )
-    except TaskSubmissionError as exc:
-        raise HTTPException(exc.status_code, exc.message) from exc
-    return _task_json(task)
+    return submit_task_for_user(payload, user=user, db=db)
 
 
 @router.post("/{task_id}/cancel")
 def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id).with_for_update())
-    if task is None:
-        raise HTTPException(404, "任务不存在")
-    cancel_task_record(db, task)
-    db.commit()
-    return _task_json(task)
+    return cancel_task_for_user(task_id, user=user, db=db)
 
 
 @router.post("/{task_id}/retry")
 def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    """Requeue a failed zero-cost task without losing its audit history."""
-    task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id).with_for_update())
-    if task is None:
-        raise HTTPException(404, "任务不存在")
-    if task.status not in {"failed", "cancelled", "timeout"}:
-        raise HTTPException(409, "任务当前不可重试")
-    reservation = db.scalar(select(QuotaReservation).where(QuotaReservation.task_id == task.id))
-    if reservation is not None and reservation.units:
-        raise HTTPException(409, "带额度预留的任务暂不支持原任务重试")
-    metered = db.scalar(select(QuotaTransaction.id).where(
-        QuotaTransaction.task_id == task.id,
-        QuotaTransaction.resource_type.in_(["LLM", "TTS"]),
-        QuotaTransaction.kind == "consume",
-    ).limit(1))
-    if metered:
-        raise HTTPException(409, "已有模型消费的任务请重新提交，以创建新的计费操作")
-    attempts = db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) or 0
-    if attempts >= settings.task_max_attempts:
-        raise HTTPException(409, "任务已达到最大尝试次数")
-    requeue_task_record(db, task, event_type="retry_requested", event_payload={"status": "pending"})
-    db.commit()
-    return _task_json(task)
+    return retry_task_for_user(task_id, user=user, db=db)

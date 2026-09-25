@@ -140,6 +140,29 @@ test('aborting a durable task wait stops its next polling request', async () => 
   assert.equal(calls, 1)
 })
 
+test('audio task reattachment is restricted to the active project', () => {
+  const load = harness()
+  const { findActiveDurableTask } = load('@/api/persistentTasks')
+  const tasks = [
+    { id: 'task-A', project_id: 'A', task_type: 'audio.cut', status: 'running' },
+    { id: 'task-B', project_id: 'B', task_type: 'audio.cut', status: 'running' },
+    { id: 'task-C', project_id: 'A', task_type: 'audio.cut', status: 'succeeded' },
+  ]
+  assert.equal(findActiveDurableTask(tasks, 'B', 'audio.cut')?.id, 'task-B')
+  assert.equal(findActiveDurableTask(tasks, 'C', 'audio.cut'), undefined)
+})
+
+test('task control applies the returned status before the next SSE event', async () => {
+  const load = harness({ '@/api/tasks': {
+    controlTask: async () => ({ id: 'task-1', status: 'cancelled', progress: 0 }),
+    listTasks: async () => [],
+    streamAllTasks: () => () => {},
+  } })
+  const store = load('@/stores/task').useTaskStore()
+  await store.control('task-1', 'cancel')
+  assert.equal(store.tasks.find((task) => task.id === 'task-1')?.status, 'cancelled')
+})
+
 test('a create response from a signed-out account cannot select its project', async () => {
   const old = deferred()
   let selections = 0

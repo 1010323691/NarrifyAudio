@@ -5,7 +5,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
-import { listVoices, makeClones, mergeSpeakers, prepareFoundations, selectVoice, setGender, ttsStatus } from '@/api/tts'
+import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations, selectVoice, setGender, ttsStatus } from '@/api/tts'
 import { downloadUrl } from '@/utils/fileops'
 import type { MakeClonesResult, PrepareFoundationsResult, TTSStatus, VoiceItem } from '@/types'
 
@@ -22,7 +22,7 @@ import StatusPill from '@/components/ui/StatusPill.vue'
 import Alert from '@/components/ui/Alert.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
-import DirPicker from '@/components/DirPicker.vue'
+import WorkspaceEntryPicker from '@/components/WorkspaceEntryPicker.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useProjectGate } from '@/composables/useProjectGate'
 import {
@@ -44,7 +44,7 @@ import {
 
 const router = useRouter()
 const settings = useSettingsStore()
-const project = usePipelineStateStore()
+const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -175,7 +175,7 @@ const cloneTargets = ref<string[] | null>(null)
 // "全部文件" scope ('__all__') never leaks into 音频合成, which is per-file.
 // '' = most recent; a file name = that file; '__all__' = every file in 03_parsed_json/.
 const ALL_SCRIPT = '__all__'
-const scope = ref(project.activeScript || '')
+const scope = ref(pipeline.activeScript || '')
 // Which parsed JSON(s) to read (mirrors the picker; '__all__' aggregates every file).
 const script = computed(() => scope.value)
 
@@ -235,11 +235,11 @@ async function loadVoices() {
 // scope is Voices-local and must not be written to the shared selection.
 watch(scope, (v) => {
   loadVoices()
-  if (v !== ALL_SCRIPT) project.activeScript = v
+  if (v !== ALL_SCRIPT) pipeline.activeScript = v
 })
 // Store → local: under keep-alive this page is cached, so a pick made on 音频合成 must
 // refresh the (cached) character list. Guarded so an active "all files" view is kept.
-watch(() => project.activeScript, (v) => {
+watch(() => pipeline.activeScript, (v) => {
   if (scope.value !== ALL_SCRIPT && v !== scope.value) scope.value = v
 })
 
@@ -303,7 +303,7 @@ async function doClones(opts: {
   cloneResult.value = null
   cloneTargets.value = opts.speakers ?? null
   try {
-    const { task_id } = await makeClones({
+    const { task_id } = await generateVoiceCandidates({
       ...opts,
       concurrency: cloneConcurrency.value,
       script: script.value || undefined,
@@ -448,7 +448,6 @@ watch(
     if (st === 'succeeded') {
       foundationResult.value = t.result as PrepareFoundationsResult
       foundationBusy.value = false
-      project.recordVoices(foundationResult.value)
       toast({ title: '语音推理基础生成完成', variant: 'success', description: `已为 ${foundationResult.value?.count ?? 0} 个角色生成基础（${foundationResult.value?.aliases ?? 0} 个别名）` })
       // Keep foundationTaskId set so the log panel stays visible with the final logs; the next
       // run simply overwrites it.
@@ -521,9 +520,9 @@ watch(
       <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
         角色配音
         <StatusPill
-          :label="status?.implemented ? '可用' : '引擎未就绪'"
-          :tone="status?.implemented ? 'positive' : 'neutral'"
-          :aria-label="status?.implemented ? '引擎可用' : '引擎未就绪'"
+          :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
+          :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
+          :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
         />
       </h1>
       <p class="mt-1 text-muted-foreground">
@@ -533,7 +532,7 @@ watch(
 
     <ProjectGateAlert />
 
-    <Alert v-if="status && !status.implemented" variant="destructive">
+    <Alert v-if="status && !(status.ready ?? status.implemented)" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
       {{ status.message }}
     </Alert>
@@ -656,7 +655,7 @@ watch(
           <CardDescription>选择要使用的解析脚本。</CardDescription>
         </CardHeader>
         <CardContent>
-          <DirPicker
+          <WorkspaceEntryPicker
             module="03_parsed_json"
             :extensions="['json']"
             exclude-suffix="_checked.json"

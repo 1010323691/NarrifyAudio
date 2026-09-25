@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
@@ -116,7 +115,7 @@ class LogConfig(BaseModel):
 class UIConfig(BaseModel):
     theme: str = "system"  # system | light | dark
     # 解析页「解析进度」日志区（每文件实时日志 + 流式反馈）是否显示；默认关。
-    # 关时三性能指标移到「开始处理」按钮下方（每文件行内的进度/速度/状态不受影响）。
+    # 关闭时性能指标移到「开始处理」按钮下方（每文件行内的进度/速度/状态不受影响）。
     show_parse_logs: bool = False
     # 侧边栏是否显示「音频分集」导航项；默认关（隐藏）。
     # 关 = 导航栏隐藏该项（音频合并页的「前往音频分集」按钮随之隐藏），
@@ -130,10 +129,8 @@ class LLMConfig(BaseModel):
     base_url: str = "http://localhost:11434/v1"
     api_key: str = "local"  # local servers ignore it; remote APIs need the real key
     model_name: str = ""  # left blank on purpose — the user sets their own model
-    # Stream the completion (``stream: true``) so the 文本解析 page can show the model's
-    # raw output token-by-token (the 「流式反馈」 panel). When a server rejects
-    # ``stream: true``, set this false in ``config/app.json`` to fall back to the
-    # non-streaming call (the stream panel then stays empty).
+    # Stream completion events so the parser can report live rate and progress.
+    # Durable task history intentionally does not store raw model output text.
     stream: bool = True
 
 
@@ -153,8 +150,8 @@ class GenerationConfig(BaseModel):
     min_p: float = 0.0  # 0 -> not sent
     presence_penalty: float = 0.0
     banned_tokens: list = Field(default_factory=list)
-    # Max files parsed in parallel (LLM jobs); the rest of a batch queue behind a
-    # shared gate (see ``core/concurrency.py``). 0 / negative is clamped to 1.
+    # Max character-foundation LLM jobs generated in parallel by the voices engine.
+    # Durable script-parse task throughput is determined by the deployed Worker count.
     max_concurrency: int = 3
     # 解析后的「归属抽样」比例：全量条目中重判 speaker 的抽样率（0 = 关闭）。
     # 分两桶（不相交）：~1/3 纯随机（整书错误率"仪表"——唯一可据以判断"采样率能不能
@@ -238,35 +235,21 @@ def bind_task_config(config: AppConfig):
 
 def reset_task_config(token) -> None:
     _task_config.reset(token)
-_platform_config_cache: dict[str, Any] = {"expires": 0.0, "value": {}}
-_PLATFORM_CONFIG_TTL = 3.0
-
-
 def _platform_config() -> dict[str, Any]:
-    """Load the administrator-managed feature defaults shared by all workspaces."""
-    now = time.monotonic()
-    with _lock:
-        if now < _platform_config_cache["expires"]:
-            return _platform_config_cache["value"]
-        try:
-            # Lazy imports keep the standalone config engine usable without the
-            # platform database (for example in unit tests and migration tools).
-            from ..platform.database import SessionLocal
-            from ..platform.models import SystemConfig
+    """Read administrator defaults without owning platform database access."""
+    try:
+        from ..platform.feature_config import load_feature_defaults
 
-            with SessionLocal() as db:
-                row = db.get(SystemConfig, "application.features")
-                value = row.value if row and isinstance(row.value, dict) else {}
-        except Exception:
-            value = {}
-        _platform_config_cache.update(value=value, expires=now + _PLATFORM_CONFIG_TTL)
-        return value
+        return load_feature_defaults()
+    except Exception:
+        return {}
 
 
 def set_platform_config_cache(value: dict[str, Any]) -> None:
-    """Update the local effective-config cache after an admin save."""
-    with _lock:
-        _platform_config_cache.update(value=value, expires=time.monotonic() + _PLATFORM_CONFIG_TTL)
+    """Compatibility adapter for invalidating the platform feature-config cache."""
+    from ..platform.feature_config import update_feature_defaults_cache
+
+    update_feature_defaults_cache(value)
 
 
 class WorkspaceNotSetError(RuntimeError):

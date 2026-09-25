@@ -5,7 +5,7 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import { useProjectStore } from '@/stores/project'
 import { cleanupProjectTemp, getProjectSummary, type ProjectFileSummary, type ProjectStorageSummary } from '@/api/project'
-import { listProjectFiles } from '@/api/projects'
+import { listProjectFiles } from '@/api/projectFiles'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 

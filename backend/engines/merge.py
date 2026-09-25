@@ -12,8 +12,8 @@ same speaker > speaker change), missing files are skipped with a clear warning,
 and a merge failure (no audio / engine error) marks the task FAILED. The staging
 dir is this module's to clean (try/finally) on every exit path.
 
-``run`` is a Task worker (first arg is a :class:`TaskHandle`); it streams progress /
-log over SSE and honours cooperative cancel (killing the child).
+``merge_audio_package`` runs behind the durable task context; progress and logs are
+persisted as task events and streamed to connected clients, with cooperative cancellation.
 """
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ from pathlib import Path
 from ..core import pathio
 from ..core.config import get_config
 from ..core.concurrency import merge_gate
-from ..core.paths import get_layout
-from ..core.tasks import TaskCancelled
-from .tts import resolve_engine, run_worker
+from ..core.paths import get_or_prepare_layout
+from ..core.task_control import TaskCancelled
+from .tts import resolve_engine, run_tts_subprocess
 from . import tts_batch as Batch
 
 IMPLEMENTED = True
@@ -185,7 +185,7 @@ def _stale_voice_speakers(manifest, layout) -> list[str]:
     return sorted(stale)
 
 
-def run(handle, m4b: bool = False, package: str | None = None) -> dict:
+def merge_audio_package(handle, m4b: bool = False, package: str | None = None) -> dict:
     """Task worker: merge one package's batch output into the final audiobook file.
 
     ``package`` names a sub-folder under ``05_audio_chunk/`` (one per source JSON,
@@ -193,7 +193,7 @@ def run(handle, m4b: bool = False, package: str | None = None) -> dict:
     omitted, the most recent package is merged (falling back to the legacy
     top-level manifest for older projects).
     """
-    layout = get_layout()
+    layout = get_or_prepare_layout()
     ws = layout.workspace
     manifest_path = _find_manifest(layout, package)
     if not manifest_path.exists():
@@ -293,7 +293,7 @@ def run(handle, m4b: bool = False, package: str | None = None) -> dict:
 
         handle.progress(0.05, "启动引擎")
 
-        run_worker(cmd, handle, on_line, temp_files=(seg_file,), fail_prefix="Merge 引擎")
+        run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,), fail_prefix="Merge 引擎")
     finally:
         if acquired:
             merge_gate().release()
@@ -332,3 +332,7 @@ def run(handle, m4b: bool = False, package: str | None = None) -> dict:
         "segments": len(segs),
         "size": size,
     }
+
+
+# Compatibility alias for integrations using the former generic name.
+run = merge_audio_package

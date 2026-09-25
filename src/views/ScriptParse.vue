@@ -28,7 +28,6 @@ import {
   RefreshCw,
   ListChecks,
   Eraser,
-  TriangleAlert,
 } from 'lucide-vue-next'
 
 const settings = useSettingsStore()
@@ -36,7 +35,7 @@ const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 
 // LLM / 生成参数 / Prompt 的配置编辑在「设置」页（含解析内检查的三个开关）；本页
-// 只从 settings.config 读取已保存的值（用于并发数显示与模型名校验），不再本地编辑 / 保存。
+// 只从 settings.config 读取已保存的模型名，不再本地编辑 / 保存。
 
 // ---- File selection (02_split_text) + per-file parse jobs ------------------------
 // The user checks one or more split .txt files; each becomes an independent backend
@@ -152,29 +151,12 @@ function progressIndicator(row: JobRow): string {
 // "In flight" while any job's task hasn't reached a terminal state (drives the button).
 const busy = computed(() => jobRows.value.some((r) => r.active))
 
-// Effective concurrency after the backend's clamp (core/concurrency.py: max(1, int(n or 1))).
-// 0 / empty / negative / non-numeric all collapse to 1 — the silent "fully serial" footgun,
-// so mirror it here to warn the user before they launch a batch that can't actually run in
-// parallel. A low value doesn't merely slow the batch: files beyond the cap queue and run
-// one/few at a time, which reads as "the LLM isn't concurrent" when it is.
-const effectiveConcurrency = computed(() => Math.max(1, Number(settings.config?.generation.max_concurrency) || 1))
-
-const concurrencyWarning = computed(() => {
-  const n = selectedNames.value.length
-  if (!n) return ''
-  const eff = effectiveConcurrency.value
-  if (eff >= n) return ''
-  return eff === 1
-    ? `并发数为 1，将串行逐个解析这 ${n} 个文件（一个完整跑完才开始下一个），无法并发。请在「设置」页把「并发数」设为 ≥ ${n} 以同时解析。`
-    : `并发数（${eff}）小于所选文件数（${n}）：前 ${eff} 个文件并发解析，之后按序预取投放（预取深度 4），其余排队，前面的文件进入机械检查后空出的槽位会立即补给后面的文件。`
-})
-
 // 解析日志区显隐（设置页「解析日志显示」，默认关）：开 = 显示「解析进度」Card
-// （每文件实时日志 + 流式反馈，三指标在 Card 内）；关 = 整个 Card 隐藏、三指标移到
+// （每文件实时日志 + 流式反馈，指标在 Card 内）；关 = 整个 Card 隐藏、指标移到
 // 「开始处理」按钮下方。保存设置后立即生效（settings.config 是响应式的）。
 const showParseLogs = computed(() => settings.config?.ui.show_parse_logs ?? false)
 
-// ---- 性能指标（顶部 3 卡）：并发数 / 吞吐量 / 处理速度 ---------------------------
+// ---- LLM 性能指标：吞吐量 / 处理速度 --------------------------------------------
 // 吞吐量 (字/s): 各运行中窗口「近 10 秒平均」生成速率之和。每个任务的 10 秒窗口速率
 // (task.llm_cps_10s) 由后端按真实流式字符算出（近 10 秒生成字符 ÷ 对应秒数）并经 SSE 实时推送；
 // 前端只把它们相加（同一时间窗口的速率可加：各运行窗口之和 = 总体近 10 秒平均）。用 computed
@@ -206,13 +188,8 @@ const speedCps = computed(() => {
   return secs > 0 ? chars / secs : 0
 })
 
-// 三指标的统一数据源（日志区开 = 「解析进度」Card 顶部；关 = 「开始处理」按钮下方紧凑卡）。
+// 指标的统一数据源（日志区开 = 「解析进度」Card 顶部；关 = 「开始处理」按钮下方紧凑卡）。
 const metrics = computed(() => [
-  {
-    label: '并发数',
-    value: String(effectiveConcurrency.value),
-    title: '当前配置的同时解析文件数（超过并发的文件排队，前面的文件进入机械检查后槽位立即补给后面的文件）',
-  },
   {
     label: '吞吐量（字/s）',
     value: String(Math.round(totalTps.value)),
@@ -456,14 +433,9 @@ async function cancelAll() {
             已选 {{ selectedNames.length }} / {{ files.length }} 个
             <span v-if="doneCount"> · 已完成 {{ doneCount }} 个</span>
             <span v-if="selectedDoneCount"> · 含已完成 {{ selectedDoneCount }}</span>
-            · 并发 {{ settings.config?.generation.max_concurrency ?? '—' }}
+            · 后台 Worker 按部署容量处理，等待中的任务会排队
           </span>
         </div>
-
-        <Alert v-if="concurrencyWarning" variant="warning">
-          <template #icon><TriangleAlert class="h-4 w-4 shrink-0" /></template>
-          {{ concurrencyWarning }}
-        </Alert>
 
         <div class="flex flex-wrap gap-2">
           <Button class="min-w-[10rem] flex-1" :disabled="!selectedNames.length || !projectSet || busy" @click="startParse">
@@ -476,7 +448,7 @@ async function cancelAll() {
           </Button>
         </div>
 
-        <!-- 性能指标（日志区关闭时显示在按钮下方；开启时三指标在「解析进度」Card 内） -->
+        <!-- 性能指标（日志区关闭时显示在按钮下方；开启时在「解析进度」Card 内） -->
         <div v-if="!showParseLogs && fileJobs.length" class="flex flex-wrap gap-3">
           <div
             v-for="m in metrics"
@@ -496,7 +468,7 @@ async function cancelAll() {
     </Card>
 
     <!-- 解析进度（每文件一行）：仅「解析日志显示」开启时渲染整个 Card
-         （实时日志 + 流式反馈 + 三指标）；关闭时由上方按钮下的紧凑指标卡替代。 -->
+         （实时日志 + 流式反馈 + 指标）；关闭时由上方按钮下的紧凑指标卡替代。 -->
     <Card v-if="fileJobs.length && showParseLogs">
       <CardHeader>
         <CardTitle class="flex items-center gap-2"><ScanText class="h-5 w-5" />解析进度</CardTitle>
@@ -505,7 +477,7 @@ async function cancelAll() {
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
-        <!-- 性能指标（顶部 3 卡）：并发数（当前配置）/ 吞吐量（各运行中窗口「近 10 秒平均」字/s 之和，随 SSE 实时刷新）/ 处理速度（累计已处理字÷累计处理耗时，每完成一段刷新、段间恒定） -->
+        <!-- 性能指标：吞吐量（各运行中窗口近 10 秒字/s 之和）/ 处理速度（累计已处理字÷累计处理耗时） -->
         <div class="grid gap-3 sm:grid-cols-3">
           <div
             v-for="m in metrics"

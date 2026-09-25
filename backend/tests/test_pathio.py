@@ -383,7 +383,7 @@ def test_move_project_manifest_and_voice_config(sandbox):
 
     # -- merge resolves every segment to a real file under the new root --------------
     manifest = json.loads((out_dir / "manifest.json").read_text("utf-8"))
-    segs, missing = merge.collect_segments(manifest, core_paths.get_layout().workspace)
+    segs, missing = merge.collect_segments(manifest, core_paths.get_or_prepare_layout().workspace)
     assert missing == 0
     assert [s["index"] for s in segs] == [0, 1]
     for s in segs:  # the worker gets absolute paths (the transient file), under the NEW root
@@ -432,7 +432,7 @@ def test_move_project_synthesize_resume(sandbox, monkeypatch):
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (P("/fake/python"), P("/fake/worker")))
-    monkeypatch.setattr(tts_batch, "run_worker", run_worker)
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
 
     class _Handle:
         logs, progresses = [], []

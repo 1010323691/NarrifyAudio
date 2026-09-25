@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.legacy_files import catalog_managed_file
-from .platform_tasks import TaskSubmit, submit_task
+from .task_submission import TaskSubmit, submit_task
 from . import _common
 
 router = APIRouter(prefix="/api/book", tags=["book"])

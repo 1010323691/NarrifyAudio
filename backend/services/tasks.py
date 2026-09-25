@@ -13,7 +13,8 @@ from ..platform.task_state import (
     suppress_pending_dispatch,
 )
 from ..platform.storage import lock_storage_migration, storage_migration
-from ..platform.task_types import BILLABLE_TASK_TYPES, SUPPORTED_TASK_TYPES
+from ..platform.task_types import ADMIN_ONLY_TASK_TYPES, BILLABLE_TASK_TYPES, SUPPORTED_TASK_TYPES
+from ..platform.task_validation import legacy_task_payload_error
 
 
 class TaskSubmissionError(Exception):
@@ -29,12 +30,13 @@ def cancel_task_record(
     """Apply the shared durable cancellation transition; return whether it changed state."""
     if task.status in TERMINAL_TASK_STATUSES:
         return False
-    if task.status in {"running", "cancelling"}:
+    if task.status == "cancelling":
+        return False
+    if task.status == "running":
         task.status = "cancelling"
     else:
         task.status = "cancelled"
-        if admin:
-            task.finished_at = task.finished_at or utcnow()
+        task.finished_at = task.finished_at or utcnow()
         release_reservation(
             db, task, kind="release",
             note="administrator cancelled task" if admin else "user cancelled before execution",
@@ -86,6 +88,11 @@ def submit_task_record(
 ) -> Task:
     if task_type not in SUPPORTED_TASK_TYPES:
         raise TaskSubmissionError(422, f"不支持的任务类型：{task_type}")
+    if task_type in ADMIN_ONLY_TASK_TYPES and user.role != "admin":
+        raise TaskSubmissionError(403, "需要管理员权限")
+    error = legacy_task_payload_error(task_type, payload)
+    if error:
+        raise TaskSubmissionError(422, error)
     if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
         raise TaskSubmissionError(409, "存储根目录正在迁移，暂时无法提交任务")
     # Estimated task size remains part of the historical idempotency contract;

@@ -282,11 +282,11 @@ async function save() {
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label>并发数（同时解析的文件数）</Label>
+            <Label>角色基础信息生成并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input v-model.number="draft.generation.max_concurrency" type="number" min="1" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
-                超出并发数的文件会排队。
+                控制角色基础信息的并行生成。文本解析任务的实际同时执行数取决于后台 Worker 部署容量。
               </span>
             </div>
           </div>

@@ -14,13 +14,13 @@ from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, Task, User
 from ..platform.storage import configured_storage_root
 from ..services.project_filesystem import iter_regular_project_files
-from .admin import (
-    _ACTIVE_TASK_STATUSES,
-    _TEMP_CLEANUP_AGE_DAYS,
-    _PROJECT_CATEGORY_LABELS,
-    _music_use_counts,
-    _scan_project_directory,
-    _project_path,
+from ..services.admin_storage import (
+    ACTIVE_TASK_STATUSES,
+    TEMP_CLEANUP_AGE_DAYS,
+    PROJECT_CATEGORY_LABELS,
+    music_use_counts,
+    scan_project_directory,
+    project_storage_path,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-resources"])
@@ -44,7 +44,7 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
         .where(Project.deleted_at.is_(None))
     ).all()
     active_project_ids = set(db.scalars(
-        select(Task.project_id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).distinct()
+        select(Task.project_id).where(Task.status.in_(ACTIVE_TASK_STATUSES)).distinct()
     ).all())
     users: dict[str, dict] = {}
     category_totals: dict[str, dict[str, int]] = {}
@@ -52,8 +52,8 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
     for project, username in projects:
         row = users.setdefault(username, {"project_count": 0, "size_bytes": 0, "file_count": 0})
         row["project_count"] += 1
-        path = _project_path(root, username, project.id)
-        measured = _scan_project_directory(path, active=project.id in active_project_ids) if path is not None else {
+        path = project_storage_path(root, username, project.id)
+        measured = scan_project_directory(path, active=project.id in active_project_ids) if path is not None else {
             "size_bytes": 0, "file_count": 0, "categories": {}, "cleanup_count": 0, "cleanup_bytes": 0,
         }
         row["size_bytes"] += measured["size_bytes"]
@@ -69,7 +69,7 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
          "registered_file_bytes": registered.get(username, {}).get("size_bytes", 0)}
         for username, values in sorted(users.items(), key=lambda item: item[1]["size_bytes"], reverse=True)[:20]
     ]
-    music_usage = _music_use_counts(projects, root)
+    music_usage = music_use_counts(projects, root)
     music_files = [path for path in MUSIC_LIBRARY_DIR.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".mp3", ".wav", ".flac"}] if MUSIC_LIBRARY_DIR.is_dir() else []
     return {
         "root_path": str(root), "disk_total_bytes": disk.total, "disk_used_bytes": disk.used,
@@ -81,11 +81,11 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
             "size_bytes": sum(row["size_bytes"] for row in users.values()),
             "file_count": sum(row["file_count"] for row in users.values()),
             "categories": [
-                {"kind": key, "label": _PROJECT_CATEGORY_LABELS[key], **values}
+                {"kind": key, "label": PROJECT_CATEGORY_LABELS[key], **values}
                 for key, values in sorted(category_totals.items(), key=lambda item: item[1]["size_bytes"], reverse=True)
             ],
             "cleanup_candidates": {"count": cleanup_count, "size_bytes": cleanup_bytes,
-                                   "older_than_days": _TEMP_CLEANUP_AGE_DAYS},
+                                   "older_than_days": TEMP_CLEANUP_AGE_DAYS},
         },
         "music_library": {"count": len(music_files), "size_bytes": sum(path.stat().st_size for path in music_files),
                           "assigned_chapters": sum(music_usage.values())},
@@ -103,15 +103,15 @@ def cleanup_stale_temp(actor: User = Depends(require_csrf), db: Session = Depend
         .where(Project.deleted_at.is_(None))
     ).all()
     active_project_ids = set(db.scalars(
-        select(Task.project_id).where(Task.status.in_(_ACTIVE_TASK_STATUSES)).distinct()
+        select(Task.project_id).where(Task.status.in_(ACTIVE_TASK_STATUSES)).distinct()
     ).all())
-    cutoff = datetime.now().timestamp() - _TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
+    cutoff = datetime.now().timestamp() - TEMP_CLEANUP_AGE_DAYS * 24 * 60 * 60
     removed_count = removed_bytes = skipped = 0
     root_resolved = root.resolve()
     for project, username in projects:
         if project.id in active_project_ids:
             continue
-        project_path = _project_path(root, username, project.id)
+        project_path = project_storage_path(root, username, project.id)
         if project_path is None:
             continue
         temp_dir = project_path / "00_temp"
@@ -128,7 +128,7 @@ def cleanup_stale_temp(actor: User = Depends(require_csrf), db: Session = Depend
                 skipped += 1
     db.add(AuditLog(actor_user_id=actor.id, action="admin.temp_cleanup", target_type="storage",
                     target_id=str(root), metadata_json={"files": removed_count, "bytes": removed_bytes,
-                                                       "age_days": _TEMP_CLEANUP_AGE_DAYS, "skipped": skipped}))
+                                                       "age_days": TEMP_CLEANUP_AGE_DAYS, "skipped": skipped}))
     db.commit()
     return {"deleted_count": removed_count, "deleted_bytes": removed_bytes, "skipped_count": skipped,
-            "older_than_days": _TEMP_CLEANUP_AGE_DAYS}
+            "older_than_days": TEMP_CLEANUP_AGE_DAYS}

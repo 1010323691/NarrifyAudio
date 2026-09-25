@@ -9,8 +9,8 @@ transport: the source called an OpenAI-compatible endpoint via the ``openai`` SD
 which the backend does not need as a dependency, so the request is issued with
 stdlib ``urllib`` in :mod:`backend.engines.llm_transport`.
 
-``generate`` is a Task worker (first arg is a :class:`TaskHandle`); it streams
-per-chunk progress and logs over SSE and honours cooperative cancel between chunks.
+``generate`` runs behind the durable engine context; it streams
+per-chunk durable progress and log events and honours cooperative cancel between chunks.
 """
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ from pathlib import Path
 
 from ..core.config import GenerationConfig, LLMConfig, PromptsConfig
 from ..core.concurrency import gate
-from ..core.paths import get_layout
-from ..core.tasks import TaskCancelled
+from ..core.paths import get_or_prepare_layout
+from ..core.task_control import TaskCancelled
 from .book import decode_buffer
 from .llm_transport import HTTP_TIMEOUT, LLMHTTPError, request_chat_completion as _llm_chat_completion
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
@@ -2600,7 +2600,7 @@ def _spot_history_path(path_override: Path | None = None) -> Path | None:
     """
     if path_override is not None:
         return path_override
-    config = get_layout().config
+    config = get_or_prepare_layout().config
     if config is None:
         return None
     return config / SPOT_CHECK_HISTORY_NAME
@@ -3039,7 +3039,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     """Task worker: turn one ``02_split_text`` file into its ``{speaker, text, instruct}``
     JSON entries.
 
-    Contract: first arg is the :class:`TaskHandle``; the second is the absolute path of
+    Contract: first arg is the durable task context`; the second is the absolute path of
     the source ``.txt``. This is the per-file, concurrent form of the old text-paste
     worker: each file is its own independent task with its own LLM requests, status,
     and output. Concurrency is bounded by the shared gate (``core.concurrency``) —
@@ -3355,7 +3355,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             long_split = 0
 
         out_name = f"{src.stem}.json"
-        out_path = output_path or ((get_layout().parsed_json / out_name) if get_layout().parsed_json is not None else None)
+        out_path = output_path or ((get_or_prepare_layout().parsed_json / out_name) if get_or_prepare_layout().parsed_json is not None else None)
         if out_path is None:
             raise RuntimeError("未设置工作空间，无法写入解析结果")
         out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,7 @@ import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import { listDir } from '@/api/files'
-import { batchStatusFiles, resetBatch, runBatch, ttsStatus } from '@/api/tts'
+import { batchStatusFiles, submitBatchReset, runBatch, ttsStatus } from '@/api/tts'
 import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import type { BatchFileStatus, BatchResult, FileItem, TTSStatus } from '@/types'
 
@@ -36,7 +36,7 @@ import {
 } from 'lucide-vue-next'
 
 const router = useRouter()
-const project = usePipelineStateStore()
+const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -54,7 +54,7 @@ const statuses = ref<BatchFileStatus[]>([])
 const filesLoaded = ref(false)
 const filesLoading = ref(false)
 
-// The same filter DirPicker applied: plain .json files, excluding the two-checks
+// The same filter WorkspaceEntryPicker applied: plain .json files, excluding the two-checks
 // shared product (<stem>_checked.json).
 function matches(i: FileItem): boolean {
   if (i.is_dir) return false
@@ -124,20 +124,20 @@ async function refreshRows() {
 
 // ---------------------------------------------------------------------------
 // Selection: a local multi-select map (keyed by file name). The shared single
-// value project.activeScript (角色配音 reads it) mirrors the FIRST selected file —
+// value pipeline.activeScript (角色配音 reads it) mirrors the FIRST selected file —
 // written only on user interaction, so a multi-select is never collapsed by its
 // own sync; an external change (角色配音 picking a file) collapses the selection
 // to that file (the previous cross-page replace semantics).
 // ---------------------------------------------------------------------------
 const selected = reactive<Record<string, boolean>>({})
-let lastSynced = project.activeScript
-if (project.activeScript) selected[project.activeScript] = true
+let lastSynced = pipeline.activeScript
+if (pipeline.activeScript) selected[pipeline.activeScript] = true
 
 const selectedNames = computed(() => fileNames.value.filter((n) => selected[n]))
 
 function syncScript() {
   const first = selectedNames.value[0] ?? ''
-  project.activeScript = first
+  pipeline.activeScript = first
   lastSynced = first
 }
 
@@ -148,7 +148,7 @@ function onRowChange(name: string, ev: Event) {
 }
 
 watch(
-  () => project.activeScript,
+  () => pipeline.activeScript,
   (v) => {
     if (v === lastSynced) return // our own sync — ignore
     for (const k of Object.keys(selected)) delete selected[k]
@@ -293,7 +293,7 @@ async function doRun() {
   }
 }
 
-// 「重新合成」: step 1 deletes the selected files' synthesis packages
+// 「重新合成」: step 1 queues deletion of the selected files' synthesis packages
 // (05_audio_chunk/<包>/ — the finished mp3s + manifest); step 2 then sends the EXACT same
 // request as 一键音频合成 — with nothing left on disk the ordinary resume run re-does every
 // segment (loads the model again). There is no separate force-re-synthesis route on the
@@ -308,12 +308,10 @@ async function doRunAll() {
   result.value = null
   try {
     // Clear the completion state (the package folders) first …
-    const reset = await resetBatch(names)
-    if ('task_id' in reset) {
-      const resetTask = await waitForTask(reset.task_id)
-      if (resetTask.status !== 'succeeded') {
-        throw new Error(resetTask.error_message || '重置合成包失败')
-      }
+    const reset = await submitBatchReset(names)
+    const resetTask = await waitForTask(reset.task_id)
+    if (resetTask.status !== 'succeeded') {
+      throw new Error(resetTask.error_message || '重置合成包失败')
     }
     // … then the identical one-click run: default resume, nothing done → everything re-done.
     const { task_id } = await runBatch({ scripts: names })
@@ -341,7 +339,6 @@ watch(
       taskId.value = null
       busy.value = false
       stopStatusPolling()
-      project.recordBatch(result.value)
       toast({
         title: '音频合成完成',
         variant: result.value?.failed.length ? 'default' : 'success',
@@ -370,9 +367,9 @@ watch(
       <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
         音频合成
         <StatusPill
-          :label="status?.implemented ? '可用' : '引擎未就绪'"
-          :tone="status?.implemented ? 'positive' : 'neutral'"
-          :aria-label="status?.implemented ? '引擎可用' : '引擎未就绪'"
+          :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
+          :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
+          :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
         />
       </h1>
       <p class="mt-1 text-muted-foreground">
@@ -382,7 +379,7 @@ watch(
 
     <ProjectGateAlert />
 
-    <Alert v-if="status && !status.implemented" variant="destructive">
+    <Alert v-if="status && !(status.ready ?? status.implemented)" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
       {{ status.message }}
     </Alert>
