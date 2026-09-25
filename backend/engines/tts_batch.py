@@ -29,34 +29,25 @@ from ..core.paths import get_or_prepare_layout, resolve_parsed_json
 from ..core.task_control import TaskCancelled
 from .tts import DEFAULT_LANGUAGE, WorkerWatchdogTimeout, resolve_engine, run_tts_subprocess
 from .tts_manifest import (
-    _canonical_voice_path,
     voice_params,
     voice_signature,
     segment_voice_params,
     segment_voice_signatures,
-    _voice_signature_matches,
-    _voice_params_match,
-    _resolved_existing_path,
-    _archive_voice_version,
-    _restore_cached_voice_versions,
-    _merged_output_paths,
-    _defer_or_delete,
-    _migrate_voice_config,
+    restore_cached_voice_versions,
+    merged_output_paths,
+    defer_or_delete,
+    migrate_voice_config,
     invalidate_speaker_outputs,
     load_manifest,
     package_for,
-    _migrate_legacy_voice_used,
     read_manifest,
     migrate_manifest,
-    _load_manifest,
     is_done,
     done_indices,
     plan_to_synthesize,
-    _store_path,
-    _preserve_voice_versions,
     build_manifest,
     count_completion,
-    _write_manifest_file,
+    write_manifest_file,
 )
 
 # 一键合成「批内段数」上限的上下界（前端输入与后端钳制共用）。这只是上限：worker 运行时按
@@ -610,7 +601,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             handle.log(f"voice_config.json 无法解析（{e}）——相关角色将失败。", "WARNING")
         # Lazy migration of legacy absolute ref_audio values (the worker resolves the
         # relative form against --workspace, so the file must be rewritten before spawn).
-        _migrate_voice_config(handle, vc_path, ws, voice_config)
+        migrate_voice_config(handle, vc_path, ws, voice_config)
 
     out_dir = layout.audio_chunk / package_for(src)
     manifest_path = out_dir / "manifest.json"
@@ -628,7 +619,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     )
     all_indices = {s["index"] for s in all_segments}
     old_entries = migrate_manifest(out_dir, handle)
-    _restore_cached_voice_versions(
+    restore_cached_voice_versions(
         old_entries, voice_params_by_index, voice_signatures, ws,
     )
     done_set = done_indices(
@@ -647,8 +638,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     })
     if stale_speakers:
         handle.log(f"检测到角色声音已变更，将重新合成这些角色的全部台词：{'、'.join(stale_speakers)}", "WARNING")
-        for output in _merged_output_paths(layout, out_dir.name):
-            _defer_or_delete(handle, output)
+        for output in merged_output_paths(layout, out_dir.name):
+            defer_or_delete(handle, output)
     # Stable filename width: the digits this file's FULL segment count needs (not the
     # pending subset) — a resume / watchdog restart re-derives the same width, so the
     # package never ends up with mixed 000x / 0000x names.
@@ -667,7 +658,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     # without spawning the engine (no wasted model load).
     if run_total == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
-        _write_manifest_file(manifest_path, build_manifest(
+        write_manifest_file(manifest_path, build_manifest(
             all_segments, old_entries, {}, root=ws,
             expected_voice_signatures=voice_signatures,
             expected_voice_params=voice_params_by_index,
@@ -767,7 +758,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         now = time.monotonic()
         if not force and now - last_flush[0] < MANIFEST_FLUSH_INTERVAL:
             return
-        _write_manifest_file(manifest_path, build_manifest(
+        write_manifest_file(manifest_path, build_manifest(
             all_segments, old_entries, seg_results, root=ws,
             expected_voice_signatures=voice_signatures,
             expected_voice_params=voice_params_by_index,
@@ -1006,7 +997,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 voice_config = loaded
         except Exception as e:  # noqa: BLE001
             handle.log(f"voice_config.json 无法解析（{e}）——相关角色将失败。", "WARNING")
-        _migrate_voice_config(handle, vc_path, ws, voice_config)
+        migrate_voice_config(handle, vc_path, ws, voice_config)
 
     # -- per-file prep (request order): fatal files are isolated, the rest join the pool --
     files: list[_PooledFile] = []
@@ -1043,7 +1034,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             )
             f.old_entries = migrate_manifest(f.out_dir, handle)
             all_indices = {s["index"] for s in f.all_segments}
-            _restore_cached_voice_versions(
+            restore_cached_voice_versions(
                 f.old_entries, f.voice_params, f.voice_signatures, ws,
             )
             done_set = done_indices(
@@ -1060,8 +1051,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                     f"检测到 {name} 中角色声音已变更，将重新合成这些角色的全部台词：{'、'.join(stale_speakers)}",
                     "WARNING",
                 )
-                for output in _merged_output_paths(layout, f.pkg):
-                    _defer_or_delete(handle, output)
+                for output in merged_output_paths(layout, f.pkg):
+                    defer_or_delete(handle, output)
             f.pending = sorted(plan_to_synthesize(all_indices, done_set))
             allocate_directory = getattr(handle, "allocate_workspace_directory", None)
             if f.pending and callable(allocate_directory):
@@ -1080,7 +1071,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 # Nothing left (all done, or an empty script) — rewrite the engine-owned
                 # manifest and contribute no rows to the pool (no wasted model work).
                 f.out_dir.mkdir(parents=True, exist_ok=True)
-                _write_manifest_file(f.manifest_path,
+                write_manifest_file(f.manifest_path,
                                      build_manifest(
                                          f.all_segments, f.old_entries, {}, root=ws,
                                          expected_voice_signatures=f.voice_signatures,
@@ -1152,7 +1143,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             if not force and not f.dirty:
                 continue
             f.dirty = False
-            _write_manifest_file(f.manifest_path,
+            write_manifest_file(f.manifest_path,
                                  build_manifest(
                                      f.all_segments, f.old_entries, f.seg_results, root=ws,
                                      expected_voice_signatures=f.voice_signatures,

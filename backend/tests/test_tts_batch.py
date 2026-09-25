@@ -164,7 +164,7 @@ def test_manifest_writer_uses_workspace_publication_handle(tmp_path):
 
     path = tmp_path / "manifest.json"
     manifest = [{"index": 0, "ok": True}]
-    tts_batch._write_manifest_file(path, manifest, _JournalHandle())
+    tts_batch.write_manifest_file(path, manifest, _JournalHandle())
 
     assert not path.exists()
     assert writes[0][0] == path
@@ -1091,7 +1091,7 @@ def test_synthesize_manifest_flush_is_throttled(workspace, monkeypatch):
         for i in (0, 1):  # both lines land within the 2s throttle window
             on_line(f"[segment] {i} ok {os.path.join(out, f'{i + 1:04d}.mp3')}")
 
-    real_write = tts_batch._write_manifest_file  # capture before the patch below
+    real_write = tts_batch.write_manifest_file  # capture before the patch below
 
     def counting(path, manifest, handle=None):
         writes.append((len(manifest), sum(e["ok"] for e in manifest)))
@@ -1099,7 +1099,7 @@ def test_synthesize_manifest_flush_is_throttled(workspace, monkeypatch):
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
     monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
-    monkeypatch.setattr(tts_batch, "_write_manifest_file", counting)
+    monkeypatch.setattr(tts_batch, "write_manifest_file", counting)
     tts_batch.synthesize(_Handle(), None, "s.json", None)
 
     # The manifest always describes every segment (done + pending), so each write carries 2
@@ -2375,7 +2375,7 @@ def test_safe_package_name_snapshot():
     differences from ``safe_display_name`` (no 180-char cap, dots preserved)."""
     from pathlib import Path
 
-    from backend.engines.tts_manifest import _merged_output_paths, _safe_package_name
+    from backend.engines.tts_manifest import merged_output_paths, _safe_package_name
 
     cases = {
         "my book": "my book",
@@ -2393,4 +2393,4 @@ def test_safe_package_name_snapshot():
     class _Layout:
         audio_merge = Path("/ws/06_audio_merge")
 
-    assert [p.name for p in _merged_output_paths(_Layout(), 'a/b:c')] == ["a_b_c.mp3", "a_b_c.wav"]
+    assert [p.name for p in merged_output_paths(_Layout(), 'a/b:c')] == ["a_b_c.mp3", "a_b_c.wav"]

@@ -165,7 +165,7 @@ def _archive_voice_version(entry: dict, workspace, handle=None) -> bool:
     return True
 
 
-def _restore_cached_voice_versions(entries: dict, expected_voice_params: dict | None,
+def restore_cached_voice_versions(entries: dict, expected_voice_params: dict | None,
                                    expected_voice_signatures: dict | None,
                                    workspace) -> int:
     """Restore a previously synthesized voice version into the active manifest entry."""
@@ -219,13 +219,13 @@ def _safe_package_name(name: str) -> str:
     return safe or _DEFAULT_PACKAGE_NAME
 
 
-def _merged_output_paths(layout, package: str):
+def merged_output_paths(layout, package: str):
     """Generated merge outputs for a package (only exact, derived file names)."""
     safe = _safe_package_name(package)
     return [layout.audio_merge / f"{safe}.mp3", layout.audio_merge / f"{safe}.wav"]
 
 
-def _defer_or_delete(handle, path: Path) -> None:
+def defer_or_delete(handle, path: Path) -> None:
     defer_delete = getattr(handle, "defer_workspace_delete", None)
     if callable(defer_delete):
         defer_delete(path)
@@ -236,7 +236,7 @@ def _defer_or_delete(handle, path: Path) -> None:
             pass
 
 
-def _migrate_voice_config(handle, path: Path, workspace, voice_config: dict) -> None:
+def migrate_voice_config(handle, path: Path, workspace, voice_config: dict) -> None:
     changed = pathio.migrate_entries(voice_config.values(), workspace, ("ref_audio",))
     if not changed:
         return
@@ -287,7 +287,7 @@ def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
                 )
             else:
                 pathio.rewrite_json_file(manifest_path, data)
-            outputs = _merged_output_paths(layout, manifest_path.parent.name)
+            outputs = merged_output_paths(layout, manifest_path.parent.name)
             if layout.bgm is not None:
                 safe = _safe_package_name(manifest_path.parent.name)
                 outputs.append(layout.bgm / f"{safe}.mp3")
@@ -404,7 +404,7 @@ def _load_manifest(out_dir, *, persist_migration: bool, handle=None) -> dict:
                     speaker = entry.get("speaker", "")
                     expected_params[index] = voice_params(speaker, voice_config)
                     expected_signatures[index] = voice_signature(speaker, voice_config)
-    restored = _restore_cached_voice_versions(
+    restored = restore_cached_voice_versions(
         by_index, expected_params or None, expected_signatures or None, layout.workspace,
     )
     if persist_migration and (n or voice_migrated or restored):
@@ -638,7 +638,7 @@ def count_completion(all_segments, manifest_by_index, out_dir=None,
     return {"total": total, "completed": completed, "remaining": total - completed}
 
 
-def _write_manifest_file(manifest_path, manifest, handle=None) -> None:
+def write_manifest_file(manifest_path, manifest, handle=None) -> None:
     """Write the (list) manifest to disk (UTF-8, pretty-printed; JSON tolerates the CRLF)."""
     encoded = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
     stage_file = getattr(handle, "publish_workspace_bytes", None) or getattr(handle, "stage_workspace_file", None)
