@@ -39,7 +39,7 @@ import {
 
 const router = useRouter()
 const settings = useSettingsStore()
-const project = usePipelineStateStore()
+const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -313,7 +313,7 @@ watch(
         const file = (t.result?.file as string) || ''
         if (file.endsWith('.mp3')) {
           mergedNames.value[pkg] = file
-          project.recordMerge(t.result as MergeResult)
+          pipeline.recordMerge(t.result as MergeResult)
           toast({ title: '音频合并完成', variant: 'success', description: `已生成 ${file}` })
         } else {
           // 编码失败兜底：WAV 是唯一产物，行回落「已就绪」，重合并（-y 覆盖）自愈。
@@ -481,7 +481,7 @@ onActivated(() => {
             <ArrowLeft class="h-4 w-4" />返回音频合成
           </Button>
           <Button
-            v-if="project.mergeResult && settings.config?.ui.show_audio_split"
+            v-if="pipeline.mergeResult && settings.config?.ui.show_audio_split"
             size="sm"
             @click="router.push('/audio')"
           >
