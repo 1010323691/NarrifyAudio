@@ -887,14 +887,13 @@ onActivated(() => {
 
 <template>
   <div class="space-y-4">
-    <div>
-      <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
-        <Disc3 class="h-6 w-6" />音乐库
-      </h1>
-      <p class="mt-1 text-muted-foreground">
-        管理背景音乐曲目、标签和文件夹。
-      </p>
-    </div>
+    <header class="page-header mb-5">
+      <div>
+        <p class="eyebrow">Music Library</p>
+        <h1 class="page-title flex items-center gap-3"><Disc3 class="h-6 w-6" />音乐库</h1>
+        <p class="page-description">管理背景音乐曲目、标签和文件夹。</p>
+      </div>
+    </header>
 
     <Card
       :class="dragOver ? 'ring-2 ring-primary' : ''"

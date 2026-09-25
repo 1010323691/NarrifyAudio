@@ -322,14 +322,13 @@ async function cancelAll() {
 
 <template>
   <div class="space-y-4">
-    <div>
-      <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
-        <ScanText class="h-6 w-6" />文本解析
-      </h1>
-      <p class="mt-1 text-muted-foreground">
-        选择分册文本，生成角色和台词数据。
-      </p>
-    </div>
+    <header class="page-header mb-5">
+      <div>
+        <p class="eyebrow">Pipeline · LLM</p>
+        <h1 class="page-title flex items-center gap-3"><ScanText class="h-6 w-6" />文本解析</h1>
+        <p class="page-description">选择分册文本，生成角色和台词数据。</p>
+      </div>
+    </header>
 
     <ProjectGateAlert />
 

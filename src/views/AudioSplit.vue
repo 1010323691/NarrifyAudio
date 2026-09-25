@@ -442,12 +442,13 @@ function download(path: string) {
 
 <template>
   <div class="space-y-4">
-    <div>
-      <h1 class="text-2xl font-bold tracking-tight">音频分集</h1>
-      <p class="text-muted-foreground mt-1">
-        将合并后的有声书切分为多集，可按停顿对齐切点。
-      </p>
-    </div>
+    <header class="page-header mb-5">
+      <div>
+        <p class="eyebrow">Pipeline · Split</p>
+        <h1 class="page-title">音频分集</h1>
+        <p class="page-description">将合并后的有声书切分为多集，可按停顿对齐切点。</p>
+      </div>
+    </header>
 
     <ProjectGateAlert />
 

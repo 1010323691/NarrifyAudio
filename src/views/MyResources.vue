@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw, Search, Trash2 } from 'lucide-vue-next'
+import { Music4, RefreshCw, Search, Trash2 } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import { useProjectStore } from '@/stores/project'
@@ -192,7 +192,7 @@ onMounted(load)
       <Card v-if="loading" class="p-6 text-center text-sm text-muted-foreground">正在读取项目文件…</Card>
       <Card v-else-if="recentOutputs.length" class="px-3.5">
         <div v-for="file in recentOutputs" :key="`${file.projectName}-${file.relative_path}`" class="flex items-center gap-3 border-b py-2.5 last:border-0">
-          <div class="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-lg bg-primary/10 text-lg text-primary"><span class="sr-only">音频文件</span>♫</div>
+          <div class="grid h-[34px] w-[34px] shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><span class="sr-only">音频文件</span><Music4 class="h-4 w-4" aria-hidden="true" /></div>
           <div class="min-w-0 flex-1">
             <strong class="block truncate text-xs">{{ file.name }}</strong>
             <small class="mt-0.5 block text-[10px] text-muted-foreground">{{ file.projectName }} · {{ MODULE_LABELS[file.module] || '其他文件' }}</small>

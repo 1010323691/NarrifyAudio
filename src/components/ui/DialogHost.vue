@@ -78,7 +78,7 @@ onBeforeUnmount(() => {
   >
     <section
       ref="panel"
-      class="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-2xl focus:outline-none sm:p-6"
+      class="glass-strong w-full max-w-md rounded-2xl p-5 focus:outline-none sm:p-6"
       :role="dialogState.current.kind === 'prompt' ? 'dialog' : 'alertdialog'"
       aria-modal="true"
       :aria-labelledby="`app-dialog-title-${dialogState.current.id}`"

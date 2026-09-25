@@ -762,6 +762,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
 <template>
   <div class="bgm-page space-y-5">
     <header class="page-header">
+      <p class="eyebrow">Pipeline · BGM</p>
       <h1 class="page-title flex items-center gap-3">
         <Music4 class="h-7 w-7 text-primary" aria-hidden="true" />背景音乐
       </h1>

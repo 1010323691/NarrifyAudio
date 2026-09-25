@@ -115,7 +115,7 @@ onBeforeUnmount(() => {
     <button
       type="button"
       :class="cn(
-        'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-input bg-background shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-input bg-white/70 shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-card/60',
         playing && 'border-primary/40 bg-primary/10 text-primary',
       )"
       :title="playing ? '暂停' : '播放'"

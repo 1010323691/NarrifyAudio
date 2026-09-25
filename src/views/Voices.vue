@@ -516,19 +516,20 @@ watch(
   <!-- -mx-16：角色表新增「选择音色」按钮后 1152px 列宽不够——本页整体向两侧各借 64px（≈一个按钮宽），
        只借 MainLayout max-w-6xl 居中留出的空白，不改共享布局，其余页面不受影响。 -->
   <div class="space-y-6">
-    <div>
-      <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
-        角色配音
-        <StatusPill
-          :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
-          :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
-          :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
-        />
-      </h1>
-      <p class="mt-1 text-muted-foreground">
-        为角色生成候选音色，并选择每个角色使用的最终音色。
-      </p>
-    </div>
+    <header class="page-header mb-5">
+      <div>
+        <p class="eyebrow">Pipeline · Voices</p>
+        <h1 class="page-title flex items-center gap-3">
+          角色配音
+          <StatusPill
+            :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
+            :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
+            :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
+          />
+        </h1>
+        <p class="page-description">为角色生成候选音色，并选择每个角色使用的最终音色。</p>
+      </div>
+    </header>
 
     <ProjectGateAlert />
 

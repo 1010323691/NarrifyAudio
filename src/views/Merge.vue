@@ -321,19 +321,20 @@ onActivated(() => {
 
 <template>
   <div class="space-y-4">
-    <div>
-      <h1 class="flex items-center gap-3 text-2xl font-bold tracking-tight">
-        <Combine class="h-6 w-6" />音频合并
-        <StatusPill
-          :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
-          :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
-          :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
-        />
-      </h1>
-      <p class="mt-1 text-muted-foreground">
-        将已合成的音频段合并为完整有声书。
-      </p>
-    </div>
+    <header class="page-header mb-5">
+      <div>
+        <p class="eyebrow">Pipeline · Merge</p>
+        <h1 class="page-title flex items-center gap-3">
+          <Combine class="h-6 w-6" />音频合并
+          <StatusPill
+            :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
+            :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
+            :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
+          />
+        </h1>
+        <p class="page-description">将已合成的音频段合并为完整有声书。</p>
+      </div>
+    </header>
 
     <ProjectGateAlert />
 

@@ -13,7 +13,7 @@ function pct(): string {
 <template>
   <div :class="cn('relative h-2.5 w-full overflow-hidden rounded-full bg-secondary', props.class)">
     <div
-      :class="cn('h-full rounded-full bg-primary transition-all', props.indicatorClass)"
+      :class="cn('h-full rounded-full bg-gradient-to-r from-indigo-400 to-primary transition-all', props.indicatorClass)"
       :style="{ width: pct() }"
       role="progressbar"
       :aria-valuenow="Math.round((props.value ?? 0) * 100)"

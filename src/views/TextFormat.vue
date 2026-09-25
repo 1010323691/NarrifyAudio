@@ -413,12 +413,13 @@ function download(p: string) {
 
 <template>
   <div class="space-y-4">
-    <div>
-      <h1 class="text-2xl font-bold tracking-tight">排版与分册</h1>
-      <p class="text-muted-foreground mt-1">
-        整理原文、识别章节并拆分为分册文本。
-      </p>
-    </div>
+    <header class="page-header mb-5">
+      <div>
+        <p class="eyebrow">Pipeline · Text</p>
+        <h1 class="page-title">排版与分册</h1>
+        <p class="page-description">整理原文、识别章节并拆分为分册文本。</p>
+      </div>
+    </header>
 
     <ProjectGateAlert />
 
