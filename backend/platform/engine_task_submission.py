@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..services.tasks import TaskSubmissionError, submit_task_record, task_dict
+from .task_submission import TaskSubmissionError, submit_task_record, task_dict
 from .deps import AuthContext
 from .project_context import active_project
 from .models import Task

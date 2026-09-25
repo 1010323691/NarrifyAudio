@@ -17,7 +17,7 @@ from backend.platform.task_worker import (
     recover_database_tasks,
     _write_outcome,
 )
-from backend.services.tasks import submit_task_record
+from backend.platform.task_submission import submit_task_record
 
 
 @pytest.fixture

@@ -6,13 +6,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..platform.models import User
-from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, owned_task
-from ..services.tasks import (
+from ..platform.task_submission import (
     TaskSubmissionError,
-    cancel_task_record,
-    requeue_task_record,
     submit_task_record,
     task_dict,
+)
+from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, owned_task
+from ..services.tasks import (
+    cancel_task_record,
+    requeue_task_record,
 )
 
 
