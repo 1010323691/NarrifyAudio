@@ -17,7 +17,7 @@ interface ResourceProject {
   error?: string
 }
 
-const workspace = useProjectStore()
+const project = useProjectStore()
 const { push: toast } = useToast()
 const records = ref<ResourceProject[]>([])
 const loading = ref(true)
@@ -72,13 +72,13 @@ async function load() {
   loading.value = records.value.length === 0
   refreshing.value = true
   pageError.value = ''
-  await workspace.refresh()
-  const results = await Promise.all(workspace.projects.map(async (project): Promise<ResourceProject> => {
+  await project.refresh()
+  const results = await Promise.all(project.projects.map(async (item): Promise<ResourceProject> => {
     try {
-      return { id: project.id, name: project.name, summary: await getProjectSummary(project.id), scope: 'workspace' }
+      return { id: item.id, name: item.name, summary: await getProjectSummary(item.id), scope: 'workspace' }
     } catch {
       try {
-        const files = await listProjectFiles(project.id)
+        const files = await listProjectFiles(item.id)
         const summaryFiles: ProjectFileSummary[] = files.map((file) => ({
           name: file.name,
           relative_path: file.name,
@@ -95,11 +95,11 @@ async function load() {
         }
         const audio = summaryFiles.filter((file) => /\.(mp3|wav|flac|m4a|aac|ogg|opus|zip)$/i.test(file.name))
         return {
-          id: project.id,
-          name: project.name,
+          id: item.id,
+          name: item.name,
           scope: 'registered',
           summary: {
-            project_id: project.id, name: project.name, updated_at: project.updated_at,
+            project_id: item.id, name: item.name, updated_at: item.updated_at,
             file_count: summaryFiles.length, size_bytes: summaryFiles.reduce((sum, file) => sum + file.size_bytes, 0), split_volume_count: 0,
           categories: Array.from(totals, ([key, value]) => ({ key, label: MODULE_LABELS[key] || '其他文件', ...value })),
             recent_files: summaryFiles, recent_outputs: audio,
@@ -109,11 +109,11 @@ async function load() {
         }
       } catch (cause: any) {
         return {
-          id: project.id,
-          name: project.name,
+          id: item.id,
+          name: item.name,
           scope: 'registered',
           summary: {
-            project_id: project.id, name: project.name, updated_at: project.updated_at,
+            project_id: item.id, name: item.name, updated_at: item.updated_at,
             file_count: 0, size_bytes: 0, split_volume_count: 0, categories: [], recent_files: [], recent_outputs: [],
             cleanup_candidates: { count: 0, size_bytes: 0, older_than_days: 7, blocked_by_active_tasks: false },
           },
@@ -123,7 +123,7 @@ async function load() {
     }
   }))
   records.value = results
-  if (!workspace.projects.length && workspace.error) pageError.value = workspace.error
+  if (!project.projects.length && project.error) pageError.value = project.error
   refreshing.value = false
   loading.value = false
 }
@@ -157,7 +157,7 @@ onMounted(load)
 
     <div v-if="pageError" class="resource-alert" role="alert">{{ pageError }} <Button variant="outline" size="sm" @click="load">重试</Button></div>
     <div class="resource-stats">
-      <Card><span>我的项目</span><strong>{{ workspace.projects.length }}</strong></Card>
+      <Card><span>我的项目</span><strong>{{ project.projects.length }}</strong></Card>
       <Card><span>文件数量</span><strong>{{ loading ? '…' : totalFiles }}</strong></Card>
       <Card><span>存储占用</span><strong>{{ loading ? '…' : formatBytes(totalBytes) }}</strong><small>{{ allScanned ? '已扫描项目工作空间' : '部分后端仅提供已登记文件统计' }}</small></Card>
     </div>

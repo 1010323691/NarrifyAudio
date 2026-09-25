@@ -13,7 +13,7 @@ import { taskTypeLabel } from '@/utils/taskLabels'
 
 const route = useRoute()
 const router = useRouter()
-const workspace = useProjectStore()
+const project = useProjectStore()
 const settings = useSettingsStore()
 const projectId = computed(() => String(route.params.projectId || ''))
 const loading = ref(true)
@@ -54,12 +54,12 @@ const nextStage = computed(() => STAGES.value.find((stage) => ['待开始', '需
 const recentFailures = computed(() => tasks.value.filter((task) => ['failed', 'timeout'].includes(task.status)).slice(0, 3))
 
 async function load() {
-  loading.value = !workspace.current
+  loading.value = !project.current
   refreshing.value = true
   error.value = ''
   try {
-    if (workspace.activeProjectId !== projectId.value) await workspace.select(projectId.value)
-    else if (!workspace.loaded) await workspace.refresh()
+    if (project.activeProjectId !== projectId.value) await project.select(projectId.value)
+    else if (!project.loaded) await project.refresh()
     const [taskResult, ...fileResults] = await Promise.allSettled([
       listDurableTasks(),
       ...STAGES.value.map((stage) => listDir(stage.dir, true)),
@@ -100,7 +100,7 @@ onMounted(load)
       <div>
         <RouterLink class="back-link" to="/dashboard"><ArrowLeft class="h-3.5 w-3.5" />所有项目</RouterLink>
         <p class="eyebrow">项目工作台</p>
-        <h1>{{ workspace.activeProjectName || workspace.activeProject?.name || '项目' }}</h1>
+        <h1>{{ project.activeProjectName || project.activeProject?.name || '项目' }}</h1>
         <p class="muted">查看进度，继续下一步制作。</p>
       </div>
       <div class="project-overview__actions">

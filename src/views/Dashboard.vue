@@ -13,7 +13,7 @@ import { deleteProject, getProjectSummary, type ProjectStorageSummary } from '@/
 import type { ProjectSummary } from '@/api/project'
 
 const router = useRouter()
-const workspace = useProjectStore()
+const projectStore = useProjectStore()
 const settings = useSettingsStore()
 const tasks = ref<DurableTask[]>([])
 const summaries = ref<Record<string, ProjectStorageSummary>>({})
@@ -33,7 +33,7 @@ const STAGE_KEYS = ['02_split_text', '03_parsed_json', '04_voice_profiles', '05_
 const visibleStageKeys = computed(() => STAGE_KEYS.filter((key) => key !== '07_output' || settings.config?.ui.show_audio_split))
 const stageCount = computed(() => visibleStageKeys.value.length)
 
-const projects = computed(() => [...workspace.projects].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)))
+const projects = computed(() => [...projectStore.projects].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)))
 
 function stagesWithOutput(summary?: ProjectStorageSummary) {
   if (!summary) return null
@@ -69,10 +69,10 @@ function updatedAt(value: string) {
 async function load() {
   refreshing.value = true
   pageError.value = ''
-  const active = await workspace.refresh()
+  const active = await projectStore.refresh()
   const tasksResult = await Promise.allSettled([listDurableTasks()])
   tasks.value = tasksResult[0].status === 'fulfilled' ? tasksResult[0].value : []
-  if (workspace.error) pageError.value = workspace.error
+  if (projectStore.error) pageError.value = projectStore.error
   else if (tasksResult[0].status === 'rejected') pageError.value = '最近任务暂时无法读取。'
   const visible = projects.value.slice(0, 12)
   const results = await Promise.allSettled(visible.map((project) => getProjectSummary(project.id)))
@@ -81,8 +81,8 @@ async function load() {
     if (result.status === 'fulfilled') next[visible[index].id] = result.value
   })
   summaries.value = next
-  if (active?.set && !workspace.projects.some((item) => item.id === active.project_id)) {
-    await workspace.refresh()
+  if (active?.set && !projectStore.projects.some((item) => item.id === active.project_id)) {
+    await projectStore.refresh()
   }
   refreshing.value = false
   loading.value = false
@@ -90,10 +90,10 @@ async function load() {
 
 async function createProject() {
   const projectName = name.value.trim()
-  if (!projectName || workspace.busy) return
+  if (!projectName || projectStore.busy) return
   openError.value = ''
   try {
-    const project = await workspace.create(projectName)
+    const project = await projectStore.create(projectName)
     await router.push(`/projects/${project.id}`)
   } catch (cause: any) {
     openError.value = cause?.message || '创建项目失败，请稍后重试。'
@@ -101,10 +101,10 @@ async function createProject() {
 }
 
 async function openProject(project: ProjectSummary) {
-  if (workspace.busy) return
+  if (projectStore.busy) return
   openError.value = ''
   try {
-    if (workspace.activeProjectId !== project.id) await workspace.select(project.id)
+    if (projectStore.activeProjectId !== project.id) await projectStore.select(project.id)
     await router.push(`/projects/${project.id}`)
   } catch (cause: any) {
     openError.value = cause?.message || '无法打开此项目。'
@@ -112,7 +112,7 @@ async function openProject(project: ProjectSummary) {
 }
 
 function requestDelete(project: ProjectSummary, trigger: HTMLElement) {
-  if (workspace.busy || deletingProjectId.value) return
+  if (projectStore.busy || deletingProjectId.value) return
   projectToDelete.value = project
   deleteError.value = ''
   deleteTrigger.value = trigger
@@ -151,7 +151,7 @@ function trapDeleteDialogFocus(event: KeyboardEvent) {
 
 async function confirmDeleteProject() {
   const project = projectToDelete.value
-  if (!project || workspace.busy || deletingProjectId.value) return
+  if (!project || projectStore.busy || deletingProjectId.value) return
   deletingProjectId.value = project.id
   deleteError.value = ''
   void nextTick(() => deleteDialog.value?.querySelector<HTMLElement>('[role="alertdialog"]')?.focus())
@@ -190,10 +190,10 @@ onMounted(load)
       <form class="project-create__form" @submit.prevent="createProject">
         <label for="project-name">项目名称</label>
         <input id="project-name" v-model="name" autofocus maxlength="160" placeholder="例如：夏日来信" />
-        <Button type="submit" :disabled="!name.trim() || workspace.busy">
-          <LoaderCircle v-if="workspace.busy" class="h-4 w-4 animate-spin" />
+        <Button type="submit" :disabled="!name.trim() || projectStore.busy">
+          <LoaderCircle v-if="projectStore.busy" class="h-4 w-4 animate-spin" />
           <Plus v-else class="h-4 w-4" />
-          {{ workspace.busy ? '正在创建…' : '创建并进入' }}
+          {{ projectStore.busy ? '正在创建…' : '创建并进入' }}
         </Button>
       </form>
       <p v-if="openError" class="project-error" role="alert">{{ openError }}</p>
@@ -213,17 +213,17 @@ onMounted(load)
         <Card v-for="n in 3" :key="n" class="project-skeleton"><div class="skeleton-line w-2/5" /><div class="skeleton-line w-4/5" /><div class="skeleton-line w-1/2" /></Card>
       </div>
       <div v-else-if="projects.length" class="project-grid">
-        <Card v-for="project in projects" :key="project.id" class="project-card" :class="workspace.activeProjectId === project.id ? 'project-card--active' : ''">
+        <Card v-for="project in projects" :key="project.id" class="project-card" :class="projectStore.activeProjectId === project.id ? 'project-card--active' : ''">
           <div class="project-card__head">
-            <button class="project-card__main" type="button" :disabled="workspace.busy || deletingProjectId === project.id" @click="openProject(project)">
+            <button class="project-card__main" type="button" :disabled="projectStore.busy || deletingProjectId === project.id" @click="openProject(project)">
               <div class="project-card__icon"><BookOpen class="h-5 w-5" /></div>
               <div class="project-card__copy">
-                <div class="project-card__title"><h3>{{ project.name }}</h3><StatusPill v-if="workspace.activeProjectId === project.id" label="当前项目" tone="positive" /></div>
+                <div class="project-card__title"><h3>{{ project.name }}</h3><StatusPill v-if="projectStore.activeProjectId === project.id" label="当前项目" tone="positive" /></div>
                 <p><Clock3 class="h-3.5 w-3.5" />{{ updatedAt(project.updated_at) }}</p>
               </div>
               <ArrowRight class="project-card__arrow h-4 w-4" />
             </button>
-            <Button variant="ghost" size="icon" class="project-card__delete" :disabled="workspace.busy || !!deletingProjectId" :aria-label="`删除项目 ${project.name}`" title="删除项目" @click="requestDelete(project, $event.currentTarget as HTMLElement)">
+            <Button variant="ghost" size="icon" class="project-card__delete" :disabled="projectStore.busy || !!deletingProjectId" :aria-label="`删除项目 ${project.name}`" title="删除项目" @click="requestDelete(project, $event.currentTarget as HTMLElement)">
               <LoaderCircle v-if="deletingProjectId === project.id" class="h-4 w-4 animate-spin" />
               <Trash2 v-else class="h-4 w-4" />
             </Button>

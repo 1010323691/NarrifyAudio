@@ -14,7 +14,7 @@ const route = useRoute()
 const app = useAppStore()
 const settings = useSettingsStore()
 const auth = useAuthStore()
-const workspace = useProjectStore()
+const project = useProjectStore()
 const accountMenuOpen = ref(false)
 const accountTrigger = ref<HTMLButtonElement | null>(null)
 const displayName = computed(() => auth.user?.display_name || auth.user?.username || '账户')
@@ -27,7 +27,7 @@ const themeOptions = [
 ] as const
 const activeTheme = computed(() => settings.config?.ui.theme || 'system')
 
-const isProjectContext = computed(() => workspace.hasActiveProject && (
+const isProjectContext = computed(() => project.hasActiveProject && (
   route.path.startsWith('/projects/') || ['/text', '/script', '/voices', '/batch', '/merge', '/audio', '/bgm'].includes(route.path)
 ))
 const USER_ITEMS = [
@@ -91,7 +91,7 @@ async function signOut() {
   }
 }
 
-onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.refresh() })
+onMounted(() => { if (!isAdminArea.value && !project.loaded) void project.refresh() })
 </script>
 
 <template>
@@ -121,9 +121,9 @@ onMounted(() => { if (!isAdminArea.value && !workspace.loaded) void workspace.re
         </RouterLink>
       </div>
 
-      <div v-if="workspace.hasActiveProject" class="app-nav__group app-nav__project-nav">
-        <RouterLink :to="`/projects/${workspace.activeProjectId}`" class="app-nav__label app-nav__project-title">
-          <FolderOpen class="h-3.5 w-3.5" /><span class="app-nav__project-name">{{ workspace.activeProjectName || '当前项目' }}</span>
+      <div v-if="project.hasActiveProject" class="app-nav__group app-nav__project-nav">
+        <RouterLink :to="`/projects/${project.activeProjectId}`" class="app-nav__label app-nav__project-title">
+          <FolderOpen class="h-3.5 w-3.5" /><span class="app-nav__project-name">{{ project.activeProjectName || '当前项目' }}</span>
         </RouterLink>
         <template v-if="isProjectContext">
           <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">

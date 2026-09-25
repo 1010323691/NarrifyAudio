@@ -39,13 +39,13 @@ import {
 const settings = useSettingsStore()
 const props = withDefaults(defineProps<{ adminOnly?: boolean; adminSection?: string }>(), { adminOnly: false })
 const auth = useAuthStore()
-const workspace = useProjectStore()
+const project = useProjectStore()
 const { push: toast } = useToast()
 
 const draft = ref<AppConfig | null>(null)
 const saving = ref(false)
 const section = ref<'account' | 'appearance' | 'text' | 'models' | 'audio'>('account')
-const projectSet = computed(() => workspace.hasActiveProject)
+const projectSet = computed(() => project.hasActiveProject)
 const settingsTabs = [['account','账号与项目'],['appearance','界面']] as const
 
 watch(() => props.adminSection, (value) => {
@@ -82,7 +82,7 @@ onMounted(async () => {
     }
     return
   }
-  if (!workspace.loaded) await workspace.refresh()
+  if (!project.loaded) await project.refresh()
   if (!settings.loaded) await settings.load()
   if (settings.config) draft.value = JSON.parse(JSON.stringify(settings.config))
 })
@@ -169,7 +169,7 @@ async function save() {
           <div><span>用户名</span><strong>{{ auth.user?.username || '—' }}</strong></div>
           <div><span>邮箱</span><strong>{{ auth.user?.email || '—' }}</strong></div>
           <div><span>账户类型</span><StatusPill :label="auth.user?.role === 'admin' ? '管理员账户' : '个人账户'" :tone="auth.user?.role === 'admin' ? 'neutral' : 'positive'" /></div>
-          <div class="settings-current-project"><div><span>当前项目</span><strong>{{ workspace.activeProjectName || '未选择项目' }}</strong></div><RouterLink to="/dashboard">管理项目<ArrowRight class="h-4 w-4" /></RouterLink></div>
+          <div class="settings-current-project"><div><span>当前项目</span><strong>{{ project.activeProjectName || '未选择项目' }}</strong></div><RouterLink to="/dashboard">管理项目<ArrowRight class="h-4 w-4" /></RouterLink></div>
           <p class="settings-help">制作参数保存在当前项目中。账户资料和套餐由账户服务管理。</p>
         </CardContent>
       </Card>

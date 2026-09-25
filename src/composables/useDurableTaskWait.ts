@@ -6,10 +6,10 @@ import { useProjectStore } from '@/stores/project'
 /** Stop page-owned polling when its project view or account is disposed. */
 export function useDurableTaskWait() {
   const auth = useAuthStore()
-  const workspace = useProjectStore()
+  const project = useProjectStore()
   let controller = new AbortController()
   watch(
-    [() => auth.user?.id ?? '', () => workspace.activeProjectId],
+    [() => auth.user?.id ?? '', () => project.activeProjectId],
     () => {
       controller.abort()
       controller = new AbortController()
