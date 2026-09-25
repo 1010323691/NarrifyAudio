@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from ..platform.config import settings
+from ..platform.platform_settings import settings
 from ..platform.database import SessionLocal
 from ..platform.models import User, UserQuotaAccount
 from ..platform.security import hash_password

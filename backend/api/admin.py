@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..platform.config import settings
+from ..platform.platform_settings import settings
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
@@ -22,7 +22,7 @@ from ..platform.system_config import update_feature_defaults_cache
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
 from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, task_worker_group
-from ..services.tasks import cancel_task_record, requeue_task_record
+from ..services.task_operations import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
 from ..services.admin_storage import (

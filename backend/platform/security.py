@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .config import settings
+from .platform_settings import settings
 from .models import User, UserSession, utcnow
 
 

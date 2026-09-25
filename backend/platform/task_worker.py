@@ -38,7 +38,7 @@ from ..engines.book import (
 from ..engines.text import format_text
 from ..engines import script as script_engine
 from ..engines import audio as audio_engine
-from .config import settings
+from .platform_settings import settings
 from .artifact_publication import PublicationJournal, publication_transaction
 from .database import SessionLocal
 from .models import (
@@ -1043,7 +1043,7 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
         return "failed"
 
 
-def _process_claim(claim: TaskClaim) -> str:
+def _run_claim_fenced(claim: TaskClaim) -> str:
     from .quota import reset_quota_context, set_quota_context
     from .worker_registry import heartbeat as worker_heartbeat
 
@@ -1113,7 +1113,7 @@ def process_task_message(message: dict[str, Any], *, worker_id: str) -> str:
     claim = claim_task(task_id, worker_id)
     if claim is None:
         return "skipped"
-    return _process_claim(claim)
+    return _run_claim_fenced(claim)
 
 
 def _decode_stream_event(fields: dict[str, Any]) -> dict[str, Any]:
@@ -1214,7 +1214,7 @@ def run_once(client: redis.Redis, *, worker_id: str, block_ms: int = 1000) -> st
     ensure_consumer_group(client)
     fair_claim = claim_fair_task(worker_id)
     if fair_claim is not None:
-        return _process_claim(fair_claim)
+        return _run_claim_fenced(fair_claim)
     try:
         result = client.xautoclaim(
             STREAM_NAME,

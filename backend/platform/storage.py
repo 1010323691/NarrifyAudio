@@ -7,7 +7,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .config import settings
+from .platform_settings import settings
 from .models import SystemConfig
 
 

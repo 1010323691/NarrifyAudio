@@ -31,7 +31,7 @@ from backend.platform.models import (
     UserQuotaAccount,
 )
 from backend.platform.quota import release_attempt_holds
-from backend.services.tasks import cancel_task_record
+from backend.services.task_operations import cancel_task_record
 
 
 @pytest.mark.skipif(

@@ -11,9 +11,11 @@ from ..platform.task_submission import (
     submit_task_record,
     task_dict,
 )
-from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, owned_task
-from ..services.tasks import (
+from ..services.task_operations import (
+    RetryNotAllowedError,
     cancel_task_record,
+    check_retry_eligible,
+    owned_task,
     requeue_task_record,
 )
 

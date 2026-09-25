@@ -1,3 +1,13 @@
+"""Process-wide platform settings, read once from the NARRIFY_* environment.
+
+The three "config" modules, distinguished:
+* ``platform.platform_settings`` (here) — deployment-level knobs from the
+  environment (database URL, storage root, cookies, lease/attempt limits).
+* ``platform.system_config`` — per-tenant knobs persisted in the database and
+  edited from the admin console.
+* ``core.config`` — the per-workspace application config (AppConfig) stored in
+  the workspace on disk.
+"""
 from __future__ import annotations
 
 import os

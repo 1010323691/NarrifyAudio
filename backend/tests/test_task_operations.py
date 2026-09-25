@@ -12,7 +12,7 @@ import uuid
 import pytest
 from sqlalchemy import delete, select
 
-from backend.platform.config import settings
+from backend.platform.platform_settings import settings
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import (
     Project, QuotaTransaction, Task, TaskAttempt, User, utcnow,

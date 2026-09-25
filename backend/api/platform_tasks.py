@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.database import SessionLocal, get_db
-from ..platform.config import settings
+from ..platform.platform_settings import settings
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Task, TaskEvent, User
 from ..platform.security import session_is_valid_for_user

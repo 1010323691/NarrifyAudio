@@ -1531,7 +1531,7 @@ def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
     from starlette.requests import Request
 
     from backend.api import platform_tasks as api_platform_tasks
-    from backend.platform.config import settings
+    from backend.platform.platform_settings import settings
     from backend.platform.security import load_session
 
     _register(client, f"{uuid.uuid4()}@example.com")
@@ -1579,7 +1579,7 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
     import time
 
     from backend.api import platform_tasks as api_platform_tasks
-    from backend.platform.config import settings
+    from backend.platform.platform_settings import settings
     from backend.platform.security import load_session
     from starlette.requests import Request
 
@@ -1744,7 +1744,7 @@ def test_task_event_stream_poll_runs_in_worker_threads(client: TestClient, monke
     from starlette.requests import Request
 
     from backend.api import platform_tasks as api_platform_tasks
-    from backend.platform.config import settings
+    from backend.platform.platform_settings import settings
     from backend.platform.security import load_session
 
     first = _register(client, f"{uuid.uuid4()}@example.com")

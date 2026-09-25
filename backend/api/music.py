@@ -26,7 +26,7 @@ from ..core import paths as core_paths
 from ..core.config import get_config
 from ..engines import music as music_engine
 from ..engines.audio import probe_duration
-from ..platform.config import settings
+from ..platform.platform_settings import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Project

@@ -24,7 +24,7 @@ from sqlalchemy import select
 pytest.importorskip("sqlalchemy")
 
 from backend.main import app
-from backend.platform.config import settings
+from backend.platform.platform_settings import settings
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import Task, TaskEvent, UserSession
 from backend.services import task_views

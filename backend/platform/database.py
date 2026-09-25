@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from .config import settings
+from .platform_settings import settings
 
 
 class Base(DeclarativeBase):

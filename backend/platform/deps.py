@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
-from .config import settings
+from .platform_settings import settings
 from .database import get_db
 from .models import User, UserSession
 from .project_context import active_project

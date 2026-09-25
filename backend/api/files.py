@@ -14,7 +14,7 @@ from ..platform.file_response import file_response
 from ..platform.project_context import active_project
 from ..platform.models import ProjectFile, new_id
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.config import settings
+from ..platform.platform_settings import settings
 from ..platform.storage import configured_storage_root, project_input_object_key, safe_display_name
 from . import _common
 

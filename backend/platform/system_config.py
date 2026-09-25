@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .config import settings
+from .platform_settings import settings
 from .database import SessionLocal
 from .models import SystemConfig
 from ..core.config import set_platform_defaults_provider

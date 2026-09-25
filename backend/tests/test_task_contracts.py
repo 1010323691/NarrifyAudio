@@ -15,7 +15,7 @@ from backend.platform.engine_task_executor import execute_engine_task
 from backend.platform.task_contracts import TaskClaim, TaskExecutionError
 from sqlalchemy.dialects import postgresql
 from backend.services import task_operations
-from backend.services import tasks as task_service
+from backend.services import task_operations as task_service
 from backend.platform.database import Base
 from backend.platform.models import TaskEvent, User
 from backend.platform.security import create_session, revoke_session, session_is_valid_for_user
