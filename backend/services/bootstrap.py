@@ -1,13 +1,19 @@
+"""Seed the bootstrap admin account and its default workspace at startup.
+
+Lives in the services layer (not platform): combining platform primitives
+(user, quota account, workspace path) with project creation is a service
+concern, and platform must not import services (S3 direction, Q17).
+"""
 from __future__ import annotations
 
 from sqlalchemy import select
 
-from .config import settings
-from .database import SessionLocal
-from .models import User, UserQuotaAccount
-from .security import hash_password
-from .storage import project_workspace_path
-from ..services.projects import create_project
+from ..platform.config import settings
+from ..platform.database import SessionLocal
+from ..platform.models import User, UserQuotaAccount
+from ..platform.security import hash_password
+from ..platform.storage import project_workspace_path
+from .projects import create_project
 
 
 def ensure_bootstrap_admin() -> None:

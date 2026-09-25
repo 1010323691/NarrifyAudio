@@ -35,7 +35,7 @@ from .core import logging_setup
 from .core.observability import record_api_request
 from .core.request_context import bind_workspace, reset_workspace
 from .core.paths import get_or_prepare_layout
-from .platform.bootstrap import ensure_bootstrap_admin
+from .services.bootstrap import ensure_bootstrap_admin
 from .platform.config import settings
 from .platform.database import initialize_schema
 from .platform.database import SessionLocal

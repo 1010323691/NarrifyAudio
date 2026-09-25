@@ -15,9 +15,8 @@ layers =
     backend.services
     backend.platform
     backend.core
-ignore_imports =
-    backend.platform.bootstrap -> backend.services.projects
 
-# The one ignore_import above is the third reverse edge lint-imports surfaced
-# in platform.bootstrap (plan S3/Q17 documented only two). Batch 3 fixes it,
-# then removes this line so the contract is fully strict.
+# All reverse edges are fixed (S3/Q17 batch 3): the submission record ops were
+# sunk to platform.task_submission, core.config reads feature defaults through
+# a provider registered by platform.system_config, and bootstrap admin seeding
+# moved to services.bootstrap. No ignores remain: the contract is fully strict.
