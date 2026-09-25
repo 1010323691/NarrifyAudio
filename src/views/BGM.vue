@@ -261,7 +261,14 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
       getChapters(),
       reloadLibrary ? getLibrary() : Promise.resolve(lib.value),
     ])
-    rowsData.value = res.chapters
+    // 内容未变的行沿用旧对象引用：批量完成时每章一次刷新会整体重拉 300+ 行，
+    // 若每次整表换引用，v-memo 行会全部失效重渲。stringify 比对（~毫秒级）换掉
+    // 整列表 DOM patch，只有真正变化的行更新。
+    const prevByStem = new Map(rowsData.value.map((r) => [r.stem, r]))
+    rowsData.value = res.chapters.map((c) => {
+      const prev = prevByStem.get(c.stem)
+      return prev && JSON.stringify(prev) === JSON.stringify(c) ? prev : c
+    })
     if (!modeInitialized) {
       mode.value = res.mode || 'llm'
       modeInitialized = true
@@ -871,7 +878,17 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
         </Alert>
 
         <div v-else-if="rows.length" class="bgm-results-list">
-          <div v-for="row in rows" :key="row.stem" class="bgm-row" :class="{ 'bgm-row--segment': mode === 'segment' }">
+          <!-- v-memo：任务流每次事件都会重算全局 rows computed，没有 memo 时整列表全量
+               patch（待处理条目多时每次任务进度 tick 都重渲几百行）。key 覆盖行模板
+               读到的全部响应式状态：行数据对象引用 + 本行任务 + 选中态 + 四个全局开关。
+               数据刷新（rowsData 整体替换）时 data 引用变化 → 该行必然重渲，不会漏更新。 -->
+          <div
+            v-for="row in rows"
+            :key="row.stem"
+            v-memo="[row.data, row.label, row.variant, row.task?.id, row.task?.status, row.task ? Math.round(row.task.progress) : -1, row.failedTask?.id, selected[row.stem] ? 1 : 0, mode, submitting, matching, projectSet]"
+            class="bgm-row"
+            :class="{ 'bgm-row--segment': mode === 'segment' }"
+          >
             <div class="bgm-row__header">
               <label class="bgm-row__title">
                 <input type="checkbox" class="h-4 w-4 shrink-0 accent-primary"

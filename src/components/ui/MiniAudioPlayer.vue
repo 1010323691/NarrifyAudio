@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { Pause, Play } from 'lucide-vue-next'
 import { cn } from '@/lib/utils'
 import { useAudioBus, type AudioPlayer } from '@/composables/useAudioBus'
@@ -10,18 +10,19 @@ import { useAudioBus, type AudioPlayer } from '@/composables/useAudioBus'
  * played in place (no "click → scroll to the bottom" round-trip). All instances share
  * the `useAudioBus` bus, so starting one pauses whichever was playing.
  *
- * `preload="metadata"` — the duration readout only needs the file header (a few KB,
- * read from the Xing/LAME header libmp3lame writes at the front of the file), while
- * the full mp3 is fetched only when playback starts. Rows are used in bulk on the
- * merge/BGM pages, so `preload="auto"` used to queue one FULL-file download per row
- * on the ~6 shared same-origin connections — starving SSE/API traffic and delaying
- * `loadedmetadata` until the readout sat at 0:00 until a page refresh.
+ * The `<audio>` element is created lazily on the FIRST play. Bulk row lists (BGM/Merge)
+ * render dozens–hundreds of these players, and eager `preload="metadata"` per row queued
+ * one metadata request per row on the ~6 shared same-origin connections — starving
+ * SSE/API traffic and piling up media pipelines for rows nobody previews. The time
+ * readout shows 0:00 until first play; the fetch itself is unchanged, it just starts
+ * when the user asks for it.
  */
 const props = defineProps<{ src: string }>()
 
 const { claim, release } = useAudioBus()
 
 const audioEl = ref<HTMLAudioElement | null>(null)
+const audioReady = ref(false)
 const playing = ref(false)
 const current = ref(0)
 const duration = ref(0)
@@ -33,15 +34,19 @@ function stop(): void {
 }
 const self: AudioPlayer = { stop }
 
-function toggle(): void {
+async function toggle(): Promise<void> {
+  if (playing.value) {
+    audioEl.value?.pause()
+    return
+  }
+  if (!audioReady.value) {
+    audioReady.value = true
+    await nextTick()
+  }
   const el = audioEl.value
   if (!el) return
-  if (playing.value) {
-    el.pause()
-  } else {
-    claim(self)
-    void el.play().catch(() => release(self))
-  }
+  claim(self)
+  void el.play().catch(() => release(self))
 }
 
 function fmt(t: number): string {
@@ -101,6 +106,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="flex items-center gap-2">
     <audio
+      v-if="audioReady"
       ref="audioEl"
       :src="src"
       preload="metadata"
