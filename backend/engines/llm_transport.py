@@ -38,6 +38,26 @@ class LLMHTTPError(RuntimeError):
         super().__init__(f"LLM HTTP {status}: {detail}")
 
 
+class LLMUnavailableError(RuntimeError):
+    """The configured LLM endpoint cannot currently accept requests."""
+
+
+def llm_server_is_alive(base_url: str, api_key: str = "", *, timeout: float = 5.0) -> bool:
+    """Probe an OpenAI-compatible endpoint; any non-5xx HTTP response proves liveness."""
+    url = base_url.rstrip("/") + "/models"
+    request = urllib.request.Request(
+        url, method="GET",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout):
+            return True
+    except urllib.error.HTTPError as exc:
+        return exc.code < 500
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError):
+        return False
+
+
 def build_chat_body(model, messages, temperature, top_p, presence_penalty,
                     max_tokens, top_k=0, min_p=0, banned_tokens=None,
                     *, stream: bool = False, extra_body: dict | None = None) -> dict:
@@ -119,7 +139,11 @@ def request_chat_completion(base_url, api_key, model, messages,
         except urllib.error.HTTPError as e:
             # Surface the server's message (rate limit, auth, model-not-found, ...) in the log.
             detail = e.read().decode("utf-8", "replace")[:300]
+            if 500 <= e.code < 600:
+                raise LLMUnavailableError(f"LLM 服务暂不可用（HTTP {e.code}）：{detail}") from e
             raise LLMHTTPError(e.code, detail) from e
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            raise LLMUnavailableError(f"LLM 服务连接失败：{e}") from e
 
     try:
         payload = _post(body)
@@ -280,7 +304,11 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
                     raise TaskCancelled()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
+        if 500 <= e.code < 600:
+            raise LLMUnavailableError(f"LLM 服务暂不可用（HTTP {e.code}）：{detail}") from e
         raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+        raise LLMUnavailableError(f"LLM 服务连接失败：{e}") from e
 
     flush(force=True)  # push any trailing buffer so the panel shows the full output
     if handle is not None and cps:
@@ -411,6 +439,8 @@ def llm_json_with_retry(llm_cfg, system: str, user: str, parse, *,
         except TaskCancelled:
             raise
         except Exception as e:  # noqa: BLE001 — record, retry with feedback
+            if isinstance(e, LLMUnavailableError):
+                raise
             last_err = str(e)
             last_raw = ""
             log.warning("LLM JSON 调用失败（第 %d/%d 次）：%s",

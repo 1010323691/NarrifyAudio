@@ -207,7 +207,7 @@ const error = ref('')
 const taskId = ref<string | null>(null)
 const result = ref<BatchResult | null>(null)
 
-const task = computed(() => taskStore.tasks.find((t) => t.id === taskId.value) ?? null)
+const task = computed(() => taskStore.projectTasks.find((t) => t.id === taskId.value) ?? null)
 
 // 长度排序后按批内上限组批，模型在任务内仅加载一次。
 // ---------------------------------------------------------------------------

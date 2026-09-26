@@ -145,7 +145,13 @@ def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None
     PublicationJournal.reconcile(shared_root, shared_path, committed=task.status == "succeeded")
 
 
-def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None) -> TaskClaim | None:
+def claim_task(
+    task_id: str,
+    worker_id: str,
+    *,
+    lease_seconds: int | None = None,
+    excluded_task_types: tuple[str, ...] = (),
+) -> TaskClaim | None:
     """Atomically create one fenced attempt for a submitted task."""
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
@@ -153,8 +159,11 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
         if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
             db.rollback()
             return None
-        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
-        if task is None or task.status in TERMINAL_TASK_STATUSES:
+        task_stmt = select(Task).where(Task.id == task_id)
+        if excluded_task_types:
+            task_stmt = task_stmt.where(Task.task_type.not_in(excluded_task_types))
+        task = db.scalar(task_stmt.with_for_update())
+        if task is None or task.status in TERMINAL_TASK_STATUSES or task.status == "paused":
             return None
         if task.status == "retrying" and _as_utc(task.next_attempt_at) and _as_utc(task.next_attempt_at) > now:
             db.rollback()
@@ -189,7 +198,7 @@ def claim_task(task_id: str, worker_id: str, *, lease_seconds: int | None = None
         latest_attempt = db.scalar(
             select(func.max(TaskAttempt.attempt_no)).where(TaskAttempt.task_id == task.id)
         ) or 0
-        if latest_attempt >= settings.task_max_attempts:
+        if latest_attempt >= settings.task_max_attempts and task.error_code != "llm_unavailable":
             task.status = "failed"
             task.error_code = "max_attempts"
             task.error_message = "任务超过最大尝试次数"
@@ -239,6 +248,7 @@ def claim_fair_task(
     *,
     lease_seconds: int | None = None,
     task_types: tuple[str, ...] | None = None,
+    excluded_task_types: tuple[str, ...] = (),
 ) -> TaskClaim | None:
     """Claim the next task using a persistent per-user round-robin cursor.
 
@@ -254,6 +264,8 @@ def claim_fair_task(
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         if task_types:
             eligible_tasks = eligible_tasks & Task.task_type.in_(task_types)
+        if excluded_task_types:
+            eligible_tasks = eligible_tasks & Task.task_type.not_in(excluded_task_types)
         account = db.scalar(
             select(UserQuotaAccount)
             .join(Task, Task.owner_id == UserQuotaAccount.user_id)
@@ -272,6 +284,8 @@ def claim_fair_task(
         user_tasks = (Task.owner_id == account.user_id) & eligible_tasks
         if task_types:
             user_tasks = user_tasks & Task.task_type.in_(task_types)
+        if excluded_task_types:
+            user_tasks = user_tasks & Task.task_type.not_in(excluded_task_types)
         task_id = db.scalar(
             select(Task.id)
             .where(user_tasks)
@@ -1020,6 +1034,16 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
             append_task_event(db, task.id, "cancelled", {"attempt_id": attempt.id})
             db.commit()
             return "cancelled"
+        if error.code == "llm_unavailable":
+            task.status = "paused"
+            task.finished_at = None
+            task.next_attempt_at = None
+            append_task_event(db, task.id, "llm_unavailable", {
+                "attempt_id": attempt.id,
+                "message": "LLM 服务暂不可用，任务已暂停；系统每分钟检查并在服务恢复后自动重试。",
+            })
+            db.commit()
+            return "paused"
         if error.retryable and attempt.attempt_no < settings.task_max_attempts:
             task.status = "retrying"
             delay = min(300, 2 ** max(0, attempt.attempt_no - 1))
@@ -1092,6 +1116,13 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         fail_claim(claim, exc)
         return exc.code
     except Exception as exc:
+        from ..engines.llm_transport import LLMHTTPError, LLMUnavailableError
+        if isinstance(exc, LLMUnavailableError):
+            fail_claim(claim, TaskExecutionError("llm_unavailable", str(exc)))
+            return "paused"
+        if isinstance(exc, LLMHTTPError) and exc.status in {400, 401, 403, 404, 422}:
+            fail_claim(claim, TaskExecutionError("llm_configuration_error", str(exc)))
+            return "llm_configuration_error"
         from .quota import QuotaInsufficientError
         if isinstance(exc, QuotaInsufficientError):
             fail_claim(claim, TaskExecutionError("quota_insufficient", str(exc)))
@@ -1105,12 +1136,17 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         reset_quota_context(quota_token)
 
 
-def process_task_message(message: dict[str, Any], *, worker_id: str) -> str:
+def process_task_message(
+    message: dict[str, Any],
+    *,
+    worker_id: str,
+    excluded_task_types: tuple[str, ...] = (),
+) -> str:
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else message
     task_id = str(payload.get("task_id", ""))
     if not task_id:
         return "invalid"
-    claim = claim_task(task_id, worker_id)
+    claim = claim_task(task_id, worker_id, excluded_task_types=excluded_task_types)
     if claim is None:
         return "skipped"
     return _run_claim_fenced(claim)
@@ -1125,8 +1161,17 @@ def _decode_stream_event(fields: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def process_stream_entry(client: redis.Redis, entry_id: str, fields: dict[str, Any], *, worker_id: str) -> str:
-    result = process_task_message(_decode_stream_event(fields), worker_id=worker_id)
+def process_stream_entry(
+    client: redis.Redis,
+    entry_id: str,
+    fields: dict[str, Any],
+    *,
+    worker_id: str,
+    excluded_task_types: tuple[str, ...] = (),
+) -> str:
+    result = process_task_message(
+        _decode_stream_event(fields), worker_id=worker_id, excluded_task_types=excluded_task_types,
+    )
     client.xack(STREAM_NAME, WORKER_GROUP, entry_id)
     return result
 
@@ -1210,9 +1255,117 @@ def recover_database_tasks(limit: int = 100) -> int:
     return recovered
 
 
-def run_once(client: redis.Redis, *, worker_id: str, block_ms: int = 1000) -> str:
+def resume_llm_unavailable_tasks(limit: int = 500) -> int:
+    """Probe paused LLM tasks and redispatch them once their configured endpoint responds."""
+    from ..engines.llm_transport import llm_server_is_alive
+
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Task.id, Task.task_type, Task.owner_id, Task.project_id)
+            .where(Task.status == "paused", Task.error_code == "llm_unavailable")
+            .order_by(Task.updated_at.asc())
+            .limit(limit)
+        ).all()
+        owner_ids = {row.owner_id for row in rows}
+        users = {user.id: user for user in db.scalars(select(User).where(User.id.in_(owner_ids))).all()}
+        workspaces = {}
+        for row in rows:
+            user = users.get(row.owner_id)
+            if user is None:
+                continue
+            key = (row.owner_id, row.project_id)
+            if key not in workspaces:
+                try:
+                    workspaces[key] = project_workspace_path(db, user.username, row.project_id)
+                except Exception:
+                    logging.getLogger("audiobook.worker").exception(
+                        "Unable to resolve paused task workspace owner_id=%s project_id=%s",
+                        row.owner_id, row.project_id,
+                    )
+
+    configs = {}
+    for key, workspace in workspaces.items():
+        token = bind_workspace(workspace)
+        try:
+            configs[key] = core_config.get_config().llm.model_dump(mode="json")
+        except Exception:
+            logging.getLogger("audiobook.worker").exception(
+                "Unable to read paused task LLM config owner_id=%s project_id=%s", *key,
+            )
+        finally:
+            reset_workspace(token)
+
+    candidates: list[tuple[str, str, str]] = []
+    for row in rows:
+        llm_config = configs.get((row.owner_id, row.project_id))
+        if not llm_config:
+            continue
+        base_url = str(llm_config.get("base_url") or "").strip()
+        if base_url:
+            candidates.append((str(row.id), base_url, str(llm_config.get("api_key") or "")))
+
+    liveness: dict[tuple[str, str], bool] = {}
+    for _task_id, base_url, api_key in candidates:
+        key = (base_url, api_key)
+        if key not in liveness:
+            liveness[key] = llm_server_is_alive(base_url, api_key)
+
+    resumed = 0
+    for task_id, base_url, api_key in candidates:
+        if not liveness.get((base_url, api_key), False):
+            continue
+        now = utcnow()
+        with SessionLocal() as db:
+            task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+            if task is None or task.status != "paused" or task.error_code != "llm_unavailable":
+                db.rollback()
+                continue
+            pending_event = db.scalar(
+                select(OutboxEvent.id)
+                .where(
+                    OutboxEvent.aggregate_type == "task",
+                    OutboxEvent.aggregate_id == task.id,
+                    OutboxEvent.published_at.is_(None),
+                )
+                .limit(1)
+            )
+            if pending_event is None:
+                latest_attempt = db.scalar(
+                    select(func.max(TaskAttempt.attempt_no)).where(TaskAttempt.task_id == task.id)
+                ) or 0
+                event_id = str(uuid5(NAMESPACE_URL, f"llm-resume:{task.id}:{latest_attempt}"))
+                if db.get(OutboxEvent, event_id) is None:
+                    db.add(OutboxEvent(
+                        id=event_id,
+                        aggregate_type="task",
+                        aggregate_id=task.id,
+                        event_type="task.llm_resumed",
+                        payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
+                        available_at=now,
+                    ))
+            task.status = "retrying"
+            task.next_attempt_at = now
+            task.finished_at = None
+            task.error_message = "LLM 服务已恢复，任务重新排队"
+            task.updated_at = now
+            append_task_event(db, task.id, "retry_scheduled", {
+                "reason": "LLM service recovered",
+                "message": task.error_message,
+            })
+            db.commit()
+            resumed += 1
+    return resumed
+
+
+def run_once(
+    client: redis.Redis,
+    *,
+    worker_id: str,
+    block_ms: int = 1000,
+    excluded_task_types: tuple[str, ...] = (),
+) -> str:
     ensure_consumer_group(client)
-    fair_claim = claim_fair_task(worker_id)
+    fair_claim = claim_fair_task(worker_id, excluded_task_types=excluded_task_types)
     if fair_claim is not None:
         return _run_claim_fenced(fair_claim)
     try:
@@ -1230,10 +1383,16 @@ def run_once(client: redis.Redis, *, worker_id: str, block_ms: int = 1000) -> st
         entries = result[1] if len(result) > 1 else []
         if entries:
             entry_id, fields = entries[0]
-            return process_stream_entry(client, entry_id, fields, worker_id=worker_id)
+            return process_stream_entry(
+                client, entry_id, fields, worker_id=worker_id,
+                excluded_task_types=excluded_task_types,
+            )
     rows = client.xreadgroup(WORKER_GROUP, worker_id, {STREAM_NAME: ">"}, count=1, block=block_ms)
     if not rows:
         return "idle"
     _, entries = rows[0]
     entry_id, fields = entries[0]
-    return process_stream_entry(client, entry_id, fields, worker_id=worker_id)
+    return process_stream_entry(
+        client, entry_id, fields, worker_id=worker_id,
+        excluded_task_types=excluded_task_types,
+    )

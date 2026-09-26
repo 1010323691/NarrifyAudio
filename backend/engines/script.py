@@ -31,6 +31,7 @@ from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
 from .book import decode_buffer
 from .llm_transport import (
+    LLMUnavailableError,
     request_chat_completion as _llm_chat_completion,
     request_chat_completion_stream,
 )
@@ -678,6 +679,8 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                 handle.log(f"WARNING: 响应被截断（达到 max_tokens={max_tokens}），可增大 max_tokens。", "WARNING")
         except TaskCancelled:
             raise  # a cancel raised mid-stream must propagate, not be retried
+        except LLMUnavailableError:
+            raise
         except Exception as e:  # noqa: BLE001 — a failed call retries, then gives up
             handle.log(f"调用 LLM API 出错：{e}", "ERROR")
             return None, ""
@@ -1392,6 +1395,8 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
             reply = _llm_call(llm, generation, messages, handle)
         except TaskCancelled:
             raise  # a cancel raised mid-stream must propagate, not be swallowed
+        except LLMUnavailableError:
+            raise
         except Exception as e:  # noqa: BLE001 — a failed call contributes no vote
             handle.log(f"  {stage}第 {attempt} 次调用失败，本轮无票：{e}", "WARNING")
             return
@@ -1653,6 +1658,8 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
         try:
             reply = _llm_call(llm, generation, messages, handle)
         except TaskCancelled:
+            raise
+        except LLMUnavailableError:
             raise
         except Exception as e:  # noqa: BLE001
             handle.log(f"instruct batch call failed: {e}", "WARNING")
@@ -2427,6 +2434,8 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
             full_map = parse_speaker_map_full(_llm_call(llm, generation, messages, handle), grp)
         except TaskCancelled:
             raise  # a cancel raised mid-stream must propagate, not be swallowed
+        except LLMUnavailableError:
+            raise
         except Exception as e:  # noqa: BLE001 — unreadable first pass → keep originals
             handle.log(f"  首批解析失败，本组保留原 speaker：{e}", "WARNING")
             full_map = {}
@@ -2459,6 +2468,8 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                 try:
                     full = parse_speaker_map_full(_llm_call(llm, generation, messages, handle), grp)
                 except TaskCancelled:
+                    raise
+                except LLMUnavailableError:
                     raise
                 except Exception as e:  # noqa: BLE001 — a failed retry adds no votes
                     handle.log(f"  重试第 {run} 次失败，无新票：{e}", "WARNING")

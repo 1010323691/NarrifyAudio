@@ -213,6 +213,102 @@ def test_user_tasks_project_filter():
     assert in_project in filtered and out_project not in filtered
 
 
+def test_task_history_cursor_pages_are_stable_and_user_scoped(client):
+    first = _register(f"history-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    shared_time = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        db.add_all([
+            Task(
+                id=str(uuid.uuid4()),
+                owner_id=user_id,
+                project_id=str(uuid.uuid4()),
+                task_type="script.parse",
+                status="succeeded",
+                progress=100,
+                payload={"label": f"历史任务 {index}"},
+                created_at=shared_time,
+                updated_at=shared_time,
+            )
+            for index in range(53)
+        ])
+        db.commit()
+
+    other = _register(f"history-other-{uuid.uuid4().hex[:10]}@example.com")
+    _create_task(other["json"]["user"]["id"], task_type="script.parse", status="succeeded")
+
+    response = first["client"].get("/api/v1/tasks/history")
+    assert response.status_code == 200, response.text
+    page_one = response.json()
+    assert len(page_one["items"]) == 50
+    assert page_one["next_cursor"]
+    assert all(item["project_name"] == "已删除项目" for item in page_one["items"])
+
+    response = first["client"].get("/api/v1/tasks/history", params={"cursor": page_one["next_cursor"]})
+    assert response.status_code == 200, response.text
+    page_two = response.json()
+    assert len(page_two["items"]) == 3
+    assert page_two["next_cursor"] is None
+
+    first_ids = [item["id"] for item in page_one["items"]]
+    second_ids = [item["id"] for item in page_two["items"]]
+    assert len(set(first_ids + second_ids)) == 53
+    assert set(first_ids + second_ids).isdisjoint(
+        {task["id"] for task in _user_task_rows(other["json"]["user"]["id"])}
+    )
+
+    invalid = first["client"].get("/api/v1/tasks/history", params={"cursor": "bad-cursor"})
+    assert invalid.status_code == 422
+
+
+def _user_task_rows(user_id: str) -> list[dict]:
+    with SessionLocal() as db:
+        return [
+            {"id": task.id}
+            for task in db.scalars(select(Task).where(Task.owner_id == user_id)).all()
+        ]
+
+
+def test_user_task_stream_keeps_old_active_tasks_in_live_window():
+    account = _register(f"oldactive-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = account["json"]["user"]["id"]
+    project_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    old_active_id = str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(Task(
+            id=old_active_id,
+            owner_id=user_id,
+            project_id=project_id,
+            task_type="script.parse",
+            status="running",
+            progress=12,
+            payload={},
+            created_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            updated_at=now,
+        ))
+        db.add_all([
+            Task(
+                owner_id=user_id,
+                project_id=project_id,
+                task_type="text.format",
+                status="succeeded",
+                progress=100,
+                payload={},
+                created_at=now,
+                updated_at=now,
+            )
+            for _ in range(205)
+        ])
+        db.commit()
+
+    from backend.api.platform_tasks import _user_tasks
+
+    with SessionLocal() as db:
+        rows = _user_tasks(db, user_id)
+    assert old_active_id in {task.id for task in rows}
+
+
 def test_v1_retry_route():
     a = _register(f"v1retry-{uuid.uuid4().hex[:10]}@example.com")
     a_id = a["json"]["user"]["id"]

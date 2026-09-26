@@ -2,23 +2,90 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import threading
 import time
 
 import redis
 
 from .platform.outbox import publish_pending
-from .platform import system_config  # registers core.config's feature-defaults provider
-from .platform.task_worker import recover_database_tasks, run_once
+from .platform.task_worker import recover_database_tasks, resume_llm_unavailable_tasks, run_once
 from .platform.worker_registry import heartbeat, mark_offline
 from .platform.task_types import SUPPORTED_TASK_TYPES
+from .core.concurrency import set_concurrency
+from .platform.task_worker import _run_claim_fenced, claim_fair_task
+from .platform.system_config import parse_worker_concurrency
+
+PARSE_WORKER_MAX = 32
+PARSE_TASK_TYPES = ("script.parse",)
+
+
+def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
+    logger = logging.getLogger("audiobook.worker")
+    slot_id = f"{worker_id}-parse-{slot:02d}"
+    try:
+        while not stop.is_set() and not slot_stop.is_set():
+            try:
+                claim = claim_fair_task(slot_id, task_types=PARSE_TASK_TYPES)
+                if claim is not None:
+                    _run_claim_fenced(claim)
+                else:
+                    slot_stop.wait(0.2)
+            except Exception:
+                logger.exception("Parse worker slot failed; retrying slot=%s", slot)
+                slot_stop.wait(1.0)
+    finally:
+        mark_offline(slot_id)
+
+
+def _parse_worker_coordinator(worker_id: str, stop: threading.Event) -> None:
+    logger = logging.getLogger("audiobook.worker")
+    workers: dict[int, tuple[threading.Thread, threading.Event]] = {}
+    next_slot = 1
+    try:
+        while not stop.is_set():
+            try:
+                limit = parse_worker_concurrency(maximum=PARSE_WORKER_MAX)
+                set_concurrency(limit)
+                for slot, (thread, slot_stop) in list(workers.items()):
+                    if not thread.is_alive():
+                        workers.pop(slot, None)
+                    elif slot > limit:
+                        slot_stop.set()
+                occupied = set(workers)
+                while len(workers) < limit and not stop.is_set():
+                    slot = next((item for item in range(next_slot, PARSE_WORKER_MAX + 1) if item not in occupied), None)
+                    if slot is None:
+                        slot = next((item for item in range(1, next_slot) if item not in occupied), None)
+                    if slot is None:
+                        break
+                    next_slot = slot % PARSE_WORKER_MAX + 1
+                    slot_stop = threading.Event()
+                    thread = threading.Thread(
+                        target=_parse_worker_loop,
+                        args=(worker_id, slot, stop, slot_stop),
+                        name=f"script-parse-{slot:02d}",
+                        daemon=True,
+                    )
+                    workers[slot] = (thread, slot_stop)
+                    occupied.add(slot)
+                    thread.start()
+            except Exception:
+                logger.exception("Parse worker coordinator iteration failed; retrying")
+            stop.wait(0.2)
+    finally:
+        for _thread, slot_stop in workers.values():
+            slot_stop.set()
+        for slot in workers:
+            mark_offline(f"{worker_id}-parse-{slot:02d}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="NarrifyAudio durable task outbox dispatcher")
     parser.add_argument("--once", action="store_true", help="publish one batch and exit")
     parser.add_argument("--interval", type=float, default=1.0, help="poll interval in seconds")
-    parser.add_argument("--worker-id", default=os.getenv("NARRIFY_WORKER_ID", "worker-local"))
+    parser.add_argument("--worker-id", default=os.getenv("NARRIFY_WORKER_ID", f"worker-local-{os.getpid()}"))
     args = parser.parse_args()
     client = redis.Redis.from_url(os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
     capabilities = {
@@ -28,12 +95,31 @@ def main() -> None:
         "queue": "narrify-tasks",
     }
     heartbeat(args.worker_id, status="starting", capabilities=capabilities)
+    stop = threading.Event()
+    parse_workers: list[threading.Thread] = []
+    if not args.once:
+        parse_workers.append(threading.Thread(
+            target=_parse_worker_coordinator,
+            args=(args.worker_id, stop),
+            name="script-parse-coordinator",
+            daemon=True,
+        ))
+        parse_workers[0].start()
+        threading.Thread(
+            target=_llm_recovery_probe_loop, args=(stop,),
+            name="llm-recovery-probe", daemon=True,
+        ).start()
     try:
         while True:
             heartbeat(args.worker_id, status="idle", capabilities=capabilities)
             recover_database_tasks()
             publish_pending()
-            result = run_once(client, worker_id=args.worker_id, block_ms=100 if args.once else int(max(100, args.interval * 1000)))
+            result = run_once(
+                client,
+                worker_id=args.worker_id,
+                block_ms=100 if args.once else int(max(100, args.interval * 1000)),
+                excluded_task_types=() if args.once else PARSE_TASK_TYPES,
+            )
             if result not in {"idle", "skipped"}:
                 heartbeat(args.worker_id, status="idle", capabilities=capabilities)
             if args.once:
@@ -43,7 +129,22 @@ def main() -> None:
         heartbeat(args.worker_id, status="error", capabilities=capabilities)
         raise
     finally:
+        stop.set()
+        for thread in parse_workers:
+            thread.join(timeout=2)
         mark_offline(args.worker_id)
+
+
+def _llm_recovery_probe_loop(stop: threading.Event) -> None:
+    logger = logging.getLogger("audiobook.worker")
+    while not stop.is_set():
+        try:
+            resumed = resume_llm_unavailable_tasks()
+            if resumed:
+                logger.info("LLM service recovered; redispatched %d paused tasks", resumed)
+        except Exception:
+            logger.exception("LLM recovery probe failed; next check will retry")
+        stop.wait(60.0)
 
 
 if __name__ == "__main__":

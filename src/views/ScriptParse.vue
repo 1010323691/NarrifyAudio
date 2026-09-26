@@ -64,7 +64,7 @@ const error = ref('')
 const fileJobs = ref<{ name: string; taskId: string }[]>([])
 
 function jobTask(taskId: string): TaskSnapshot | undefined {
-  return taskStore.tasks.find((t) => t.id === taskId)
+  return taskStore.projectTasks.find((t) => t.id === taskId)
 }
 
 type JobState = {
@@ -89,6 +89,8 @@ function jobState(task: TaskSnapshot | undefined): JobState {
     case 'pending':
       // PENDING 壳：批次协调者尚未投放（有序投放 + 有限预取）。
       return { label: '排队', variant: 'secondary' }
+    case 'paused':
+      return { label: '等待 LLM 恢复', variant: 'warning' }
     default:
       return { label: '排队', variant: 'secondary' }
   }
@@ -122,7 +124,7 @@ const jobRows = computed<JobRow[]>(() =>
       queueIndex: idx + 1,
       queueTotal: fileJobs.value.length,
       progress: task?.progress ?? 0,
-      active: status === 'pending' || status === 'running',
+      active: status === 'pending' || status === 'running' || status === 'paused',
       error: task?.error || '',
     }
   }),

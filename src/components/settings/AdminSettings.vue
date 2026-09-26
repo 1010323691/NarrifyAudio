@@ -35,6 +35,7 @@ const settings = useSettingsStore()
 const { push: toast } = useToast()
 
 const draft = ref<AppConfig | null>(null)
+const originalPrompts = ref<AppConfig['prompts'] | null>(null)
 const saving = ref(false)
 const active = ref<'text' | 'models' | 'audio'>('text')
 
@@ -61,6 +62,7 @@ onMounted(async () => {
   // store field, so saving below can never overwrite the project values.
   await settings.loadRoot()
   draft.value = settings.rootConfig ? JSON.parse(JSON.stringify(settings.rootConfig)) : null
+  originalPrompts.value = draft.value ? { ...draft.value.prompts } : null
 })
 
 async function save() {
@@ -75,21 +77,35 @@ async function save() {
     batch_concurrency: Math.max(1, Math.min(128, Math.trunc(Number(config.tts.batch_concurrency) || 80))),
     batch_seed: Math.max(-1, Math.min(2147483647, Math.trunc(seed))),
   }
+  const generation = {
+    ...config.generation,
+    parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
+  }
   try {
-    ok = await settings.saveRoot({
+    const patch: Record<string, unknown> = {
       text: config.text,
       audio: config.audio,
       tts,
       llm: config.llm,
-      prompts: config.prompts,
       persona_prompts: config.persona_prompts,
-      generation: config.generation,
+      generation,
       ffmpeg: config.ffmpeg,
       bgm: config.bgm,
-    })
+    }
+    // The API echoes bundled defaults for display. Persist prompts only when
+    // edited so saving unrelated settings does not freeze today's defaults.
+    if (!originalPrompts.value
+      || config.prompts.system_prompt !== originalPrompts.value.system_prompt
+      || config.prompts.user_prompt !== originalPrompts.value.user_prompt) {
+      patch.prompts = config.prompts
+    }
+    ok = await settings.saveRoot(patch)
     // Server-echoed values win for the sent sections (Q10: root channel
     // only — the project store's `config` is deliberately not written).
-    if (ok && settings.rootConfig) draft.value = JSON.parse(JSON.stringify(settings.rootConfig))
+    if (ok && settings.rootConfig) {
+      draft.value = JSON.parse(JSON.stringify(settings.rootConfig))
+      originalPrompts.value = { ...settings.rootConfig.prompts }
+    }
   } catch {
     ok = false
   }
@@ -177,11 +193,20 @@ async function save() {
             </div>
           </div>
           <div class="space-y-1.5">
+            <Label>文本解析 Worker 并发数</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input v-model.number="draft.generation.parse_worker_concurrency" type="number" min="1" max="32" step="1" class="max-w-[8rem]" />
+              <span class="text-xs text-muted-foreground">
+                控制每个后台 Worker 进程同时执行的文本解析任务数（1–32）；多个 Worker 进程的总并发为各进程之和。
+              </span>
+            </div>
+          </div>
+          <div class="space-y-1.5">
             <Label>角色基础信息生成并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input v-model.number="draft.generation.max_concurrency" type="number" min="1" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
-                控制角色基础信息的并行生成。文本解析任务的实际同时执行数取决于后台 Worker 部署容量。
+                控制角色基础信息的并行生成。
               </span>
             </div>
           </div>

@@ -1,17 +1,8 @@
 """Process-local concurrency gates for LLM-bound and merge work.
 
-These gates limit concurrent callers within one Python process. They do not
-configure cross-task parallelism in the durable queue; that depends on the
-number of Worker processes.
-
-A4 (批次 4): the process-wide resize surface (``set_concurrency`` /
-``set_merge_concurrency``) had zero production callers and hid a permanent
-limit=1 behind a fake knob, so it is retired — in production both gates run
-at one permit (deliberately conservative serialization of LLM / merge work).
-:class:`ConcurrencyGate` is kept as the permit-gate building block; its
-``set_limit``/``limit`` remain only as a test seam for exercising the
-multi-permit mechanics. If a tunable production limit is ever wanted,
-reintroduce the resize surface as an explicit feature.
+These gates limit concurrent callers within one Python process. Text-parse
+Worker threads resize the LLM gate from the administrator-configured per-process
+parse concurrency; merge work remains serialized at one permit.
 """
 from __future__ import annotations
 
@@ -80,14 +71,18 @@ class ConcurrencyGate:
             self._cond.notify_all()
 
 
-# Module-level singletons shared by callers in this process. Both run at the
-# default limit of 1 (A4: the resize surface is retired — no production caller).
+# Module-level singletons shared by callers in this process.
 _gate = ConcurrencyGate()
 
 
 def gate() -> ConcurrencyGate:
-    """The process-wide LLM gate (fixed limit 1 in production)."""
+    """The process-wide LLM gate used by text parsing."""
     return _gate
+
+
+def set_concurrency(n: int) -> None:
+    """Set the process-local text-parse LLM concurrency limit."""
+    _gate.set_limit(n)
 
 
 # A second, independent gate for CPU/ffmpeg/disk-bound merge work.
@@ -95,5 +90,5 @@ _merge_gate = ConcurrencyGate()
 
 
 def merge_gate() -> ConcurrencyGate:
-    """The process-wide merge gate (fixed limit 1 in production)."""
+    """The process-wide merge gate (kept at its conservative default of one)."""
     return _merge_gate

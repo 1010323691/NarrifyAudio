@@ -375,24 +375,37 @@ export interface GenerateFilesResult {
 export type TaskStatus =
   | 'pending'
   | 'running'
+  | 'paused'
+  | 'queued'
+  | 'retrying'
+  | 'cancelling'
   | 'cancelled'
   | 'succeeded'
   | 'failed'
+  | 'timeout'
 
 export interface TaskLog {
   level: string
   msg: string
   t: number
 }
-export interface TaskSnapshot {
+export interface TaskCenterItem {
   id: string
-  module: string
+  project_id: string
+  project_name: string
+  task_type: string
   label: string
-  /** Current engine stage, e.g. parse/check. */
-  phase?: string
   status: TaskStatus
   progress: number
   current: string
+  error: string
+  created: number
+  created_at: string
+}
+export interface TaskSnapshot extends TaskCenterItem {
+  module: string
+  /** Current engine stage, e.g. parse/check. */
+  phase?: string
   logs: TaskLog[]
   /** Raw LLM stream (「流式反馈」 panel); populated by `llm_chunk` events / snapshots. */
   llm_stream?: string
@@ -415,8 +428,6 @@ export interface TaskSnapshot {
   /** Total chars of the run's full segment table (音频合成 进度指标 denominator). */
   seg_chars_total?: number
   result: Record<string, any>
-  error: string
-  created: number
   started: number
   finished: number
   /** Monotonic creation order (backend `itertools.count`) — batch order after reload. */
@@ -469,7 +480,9 @@ export interface AppConfig {
     min_p: number
     presence_penalty: number
     banned_tokens: number[]
-    /** Max files parsed in parallel (LLM jobs); the rest queue behind a shared gate. */
+    /** Concurrent script.parse Tasks per backend worker process. */
+    parse_worker_concurrency: number
+    /** Max character-foundation LLM jobs generated in parallel by one voice task. */
     max_concurrency: number
     /** 解析后归属抽样率（0 = 关闭）：1/3 纯随机（整书错误率仪表）+ 2/3 风险加权。
      *  每本读数记入任务日志与 config/spot_check_history.json；降不降由用户手动决定。 */
@@ -748,4 +761,3 @@ export interface BgmPackageResult {
   file_count: number
   base: string
 }
-

@@ -24,6 +24,7 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/dashboard' },
         { path: 'dashboard', name: 'dashboard', component: () => import('@/views/Dashboard.vue'), meta: { title: '项目' } },
+        { path: 'tasks', name: 'task-center', component: () => import('@/views/TaskCenter.vue'), meta: { title: '任务中心' } },
         { path: 'projects/:projectId', name: 'project-overview', component: () => import('@/views/ProjectOverview.vue'), meta: { title: '项目工作台' } },
         { path: 'resources', name: 'resources', component: () => import('@/views/MyResources.vue'), meta: { title: '我的资源' } },
         { path: 'usage', name: 'usage', component: () => import('@/views/Usage.vue'), meta: { title: '使用量' } },

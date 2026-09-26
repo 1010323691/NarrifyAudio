@@ -23,12 +23,10 @@ export const useProjectStore = defineStore('project', () => {
   function applyCurrent(value: ProjectContext) {
     const changed = (value.project_id || '') !== activeProjectId.value
     if (changed) {
-      // Bind BEFORE the task store resets/refreshes so the reopened v1 stream
-      // is already scoped to the new project.
+      // The user task stream stays global; page selectors follow the active project.
       useTaskStore().bindProject(value.project_id || null)
       usePipelineStateStore().reset()
       useSettingsStore().reset()
-      useTaskStore().reset()
     }
     current.value = value
     if (changed) void useTaskStore().refresh().catch(() => undefined)

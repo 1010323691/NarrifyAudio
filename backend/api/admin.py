@@ -25,6 +25,7 @@ from ..services.task_operations import RetryNotAllowedError, check_retry_eligibl
 from ..services.task_operations import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
+from ..engines.script_prompts import load_default_prompts
 from ..services.admin_storage import (
     scan_project_directory,
     project_storage_path,
@@ -73,10 +74,22 @@ _FEATURE_CONFIG_SECTIONS = {
 }
 
 
+def _application_config_with_prompt_defaults() -> dict:
+    """Echo bundled parsing prompts when the platform config leaves them blank."""
+    config = core_config.get_config().model_dump()
+    prompts = config.setdefault("prompts", {})
+    system_prompt, user_prompt = load_default_prompts()
+    if not prompts.get("system_prompt"):
+        prompts["system_prompt"] = system_prompt
+    if not prompts.get("user_prompt"):
+        prompts["user_prompt"] = user_prompt
+    return config
+
+
 @router.get("/settings/application")
 def get_application_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     """Return effective feature settings, including shared admin overrides."""
-    config = core_config.get_config().model_dump()
+    config = _application_config_with_prompt_defaults()
     stored = db.get(SystemConfig, "application.features")
     return {"config": config, "source": "admin" if stored else "deployment-default"}
 
@@ -105,7 +118,7 @@ def update_application_settings(payload: dict, actor: User = Depends(require_csr
     db.add(AuditLog(actor_user_id=actor.id, action="admin.application_features_changed", target_type="system_config", target_id="application.features", metadata_json={"sections": sorted(patch)}))
     db.commit()
     update_feature_defaults_cache(config.value)
-    return {"config": core_config.get_config().model_dump(), "source": "admin"}
+    return {"config": _application_config_with_prompt_defaults(), "source": "admin"}
 
 
 class QuotaAdjustment(BaseModel):

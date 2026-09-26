@@ -28,7 +28,7 @@ export function useLabelDerivedTasks(
   return computed(() => {
     const active = new Map<string, TaskSnapshot>()
     const failed = new Map<string, TaskSnapshot>()
-    for (const t of taskStore.tasks) {
+    for (const t of taskStore.projectTasks) {
       if (!modules.has(t.module)) continue
       const key = labelKeyOf(t.label)
       if (!key) continue
