@@ -57,7 +57,7 @@ def submit_task_record(
     request_hash = hashlib.sha256(json.dumps(request_body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     project = db.scalar(select(Project).where(
         Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None),
-    ))
+    ).with_for_update())
     if project is None:
         raise TaskSubmissionError(404, "项目不存在")
     existing = db.scalar(select(Task).where(Task.owner_id == user.id, Task.idempotency_key == idempotency_key))

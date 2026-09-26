@@ -123,7 +123,7 @@ async function openProject(project: ProjectSummary) {
 async function requestDelete(project: ProjectSummary) {
   if (projectStore.busy || deletingProjectId.value) return
   const confirmed = await showConfirm(
-    `删除项目「${project.name}」？删除后，项目会从你的列表中移除。项目文件会保留在存储目录中；如果项目有未完成任务，需要先等待任务完成或取消任务。`,
+    `将项目「${project.name}」移入回收站。本地文件和任务记录会保留一个自然月，可在回收站恢复；到期后会彻底删除。如果项目有未完成任务，需要先等待任务完成或取消任务。`,
     { title: '删除项目', confirmText: '删除项目', destructive: true },
   )
   if (!confirmed) return

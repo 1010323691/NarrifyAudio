@@ -9,6 +9,11 @@ export interface ProjectSummary {
   updated_at: string
 }
 
+export interface TrashedProjectSummary extends ProjectSummary {
+  deleted_at: string
+  expires_at: string
+}
+
 export interface ProjectFileSummary {
   name: string
   relative_path: string
@@ -46,6 +51,18 @@ export function createProject(name: string): Promise<ProjectSummary> {
 
 export function listProjects(): Promise<ProjectSummary[]> {
   return http.get('/api/v1/projects')
+}
+
+export function listTrashedProjects(): Promise<TrashedProjectSummary[]> {
+  return http.get('/api/v1/projects/trash')
+}
+
+export function restoreProject(projectId: string): Promise<ProjectSummary> {
+  return http.post(`/api/v1/projects/${encodeURIComponent(projectId)}/restore`, {})
+}
+
+export function permanentlyDeleteProject(projectId: string): Promise<{ ok: boolean }> {
+  return http.del(`/api/v1/projects/${encodeURIComponent(projectId)}/permanent`)
 }
 
 export function deleteProject(projectId: string): Promise<{ ok: boolean }> {

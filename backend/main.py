@@ -7,6 +7,7 @@ Run (whole app):     ``npm run build`` then the same command, and open
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from .core.observability import record_api_request
 from .core.request_context import bind_workspace, reset_workspace
 from .core.paths import get_or_prepare_layout
 from .services.bootstrap import ensure_bootstrap_admin
+from .services.project_retention import project_retention_loop
 from .platform.platform_settings import settings
 from .platform.database import initialize_schema
 from .platform.database import SessionLocal, LockSessionLocal
@@ -75,7 +77,15 @@ async def lifespan(_: FastAPI):
     ensure_bootstrap_admin()
     layout = get_or_prepare_layout()
     logging_setup.setup_logging(layout.logs, core_config.get_config().log.level)
-    yield
+    retention_task = asyncio.create_task(project_retention_loop())
+    try:
+        yield
+    finally:
+        retention_task.cancel()
+        try:
+            await retention_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="NarrifyAudio API", version="0.2.0", lifespan=lifespan)

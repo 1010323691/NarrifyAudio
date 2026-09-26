@@ -10,8 +10,17 @@ from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, ProjectFile, User, utcnow
 from ..platform.project_context import active_project
 from ..platform.deps import AuthContext, get_auth_context
-from ..services.projects import ActiveProjectTasksError, create_project as create_project_record, rename_project, soft_delete_project
-from ..platform.storage import project_workspace_path
+from ..services.projects import (
+    ActiveProjectTasksError,
+    add_calendar_month,
+    as_utc,
+    create_project as create_project_record,
+    move_project_to_trash,
+    permanently_delete_project,
+    rename_project,
+    restore_project,
+)
+from ..platform.storage import project_workspace_path, safe_project_workspace_path
 from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
 from ..core.request_context import bind_workspace
 
@@ -37,8 +46,11 @@ def _project_json(project: Project, user: User) -> dict:
     return {"id": project.id, "name": project.name, "description": project.description, "created_at": project.created_at.isoformat(), "updated_at": project.updated_at.isoformat(), "directory_key": project.directory_key}
 
 
-def _owned_project(db: Session, user: User, project_id: str) -> Project:
-    project = db.scalar(select(Project).where(Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None)))
+def _owned_project(db: Session, user: User, project_id: str, *, lock: bool = False) -> Project:
+    statement = select(Project).where(Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None))
+    if lock:
+        statement = statement.with_for_update()
+    project = db.scalar(statement)
     if project is None:
         raise HTTPException(404, "项目不存在")
     return project
@@ -47,6 +59,27 @@ def _owned_project(db: Session, user: User, project_id: str) -> Project:
 @router.get("")
 def list_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     return [_project_json(item, user) for item in db.scalars(select(Project).where(Project.owner_id == user.id, Project.deleted_at.is_(None)).order_by(Project.updated_at.desc())).all()]
+
+
+@router.get("/trash")
+def list_trashed_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+    items = db.scalars(select(Project).where(
+        Project.owner_id == user.id, Project.deleted_at.is_not(None),
+    ).order_by(Project.deleted_at.desc())).all()
+    return [{
+        **_project_json(item, user),
+        "deleted_at": as_utc(item.deleted_at).isoformat(),
+        "expires_at": add_calendar_month(as_utc(item.deleted_at)).isoformat(),
+    } for item in items]
+
+
+def _owned_trashed_project(db: Session, user: User, project_id: str) -> Project:
+    project = db.scalar(select(Project).where(
+        Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_not(None),
+    ).with_for_update())
+    if project is None:
+        raise HTTPException(404, "项目不在回收站中")
+    return project
 
 
 @router.post("", status_code=201)
@@ -87,6 +120,37 @@ def _project_context(db: Session, ctx: AuthContext) -> dict:
 @router.get("/active")
 def get_active_project(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
     return _project_context(db, ctx)
+
+
+@router.post("/{project_id}/restore")
+def restore_trashed_project(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    project = _owned_trashed_project(db, user, project_id)
+    try:
+        restore_project(db, project)
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(410, str(exc)) from exc
+    db.refresh(project)
+    return _project_json(project, user)
+
+
+@router.delete("/{project_id}/permanent")
+def permanently_delete_trashed_project(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    project = _owned_trashed_project(db, user, project_id)
+    if add_calendar_month(as_utc(project.deleted_at)) > utcnow():
+        raise HTTPException(409, "项目需要在回收站保留满一个自然月后才能彻底删除")
+    workspace_path = safe_project_workspace_path(db, user.username, project.id)
+    if workspace_path is None:
+        raise HTTPException(409, "项目存储目录无法安全访问")
+    try:
+        permanently_delete_project(db, project, workspace_path)
+    except ActiveProjectTasksError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except OSError as exc:
+        db.rollback()
+        raise HTTPException(500, f"项目文件清理失败：{exc}") from exc
+    return {"ok": True}
 
 
 @router.put("/active")
@@ -133,12 +197,16 @@ def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    project = _owned_project(db, user, project_id)
+    project = _owned_project(db, user, project_id, lock=True)
     try:
-        soft_delete_project(db, project)
+        move_project_to_trash(db, project)
+        db.commit()
     except ActiveProjectTasksError as exc:
+        db.rollback()
         raise HTTPException(409, str(exc)) from exc
-    db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return {"ok": True}
 
 

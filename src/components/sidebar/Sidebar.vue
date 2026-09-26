@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon, ListTodo,
+  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon, ListTodo, Trash2,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -201,6 +201,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
           <template v-else>
             <RouterLink to="/usage" class="app-account__menu-item" @click="accountMenuOpen = false"><AudioLines class="h-4 w-4" />使用量</RouterLink>
             <RouterLink to="/resources" class="app-account__menu-item" @click="accountMenuOpen = false"><Layers class="h-4 w-4" />我的资源</RouterLink>
+            <RouterLink to="/trash" class="app-account__menu-item" @click="accountMenuOpen = false"><Trash2 class="h-4 w-4" aria-hidden="true" />回收站</RouterLink>
             <RouterLink to="/settings" class="app-account__menu-item" @click="accountMenuOpen = false"><Settings class="h-4 w-4" />设置</RouterLink>
           </template>
           <button type="button" class="app-account__menu-item app-account__menu-item--logout" @click="signOut"><LogOut class="h-4 w-4" />退出登录</button>
