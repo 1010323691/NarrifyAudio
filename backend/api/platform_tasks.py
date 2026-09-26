@@ -18,6 +18,7 @@ from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Task, TaskEvent, User
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from ..platform.task_registry import TASK_TYPES
 from ..platform.task_submission import task_dict
 from ..services import task_views
 from .task_operations import (
@@ -33,41 +34,51 @@ router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 TASK_HISTORY_PAGE_SIZE = 50
 
 
-def _subject_expression(task) -> ColumnElement:
-    """The entry's subject, in the same fallback order the task center renders
-    its label (``services.task_views.durable_label``): label, then source name,
-    then output name. All-NULL stays NULL so unsubjected rows never match."""
-    return func.coalesce(
-        task.payload["label"].as_string(),
-        task.payload["source_name"].as_string(),
-        task.payload["output_name"].as_string(),
-    )
+_NO_IDENTITY = "__narrify_no_identity__"
 
 
-def _superseded_by_newer_run() -> ColumnElement:
-    """Correlated EXISTS: a newer task for the same owner/project/type/subject.
-    A rerun of the same entry (e.g. the same chapter file re-parsed after a
-    failure) supersedes the older terminal row — the centre must show one row
-    per entry, not 失败 next to its 进行中/已完成 replacement. Rows that are
-    still active are never superseded: they are still doing real work."""
+def _identity_value(task, key: str):
+    """One identity payload key as comparable text; absent / NULL values
+    coalesce to a sentinel so two rows both lacking the key compare equal."""
+    return func.coalesce(task.payload[key].as_string(), _NO_IDENTITY)
+
+
+def _same_entry(newer) -> ColumnElement:
+    """The two rows name the same entry: same type, and — per the registry's
+    ``entry_identity`` — equal identity values in their payloads. Types with
+    no identity keys (whole-book operations) share one entry. A row whose
+    identity keys are all absent / NULL has no subject and never matches:
+    legacy rows must not be hidden under a guess."""
+    terms = []
+    for spec in TASK_TYPES.values():
+        keys = spec.entry_identity
+        term = [Task.task_type == spec.name]
+        if keys:
+            term.append(or_(*[_identity_value(Task, key) != _NO_IDENTITY for key in keys]))
+            term.extend(_identity_value(newer, key) == _identity_value(Task, key) for key in keys)
+        terms.append(and_(*term))
+    return or_(*terms)
+
+
+def _one_row_per_entry() -> ColumnElement:
+    """Hide terminal rows superseded by a newer run of the same entry; keep
+    every active row. A cancelled re-run does not supersede: it is not a
+    completed attempt, and hiding the last real record behind it would make
+    the entry vanish from the default history (which excludes cancelled)."""
     newer = aliased(Task)
-    return exists(
+    superseded = exists(
         select(newer.id).where(
             newer.owner_id == Task.owner_id,
             newer.project_id == Task.project_id,
-            newer.task_type == Task.task_type,
-            _subject_expression(newer) == _subject_expression(Task),
+            _same_entry(newer),
+            newer.status != "cancelled",
             or_(
                 newer.created_at > Task.created_at,
                 and_(newer.created_at == Task.created_at, newer.id > Task.id),
             ),
         )
     )
-
-
-def _one_row_per_entry() -> ColumnElement:
-    """Hide terminal rows whose entry has a newer run; keep every active row."""
-    return or_(Task.status.in_(ACTIVE_TASK_STATUSES), ~_superseded_by_newer_run())
+    return or_(Task.status.in_(ACTIVE_TASK_STATUSES), ~superseded)
 
 
 def _task_json(task: Task) -> dict:
