@@ -14,6 +14,12 @@ export const useProjectStore = defineStore('project', () => {
   const busy = ref(false)
   const error = ref('')
   let generation = 0
+  // Coalesced in-flight refresh: layout guard, router guard and page mounts all
+  // share ONE wave of requests instead of each firing their own (the dashboard
+  // used to load the same list twice — and again after the keep-alive scope
+  // remounted it mid-load).
+  let inflight: Promise<ProjectContext | null> | null = null
+  let inflightGeneration = -1
 
   const activeProjectId = computed(() => current.value?.project_id || '')
   const activeProject = computed(() => projects.value.find((item) => item.id === activeProjectId.value) ?? null)
@@ -34,23 +40,40 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   async function refresh() {
+    if (inflight && inflightGeneration === generation) return inflight
     const requestGeneration = generation
-    loading.value = true
-    error.value = ''
-    const [activeResult, projectsResult] = await Promise.allSettled([
-      projectApi.getActiveProject(),
-      projectApi.listProjects(),
-    ])
-    if (requestGeneration !== generation) return current.value
-    let scopeChanged = false
-    if (activeResult.status === 'fulfilled') scopeChanged = applyCurrent(activeResult.value)
-    else error.value = activeResult.reason?.message || '无法读取当前项目'
-    if (projectsResult.status === 'fulfilled') projects.value = projectsResult.value
-    else if (!error.value) error.value = projectsResult.reason?.message || '无法读取项目列表'
-    loading.value = false
-    loaded.value = true
-    if (scopeChanged) await useSettingsStore().load()
-    return current.value
+    const promise = (async () => {
+      loading.value = true
+      error.value = ''
+      try {
+        const [activeResult, projectsResult] = await Promise.allSettled([
+          projectApi.getActiveProject(),
+          projectApi.listProjects(),
+        ])
+        if (requestGeneration !== generation) return current.value
+        let scopeChanged = false
+        if (activeResult.status === 'fulfilled') scopeChanged = applyCurrent(activeResult.value)
+        else error.value = activeResult.reason?.message || '无法读取当前项目'
+        if (projectsResult.status === 'fulfilled') projects.value = projectsResult.value
+        else if (!error.value) error.value = projectsResult.reason?.message || '无法读取项目列表'
+        // Fire-and-forget: first paint must not wait on the config fetch; views
+        // read settings reactively and settle when it lands.
+        if (scopeChanged) void useSettingsStore().load()
+        return current.value
+      } catch (cause: any) {
+        if (requestGeneration === generation) error.value = cause?.message || '无法读取项目列表'
+        return current.value
+      } finally {
+        if (requestGeneration === generation) {
+          loading.value = false
+          loaded.value = true
+        }
+      }
+    })()
+    inflight = promise
+    inflightGeneration = requestGeneration
+    void promise.finally(() => { if (inflight === promise) inflight = null })
+    return promise
   }
 
   async function select(projectId: string) {
