@@ -52,8 +52,9 @@ export function deleteProject(projectId: string): Promise<{ ok: boolean }> {
   return http.del(`/api/v1/projects/${encodeURIComponent(projectId)}`)
 }
 
-export function getProjectSummary(projectId: string): Promise<ProjectStorageSummary> {
-  return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary`)
+export function getProjectSummary(projectId: string, compact = false): Promise<ProjectStorageSummary> {
+  const query = compact ? '?compact=true' : ''
+  return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary${query}`)
 }
 
 export function cleanupProjectTemp(projectId: string): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {

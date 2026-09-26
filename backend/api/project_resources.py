@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, Task, User
-from ..platform.storage import configured_storage_root, safe_display_name
+from ..platform.storage import safe_project_workspace_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
 from ..services.task_operations import owned_project
@@ -48,22 +48,11 @@ _SPLIT_VOLUME_NAME = re.compile(r"^第\s+\d+\s+章(?:\s|\.|$)")
 
 def _safe_project_directory(db: Session, user: User, item: Project) -> Path | None:
     """Resolve a managed project directory without following user-controlled symlinks."""
-    root = configured_storage_root(db).resolve()
-    user_root = root / safe_display_name(user.username)
-    candidate = user_root / item.id
-    if user_root.is_symlink() or candidate.is_symlink():
-        return None
-    try:
-        resolved = candidate.resolve()
-        if not resolved.is_relative_to(root):
-            return None
-    except (OSError, RuntimeError):
-        return None
-    return resolved
+    return safe_project_workspace_path(db, user.username, item.id)
 
 
-def _project_summary(root: Path, *, active: bool) -> dict:
-    """Collect file metadata only; never follows links or reads file contents."""
+def _project_summary(root: Path, *, active: bool, compact: bool = False) -> dict:
+    """Collect metadata, optionally skipping per-file data for list views."""
     totals: dict[str, dict[str, int]] = {}
     files: list[dict] = []
     cleanup_count = cleanup_bytes = split_volume_count = 0
@@ -89,20 +78,26 @@ def _project_summary(root: Path, *, active: bool) -> dict:
         if not active and relative.parts and relative.parts[0] in _CACHE_DIRS and stat.st_mtime < cutoff:
             cleanup_count += 1
             cleanup_bytes += stat.st_size
-        files.append({
-            "name": path.name,
-            "relative_path": relative.as_posix(),
-            "module": category,
-            "size_bytes": stat.st_size,
-            "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
-        })
+        if not compact:
+            files.append({
+                "name": path.name,
+                "relative_path": relative.as_posix(),
+                "module": category,
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(),
+            })
 
-    files.sort(key=lambda row: row["modified_at"], reverse=True)
-    outputs = [
-        row for row in files
-        if Path(row["name"]).suffix.lower() in _AUDIO_EXTENSIONS
-        and row["module"] in {"05_audio_chunk", "06_audio_merge", "07_output", "08_bgm"}
-    ]
+    if compact:
+        recent_files = recent_outputs = []
+    else:
+        files.sort(key=lambda row: row["modified_at"], reverse=True)
+        outputs = [
+            row for row in files
+            if Path(row["name"]).suffix.lower() in _AUDIO_EXTENSIONS
+            and row["module"] in {"05_audio_chunk", "06_audio_merge", "07_output", "08_bgm"}
+        ]
+        recent_files = files[:100]
+        recent_outputs = outputs[:12]
     return {
         "file_count": sum(bucket["count"] for bucket in totals.values()),
         "size_bytes": sum(bucket["size_bytes"] for bucket in totals.values()),
@@ -111,8 +106,8 @@ def _project_summary(root: Path, *, active: bool) -> dict:
             {"key": key, "label": _CATEGORY_LABELS[key], **value}
             for key, value in sorted(totals.items(), key=lambda pair: pair[1]["size_bytes"], reverse=True)
         ],
-        "recent_files": files[:100],
-        "recent_outputs": outputs[:12],
+        "recent_files": recent_files,
+        "recent_outputs": recent_outputs,
         "cleanup_candidates": {
             "count": cleanup_count, "size_bytes": cleanup_bytes, "older_than_days": 7,
             "blocked_by_active_tasks": active,
@@ -121,7 +116,7 @@ def _project_summary(root: Path, *, active: bool) -> dict:
 
 
 @router.get("/{project_id}/summary")
-def get_project_summary(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+def get_project_summary(project_id: str, compact: bool = False, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, project_id)
     active = db.scalar(select(Task.id).where(
         Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)
@@ -133,7 +128,7 @@ def get_project_summary(project_id: str, user: User = Depends(require_authentica
         "project_id": item.id,
         "name": item.name,
         "updated_at": item.updated_at.isoformat(),
-        **_project_summary(root, active=active),
+        **_project_summary(root, active=active, compact=compact),
     }
 
 

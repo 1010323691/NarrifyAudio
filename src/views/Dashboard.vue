@@ -27,6 +27,7 @@ const name = ref('')
 const pageError = ref('')
 const openError = ref('')
 const deletingProjectId = ref('')
+let loadGeneration = 0
 const STAGE_KEYS = ['02_split_text', '03_parsed_json', '04_voice_profiles', '05_audio_chunk', '06_audio_merge', '07_output', '08_bgm']
 const visibleStageKeys = computed(() => STAGE_KEYS.filter((key) => key !== '07_output' || settings.config?.ui.show_audio_split))
 const stageCount = computed(() => visibleStageKeys.value.length)
@@ -65,15 +66,22 @@ function updatedAt(value: string) {
 }
 
 async function load() {
+  const requestGeneration = ++loadGeneration
   refreshing.value = true
   pageError.value = ''
-  const active = await projectStore.refresh()
-  const tasksResult = await Promise.allSettled([listDurableTasks()])
+  const [active, tasksResult] = await Promise.all([
+    projectStore.refresh(),
+    Promise.allSettled([listDurableTasks()]),
+  ])
+  if (requestGeneration !== loadGeneration) return
   tasks.value = tasksResult[0].status === 'fulfilled' ? tasksResult[0].value : []
   if (projectStore.error) pageError.value = projectStore.error
   else if (tasksResult[0].status === 'rejected') pageError.value = '最近任务暂时无法读取。'
   const visible = projects.value.slice(0, 12)
-  const results = await Promise.allSettled(visible.map((project) => getProjectSummary(project.id)))
+  loading.value = false
+  refreshing.value = false
+  const results = await Promise.allSettled(visible.map((project) => getProjectSummary(project.id, true)))
+  if (requestGeneration !== loadGeneration) return
   const next: Record<string, ProjectStorageSummary> = {}
   results.forEach((result, index) => {
     if (result.status === 'fulfilled') next[visible[index].id] = result.value
