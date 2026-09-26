@@ -39,13 +39,16 @@ def _test_schema():
     SessionLocal directly (no ``client`` fixture) depended on an EARLIER test
     module having run, and any file run in isolation failed with
     ``no such table`` on its first DB query. Do it here, before everything."""
-    from backend.platform.database import engine, initialize_schema
+    from backend.platform.database import engine, lock_engine, initialize_schema
 
     initialize_schema()
     yield
     # The file-backed DB lives in the session's temp dir: release every pooled
     # (and leaked) connection or Windows cannot delete the file at cleanup.
+    # The lock pool holds connections for the middleware's whole-request lock
+    # sessions, so it must be drained too.
     engine.dispose(close=True)
+    lock_engine.dispose(close=True)
 
 
 @pytest.fixture(autouse=True)

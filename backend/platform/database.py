@@ -36,6 +36,30 @@ engine = create_engine(settings.database_url, future=True, **_engine_kwargs())
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
+def _lock_engine_kwargs() -> dict:
+    """Pool for the migration-coordination lock sessions (see
+    ``main.protect_storage_during_migration``). Those sessions stay open for the
+    WHOLE request — the transaction-scoped advisory lock dies with the
+    transaction — so their connection cost must NOT land on the business pool
+    above: a long request (SSE task stream) would otherwise pin a business
+    connection for minutes. Sized for concurrent page loads + open streams."""
+    if settings.database_url in {"sqlite://", "sqlite:///:memory:"}:
+        return {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool}
+    if settings.database_url.startswith("sqlite"):
+        return {"connect_args": {"check_same_thread": False}}
+    return {
+        "pool_pre_ping": True,
+        "pool_size": 32,
+        "max_overflow": 16,
+        "pool_timeout": 30,
+        "pool_recycle": 1800,
+    }
+
+
+lock_engine = create_engine(settings.database_url, future=True, **_lock_engine_kwargs())
+LockSessionLocal = sessionmaker(bind=lock_engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:

@@ -37,7 +37,7 @@ from .core.paths import get_or_prepare_layout
 from .services.bootstrap import ensure_bootstrap_admin
 from .platform.platform_settings import settings
 from .platform.database import initialize_schema
-from .platform.database import SessionLocal
+from .platform.database import SessionLocal, LockSessionLocal
 from .platform.deps import require_legacy_access
 from .platform.project_context import active_project
 from .platform.security import load_session
@@ -134,18 +134,35 @@ async def protect_storage_during_migration(request, call_next):
     if request.url.path in {"/api/health", "/api/v1/admin/settings/storage", "/api/auth/login", "/api/auth/logout"}:
         return await call_next(request)
 
-    # Entry check only: the connection (and with it the transaction-scoped
-    # shared lock) is released before the request runs, so an in-flight
-    # request never pins a pooled connection for its whole lifetime.
-    def storage_ready() -> bool:
-        with SessionLocal() as db:
-            if not lock_storage_migration(db, shared=True):
-                return False
-            return storage_migration(db) is None
+    # The shared advisory lock is transaction-scoped, so the session that
+    # takes it must stay open for the WHOLE request: while any request holds
+    # the shared lock, the admin's exclusive TRY lock fails and the storage
+    # migration waits for in-flight requests to drain (and the
+    # storage.migration flag rejects new requests). Releasing the lock after
+    # an entry check would let a migration move the root under a request
+    # already running against the old one.
+    # The lock session draws from the dedicated lock pool
+    # (platform.database.LockSessionLocal), not the business pool: a long
+    # request (e.g. the SSE task stream) pins one budgeted lock connection,
+    # never a business one.
+    def enter_storage():
+        db = LockSessionLocal()
+        try:
+            if lock_storage_migration(db, shared=True) and storage_migration(db) is None:
+                return db
+        except BaseException:
+            db.close()
+            raise
+        db.close()
+        return None
 
-    if not await run_in_threadpool(storage_ready):
+    db = await run_in_threadpool(enter_storage)
+    if db is None:
         return JSONResponse(status_code=409, content={"detail": "存储根目录正在迁移，工作空间暂时不可用"})
-    return await call_next(request)
+    try:
+        return await call_next(request)
+    finally:
+        await run_in_threadpool(db.close)
 
 
 # Local client on this machine; origins are loopback addresses.
