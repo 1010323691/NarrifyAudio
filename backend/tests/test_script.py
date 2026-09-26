@@ -2932,6 +2932,41 @@ def test_split_long_entries_unit():
     assert out2 is short and n2 == 0
 
 
+def test_split_long_entries_replaces_multiple_long_rows_without_shifting():
+    first = "甲" * 450
+    middle = {"speaker": "林某", "text": "中间短句。", "instruct": "middle"}
+    second = "乙" * 450
+    last = {"speaker": "NARRATOR", "text": "结尾短句。", "instruct": "last"}
+    entries = [
+        {"speaker": "NARRATOR", "text": first, "instruct": "first"},
+        middle,
+        {"speaker": "林某", "text": second, "instruct": "second"},
+        last,
+    ]
+
+    out, split_count = split_long_entries(entries, 200, is_chapter_title)
+
+    assert split_count == 2
+    assert [entry["text"] for entry in out] == [
+        "甲" * 200, "甲" * 200, "甲" * 50,
+        "中间短句。",
+        "乙" * 200, "乙" * 200, "乙" * 50,
+        "结尾短句。",
+    ]
+    assert [entry["speaker"] for entry in out] == [
+        "NARRATOR", "NARRATOR", "NARRATOR", "林某",
+        "林某", "林某", "林某", "NARRATOR",
+    ]
+    assert [entry["instruct"] for entry in out] == [
+        "first", "", "", "middle", "second", "", "", "last",
+    ]
+    first_parts = [entry["text"] for entry in out if entry["text"].startswith("甲")]
+    second_parts = [entry["text"] for entry in out if entry["text"].startswith("乙")]
+    assert "".join(first_parts) == first
+    assert "".join(second_parts) == second
+    assert entries[0]["text"] == first and entries[2]["text"] == second
+
+
 def test_absorb_punct_entries_unit():
     N = lambda t: {"speaker": "NARRATOR", "text": t, "instruct": ""}
     # 并入前邻（追加到其尾）

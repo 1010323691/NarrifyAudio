@@ -1933,7 +1933,9 @@ def split_long_entries(entries: list, max_chars: int, title_test) -> tuple:
         return entries, 0
     updated = list(entries)
     split_count = 0
-    for i in sorted(flagged):
+    # Replace from right to left: each split grows ``updated`` and would otherwise
+    # shift the original indices of any later flagged entries.
+    for i in sorted(flagged, reverse=True):
         e = entries[i]
         parts = split_long_text(e.get("text") or "", max_chars)
         if len(parts) < 2:
