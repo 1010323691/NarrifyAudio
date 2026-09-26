@@ -153,7 +153,8 @@ onMounted(load)
       </Card>
       <Card class="attention-card">
         <div class="section-title section-title--compact"><div><h2>最近需要处理</h2><p>仅包含此项目的失败任务。</p></div><CircleAlert class="h-4 w-4" /></div>
-        <div v-if="recentFailures.length" class="failure-list">
+        <div v-if="loading" class="stage-skeleton" aria-label="正在读取任务状态"><div class="skeleton-line w-2/3" /></div>
+        <div v-else-if="recentFailures.length" class="failure-list">
           <div v-for="task in recentFailures" :key="task.id" class="failure-row"><div><strong>{{ taskTypeLabel(task.task_type) }}</strong><small>{{ task.error_message || '任务失败，请重试或检查输入。' }}</small></div><StatusPill label="失败" tone="negative" /></div>
         </div>
         <p v-else class="empty-inline">目前没有失败任务。</p>
