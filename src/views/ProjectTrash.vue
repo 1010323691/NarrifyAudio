@@ -4,8 +4,7 @@ import { Clock3, LoaderCircle, RotateCcw, RefreshCw, Trash2 } from 'lucide-vue-n
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import { useToast } from '@/components/ui/toast'
-import { showConfirm } from '@/components/ui/dialog'
-import { listTrashedProjects, permanentlyDeleteProject, restoreProject, type TrashedProjectSummary } from '@/api/project'
+import { listTrashedProjects, restoreProject, type TrashedProjectSummary } from '@/api/project'
 import { useProjectStore } from '@/stores/project'
 
 const { push: toast } = useToast()
@@ -61,25 +60,6 @@ async function restore(item: TrashedProjectSummary) {
   }
 }
 
-async function purge(item: TrashedProjectSummary) {
-  if (workingId.value) return
-  const confirmed = await showConfirm(
-    `彻底删除「${item.name}」及其本地文件和任务记录？此操作无法恢复。`,
-    { title: '彻底删除项目', confirmText: '彻底删除', destructive: true },
-  )
-  if (!confirmed) return
-  workingId.value = item.id
-  try {
-    await permanentlyDeleteProject(item.id)
-    toast({ title: '项目已彻底删除', variant: 'success' })
-    await load()
-  } catch (cause: any) {
-    toast({ title: '删除失败', variant: 'destructive', description: cause?.message || '请稍后重试。' })
-  } finally {
-    workingId.value = ''
-  }
-}
-
 onMounted(load)
 </script>
 
@@ -119,10 +99,7 @@ onMounted(load)
               <LoaderCircle v-if="workingId === item.id" class="h-4 w-4 animate-spin" />
               <RotateCcw v-else class="h-4 w-4" />恢复项目
             </Button>
-            <Button v-if="isExpired(item.expires_at)" variant="destructive" :disabled="!!workingId" @click="purge(item)">
-              <LoaderCircle v-if="workingId === item.id" class="h-4 w-4 animate-spin" />
-              <Trash2 v-else class="h-4 w-4" />彻底删除
-            </Button>
+            <span v-else class="trash-card__expired">已到期，等待后台彻底删除</span>
           </div>
         </Card>
       </div>
@@ -136,5 +113,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.project-trash{display:grid;gap:26px;max-width:1100px;margin:0 auto;padding-bottom:30px}.project-trash__header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap}.project-trash__header::before{display:none}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.16em;color:hsl(var(--primary))}.project-trash__header h1{margin-top:5px}.project-trash__header .page-description{max-width:620px}.trash-section{display:grid;gap:12px}.trash-heading{display:flex;align-items:center;justify-content:space-between}.trash-heading>div{display:flex;align-items:baseline;gap:10px}.trash-heading h2{font-size:16px;font-weight:750}.muted,.trash-card__copy p,.trash-empty p{color:hsl(var(--muted-foreground));font-size:12px}.trash-list{display:grid;gap:12px}.trash-card{display:flex;align-items:center;gap:15px;padding:16px}.trash-card__icon,.trash-empty__icon{display:grid;place-items:center;width:42px;height:42px;flex:none;border-radius:12px;background:hsl(var(--destructive)/.08);color:hsl(var(--destructive))}.trash-card__copy{min-width:0;flex:1}.trash-card__copy h3{overflow:hidden;font-size:14px;font-weight:700;text-overflow:ellipsis;white-space:nowrap}.trash-card__copy p{margin-top:4px}.trash-card__expiry{display:flex;align-items:center;gap:5px}.trash-card__actions{display:flex;flex:none;gap:8px}.trash-empty{display:grid;justify-items:center;gap:9px;padding:44px 18px;text-align:center}.trash-empty h3{font-size:16px;font-weight:700}.trash-alert{border:1px solid hsl(var(--destructive)/.25);border-radius:10px;background:hsl(var(--destructive)/.06);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.trash-skeleton{display:grid;gap:13px;padding:18px}.skeleton-line{height:11px;border-radius:6px;background:hsl(var(--muted));animation:pulse 1.4s ease-in-out infinite}.trash-skeleton .w-2\/5{width:40%}.trash-skeleton .w-4\/5{width:80%}@keyframes pulse{50%{opacity:.4}}@media(max-width:720px){.trash-card{align-items:flex-start;flex-wrap:wrap}.trash-card__copy{flex-basis:calc(100% - 58px)}.trash-card__actions{width:100%;padding-left:57px}.trash-card__actions>*{flex:1}}@media(max-width:420px){.trash-card__actions{padding-left:0;flex-direction:column}.trash-card__actions>*{width:100%}}
+.project-trash{display:grid;gap:26px;max-width:1100px;margin:0 auto;padding-bottom:30px}.project-trash__header{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap}.project-trash__header::before{display:none}.eyebrow{font-size:10px;font-weight:800;letter-spacing:.16em;color:hsl(var(--primary))}.project-trash__header h1{margin-top:5px}.project-trash__header .page-description{max-width:620px}.trash-section{display:grid;gap:12px}.trash-heading{display:flex;align-items:center;justify-content:space-between}.trash-heading>div{display:flex;align-items:baseline;gap:10px}.trash-heading h2{font-size:16px;font-weight:750}.muted,.trash-card__copy p,.trash-empty p{color:hsl(var(--muted-foreground));font-size:12px}.trash-list{display:grid;gap:12px}.trash-card{display:flex;align-items:center;gap:15px;padding:16px}.trash-card__icon,.trash-empty__icon{display:grid;place-items:center;width:42px;height:42px;flex:none;border-radius:12px;background:hsl(var(--destructive)/.08);color:hsl(var(--destructive))}.trash-card__copy{min-width:0;flex:1}.trash-card__copy h3{overflow:hidden;font-size:14px;font-weight:700;text-overflow:ellipsis;white-space:nowrap}.trash-card__copy p{margin-top:4px}.trash-card__expiry{display:flex;align-items:center;gap:5px}.trash-card__actions{display:flex;flex:none;gap:8px}.trash-card__expired{color:hsl(var(--muted-foreground));font-size:12px}.trash-empty{display:grid;justify-items:center;gap:9px;padding:44px 18px;text-align:center}.trash-empty h3{font-size:16px;font-weight:700}.trash-alert{border:1px solid hsl(var(--destructive)/.25);border-radius:10px;background:hsl(var(--destructive)/.06);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.trash-skeleton{display:grid;gap:13px;padding:18px}.skeleton-line{height:11px;border-radius:6px;background:hsl(var(--muted));animation:pulse 1.4s ease-in-out infinite}.trash-skeleton .w-2\/5{width:40%}.trash-skeleton .w-4\/5{width:80%}@keyframes pulse{50%{opacity:.4}}@media(max-width:720px){.trash-card{align-items:flex-start;flex-wrap:wrap}.trash-card__copy{flex-basis:calc(100% - 58px)}.trash-card__actions{width:100%;padding-left:57px}.trash-card__actions>*{flex:1}}@media(max-width:420px){.trash-card__actions{padding-left:0;flex-direction:column}.trash-card__actions>*{width:100%}}
 </style>

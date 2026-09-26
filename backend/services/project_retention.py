@@ -1,15 +1,13 @@
 """Daily cleanup for projects that have remained in the trash for a month."""
 from __future__ import annotations
 
-import asyncio
 import logging
-from datetime import datetime, timezone
 
 from sqlalchemy import select, text
-from starlette.concurrency import run_in_threadpool
+from sqlalchemy.orm import Session
 
 from ..platform.database import LockSessionLocal, SessionLocal
-from ..platform.models import Project, User
+from ..platform.models import Project, User, utcnow
 from ..platform.storage import lock_storage_migration, safe_project_workspace_path, storage_migration
 from .projects import add_calendar_month, as_utc, permanently_delete_project
 
@@ -33,9 +31,9 @@ def purge_expired_projects() -> int:
         return _purge_expired_with_session(db)
 
 
-def _purge_expired_with_session(db) -> int:
+def _purge_expired_with_session(db: Session) -> int:
     purged = 0
-    now = datetime.now(timezone.utc)
+    now = utcnow()
     rows = db.execute(
         select(Project.id, User.username)
         .join(User, User.id == Project.owner_id)
@@ -62,13 +60,3 @@ def _purge_expired_with_session(db) -> int:
             db.rollback()
             logger.exception("Failed to purge expired project: %s", project.id)
     return purged
-
-
-async def project_retention_loop() -> None:
-    """Check on startup and then once per day for expired trash entries."""
-    while True:
-        try:
-            await run_in_threadpool(purge_expired_projects)
-        except Exception:
-            logger.exception("Daily project trash cleanup failed")
-        await asyncio.sleep(24 * 60 * 60)

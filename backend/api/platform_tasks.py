@@ -88,8 +88,12 @@ def _task_json(task: Task) -> dict:
 def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> list[Task]:
     """Return every active task plus the newest 200 records for live UI state,
     with terminal rows superseded by a newer run of the same entry hidden."""
-    live_projects = select(Project.id).where(Project.owner_id == user_id, Project.deleted_at.is_(None))
-    filters = [Task.owner_id == user_id, Task.project_id.in_(live_projects)]
+    trashed_project = select(Project.id).where(
+        Project.id == Task.project_id,
+        Project.owner_id == user_id,
+        Project.deleted_at.is_not(None),
+    ).exists()
+    filters = [Task.owner_id == user_id, ~trashed_project]
     if project_id:
         filters.append(Task.project_id == project_id)
     recent_ids = select(Task.id).where(*filters).order_by(Task.created_at.desc(), Task.id.desc()).limit(200)
@@ -103,11 +107,16 @@ def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> lis
 
 @router.get("")
 def list_tasks(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+    trashed_project = select(Project.id).where(
+        Project.id == Task.project_id,
+        Project.owner_id == user.id,
+        Project.deleted_at.is_not(None),
+    ).exists()
     rows = db.scalars(
         select(Task)
         .where(
             Task.owner_id == user.id,
-            Task.project_id.in_(select(Project.id).where(Project.owner_id == user.id, Project.deleted_at.is_(None))),
+            ~trashed_project,
             _one_row_per_entry(),
         )
         .order_by(Task.created_at.desc())

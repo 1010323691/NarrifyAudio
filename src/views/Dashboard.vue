@@ -11,7 +11,7 @@ import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
-import { deleteProject, getProjectSummary, type ProjectStorageSummary } from '@/api/project'
+import { deleteProject, getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
 
 const router = useRouter()
@@ -19,7 +19,7 @@ const projectStore = useProjectStore()
 const settings = useSettingsStore()
 const { push: toast } = useToast()
 const tasks = ref<DurableTask[]>([])
-const summaries = ref<Record<string, ProjectStorageSummary>>({})
+const summaries = ref<Record<string, ProjectProgressSummary>>({})
 const loading = ref(true)
 const refreshing = ref(false)
 const createOpen = ref(false)
@@ -34,9 +34,9 @@ const stageCount = computed(() => visibleStageKeys.value.length)
 
 const projects = computed(() => [...projectStore.projects].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)))
 
-function stagesWithOutput(summary?: ProjectStorageSummary) {
+function stagesWithOutput(summary?: ProjectProgressSummary) {
   if (!summary) return null
-  const completed = new Set(summary.categories.filter((row) => row.count > 0).map((row) => row.key))
+  const completed = new Set(summary.stage_keys)
   return visibleStageKeys.value.filter((key) =>
     key === '02_split_text' ? summary.split_volume_count > 0 : completed.has(key),
   ).length
@@ -80,9 +80,9 @@ async function load() {
   const visible = projects.value.slice(0, 12)
   loading.value = false
   refreshing.value = false
-  const results = await Promise.allSettled(visible.map((project) => getProjectSummary(project.id, true)))
+  const results = await Promise.allSettled(visible.map((project) => getProjectProgressSummary(project.id)))
   if (requestGeneration !== loadGeneration) return
-  const next: Record<string, ProjectStorageSummary> = {}
+  const next: Record<string, ProjectProgressSummary> = {}
   results.forEach((result, index) => {
     if (result.status === 'fulfilled') next[visible[index].id] = result.value
   })

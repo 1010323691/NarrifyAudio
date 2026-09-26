@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
@@ -16,11 +17,10 @@ from ..services.projects import (
     as_utc,
     create_project as create_project_record,
     move_project_to_trash,
-    permanently_delete_project,
     rename_project,
     restore_project,
 )
-from ..platform.storage import project_workspace_path, safe_project_workspace_path
+from ..platform.storage import project_workspace_path
 from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
 from ..core.request_context import bind_workspace
 
@@ -82,9 +82,15 @@ def _owned_trashed_project(db: Session, user: User, project_id: str) -> Project:
     return project
 
 
+def _lock_project_name_scope(db: Session, user: User) -> None:
+    """Serialize name checks and updates for one owner's active projects."""
+    db.scalar(select(User.id).where(User.id == user.id).with_for_update())
+
+
 @router.post("", status_code=201)
 def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     name = payload.name.strip()
+    _lock_project_name_scope(db, user)
     if db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.deleted_at.is_(None))) is not None:
         raise HTTPException(409, "项目名称已存在")
     project = create_project_record(
@@ -124,6 +130,7 @@ def get_active_project(ctx: AuthContext = Depends(get_auth_context), db: Session
 
 @router.post("/{project_id}/restore")
 def restore_trashed_project(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    _lock_project_name_scope(db, user)
     project = _owned_trashed_project(db, user, project_id)
     try:
         restore_project(db, project)
@@ -131,26 +138,11 @@ def restore_trashed_project(project_id: str, user: User = Depends(require_csrf),
     except ValueError as exc:
         db.rollback()
         raise HTTPException(410, str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "项目名称刚刚被其他项目占用，请刷新回收站后重试。") from exc
     db.refresh(project)
     return _project_json(project, user)
-
-
-@router.delete("/{project_id}/permanent")
-def permanently_delete_trashed_project(project_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    project = _owned_trashed_project(db, user, project_id)
-    if add_calendar_month(as_utc(project.deleted_at)) > utcnow():
-        raise HTTPException(409, "项目需要在回收站保留满一个自然月后才能彻底删除")
-    workspace_path = safe_project_workspace_path(db, user.username, project.id)
-    if workspace_path is None:
-        raise HTTPException(409, "项目存储目录无法安全访问")
-    try:
-        permanently_delete_project(db, project, workspace_path)
-    except ActiveProjectTasksError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    except OSError as exc:
-        db.rollback()
-        raise HTTPException(500, f"项目文件清理失败：{exc}") from exc
-    return {"ok": True}
 
 
 @router.put("/active")
@@ -181,6 +173,8 @@ def select_active_project(
 
 @router.patch("/{project_id}")
 def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+    if payload.name is not None:
+        _lock_project_name_scope(db, user)
     project = _owned_project(db, user, project_id)
     if payload.name is not None:
         name = payload.name.strip()

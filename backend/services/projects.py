@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..platform.models import (
     OutboxEvent, Project, ProjectFile, QuotaHold, QuotaTransaction, Task,
-    TaskAttempt, TaskEvent, TaskResult, UserSession, WorkerHeartbeat, new_id,
+    TaskAttempt, TaskEvent, TaskResult, UserSession, WorkerHeartbeat, new_id, utcnow,
 )
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 
@@ -74,13 +74,13 @@ def as_utc(value: datetime) -> datetime:
 def move_project_to_trash(db: Session, project: Project) -> None:
     """Hide a project while retaining its files and database records for recovery."""
     ensure_project_idle(db, project)
-    project.deleted_at = datetime.now(timezone.utc)
+    project.deleted_at = utcnow()
     db.execute(update(UserSession).where(UserSession.active_project_id == project.id).values(active_project_id=None))
 
 
 def restore_project(db: Session, project: Project) -> None:
     """Restore a trashed project before its one-calendar-month expiry."""
-    if project.deleted_at is None or add_calendar_month(as_utc(project.deleted_at)) <= datetime.now(timezone.utc):
+    if project.deleted_at is None or add_calendar_month(as_utc(project.deleted_at)) <= utcnow():
         raise ValueError("项目已超过回收期限")
     duplicate = db.scalar(select(Project.id).where(
         Project.owner_id == project.owner_id,
@@ -107,16 +107,26 @@ def restore_project(db: Session, project: Project) -> None:
 
 
 def permanently_delete_project(db: Session, project: Project, workspace_path: Path) -> None:
-    """Permanently remove expired project data and its managed workspace."""
+    """Permanently remove expired project data and its managed workspace.
+
+    Failed or interrupted directory removals remain in a deterministic staging
+    location. The expired project row stays in the trash so the next worker pass
+    can resume cleanup; partially removed data is never moved back as if it were
+    recoverable.
+    """
     ensure_project_idle(db, project)
-    staged_path: Path | None = None
     if workspace_path.is_symlink():
         raise OSError("Project workspace must not be a symlink")
+    staged_paths = list(workspace_path.parent.glob(f".{project.id}.deleting-*"))
     if workspace_path.exists():
         if not workspace_path.is_dir():
             raise OSError("Project workspace is not a directory")
         staged_path = workspace_path.with_name(f".{project.id}.deleting-{uuid.uuid4().hex}")
         workspace_path.rename(staged_path)
+        staged_paths.append(staged_path)
+    for staged_path in staged_paths:
+        if staged_path.is_symlink() or not staged_path.is_dir():
+            raise OSError("Staged project workspace is not a safe directory")
 
     task_ids = select(Task.id).where(Task.owner_id == project.owner_id, Task.project_id == project.id)
     try:
@@ -137,11 +147,9 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
         db.delete(project)
         db.flush()
 
-        if staged_path is not None:
+        for staged_path in staged_paths:
             shutil.rmtree(staged_path, onerror=_remove_readonly)
         db.commit()
     except Exception:
         db.rollback()
-        if staged_path is not None and staged_path.exists() and not workspace_path.exists():
-            staged_path.rename(workspace_path)
         raise
