@@ -65,30 +65,31 @@ function updatedAt(value: string) {
   return Number.isNaN(date.getTime()) ? '最近更新未知' : `最近更新 ${date.toLocaleDateString()}`
 }
 
-async function load() {
+async function load(force = false) {
   const requestGeneration = ++loadGeneration
   refreshing.value = true
   pageError.value = ''
-  const [active, tasksResult] = await Promise.all([
-    projectStore.refresh(),
-    Promise.allSettled([listDurableTasks()]),
-  ])
+  // 卡片只等最基本的活动项目 + 项目列表（路由守卫首帧前已解析过时直接复用，
+  // 不再重复拉取）。任务列表与每项目进度都改为到达即填充，不阻塞首屏。
+  const refreshGate = force || !projectStore.loaded ? projectStore.refresh() : Promise.resolve(projectStore.current)
+  listDurableTasks()
+    .then((items) => { if (requestGeneration === loadGeneration) tasks.value = items })
+    .catch(() => { if (requestGeneration === loadGeneration && !pageError.value) pageError.value = '最近任务暂时无法读取。' })
+  await refreshGate
   if (requestGeneration !== loadGeneration) return
-  tasks.value = tasksResult[0].status === 'fulfilled' ? tasksResult[0].value : []
   if (projectStore.error) pageError.value = projectStore.error
-  else if (tasksResult[0].status === 'rejected') pageError.value = '最近任务暂时无法读取。'
-  const visible = projects.value.slice(0, 12)
   loading.value = false
   refreshing.value = false
-  const results = await Promise.allSettled(visible.map((project) => getProjectProgressSummary(project.id)))
-  if (requestGeneration !== loadGeneration) return
-  const next: Record<string, ProjectProgressSummary> = {}
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') next[visible[index].id] = result.value
-  })
-  summaries.value = next
-  if (active?.set && !projectStore.projects.some((item) => item.id === active.project_id)) {
+  // 每项目进度并行发出、逐个回填：不再等最慢的一个项目算完才整批回显。
+  for (const project of projects.value.slice(0, 12)) {
+    getProjectProgressSummary(project.id)
+      .then((summary) => { if (requestGeneration === loadGeneration) summaries.value[project.id] = summary })
+      .catch(() => undefined)
+  }
+  // 活动项目不在列表中（别处删除/移入回收站）时补拉一次列表。
+  if (projectStore.current?.set && !projectStore.projects.some((item) => item.id === projectStore.current!.project_id)) {
     await projectStore.refresh()
+    if (requestGeneration !== loadGeneration) return
   }
   refreshing.value = false
   loading.value = false
@@ -130,7 +131,7 @@ async function requestDelete(project: ProjectSummary) {
   deletingProjectId.value = project.id
   try {
     await deleteProject(project.id)
-    await load()
+    await load(true)
   } catch (cause: any) {
     toast({ title: '删除项目失败', variant: 'destructive', description: cause?.message || '请稍后重试。' })
   } finally {
@@ -138,7 +139,7 @@ async function requestDelete(project: ProjectSummary) {
   }
 }
 
-onMounted(load)
+onMounted(() => load())
 </script>
 
 <template>
@@ -168,13 +169,13 @@ onMounted(load)
     </Card>
 
     <div v-if="pageError" class="project-alert" role="alert">
-      <span>{{ pageError }}</span><Button variant="outline" size="sm" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" />重试</Button>
+      <span>{{ pageError }}</span><Button variant="outline" size="sm" :disabled="refreshing" @click="load(true)"><RefreshCw class="h-4 w-4" />重试</Button>
     </div>
 
     <section class="project-center__section">
       <div class="section-heading">
         <div><h2>项目列表</h2><span v-if="!loading" class="muted">{{ projects.length }} 个项目</span></div>
-        <Button variant="ghost" size="sm" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" />刷新</Button>
+        <Button variant="ghost" size="sm" :disabled="refreshing" @click="load(true)"><RefreshCw class="h-4 w-4" />刷新</Button>
       </div>
 
       <div v-if="loading" class="project-grid" aria-label="正在加载项目">

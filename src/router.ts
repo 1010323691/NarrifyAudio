@@ -5,7 +5,6 @@ import Login from '@/views/Login.vue'
 import AccessDenied from '@/views/AccessDenied.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
-import { getActiveProject } from '@/api/project'
 
 // The customer workspace and admin console have separate route trees, layouts,
 // login portals, and role guards. Neither shell links into the other.
@@ -70,25 +69,32 @@ router.beforeEach(async (to) => {
   if (to.meta.requiresAdmin && auth.user?.role !== 'admin') return '/access-denied'
   if (to.meta.requiresUser && auth.user?.role !== 'user') return '/access-denied'
 
+  // 进入用户工作区前先把活动项目解析好：MainLayout 的 keep-alive 按
+  // 「用户:活动项目」做 key，若组件挂载后才拿到活动项目，key 中途变化会触发
+  // 整页重挂载，首次进入时全部加载请求都要再跑一轮。refresh() 内部合流，
+  // 守卫、布局、页面三方共享同一波请求。
+  if (to.meta.requiresUser && !project.loaded) await project.refresh()
+
   if (to.name === 'project-overview') {
     const projectId = String(to.params.projectId || '')
     if (!projectId) return '/dashboard'
-    try {
-      const current = await getActiveProject()
-      if (current.project_id === projectId) project.setCurrent(current)
-      else await project.select(projectId)
-    } catch {
-      return '/dashboard'
+    if (!project.current) {
+      await project.refresh()
+      if (!project.current) return '/dashboard'
     }
+    if (project.current.project_id !== projectId) {
+      try {
+        await project.select(projectId)
+      } catch {
+        return '/dashboard'
+      }
+    }
+    return true
   }
   if (to.meta.projectStage) {
-    try {
-      const current = await getActiveProject()
-      project.setCurrent(current)
-      if (!current.set || !current.project_id) return '/dashboard'
-    } catch {
-      return '/dashboard'
-    }
+    if (!project.current) await project.refresh()
+    if (!project.current?.set || !project.current?.project_id) return '/dashboard'
+    return true
   }
   return true
 })
