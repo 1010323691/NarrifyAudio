@@ -28,9 +28,6 @@ const themeOptions = [
 ] as const
 const activeTheme = computed(() => settings.config?.ui.theme || 'system')
 
-const isProjectContext = computed(() => project.hasActiveProject && (
-  route.path.startsWith('/projects/') || ['/text', '/script', '/voices', '/batch', '/merge', '/audio', '/bgm'].includes(route.path)
-))
 const USER_ITEMS = [
   { to: '/dashboard', label: '项目', icon: LayoutDashboard },
   { to: '/tasks', label: '任务中心', icon: ListTodo },
@@ -141,11 +138,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
         <RouterLink :to="`/projects/${project.activeProjectId}`" class="app-nav__label app-nav__project-title">
           <FolderOpen class="h-3.5 w-3.5" /><span class="app-nav__project-name">{{ project.activeProjectName || '当前项目' }}</span>
         </RouterLink>
-        <template v-if="isProjectContext">
-          <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
-            <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>
-          </RouterLink>
-        </template>
+        <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
+          <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>
+        </RouterLink>
       </div>
 
     </nav>
