@@ -57,7 +57,9 @@ const nextStage = computed(() => STAGES.value.find((stage) => ['待开始', '需
 const recentFailures = computed(() => tasks.value.filter((task) => ['failed', 'timeout'].includes(task.status)).slice(0, 3))
 
 async function load() {
-  loading.value = !project.current
+  // 首帧骨架由 loading（初始 true）驱动：任务列表与各阶段文件数到达前不渲染
+  // 「待开始 / 0 个文件」的假状态；刷新按钮在 refreshing 期间禁用，数据落定后
+  // finally 统一收尾，后续「刷新进度」保留现值并用底部 spinner 提示。
   refreshing.value = true
   error.value = ''
   try {
@@ -117,7 +119,8 @@ onMounted(load)
     <Card class="project-progress">
       <div class="project-progress__top">
         <div><span class="muted">制作进度</span><strong>{{ doneStages }} / {{ STAGES.length }} 阶段已有产物</strong></div>
-        <StatusPill v-if="recentFailures.length" label="有任务需处理" tone="negative" />
+        <StatusPill v-if="loading" label="正在加载…" tone="neutral" />
+        <StatusPill v-else-if="recentFailures.length" label="有任务需处理" tone="negative" />
         <StatusPill v-else label="项目可继续制作" tone="positive" />
       </div>
       <div class="project-progress__bar"><span :style="{ width: `${(doneStages / STAGES.length) * 100}%` }" /></div>
@@ -150,13 +153,14 @@ onMounted(load)
       </Card>
       <Card class="attention-card">
         <div class="section-title section-title--compact"><div><h2>最近需要处理</h2><p>仅包含此项目的失败任务。</p></div><CircleAlert class="h-4 w-4" /></div>
-        <div v-if="recentFailures.length" class="failure-list">
+        <div v-if="loading" class="stage-skeleton" aria-label="正在读取任务状态"><div class="skeleton-line w-2/3" /></div>
+        <div v-else-if="recentFailures.length" class="failure-list">
           <div v-for="task in recentFailures" :key="task.id" class="failure-row"><div><strong>{{ taskTypeLabel(task.task_type) }}</strong><small>{{ task.error_message || '任务失败，请重试或检查输入。' }}</small></div><StatusPill label="失败" tone="negative" /></div>
         </div>
         <p v-else class="empty-inline">目前没有失败任务。</p>
       </Card>
     </section>
-    <div v-if="refreshing" class="refreshing-note"><LoaderCircle class="h-3.5 w-3.5 animate-spin" />正在更新项目状态</div>
+    <div v-if="refreshing && !loading" class="refreshing-note"><LoaderCircle class="h-3.5 w-3.5 animate-spin" />正在更新项目状态</div>
   </div>
 </template>
 
