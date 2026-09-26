@@ -35,7 +35,9 @@ const allTasks = computed(() => {
   for (const task of taskStore.tasks) {
     if (task.project_name && task.task_type) byId.set(task.id, task)
   }
-  return [...byId.values()].sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))
+  return [...byId.values()]
+    .filter((task) => task.status !== 'cancelled')
+    .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))
 })
 
 const sections = computed(() => TASK_CENTER_CATEGORIES.map((category) => {
