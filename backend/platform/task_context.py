@@ -278,6 +278,16 @@ class EngineExecutionContext:
             self._shared_publication_journal.rollback()
 
     def check(self) -> None:
+        # A paused durable task keeps its current worker attempt parked at the
+        # engine's next cooperative checkpoint. Resuming can continue that same
+        # attempt without repeating completed work or model charges.
+        while True:
+            with SessionLocal() as db:
+                task = db.get(Task, self.claim.task_id)
+                paused = task is not None and task.status == "paused"
+            if not paused:
+                break
+            time.sleep(0.25)
         if self.cancelled:
             raise TaskCancelled()
 
@@ -332,7 +342,7 @@ def cancellation_requested(claim: TaskClaim) -> bool:
     with SessionLocal() as db:
         task = db.get(Task, claim.task_id)
         attempt = db.get(TaskAttempt, claim.attempt_id)
-        if task is None or task.status == "cancelling":
+        if task is None or task.status in TERMINAL_TASK_STATUSES | {"cancelling"}:
             return True
         return (
             attempt is None
