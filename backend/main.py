@@ -134,24 +134,18 @@ async def protect_storage_during_migration(request, call_next):
     if request.url.path in {"/api/health", "/api/v1/admin/settings/storage", "/api/auth/login", "/api/auth/logout"}:
         return await call_next(request)
 
-    def enter_storage():
-        db = SessionLocal()
-        try:
-            if lock_storage_migration(db, shared=True) and storage_migration(db) is None:
-                return db
-        except BaseException:
-            db.close()
-            raise
-        db.close()
-        return None
+    # Entry check only: the connection (and with it the transaction-scoped
+    # shared lock) is released before the request runs, so an in-flight
+    # request never pins a pooled connection for its whole lifetime.
+    def storage_ready() -> bool:
+        with SessionLocal() as db:
+            if not lock_storage_migration(db, shared=True):
+                return False
+            return storage_migration(db) is None
 
-    db = await run_in_threadpool(enter_storage)
-    if db is None:
+    if not await run_in_threadpool(storage_ready):
         return JSONResponse(status_code=409, content={"detail": "存储根目录正在迁移，工作空间暂时不可用"})
-    try:
-        return await call_next(request)
-    finally:
-        await run_in_threadpool(db.close)
+    return await call_next(request)
 
 
 # Local client on this machine; origins are loopback addresses.

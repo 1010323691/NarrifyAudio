@@ -19,7 +19,17 @@ def _engine_kwargs() -> dict:
         return {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool}
     if settings.database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {"pool_pre_ping": True}
+    # Sized for a page load firing 10+ concurrent requests, each of which
+    # checks out up to two connections (middleware + endpoint session).
+    # pool_recycle keeps long-idle connections from outliving server-side
+    # session timeouts.
+    return {
+        "pool_pre_ping": True,
+        "pool_size": 20,
+        "max_overflow": 20,
+        "pool_timeout": 60,
+        "pool_recycle": 1800,
+    }
 
 
 engine = create_engine(settings.database_url, future=True, **_engine_kwargs())
