@@ -9,8 +9,8 @@ from datetime import datetime
 import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy.orm import Session, aliased, selectinload
 
 from ..platform.database import SessionLocal, get_db
 from ..platform.platform_settings import settings
@@ -33,12 +33,50 @@ router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 TASK_HISTORY_PAGE_SIZE = 50
 
 
+def _subject_expression(task) -> ColumnElement:
+    """The entry's subject, in the same fallback order the task center renders
+    its label (``services.task_views.durable_label``): label, then source name,
+    then output name. All-NULL stays NULL so unsubjected rows never match."""
+    return func.coalesce(
+        task.payload["label"].as_string(),
+        task.payload["source_name"].as_string(),
+        task.payload["output_name"].as_string(),
+    )
+
+
+def _superseded_by_newer_run() -> ColumnElement:
+    """Correlated EXISTS: a newer task for the same owner/project/type/subject.
+    A rerun of the same entry (e.g. the same chapter file re-parsed after a
+    failure) supersedes the older terminal row — the centre must show one row
+    per entry, not 失败 next to its 进行中/已完成 replacement. Rows that are
+    still active are never superseded: they are still doing real work."""
+    newer = aliased(Task)
+    return exists(
+        select(newer.id).where(
+            newer.owner_id == Task.owner_id,
+            newer.project_id == Task.project_id,
+            newer.task_type == Task.task_type,
+            _subject_expression(newer) == _subject_expression(Task),
+            or_(
+                newer.created_at > Task.created_at,
+                and_(newer.created_at == Task.created_at, newer.id > Task.id),
+            ),
+        )
+    )
+
+
+def _one_row_per_entry() -> ColumnElement:
+    """Hide terminal rows whose entry has a newer run; keep every active row."""
+    return or_(Task.status.in_(ACTIVE_TASK_STATUSES), ~_superseded_by_newer_run())
+
+
 def _task_json(task: Task) -> dict:
     return task_dict(task)
 
 
 def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> list[Task]:
-    """Return every active task plus the newest 200 records for live UI state."""
+    """Return every active task plus the newest 200 records for live UI state,
+    with terminal rows superseded by a newer run of the same entry hidden."""
     filters = [Task.owner_id == user_id]
     if project_id:
         filters.append(Task.project_id == project_id)
@@ -46,13 +84,19 @@ def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> lis
     stmt = select(Task).where(
         *filters,
         or_(Task.status.in_(ACTIVE_TASK_STATUSES), Task.id.in_(recent_ids)),
+        _one_row_per_entry(),
     )
     return db.scalars(stmt.order_by(Task.created_at.desc(), Task.id.desc())).all()
 
 
 @router.get("")
 def list_tasks(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
-    rows = db.scalars(select(Task).where(Task.owner_id == user.id).order_by(Task.created_at.desc()).limit(200)).all()
+    rows = db.scalars(
+        select(Task)
+        .where(Task.owner_id == user.id, _one_row_per_entry())
+        .order_by(Task.created_at.desc())
+        .limit(200)
+    ).all()
     return [_task_json(row) for row in rows]
 
 
@@ -76,11 +120,21 @@ def _decode_task_cursor(cursor: str) -> tuple[datetime, str]:
 @router.get("/history")
 def list_task_history(
     cursor: str | None = None,
+    include_cancelled: bool = False,
     user: User = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Read the caller's complete task history in stable, newest-first pages."""
+    """Read the caller's complete task history in stable, newest-first pages.
+    Cancelled rows are excluded by default: bulk cancels leave hundreds of
+    identical terminal rows that would otherwise occupy the newest-first pages
+    (and the SSE replay window) and push completed / failed work out of view.
+    Pass ``include_cancelled=true`` for the full record.
+    Terminal rows superseded by a newer run of the same entry are hidden as
+    well, so a re-run shows as one entry, not 失败 + 进行中/已完成."""
     stmt = select(Task).options(selectinload(Task.project)).where(Task.owner_id == user.id)
+    if not include_cancelled:
+        stmt = stmt.where(Task.status != "cancelled")
+    stmt = stmt.where(_one_row_per_entry())
     if cursor:
         created_at, task_id = _decode_task_cursor(cursor)
         stmt = stmt.where(or_(
