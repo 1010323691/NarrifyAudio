@@ -194,3 +194,40 @@ def test_postgres_schema_upgrade(isolated_postgres, tmp_path, legacy_hold_table)
     schema = inspect(isolated_postgres)
     assert "quota_holds" in schema.get_table_names()
     assert "next_attempt_at" in {column["name"] for column in schema.get_columns("tasks")}
+
+
+def test_middleware_holds_the_lock_session_for_the_whole_request():
+    """An entry-only lock check is NOT enough: the shared advisory lock is
+    transaction-scoped, so a probe session released before ``call_next`` lets
+    an admin grab the exclusive lock and move the storage root while the
+    request is still running against the old root. The middleware must hold
+    the lock session across the request — and draw it from the dedicated lock
+    pool, so a long request (SSE stream) pins a lock connection, never a
+    business-pool one."""
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    from backend.platform import database
+
+    @app.get("/api/lock_probe_selftest")
+    def _lock_probe_selftest():
+        return {
+            "lock_checkedout": database.lock_engine.pool.checkedout(),
+            "business_checkedout": database.engine.pool.checkedout(),
+        }
+
+    # The SPA catch-all (main.py) is registered first and would shadow this
+    # late-added /api/ route with a 404; move the probe to the front of the
+    # route table.
+    probe = next(r for r in app.router.routes if getattr(r, "path", None) == "/api/lock_probe_selftest")
+    app.router.routes.remove(probe)
+    app.router.routes.insert(0, probe)
+
+    with TestClient(app) as client:
+        body = client.get("/api/lock_probe_selftest").json()
+
+    # The probe route body executes while the middleware's lock session is
+    # still open: exactly one lock-pool connection is checked out, and the
+    # middleware pins ZERO business-pool connections.
+    assert body == {"lock_checkedout": 1, "business_checkedout": 0}
+    # Released right after the response, before the pool is ever needed again.
+    assert database.lock_engine.pool.checkedout() == 0

@@ -59,10 +59,12 @@ def workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
     (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
+    core_paths.reset_layout_cache()  # module state outlives the monkeypatched TEMPLATE_FILE
     ws = tmp_path / "Book"
     core_config.set_workspace_pointer(str(ws))
     yield ws
     core_config.reset_config_cache()
+    core_paths.reset_layout_cache()
 
 
 def _seed_manifest(ws, n, package="pkg", missing=(), top_level=False):
@@ -301,15 +303,33 @@ def test_run_gate_acquired_after_fast_fail(workspace, monkeypatch, fresh_gate):
     slot held elsewhere, a missing manifest still fails immediately and leaves the
     gate untouched (the acquire sits after every fast-fail, before any file is written)."""
     fresh_gate.acquire()  # an outside holder takes the only slot
+    handle = _Handle()
     try:
         captured = {}
         _stub_engine(monkeypatch, captured)
-        t0 = time.monotonic()
-        with pytest.raises(RuntimeError, match="未找到合成结果清单"):
-            merge.merge_audio_package(_Handle(), "nope")
-        assert time.monotonic() - t0 < 1.0  # did not sit down waiting for the slot
+        errors: list = []
+
+        def call():
+            try:
+                merge.merge_audio_package(handle, "nope")
+            except BaseException as e:  # noqa: BLE001 — recorded, asserted below
+                errors.append(e)
+
+        t = threading.Thread(target=call, daemon=True)
+        t.start()
+        # Run the fast-fail in a worker and bound the join: if a regression made it
+        # wait for the slot, it would block here (the holder never releases during
+        # the test) and fail the join instead of hanging the suite. No wall-clock
+        # assertion — scheduling latency on a loaded machine is not the property
+        # under test; "never touched the gate" is.
+        t.join(timeout=15)
+        assert not t.is_alive(), "the fast-fail path is waiting for a merge slot (regression)"
+        assert len(errors) == 1 and isinstance(errors[0], RuntimeError) \
+            and "未找到合成结果清单" in str(errors[0]), f"unexpected outcome: {errors!r}"
+        assert "cmd" not in captured
         assert fresh_gate.active == 1  # unchanged — never acquired
     finally:
+        handle.cancelled = True  # lets a regressed, slot-waiting thread self-abort
         fresh_gate.release()
 
 
@@ -322,16 +342,45 @@ def test_run_spawns_only_after_slot(workspace, monkeypatch, fresh_gate):
     captured = {}
     _stub_engine(monkeypatch, captured)
     handle = _Handle()
-    t = threading.Thread(target=merge.merge_audio_package, args=(handle, "pkg"), daemon=True)
+    errors: list = []
+
+    def call():
+        try:
+            merge.merge_audio_package(handle, "pkg")
+        except BaseException as e:  # noqa: BLE001 — recorded, asserted below
+            errors.append(e)
+
+    t = threading.Thread(target=call, daemon=True)
     t.start()
-    time.sleep(0.5)  # plenty of cooperative-poll cycles for the run to reach the gate
-    assert "cmd" not in captured  # nothing spawned while the slot is held
-    fresh_gate.release()  # frees the slot -> the queued run acquires it and spawns
-    t.join(timeout=5)
-    assert not t.is_alive()
-    assert "cmd" in captured  # spawned only after the slot freed
-    assert (workspace / "06_audio_merge" / "pkg.mp3").exists()
-    assert fresh_gate.active == 0  # the run released its slot on the way out
+    try:
+        # Wait until the run REPORTS itself queued — the engine records 排队中
+        # right before the blocking acquire. Polling the sentinel instead of a
+        # blind sleep is what this test is about: under load the run may need
+        # more than a fixed window to reach the gate, and a dead thread must
+        # fail the test with its real exception, not a stale assert.
+        queued = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if any("排队" in cur for _frac, cur in handle.progresses):
+                queued = True
+                break
+            if not t.is_alive():
+                break
+            time.sleep(0.05)
+        assert not errors, f"the run died before reaching the gate: {errors[0]!r}"
+        assert queued, "the run never reached the gate within 15 s"
+        assert "cmd" not in captured  # nothing spawned while the slot is held
+        fresh_gate.release()  # frees the slot -> the queued run acquires it and spawns
+        t.join(timeout=30)
+        assert not t.is_alive(), "the run did not finish after the slot freed"
+        assert not errors, f"the run failed after the slot freed: {errors[0]!r}"
+        assert "cmd" in captured  # spawned only after the slot freed
+        assert (workspace / "06_audio_merge" / "pkg.mp3").exists()
+        assert fresh_gate.active == 0  # the run released its slot on the way out
+    finally:
+        handle.cancelled = True  # a regressed thread still queued aborts itself
+        if fresh_gate.active:
+            fresh_gate.release()
 
 
 def test_run_release_balanced(workspace, monkeypatch, fresh_gate):
@@ -364,9 +413,24 @@ def test_run_cancel_while_queued_zero_output(workspace, monkeypatch, fresh_gate)
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
-        time.sleep(0.3)
+        # Wait for the run to REPORT itself queued (the engine records 排队中
+        # right before the blocking acquire), THEN cancel — so "cancelled while
+        # queued" is true by construction, not by a fixed sleep racing the
+        # scheduler on a loaded machine.
+        queued = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if any("排队" in cur for _frac, cur in handle.progresses):
+                queued = True
+                break
+            if not t.is_alive():
+                break
+            time.sleep(0.05)
+        assert queued, "the run never reached the gate before being cancelled"
         handle.cancelled = True
-        t.join(timeout=2)
+        # The engine re-checks stop_check every 0.2 s while blocked, so the abort
+        # lands on the next poll cycle — 10 s bounds scheduling, not the poll.
+        t.join(timeout=10)
         assert not t.is_alive()
         assert isinstance(getattr(handle, "error", None), merge.TaskCancelled)
         assert "cmd" not in captured  # never spawned

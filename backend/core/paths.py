@@ -124,7 +124,7 @@ def is_workspace_set() -> bool:
 # AND per completed segment), and each uncached call re-reads the root ``app.json`` pointer
 # plus re-runs the 11 mkdir probes. The pointer only changes when the root file itself is
 # rewritten (``set_workspace_pointer`` rewrites it), so the file's
-# ``(mtime_ns, size)`` is a faithful invalidation key: steady state costs ONE stat per call.
+# ``(mtime_ns, size, st_ino)`` is a faithful invalidation key: steady state costs ONE stat per call.
 # The ``ensured`` flag remembers whether the cached layout's skeleton was planted — a stale-
 # pointer entry (the folder was gone when cached) plants it exactly once if the folder
 # comes back, instead of re-running the probes on every hit.
@@ -135,12 +135,15 @@ _layout_cache: dict[str, tuple[Layout, bool]] = {}
 
 def _root_pointer_key():
     """The cache key: the root ``app.json``'s ``(mtime_ns, size)``; a sentinel while the
-    file does not exist yet (a fresh sandbox before the first pointer write)."""
+    file does not exist yet (a fresh sandbox before the first pointer write).
+    ``st_ino`` is included because two DIFFERENT files can share a timestamp
+    pair — a collision would serve one root's layout for another's (a real
+    flake in sandboxed tests, where each test points at its own app.json)."""
     from .config import TEMPLATE_FILE  # local import: config imports paths at top level
 
     try:
         st = TEMPLATE_FILE.stat()
-        return (st.st_mtime_ns, st.st_size)
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
     except OSError:
         return _MISSING_KEY
 
