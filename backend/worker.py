@@ -8,10 +8,13 @@ import threading
 import time
 
 import redis
+from sqlalchemy import func, select
 
 from .platform.outbox import publish_pending
 from .platform.task_worker import recover_database_tasks, resume_llm_unavailable_tasks, run_once
 from .platform.worker_registry import heartbeat, mark_offline
+from .platform.database import SessionLocal
+from .platform.models import Task, TaskAttempt
 from .platform.task_types import SUPPORTED_TASK_TYPES
 from .core.concurrency import set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
@@ -23,9 +26,31 @@ PARSE_WORKER_MULTIPLIER = 2
 PARSE_TASK_TYPES = ("script.parse",)
 
 
-def parse_worker_slot_count(llm_concurrency: int) -> int:
-    """Allow two parse tasks per LLM slot for preparation and queueing."""
-    return min(PARSE_WORKER_MAX, max(1, int(llm_concurrency)) * PARSE_WORKER_MULTIPLIER)
+def parse_worker_slot_count(llm_concurrency: int, parked_worker_count: int = 0) -> int:
+    """Keep the configured active queue slots available when tasks are parked."""
+    configured_slots = max(1, int(llm_concurrency)) * PARSE_WORKER_MULTIPLIER
+    return min(PARSE_WORKER_MAX, configured_slots + max(0, int(parked_worker_count)))
+
+
+def _paused_parse_worker_count(worker_id: str) -> int:
+    """Count this process's live, manually paused parse attempts.
+
+    Their threads preserve the in-memory execution stack, so the coordinator
+    provisions replacement workers while keeping the number of runnable slots
+    at the configured limit. Other worker processes do not compensate for them.
+    """
+    with SessionLocal() as db:
+        return int(db.scalar(
+            select(func.count(TaskAttempt.id))
+            .join(Task, Task.id == TaskAttempt.task_id)
+            .where(
+                Task.task_type.in_(PARSE_TASK_TYPES),
+                Task.status == "paused",
+                Task.error_code == "manual_pause",
+                TaskAttempt.status == "running",
+                TaskAttempt.worker_id.startswith(f"{worker_id}-parse-", autoescape=True),
+            )
+        ) or 0)
 
 
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
@@ -54,11 +79,17 @@ def _parse_worker_coordinator(worker_id: str, stop: threading.Event) -> None:
     logger = logging.getLogger("audiobook.worker")
     workers: dict[int, tuple[threading.Thread, threading.Event]] = {}
     next_slot = 1
+    paused_worker_count = 0
+    last_pause_count_check = 0.0
     try:
         while not stop.is_set():
             try:
                 llm_limit = parse_worker_concurrency(maximum=PARSE_LLM_CONCURRENCY_MAX)
-                worker_limit = parse_worker_slot_count(llm_limit)
+                now = time.monotonic()
+                if now - last_pause_count_check >= 1.0:
+                    paused_worker_count = _paused_parse_worker_count(worker_id)
+                    last_pause_count_check = now
+                worker_limit = parse_worker_slot_count(llm_limit, paused_worker_count)
                 set_concurrency(llm_limit)
                 for slot, (thread, slot_stop) in list(workers.items()):
                     if not thread.is_alive():
