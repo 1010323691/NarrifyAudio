@@ -24,6 +24,11 @@ const error = ref('')
 const controlError = ref('')
 const controllingCategory = ref<TaskCenterCategoryId | null>(null)
 const taskFilter = ref<'all' | 'active' | 'completed'>('all')
+// A single bulk run can occupy the newest history pages (a 400-chapter
+// re-parse spans 8+ pages of 50). Auto-load this many rows so recently
+// completed entries stay in view instead of sitting behind manual
+// "load earlier" clicks.
+const AUTO_HISTORY_LIMIT = 500
 const selectedGroup = ref<{ categoryId: TaskCenterCategoryId; projectId: string } | null>(null)
 const dialogPanel = ref<HTMLElement | null>(null)
 const dialogCloseButton = ref<HTMLButtonElement | null>(null)
@@ -212,9 +217,16 @@ function handleDialogKeydown(event: KeyboardEvent) {
   }
 }
 
-function activate() {
+async function activate() {
   taskStore.setTaskCenterOpen(true)
-  if (!loaded.value) void loadPage()
+  if (!loaded.value) {
+    await loadPage()
+    // keep pulling earlier pages (capped) so a large recent batch cannot push
+    // completed entries out of the auto-loaded view
+    for (let i = 0; i < 20 && cursor.value && historyTasks.value.length < AUTO_HISTORY_LIMIT; i += 1) {
+      await loadPage(true)
+    }
+  }
   void taskStore.refresh()
 }
 
