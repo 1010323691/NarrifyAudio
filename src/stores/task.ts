@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { controlTask, streamAllTasks } from '@/api/tasks'
 import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
 
-const ACTIVE: TaskStatus[] = ['pending', 'running']
+const ACTIVE: TaskStatus[] = ['pending', 'running', 'paused']
 
 // Client-side cap on the display-only live LLM stream buffer (「流式反馈」 panel): it
 // bounds the in-memory tail; snapshot / terminal events replace the whole task,
@@ -34,6 +34,8 @@ export const useTaskStore = defineStore('task', () => {
   // project store binds the current project so snapshot_all carries exactly its
   // tasks (binding null = the user's tasks across all projects).
   let boundProjectId: string | null = null
+  let taskCenterOpen = false
+  let snapshotReceived = false
   // refresh() callers wait here for the stream's snapshot_all replay to land.
   let snapshotWaiters: Array<() => void> = []
 
@@ -56,9 +58,17 @@ export const useTaskStore = defineStore('task', () => {
     return tasks.value.some((t) => isActive(t.status))
   }
 
+  function shouldKeepStream() {
+    return taskCenterOpen || hasActive()
+  }
+
+  const projectTasks = computed(() => boundProjectId
+    ? tasks.value.filter((task) => task.project_id === boundProjectId)
+    : [])
+
   /** 非终态任务（可选按 module 过滤）——供各页在页面刷新后重新挂接在途任务。 */
   function activeTasks(module?: string): TaskSnapshot[] {
-    return tasks.value.filter((t) => isActive(t.status) && (!module || t.module === module))
+    return projectTasks.value.filter((t) => isActive(t.status) && (!module || t.module === module))
   }
 
   function upsert(t: TaskSnapshot) {
@@ -69,10 +79,11 @@ export const useTaskStore = defineStore('task', () => {
 
   function applyEvent(id: string, e: { type: string; [k: string]: any }) {
     if (e.type === 'snapshot_all') {
-      // Connect / reconnect replay: the authoritative full task list — replace
-      // wholesale so live events that follow apply to the fresh objects.
-      tasks.value = Array.isArray(e.tasks) ? e.tasks : []
+      // Keep history-page records while refreshing recent and active live state.
+      for (const task of Array.isArray(e.tasks) ? e.tasks : []) upsert(task)
+      snapshotReceived = true
       wakeSnapshotWaiters()
+      if (allStream && !shouldKeepStream()) closeStream()
       return
     }
     const t = tasks.value.find((x) => x.id === id)
@@ -148,17 +159,11 @@ export const useTaskStore = defineStore('task', () => {
     // terminal event releases the tab's connection (idle tabs shouldn't occupy
     // one of the browser's ~6 per-host slots); refresh() / control() reopen it
     // when work starts.
-    if (allStream && !hasActive()) closeStream()
+    if (allStream && !shouldKeepStream()) closeStream()
   }
 
   function ensureStream() {
     if (allStream) return
-    // The v1 stream is user-scoped but this is a project console: while no
-    // project is bound (the App boot window) there is nothing to stream —
-    // opening the unscoped stream would replay the user's 200 tasks × up to
-    // 1000 log lines, while the legacy console semantics said "no project →
-    // empty". It is (re)opened by refresh() once bindProject has landed.
-    if (boundProjectId === null) return
     const streamGeneration = generation
     allStream = streamAllTasks(
       (e) => {
@@ -170,10 +175,10 @@ export const useTaskStore = defineStore('task', () => {
         // waiting on the replay, and — if work is still in flight — reopen the
         // stream; its snapshot_all self-heals the state.
         allStream = null
+        snapshotReceived = false
         wakeSnapshotWaiters()
-        if (hasActive()) ensureStream()
+        if (shouldKeepStream()) ensureStream()
       },
-      boundProjectId,
     )
   }
 
@@ -181,6 +186,7 @@ export const useTaskStore = defineStore('task', () => {
     if (allStream) {
       allStream()
       allStream = null
+      snapshotReceived = false
     }
   }
 
@@ -190,19 +196,14 @@ export const useTaskStore = defineStore('task', () => {
    *  connection ends / the wait times out). An already-open stream is current
    *  by construction, so it resolves immediately. */
   async function refresh() {
-    // No project bound yet (boot window): the console is empty by legacy
-    // semantics — the project store's applyCurrent binds first and the views'
-    // refresh() that follows opens the scoped stream.
-    if (boundProjectId === null) return
     const requestGeneration = generation
     loading.value = true
     try {
-      if (!allStream) {
+      if (!allStream || !snapshotReceived) {
         // The replay is the ONLY event that can wake this waiter, so the
         // stream must be opened BEFORE the wait — waiting first would burn
         // the full timeout on a cold start and resolve with tasks still
         // empty, losing the one-shot reattach (F5 / project switch).
-        ensureStream()
         const gate: { drop?: () => void } = {}
         const replay = new Promise<void>((resolve) => {
           const wait = () => {
@@ -216,6 +217,7 @@ export const useTaskStore = defineStore('task', () => {
             if (i !== -1) snapshotWaiters.splice(i, 1)
           }
         })
+        ensureStream()
         const timedOut = await Promise.race([
           replay,
           new Promise<true>((resolve) => setTimeout(() => resolve(true), SNAPSHOT_WAIT_TIMEOUT_MS)),
@@ -227,18 +229,60 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
-  /** The v1 control POSTs are fire-and-confirm-over-SSE: the authoritative
-   *  snapshot arrives as the `status` frame that follows the request, so the
-   *  response body is discarded and the stream is (re)opened to receive it. */
+  /** Apply the immediate control response, then let SSE confirm the durable snapshot. */
   async function control(id: string, action: TaskControl): Promise<void> {
     const requestGeneration = generation
-    await controlTask(id, action)
+    const response = await controlTask(id, action) as {
+      status?: TaskStatus
+      project_id?: string
+      task_type?: string
+      progress?: number
+      error_message?: string
+      created_at?: string
+    }
     if (requestGeneration !== generation) return
+    const task = tasks.value.find((item) => item.id === id)
+    if (response?.status) {
+      const status = response.status === 'queued' || response.status === 'retrying'
+        ? 'pending'
+        : response.status === 'cancelling' ? 'running' : response.status
+      if (task) task.status = status
+      else {
+        const created = response.created_at ? new Date(response.created_at).getTime() / 1000 : Date.now() / 1000
+        upsert({
+          id,
+          project_id: response.project_id || boundProjectId || '',
+          project_name: '',
+          task_type: response.task_type || '',
+          module: response.task_type?.split('.', 1)[0] || '',
+          label: '任务状态更新',
+          status,
+          progress: typeof response.progress === 'number' ? response.progress / 100 : 0,
+          current: '',
+          logs: [],
+          result: {},
+          error: response.error_message || '',
+          created,
+          created_at: response.created_at || new Date(created * 1000).toISOString(),
+          started: 0,
+          finished: 0,
+          seq: created * 1000,
+        })
+      }
+    }
     ensureStream()
+  }
+
+  function setTaskCenterOpen(open: boolean) {
+    taskCenterOpen = open
+    if (open) ensureStream()
+    else if (allStream && !hasActive()) closeStream()
   }
 
   function reset() {
     generation += 1
+    boundProjectId = null
+    taskCenterOpen = false
     snapshotWaiters = []
     closeStream()
     tasks.value = []
@@ -247,5 +291,5 @@ export const useTaskStore = defineStore('task', () => {
 
   refresh()
 
-  return { tasks, loading, refresh, control, reset, bindProject, activeTasks }
+  return { tasks, projectTasks, loading, refresh, control, reset, bindProject, activeTasks, setTaskCenterOpen }
 })

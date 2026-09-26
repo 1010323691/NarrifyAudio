@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon,
+  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon, ListTodo,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -33,6 +33,7 @@ const isProjectContext = computed(() => project.hasActiveProject && (
 ))
 const USER_ITEMS = [
   { to: '/dashboard', label: '项目', icon: LayoutDashboard },
+  { to: '/tasks', label: '任务中心', icon: ListTodo },
 ]
 
 const PROJECT_STAGES = [

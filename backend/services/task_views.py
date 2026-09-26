@@ -123,8 +123,12 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
         if last_progress is not None:
             current = str((last_progress.payload or {}).get("current") or "")
     result = task.result.result if task.result is not None else {}
+    project = getattr(task, "project", None)
     return {
         "id": task.id,
+        "project_id": getattr(task, "project_id", ""),
+        "project_name": getattr(project, "name", None) or "已删除项目",
+        "task_type": task.task_type,
         "module": task_module(task.task_type),
         "label": durable_label(task),
         "seq": int(task.created_at.timestamp() * 1000),
@@ -145,8 +149,35 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
         "result": result,
         "error": task.error_message or "",
         "created": epoch(task.created_at),
+        "created_at": task.created_at.isoformat(),
+        "updated_at": task.updated_at.isoformat() if getattr(task, "updated_at", None) else "",
         "started": epoch(task.started_at),
         "finished": epoch(task.finished_at),
+    }
+
+
+def task_center_item(db: Session, task: DurableTask) -> dict:
+    """Compact history row for the cross-project task center (no log payloads)."""
+    progress_event = db.scalar(
+        select(TaskEvent)
+        .where(TaskEvent.task_id == task.id, TaskEvent.event_type == "progress")
+        .order_by(TaskEvent.sequence.desc())
+        .limit(1)
+    )
+    progress_payload = progress_event.payload if progress_event and isinstance(progress_event.payload, dict) else {}
+    project = getattr(task, "project", None)
+    return {
+        "id": task.id,
+        "project_id": getattr(task, "project_id", ""),
+        "project_name": getattr(project, "name", None) or "已删除项目",
+        "task_type": task.task_type,
+        "label": durable_label(task),
+        "status": legacy_status(task.status),
+        "progress": max(0.0, min(1.0, task.progress / 100.0)),
+        "current": str(progress_payload.get("current") or ""),
+        "error": task.error_message or "",
+        "created": epoch(task.created_at),
+        "created_at": task.created_at.isoformat(),
     }
 
 
@@ -180,6 +211,7 @@ def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None
         "submitted", "cancel_requested", "admin_cancel_requested",
         "retry_requested", "admin_retry_requested",
         "retry_scheduled", "attempt_expired", "dispatch_recovered", "attempt_started",
+        "llm_unavailable",
     }:
         if event.event_type != "submitted":
             return {

@@ -263,18 +263,18 @@ const processed = new Set<string>()
 let watcherArmed = false
 
 watch(
-  () => taskStore.tasks.filter((t) => t.module === 'merge').map((t) => `${t.id}:${t.status}`).join('|'),
+  () => taskStore.projectTasks.filter((t) => t.module === 'merge').map((t) => `${t.id}:${t.status}`).join('|'),
   () => {
     // 首次触发 = 页面加载/重连后的快照回放：把当下已终态的任务全部预标记为「已处理」
     // （其磁盘产物由 refreshRows 的 06 目录扫描恢复），避免对陈旧结果重复弹 toast。
     if (!watcherArmed) {
       watcherArmed = true
-      for (const t of taskStore.tasks) {
+      for (const t of taskStore.projectTasks) {
         if (t.module === 'merge' && LABEL_TASK_TERMINAL_STATUSES.has(t.status)) processed.add(t.id)
       }
       return
     }
-    for (const t of taskStore.tasks) {
+    for (const t of taskStore.projectTasks) {
       if (t.module !== 'merge') continue
       const pkg = labelKeyOf(t.label)
       if (!pkg) continue

@@ -1,5 +1,15 @@
 import { API_BASE, http } from './client'
-import type { TaskControl } from '@/types'
+import type { TaskCenterItem, TaskControl } from '@/types'
+
+export interface TaskHistoryPage {
+  items: TaskCenterItem[]
+  next_cursor: string | null
+}
+
+export function listTaskHistory(cursor?: string | null): Promise<TaskHistoryPage> {
+  const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+  return http.get(`/api/v1/tasks/history${query}`)
+}
 
 /** v1 task control (cancel / retry). The shared http client attaches the CSRF
  *  token. The response's durable dict is not consumed — the authoritative

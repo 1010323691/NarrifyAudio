@@ -2,7 +2,7 @@
 import { cn } from '@/lib/utils'
 
 // `value` is a fraction in [0, 1] (matches the backend's task.progress).
-const props = defineProps<{ value?: number; class?: string; indicatorClass?: string }>()
+const props = defineProps<{ value?: number; class?: string; indicatorClass?: string; ariaLabel?: string }>()
 
 function pct(): string {
   const v = props.value ?? 0
@@ -16,6 +16,7 @@ function pct(): string {
       :class="cn('h-full rounded-full bg-gradient-to-r from-indigo-400 to-primary transition-all', props.indicatorClass)"
       :style="{ width: pct() }"
       role="progressbar"
+      :aria-label="props.ariaLabel"
       :aria-valuenow="Math.round((props.value ?? 0) * 100)"
       aria-valuemin="0"
       aria-valuemax="100"

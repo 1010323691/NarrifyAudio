@@ -706,19 +706,19 @@ let watcherArmed = false
 
 watch(
   () =>
-    taskStore.tasks
+    taskStore.projectTasks
       .filter((t) => BGM_MODULES.includes(t.module))
       .map((t) => `${t.id}:${t.status}`)
       .join('|'),
   () => {
     if (!watcherArmed) {
       watcherArmed = true
-      for (const t of taskStore.tasks) {
+      for (const t of taskStore.projectTasks) {
         if (BGM_MODULES.includes(t.module) && LABEL_TASK_TERMINAL_STATUSES.has(t.status)) processed.add(t.id)
       }
       return
     }
-    for (const t of taskStore.tasks) {
+    for (const t of taskStore.projectTasks) {
       if (!BGM_MODULES.includes(t.module)) continue
       if (!LABEL_TASK_TERMINAL_STATUSES.has(t.status)) {
         processed.delete(t.id)

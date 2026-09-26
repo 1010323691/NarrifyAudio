@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import json
-import anyio
 import asyncio
+import base64
+import binascii
+import json
+from datetime import datetime
 
+import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from ..platform.database import SessionLocal, get_db
 from ..platform.platform_settings import settings
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Task, TaskEvent, User
 from ..platform.security import session_is_valid_for_user
-from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
+from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.task_submission import task_dict
 from ..services import task_views
 from .task_operations import (
@@ -25,6 +28,7 @@ from .task_operations import (
 )
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
+TASK_HISTORY_PAGE_SIZE = 50
 
 
 def _task_json(task: Task) -> dict:
@@ -32,19 +36,63 @@ def _task_json(task: Task) -> dict:
 
 
 def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> list[Task]:
-    """The user's durable tasks, newest first, cap 200 — v1 is user-scoped
-    (cross-project); the optional ``project_id`` narrows to one project (the
-    UI views' scope)."""
-    stmt = select(Task).where(Task.owner_id == user_id)
+    """Return every active task plus the newest 200 records for live UI state."""
+    filters = [Task.owner_id == user_id]
     if project_id:
-        stmt = stmt.where(Task.project_id == project_id)
-    return db.scalars(stmt.order_by(Task.created_at.desc()).limit(200)).all()
+        filters.append(Task.project_id == project_id)
+    recent_ids = select(Task.id).where(*filters).order_by(Task.created_at.desc(), Task.id.desc()).limit(200)
+    stmt = select(Task).where(
+        *filters,
+        or_(Task.status.in_(ACTIVE_TASK_STATUSES), Task.id.in_(recent_ids)),
+    )
+    return db.scalars(stmt.order_by(Task.created_at.desc(), Task.id.desc())).all()
 
 
 @router.get("")
 def list_tasks(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(Task).where(Task.owner_id == user.id).order_by(Task.created_at.desc()).limit(200)).all()
     return [_task_json(row) for row in rows]
+
+
+def _encode_task_cursor(created_at: datetime, task_id: str) -> str:
+    raw = json.dumps([created_at.isoformat(), task_id], separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_task_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        created_at, task_id = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        value = datetime.fromisoformat(created_at)
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("invalid task id")
+        return value, task_id
+    except (ValueError, TypeError, binascii.Error) as exc:
+        raise HTTPException(422, "无效的任务历史游标") from exc
+
+
+@router.get("/history")
+def list_task_history(
+    cursor: str | None = None,
+    user: User = Depends(require_authenticated_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Read the caller's complete task history in stable, newest-first pages."""
+    stmt = select(Task).options(selectinload(Task.project)).where(Task.owner_id == user.id)
+    if cursor:
+        created_at, task_id = _decode_task_cursor(cursor)
+        stmt = stmt.where(or_(
+            Task.created_at < created_at,
+            and_(Task.created_at == created_at, Task.id < task_id),
+        ))
+    rows = db.scalars(
+        stmt.order_by(Task.created_at.desc(), Task.id.desc()).limit(TASK_HISTORY_PAGE_SIZE + 1)
+    ).all()
+    has_more = len(rows) > TASK_HISTORY_PAGE_SIZE
+    page = rows[:TASK_HISTORY_PAGE_SIZE]
+    items = [task_views.task_center_item(db, task) for task in page]
+    next_cursor = _encode_task_cursor(page[-1].created_at, page[-1].id) if has_more and page else None
+    return {"items": items, "next_cursor": next_cursor}
 
 
 @router.get("/stream")
