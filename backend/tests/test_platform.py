@@ -1736,11 +1736,17 @@ def test_task_stream_serves_concurrent_readers(client: TestClient):
                         disconnected.set()
 
         started = time.monotonic()
+        # The deadline bounds the SCHEDULING of a stream that must end the
+        # moment the shared disconnect fires — not a latency SLO. 15 s
+        # flipped to a spurious TimeoutError on a loaded machine (both
+        # readers are driven on one loop; under CPU contention the poll
+        # ticks and the disconnect peek simply land late). 120 s keeps the
+        # hang-detection property while tolerating any realistic load.
         await asyncio.wait_for(
             api_platform_tasks.stream_user_tasks(request, user)(
                 {"type": "http", "headers": []}, wire_receive, send,
             ),
-            timeout=15,
+            timeout=120,
         )
         return start, chunks, time.monotonic() - started
 
