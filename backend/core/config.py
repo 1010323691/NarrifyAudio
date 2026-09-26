@@ -148,8 +148,10 @@ class GenerationConfig(BaseModel):
     min_p: float = 0.0  # 0 -> not sent
     presence_penalty: float = 0.0
     banned_tokens: list = Field(default_factory=list)
+    # Concurrent durable script.parse tasks per backend.worker process.
+    # The voice-foundation setting below controls parallel requests within one voice job.
+    parse_worker_concurrency: int = Field(default=4, ge=1, le=32)
     # Max character-foundation LLM jobs generated in parallel by the voices engine.
-    # Durable script-parse task throughput is determined by the deployed Worker count.
     max_concurrency: int = 3
     # 解析后的「归属抽样」比例：全量条目中重判 speaker 的抽样率（0 = 关闭）。
     # 分两桶（不相交）：~1/3 纯随机（整书错误率"仪表"——唯一可据以判断"采样率能不能

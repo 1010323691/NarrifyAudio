@@ -62,13 +62,13 @@ const error = ref('')
 const foundationBusy = ref(false)
 const foundationTaskId = ref<string | null>(null)
 const foundationResult = ref<PrepareFoundationsResult | null>(null)
-const foundationTask = computed(() => taskStore.tasks.find((t) => t.id === foundationTaskId.value) ?? null)
+const foundationTask = computed(() => taskStore.projectTasks.find((t) => t.id === foundationTaskId.value) ?? null)
 
 // Phase 2 (克隆音频, TTS only) task state.
 const cloneBusy = ref(false)
 const cloneTaskId = ref<string | null>(null)
 const cloneResult = ref<MakeClonesResult | null>(null)
-const cloneTask = computed(() => taskStore.tasks.find((t) => t.id === cloneTaskId.value) ?? null)
+const cloneTask = computed(() => taskStore.projectTasks.find((t) => t.id === cloneTaskId.value) ?? null)
 
 // Phase 2 rows-per-batch cap (ONE long-lived worker process, tensor batches; VRAM scales
 // with it). Seeded from config — shares tts.batch_concurrency with 音频合成.
@@ -180,9 +180,9 @@ const scope = ref(pipeline.activeScript || '')
 const script = computed(() => scope.value)
 
 // A phase is "running" while any of its tasks is active (drives the per-row 生成中/制作中 overlay).
-const ACTIVE: string[] = ['pending', 'running']
-const foundationRunning = computed(() => taskStore.tasks.some((t) => t.module === 'voices-foundation' && ACTIVE.includes(t.status)))
-const cloneRunning = computed(() => taskStore.tasks.some((t) => t.module === 'voices-clone' && ACTIVE.includes(t.status)))
+const ACTIVE: string[] = ['pending', 'running', 'paused']
+const foundationRunning = computed(() => taskStore.projectTasks.some((t) => t.module === 'voices-foundation' && ACTIVE.includes(t.status)))
+const cloneRunning = computed(() => taskStore.projectTasks.some((t) => t.module === 'voices-clone' && ACTIVE.includes(t.status)))
 
 // Button gating: a phase is blocked while its own launch is in flight, while the OTHER phase
 // is running (so the LLM and TTS never share the GPU), or with no workspace / script.

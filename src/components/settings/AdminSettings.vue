@@ -75,6 +75,10 @@ async function save() {
     batch_concurrency: Math.max(1, Math.min(128, Math.trunc(Number(config.tts.batch_concurrency) || 80))),
     batch_seed: Math.max(-1, Math.min(2147483647, Math.trunc(seed))),
   }
+  const generation = {
+    ...config.generation,
+    parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
+  }
   try {
     ok = await settings.saveRoot({
       text: config.text,
@@ -83,7 +87,7 @@ async function save() {
       llm: config.llm,
       prompts: config.prompts,
       persona_prompts: config.persona_prompts,
-      generation: config.generation,
+      generation,
       ffmpeg: config.ffmpeg,
       bgm: config.bgm,
     })
@@ -177,11 +181,20 @@ async function save() {
             </div>
           </div>
           <div class="space-y-1.5">
+            <Label>文本解析 Worker 并发数</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input v-model.number="draft.generation.parse_worker_concurrency" type="number" min="1" max="32" step="1" class="max-w-[8rem]" />
+              <span class="text-xs text-muted-foreground">
+                控制每个后台 Worker 进程同时执行的文本解析任务数（1–32）；多个 Worker 进程的总并发为各进程之和。
+              </span>
+            </div>
+          </div>
+          <div class="space-y-1.5">
             <Label>角色基础信息生成并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input v-model.number="draft.generation.max_concurrency" type="number" min="1" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
-                控制角色基础信息的并行生成。文本解析任务的实际同时执行数取决于后台 Worker 部署容量。
+                控制角色基础信息的并行生成。
               </span>
             </div>
           </div>

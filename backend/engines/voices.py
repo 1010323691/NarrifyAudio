@@ -264,7 +264,7 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
     (unknown): the explicit ``gender`` key wins, else the description's own gender words
     (a prompt without the key still states it there).
     """
-    from .llm_transport import request_chat_completion as _llm_chat_completion
+    from .llm_transport import LLMUnavailableError, request_chat_completion as _llm_chat_completion
 
     if not (llm.model_name or "").strip():
         raise RuntimeError("未配置 LLM 模型名称（在「文本解析」页填写模型）。")
@@ -307,6 +307,8 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
                 max_tokens=1024, top_k=gen.top_k, min_p=gen.min_p,
                 banned_tokens=gen.banned_tokens,
             )
+        except LLMUnavailableError:
+            raise
         except Exception as e:  # noqa: BLE001 — a failed call retries, then falls back
             handle.log(f"  调用 LLM 出错（{speaker}, 第 {attempt + 1} 次）：{e}", "ERROR")
             continue
@@ -666,7 +668,11 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             except QuotaInsufficientError:
                 quota_failed = True
                 raise
-            except Exception as e:  # noqa: BLE001 — a per-char error never aborts the run
+            except Exception as e:
+                from .llm_transport import LLMUnavailableError
+                if isinstance(e, LLMUnavailableError):
+                    quota_failed = True
+                    raise
                 handle.log(f"  {sp} 生成基础失败：{e}", "ERROR")
                 r = {"speaker": sp, "ok": False, "type": "foundation", "description": "",
                      "ref_text": "", "foundation_status": "failed"}
@@ -1133,4 +1139,3 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         "output_dir": str(get_or_prepare_layout().voice_profiles / "designed_voices"),
         "results": results,
     }
-

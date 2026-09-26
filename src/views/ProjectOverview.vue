@@ -44,7 +44,8 @@ function taskFor(stage: typeof STAGE_DEFS[number]) {
 function stageStatus(stage: typeof STAGE_DEFS[number]) {
   const task = taskFor(stage)
   if (task && ['failed', 'timeout'].includes(task.status)) return { label: '需处理', tone: 'negative' as const }
-  if (task && ['running', 'queued', 'pending', 'retrying'].includes(task.status)) {
+  if (task && ['running', 'queued', 'pending', 'retrying', 'paused'].includes(task.status)) {
+    if (task.status === 'paused') return { label: '等待 LLM 恢复', tone: 'warning' as const }
     return { label: task.status === 'running' ? '处理中' : '排队中', tone: 'warning' as const }
   }
   if ((artifactCounts.value[stage.dir] || 0) > 0) return { label: '已有产物', tone: 'positive' as const }
