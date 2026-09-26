@@ -94,9 +94,23 @@ class WorkerWatchdogTimeout(RuntimeError):
     """
 
 
-def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = "TTS 引擎",
+class _SubprocessPaused(Exception):
+    """The child was stopped for pause and should be relaunched after resume."""
+
+
+def run_tts_subprocess(*args, **kwargs) -> deque:
+    """Run or restart a child across pauses, retaining its input files until exit."""
+    while True:
+        try:
+            return _run_tts_subprocess_once(*args, **kwargs)
+        except _SubprocessPaused:
+            continue
+
+
+def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = "TTS 引擎",
               watchdog_code: int | None = None,
-              log_file: Path | None = None, log_line=None) -> deque:
+              log_file: Path | None = None, log_line=None,
+              interrupt_on_pause: bool = False) -> deque:
     """Run a one-shot shared-``.venv`` worker and stream its output into a Task.
 
     Shared orchestration for the TTS-family stages (batch synthesis / merge):
@@ -178,9 +192,27 @@ def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix
     threading.Thread(target=_pump, args=(proc.stderr, err_q), daemon=True).start()
 
     out_done = err_done = False
+    pause_requested = False
+    pause_retry = False
+
+    def check() -> None:
+        nonlocal pause_requested, pause_retry
+        if interrupt_on_pause and hasattr(handle, "check_interruptible"):
+            def stop_for_pause() -> None:
+                nonlocal pause_requested
+                pause_requested = True
+                if proc.poll() is None:
+                    _kill_worker_tree(proc)
+            handle.check_interruptible(stop_for_pause)
+            if pause_requested:
+                pause_retry = True
+                raise _SubprocessPaused()
+        else:
+            handle.check()
+
     try:
         while True:
-            handle.check()  # cooperative cancel (child killed in finally) / pause
+            check()  # cooperative cancel/pause
             try:
                 while True:
                     raw = out_q.get_nowait()
@@ -192,7 +224,7 @@ def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix
                     # on a loaded machine that can be minutes, which made a clicked cancel
                     # look like "it never stops". Checking per line bounds the latency to one
                     # line (a pause parked here likewise; cancel still wins the busy-wait).
-                    handle.check()
+                    check()
                     line = raw.decode("utf-8", "replace").strip()
                     if not line:
                         continue
@@ -217,7 +249,7 @@ def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix
                     if raw is None:
                         err_done = True
                         break
-                    handle.check()  # per-line cancel point (same rationale as the stdout drain)
+                    check()  # per-line cancel point (same rationale as the stdout drain)
                     line = raw.decode("utf-8", "replace").strip()
                     if line:
                         stderr_tail.append(line)
@@ -243,11 +275,12 @@ def run_tts_subprocess(cmd: list, handle, on_line, *, temp_files=(), fail_prefix
                 p.close()
             except Exception:  # noqa: BLE001
                 pass
-        for f in temp_files:
-            try:
-                Path(f).unlink(missing_ok=True)
-            except Exception:  # noqa: BLE001
-                pass
+        if not pause_retry:
+            for f in temp_files:
+                try:
+                    Path(f).unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
 
     if proc.returncode != 0:
         tail = " | ".join(stderr_tail)[-500:]

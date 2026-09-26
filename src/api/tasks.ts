@@ -23,7 +23,7 @@ export function controlTaskCategory(
   projectId: string,
   category: TaskCenterCategoryId,
   action: 'pause' | 'resume' | 'cancel',
-): Promise<{ changed: number; tasks: Array<{ id: string; status: string }> }> {
+): Promise<{ changed: number; tasks: Array<{ id: string; status: string; error_code?: string }> }> {
   return http.post('/api/v1/tasks/batch-control', { project_id: projectId, category, action })
 }
 

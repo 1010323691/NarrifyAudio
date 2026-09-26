@@ -848,7 +848,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 require_quota("TTS", "tts.batch")
                 run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
-                           log_line=_format_batch_log_line)
+                           log_line=_format_batch_log_line, interrupt_on_pause=True)
                 segment_log.flush()
                 break  # a clean exit (0)
             except WorkerWatchdogTimeout:
@@ -1299,7 +1299,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 require_quota("TTS", "tts.batch")
                 run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
-                           log_line=_format_batch_log_line)
+                           log_line=_format_batch_log_line, interrupt_on_pause=True)
                 segment_log.flush()
                 break  # a clean exit (0)
             except WorkerWatchdogTimeout:

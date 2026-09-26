@@ -156,10 +156,12 @@ export const useTaskStore = defineStore('task', () => {
         break
       case 'paused':
         t.status = 'paused'
+        t.error_code = 'manual_pause'
         t.current = '用户已暂停任务'
         break
       case 'resumed':
         t.status = 'running'
+        t.error_code = ''
         t.current = ''
         break
       case 'resume_requested':
@@ -299,6 +301,7 @@ export const useTaskStore = defineStore('task', () => {
       const task = tasks.value.find((candidate) => candidate.id === item.id)
       if (!task) continue
       task.status = item.status === 'queued' || item.status === 'retrying' ? 'pending' : item.status as TaskStatus
+      task.error_code = item.error_code ?? (task.status === 'paused' ? 'manual_pause' : '')
       task.current = task.status === 'paused'
         ? '用户已暂停任务'
         : task.status === 'cancelling' ? '取消中，等待任务安全停止'

@@ -31,17 +31,21 @@ def parse_worker_slot_count(llm_concurrency: int) -> int:
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
     logger = logging.getLogger("audiobook.worker")
     slot_id = f"{worker_id}-parse-{slot:02d}"
+    idle_delay = 0.25
     try:
         while not stop.is_set() and not slot_stop.is_set():
             try:
                 claim = claim_fair_task(slot_id, task_types=PARSE_TASK_TYPES)
                 if claim is not None:
+                    idle_delay = 0.25
                     _run_claim_fenced(claim)
                 else:
-                    slot_stop.wait(0.2)
+                    slot_stop.wait(idle_delay)
+                    idle_delay = min(idle_delay * 2, 3.0)
             except Exception:
                 logger.exception("Parse worker slot failed; retrying slot=%s", slot)
                 slot_stop.wait(1.0)
+                idle_delay = 0.25
     finally:
         mark_offline(slot_id)
 

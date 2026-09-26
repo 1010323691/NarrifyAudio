@@ -119,7 +119,7 @@ function taskIcon(taskType: string) {
 
 function taskDetail(task: TaskCenterItem) {
   if (task.status === 'paused') {
-    if (task.error === '用户已暂停任务') return task.current || '已暂停，可在当前任务列表中点击启动全部继续'
+    if (task.error_code === 'manual_pause' || task.error === '用户已暂停任务') return task.current || '已暂停，可在当前任务列表中点击启动全部继续'
     return task.current || task.error || '等待 LLM 服务恢复，系统会每分钟检查并自动重试'
   }
   if (task.current) return task.current

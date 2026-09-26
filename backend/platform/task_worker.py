@@ -1119,6 +1119,9 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                 return "succeeded"
             fail_claim(claim, TaskCancelledError())
             return "cancelled"
+    except TaskCancelled:
+        fail_claim(claim, TaskCancelledError())
+        return "cancelled"
     except TaskExecutionError as exc:
         fail_claim(claim, exc)
         return exc.code

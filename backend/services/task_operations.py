@@ -6,13 +6,12 @@ console) reuse this module instead of carrying their own copies.
 """
 from __future__ import annotations
 
-from datetime import timezone
-
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..platform.models import OutboxEvent, Project, QuotaTransaction, Task, TaskAttempt, utcnow
 from ..platform.platform_settings import settings
+from ..platform.task_context import _as_utc
 from ..platform.task_lifecycle import (
     ACTIVE_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -258,9 +257,3 @@ def control_task_category(
         changed.append(task)
 
     return changed
-
-
-def _as_utc(value):
-    if value is None:
-        return None
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)

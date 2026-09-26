@@ -747,6 +747,68 @@ def test_run_worker_can_transform_stdout_in_persistent_log(tmp_path):
     assert "[out] [perf]" not in text
 
 
+def test_run_worker_restarts_child_after_pause_and_keeps_temp_input(tmp_path):
+    import sys
+    import time
+
+    from backend.engines import tts as tts_eng
+
+    launches = tmp_path / "launches.txt"
+    temp_input = tmp_path / "segments.json"
+    temp_input.write_text("{}", encoding="utf-8")
+    code = (
+        "import pathlib, sys, time; "
+        f"p=pathlib.Path({str(launches)!r}); "
+        "n=int(p.read_text() or '0') if p.exists() else 0; "
+        "p.write_text(str(n+1)); "
+        "time.sleep(30) if n == 0 else print('resumed', flush=True)"
+    )
+
+    class _PauseOnce(_Handle):
+        paused = False
+
+        def check_interruptible(self, on_pause):
+            if not self.paused:
+                self.paused = True
+                deadline = time.monotonic() + 2
+                while not launches.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert launches.exists()
+                on_pause()
+
+    seen = []
+    tail = tts_eng.run_tts_subprocess(
+        [sys.executable, "-c", code], _PauseOnce(), seen.append,
+        temp_files=(temp_input,), interrupt_on_pause=True,
+    )
+    assert launches.read_text(encoding="utf-8") == "2"
+    assert seen == ["resumed"]
+    assert list(tail) == []
+    assert not temp_input.exists()
+
+
+def test_run_worker_cancelled_while_paused_cleans_temp_input(tmp_path):
+    import sys
+
+    from backend.core.task_control import TaskCancelled
+    from backend.engines import tts as tts_eng
+
+    temp_input = tmp_path / "segments.json"
+    temp_input.write_text("{}", encoding="utf-8")
+
+    class _CancelOnPause(_Handle):
+        def check_interruptible(self, on_pause):
+            on_pause()
+            raise TaskCancelled()
+
+    with pytest.raises(TaskCancelled):
+        tts_eng.run_tts_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(30)"], _CancelOnPause(),
+            lambda _line: None, temp_files=(temp_input,), interrupt_on_pause=True,
+        )
+    assert not temp_input.exists()
+
+
 def test_run_worker_cancel_not_stalled_by_backlog(tmp_path):
     """A cancel must be honoured within one line, NOT after the whole output backlog drains.
 

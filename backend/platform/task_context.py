@@ -12,6 +12,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from ..core.concurrency import gate, merge_gate
 from ..core.task_control import TaskCancelled
 from .artifact_publication import PublicationJournal, PublicationJournalBundle
 from .database import SessionLocal
@@ -277,17 +278,44 @@ class EngineExecutionContext:
         if self._shared_publication_journal is not None:
             self._shared_publication_journal.rollback()
 
+    def _paused(self) -> bool:
+        with SessionLocal() as db:
+            task = db.get(Task, self.claim.task_id)
+            return task is not None and task.status == "paused"
+
+    def _pause(self, on_pause=None) -> None:
+        # Free scarce permits while parked so other tasks can make progress.
+        permits = [(resource, resource.suspend_current_thread()) for resource in (gate(), merge_gate())]
+        if on_pause is not None:
+            on_pause()
+        delay = 0.25
+        while self._paused():
+            if self.cancelled:
+                raise TaskCancelled()
+            time.sleep(delay)
+            delay = min(delay * 2, 5.0)
+        if self.cancelled:
+            raise TaskCancelled()
+        restored = []
+        for resource, count in permits:
+            if not resource.restore_current_thread(count, stop_check=lambda: self.cancelled):
+                for restored_resource, restored_count in reversed(restored):
+                    for _ in range(restored_count):
+                        restored_resource.release()
+                raise TaskCancelled()
+            restored.append((resource, count))
+
+    def check_interruptible(self, on_pause) -> None:
+        """Interrupt a child on pause, park, then return so its caller can restart it."""
+        if self._paused():
+            self._pause(on_pause)
+        if self.cancelled:
+            raise TaskCancelled()
+
     def check(self) -> None:
-        # A paused durable task keeps its current worker attempt parked at the
-        # engine's next cooperative checkpoint. Resuming can continue that same
-        # attempt without repeating completed work or model charges.
-        while True:
-            with SessionLocal() as db:
-                task = db.get(Task, self.claim.task_id)
-                paused = task is not None and task.status == "paused"
-            if not paused:
-                break
-            time.sleep(0.25)
+        # Back off to cap database load while a task remains paused.
+        if self._paused():
+            self._pause()
         if self.cancelled:
             raise TaskCancelled()
 
