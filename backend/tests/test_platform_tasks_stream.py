@@ -15,7 +15,7 @@ import json
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -261,12 +261,283 @@ def test_task_history_cursor_pages_are_stable_and_user_scoped(client):
     assert invalid.status_code == 422
 
 
+def test_task_history_hides_cancelled_by_default(client):
+    # Bulk cancels leave hundreds of identical terminal rows; the newest-first
+    # history must not let them push completed work out of the visible pages.
+    first = _register(f"hist-cancel-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    with SessionLocal() as db:
+        db.add_all([
+            Task(
+                id=str(uuid.uuid4()),
+                owner_id=user_id,
+                project_id=str(uuid.uuid4()),
+                task_type="script.parse",
+                status="cancelled",
+                progress=100,
+                payload={},
+            )
+            for _ in range(60)
+        ])
+        succeeded = Task(
+            id=str(uuid.uuid4()),
+            owner_id=user_id,
+            project_id=str(uuid.uuid4()),
+            task_type="script.parse",
+            status="succeeded",
+            progress=100,
+            payload={"label": "已完成的任务"},
+        )
+        db.add(succeeded)
+        db.commit()
+
+    page = first["client"].get("/api/v1/tasks/history").json()
+    assert len(page["items"]) == 1
+    assert page["items"][0]["id"] == succeeded.id
+    assert page["items"][0]["status"] == "succeeded"
+
+    full = first["client"].get("/api/v1/tasks/history", params={"include_cancelled": "true"}).json()
+    assert len(full["items"]) == 50
+    assert full["next_cursor"]  # 61 rows total, so the full record still paginates
+
+
 def _user_task_rows(user_id: str) -> list[dict]:
     with SessionLocal() as db:
         return [
             {"id": task.id}
             for task in db.scalars(select(Task).where(Task.owner_id == user_id)).all()
         ]
+
+
+def test_terminal_row_superseded_by_newer_run_is_hidden(client):
+    # A rerun of the same entry (same project + type + subject) supersedes the
+    # older terminal row: the centre shows one row per entry, not 失败 next to
+    # its 进行中/已完成 replacement.
+    first = _register(f"supersede-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    project_id = str(uuid.uuid4())
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        failed_old = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="failed", progress=0,
+            payload={"source_name": "第018章 庆典.txt"},
+            created_at=base, updated_at=base,
+        )
+        running_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="running", progress=40,
+            payload={"source_name": "第018章 庆典.txt"},
+            created_at=base + timedelta(hours=1),
+            updated_at=base + timedelta(hours=1),
+        )
+        other = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="succeeded", progress=100,
+            payload={"source_name": "第030章 骑兵_一_.txt"},
+            created_at=base + timedelta(hours=2),
+            updated_at=base + timedelta(hours=2),
+        )
+        db.add_all([failed_old, running_new, other])
+        db.commit()
+
+    page = first["client"].get("/api/v1/tasks/history").json()
+    ids = {item["id"] for item in page["items"]}
+    assert running_new.id in ids, "the newer run of the entry must be visible"
+    assert other.id in ids, "an entry without a newer run must stay"
+    assert failed_old.id not in ids, "the failed row must be superseded by its rerun"
+
+    # The SSE live window applies the same rule.
+    from backend.api.platform_tasks import _user_tasks
+
+    with SessionLocal() as db:
+        window = {task.id for task in _user_tasks(db, user_id)}
+    assert failed_old.id not in window
+    assert running_new.id in window and other.id in window
+
+    # GET /api/v1/tasks (durable list surface) matches too.
+    listed = first["client"].get("/api/v1/tasks").json()
+    listed_ids = {task["id"] for task in listed}
+    assert failed_old.id not in listed_ids and running_new.id in listed_ids
+
+
+def test_active_rows_are_never_superseded_and_cross_page_hide_applies(client):
+    first = _register(f"supersede2-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    project_id = str(uuid.uuid4())
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        # Two ACTIVE rows for the same entry both stay visible: real work is
+        # still in flight, so neither supersedes the other.
+        active_a = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="running", progress=10,
+            payload={"source_name": "甲.txt"}, created_at=base, updated_at=base,
+        )
+        active_b = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="pending", progress=0,
+            payload={"source_name": "甲.txt"}, created_at=base + timedelta(hours=1),
+            updated_at=base + timedelta(hours=1),
+        )
+        # A failed row whose newer sibling (same entry) is on page 1: the older
+        # row sits on page 2 and must still be hidden there (cross-page).
+        failed_old = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="failed", progress=0,
+            payload={"source_name": "乙.txt"}, created_at=base, updated_at=base,
+        )
+        succeeded_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="succeeded", progress=100,
+            payload={"source_name": "乙.txt"},
+            created_at=base + timedelta(hours=2), updated_at=base + timedelta(hours=2),
+        )
+        db.add_all([failed_old, succeeded_new, active_a, active_b])
+        db.add_all([
+            # Distinct entries (their own source_name each): whole-book types
+            # like text.format would collapse to a single row, so the fillers
+            # must be per-entry rows to keep history paginating.
+            Task(
+                owner_id=user_id, project_id=project_id, task_type="script.parse",
+                status="succeeded", progress=100,
+                payload={"source_name": f"filler-{index:02d}.txt"},
+                # Older than every subject row above: the special rows all land
+                # on page 1, the rest of the fillers on page 2.
+                created_at=base - timedelta(minutes=30 * index),
+                updated_at=base - timedelta(minutes=30 * index),
+            )
+            for index in range(1, 61)  # filler rows making history paginate
+        ])
+        db.commit()
+
+    page_one = first["client"].get("/api/v1/tasks/history").json()
+    assert active_a.id in {item["id"] for item in page_one["items"]}
+    assert active_b.id in {item["id"] for item in page_one["items"]}
+    assert failed_old.id not in {item["id"] for item in page_one["items"]}
+    cursor = page_one["next_cursor"]
+    assert cursor, "enough rows must exist to need page 2"
+    page_two = first["client"].get("/api/v1/tasks/history", params={"cursor": cursor}).json()
+    assert failed_old.id not in {item["id"] for item in page_two["items"]}, (
+        "the superseded row must stay hidden even when its newer sibling is on an earlier page"
+    )
+
+
+def test_display_label_collision_does_not_supersede(client):
+    # Entry identity comes from stable payload keys, never from the display
+    # label: two tts.reset runs whose files DIFFER but whose (legacy-style)
+    # labels would be identical (same count) are different entries. A re-run
+    # of the same source_name still supersedes.
+    first = _register(f"supersede3-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    project_id = str(uuid.uuid4())
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        reset_old = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="tts.reset", status="succeeded", progress=100,
+            payload={"label": "重新合成：2 个文件", "scripts": ["a.json", "b.json"]},
+            created_at=base, updated_at=base,
+        )
+        reset_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="tts.reset", status="succeeded", progress=100,
+            payload={"label": "重新合成：2 个文件", "scripts": ["c.json", "d.json"]},
+            created_at=base + timedelta(hours=1), updated_at=base + timedelta(hours=1),
+        )
+        parse_old = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="failed", progress=0,
+            payload={"source_name": "第018章 庆典.txt"},
+            created_at=base, updated_at=base,
+        )
+        parse_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="running", progress=40,
+            payload={"source_name": "第018章 庆典.txt"},
+            created_at=base + timedelta(hours=2), updated_at=base + timedelta(hours=2),
+        )
+        db.add_all([reset_old, reset_new, parse_old, parse_new])
+        db.commit()
+
+    page = first["client"].get("/api/v1/tasks/history").json()
+    ids = {item["id"] for item in page["items"]}
+    assert reset_old.id in ids, "a label collision must not hide the older, different entry"
+    assert reset_new.id in ids
+    assert parse_new.id in ids
+    assert parse_old.id not in ids, "a re-run of the same source_name still supersedes"
+
+
+def test_rows_without_identity_values_are_never_superseded(client):
+    # Legacy rows carry no identity payload (no source_name): they have no
+    # subject, so nothing may hide them — not a newer row that DOES name its
+    # entry, not an identically unsubjected newer row.
+    first = _register(f"supersede4-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    project_id = str(uuid.uuid4())
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        legacy_old = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="succeeded", progress=100,
+            payload={}, created_at=base, updated_at=base,
+        )
+        legacy_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="succeeded", progress=100,
+            payload={}, created_at=base + timedelta(hours=1),
+            updated_at=base + timedelta(hours=1),
+        )
+        named_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="succeeded", progress=100,
+            payload={"source_name": "第001章 序幕.txt"},
+            created_at=base + timedelta(hours=2), updated_at=base + timedelta(hours=2),
+        )
+        db.add_all([legacy_old, legacy_new, named_new])
+        db.commit()
+
+    page = first["client"].get("/api/v1/tasks/history").json()
+    ids = {item["id"] for item in page["items"]}
+    assert {legacy_old.id, legacy_new.id, named_new.id} <= ids, (
+        "rows whose identity keys are all absent must never be superseded"
+    )
+
+
+def test_cancelled_rerun_does_not_supersede_old_terminal_row(client):
+    # A cancelled re-run is not a completed attempt: it must not hide the
+    # last real record. Otherwise (with /history excluding cancelled rows)
+    # the entry would vanish from the default history entirely.
+    first = _register(f"supersede5-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = first["json"]["user"]["id"]
+    project_id = str(uuid.uuid4())
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        succeeded_old = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="succeeded", progress=100,
+            payload={"source_name": "第018章 庆典.txt"},
+            created_at=base, updated_at=base,
+        )
+        cancelled_new = Task(
+            id=str(uuid.uuid4()), owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status="cancelled", progress=0,
+            payload={"source_name": "第018章 庆典.txt"},
+            created_at=base + timedelta(hours=1), updated_at=base + timedelta(hours=1),
+        )
+        db.add_all([succeeded_old, cancelled_new])
+        db.commit()
+
+    page = first["client"].get("/api/v1/tasks/history").json()
+    ids = {item["id"] for item in page["items"]}
+    assert succeeded_old.id in ids, "the entry must not vanish behind its cancelled re-run"
+    assert cancelled_new.id not in ids  # the default cancelled filter still applies
+
+    full = first["client"].get("/api/v1/tasks/history", params={"include_cancelled": "true"}).json()
+    full_ids = {item["id"] for item in full["items"]}
+    assert succeeded_old.id in full_ids and cancelled_new.id in full_ids, (
+        "the full record keeps both rows of the entry"
+    )
 
 
 def test_user_task_stream_keeps_old_active_tasks_in_live_window():

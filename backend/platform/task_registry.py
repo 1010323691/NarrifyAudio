@@ -30,6 +30,14 @@ class TaskTypeSpec:
     billable: bool = False
     admin_only: bool = False
     legacy_engine: bool = False
+    # Payload keys that name the run's entry (one row per entry in the task
+    # centre). The display label is never an identity key: batch labels are
+    # counts / display text (「音频合成（N 段）」), so different entries of the
+    # same shape share one. Empty = whole-book type: every run of the type in
+    # a project is the same entry. Keys absent from (or NULL in) both rows
+    # compare equal; a row whose identity keys are all NULL/absent has no
+    # subject and is never superseded.
+    entry_identity: tuple[str, ...] = ()
 
 
 _SPECS: tuple[TaskTypeSpec, ...] = (
@@ -37,23 +45,33 @@ _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("text.format", "_execute_text_format"),
     TaskTypeSpec("book.analyze", "_execute_book_analyze"),
     TaskTypeSpec("book.split", "_execute_book_split"),
-    TaskTypeSpec("script.parse", "_execute_script_parse", billable=True),
-    TaskTypeSpec("audio.silences", "_execute_audio_silences"),
-    TaskTypeSpec("audio.cut", "_execute_audio_cut"),
+    TaskTypeSpec("script.parse", "_execute_script_parse", billable=True,
+                 entry_identity=("source_name",)),
+    TaskTypeSpec("audio.silences", "_execute_audio_silences",
+                 entry_identity=("source_name",)),
+    TaskTypeSpec("audio.cut", "_execute_audio_cut", entry_identity=("source_name",)),
     # legacy 引擎（13）：engine_task_executor.ENGINE_BRANCHES
-    TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True),
-    TaskTypeSpec("voices.clone", "_run_voices_clone", billable=True, legacy_engine=True),
-    TaskTypeSpec("tts.batch", "_run_tts_batch", billable=True, legacy_engine=True),
-    TaskTypeSpec("tts.merge", "_run_tts_merge", legacy_engine=True),
-    TaskTypeSpec("bgm.analysis", "_run_bgm_analysis", billable=True, legacy_engine=True),
-    TaskTypeSpec("bgm.segment", "_run_bgm_segment", billable=True, legacy_engine=True),
-    TaskTypeSpec("bgm.mix", "_run_bgm_mix", legacy_engine=True),
-    TaskTypeSpec("bgm.match", "_run_bgm_match", legacy_engine=True),
-    TaskTypeSpec("bgm.package", "_run_bgm_package", legacy_engine=True),
-    TaskTypeSpec("music.suggest_tags", "_run_music_suggest_tags", billable=True, admin_only=True, legacy_engine=True),
-    TaskTypeSpec("audio.zip", "_run_audio_zip", legacy_engine=True),
-    TaskTypeSpec("audio.export", "_run_audio_export", legacy_engine=True),
-    TaskTypeSpec("tts.reset", "_run_tts_reset", legacy_engine=True),
+    TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True,
+                 entry_identity=("speakers", "script")),
+    TaskTypeSpec("voices.clone", "_run_voices_clone", billable=True, legacy_engine=True,
+                 entry_identity=("speakers", "script")),
+    TaskTypeSpec("tts.batch", "_run_tts_batch", billable=True, legacy_engine=True,
+                 entry_identity=("scripts", "indices")),
+    TaskTypeSpec("tts.merge", "_run_tts_merge", legacy_engine=True, entry_identity=("package",)),
+    TaskTypeSpec("bgm.analysis", "_run_bgm_analysis", billable=True, legacy_engine=True,
+                 entry_identity=("stem",)),
+    TaskTypeSpec("bgm.segment", "_run_bgm_segment", billable=True, legacy_engine=True,
+                 entry_identity=("stem",)),
+    TaskTypeSpec("bgm.mix", "_run_bgm_mix", legacy_engine=True, entry_identity=("stem",)),
+    TaskTypeSpec("bgm.match", "_run_bgm_match", legacy_engine=True,
+                 entry_identity=("chapters", "mode")),
+    TaskTypeSpec("bgm.package", "_run_bgm_package", legacy_engine=True, entry_identity=("base",)),
+    TaskTypeSpec("music.suggest_tags", "_run_music_suggest_tags", billable=True, admin_only=True,
+                 legacy_engine=True, entry_identity=("name",)),
+    TaskTypeSpec("audio.zip", "_run_audio_zip", legacy_engine=True, entry_identity=("base",)),
+    TaskTypeSpec("audio.export", "_run_audio_export", legacy_engine=True,
+                 entry_identity=("source_relative",)),
+    TaskTypeSpec("tts.reset", "_run_tts_reset", legacy_engine=True, entry_identity=("scripts",)),
 )
 
 TASK_TYPES: dict[str, TaskTypeSpec] = {spec.name: spec for spec in _SPECS}
