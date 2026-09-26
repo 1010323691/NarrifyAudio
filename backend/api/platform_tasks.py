@@ -9,16 +9,16 @@ from datetime import datetime
 import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, exists, func, or_, select
-from sqlalchemy.orm import Session, aliased, selectinload
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import Session, selectinload
 
 from ..platform.database import SessionLocal, get_db
 from ..platform.platform_settings import settings
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, Task, TaskEvent, User
 from ..platform.security import session_is_valid_for_user
+from ..platform.task_identity import one_row_per_entry
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
-from ..platform.task_registry import TASK_TYPES
 from ..platform.task_submission import task_dict
 from ..services import task_views
 from .task_operations import (
@@ -32,53 +32,6 @@ from .task_operations import (
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 TASK_HISTORY_PAGE_SIZE = 50
-
-
-_NO_IDENTITY = "__narrify_no_identity__"
-
-
-def _identity_value(task, key: str):
-    """One identity payload key as comparable text; absent / NULL values
-    coalesce to a sentinel so two rows both lacking the key compare equal."""
-    return func.coalesce(task.payload[key].as_string(), _NO_IDENTITY)
-
-
-def _same_entry(newer) -> ColumnElement:
-    """The two rows name the same entry: same type, and — per the registry's
-    ``entry_identity`` — equal identity values in their payloads. Types with
-    no identity keys (whole-book operations) share one entry. A row whose
-    identity keys are all absent / NULL has no subject and never matches:
-    legacy rows must not be hidden under a guess."""
-    terms = []
-    for spec in TASK_TYPES.values():
-        keys = spec.entry_identity
-        term = [Task.task_type == spec.name]
-        if keys:
-            term.append(or_(*[_identity_value(Task, key) != _NO_IDENTITY for key in keys]))
-            term.extend(_identity_value(newer, key) == _identity_value(Task, key) for key in keys)
-        terms.append(and_(*term))
-    return or_(*terms)
-
-
-def _one_row_per_entry() -> ColumnElement:
-    """Hide terminal rows superseded by a newer run of the same entry; keep
-    every active row. A cancelled re-run does not supersede: it is not a
-    completed attempt, and hiding the last real record behind it would make
-    the entry vanish from the default history (which excludes cancelled)."""
-    newer = aliased(Task)
-    superseded = exists(
-        select(newer.id).where(
-            newer.owner_id == Task.owner_id,
-            newer.project_id == Task.project_id,
-            _same_entry(newer),
-            newer.status != "cancelled",
-            or_(
-                newer.created_at > Task.created_at,
-                and_(newer.created_at == Task.created_at, newer.id > Task.id),
-            ),
-        )
-    )
-    return or_(Task.status.in_(ACTIVE_TASK_STATUSES), ~superseded)
 
 
 def _task_json(task: Task) -> dict:
@@ -100,7 +53,7 @@ def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> lis
     stmt = select(Task).where(
         *filters,
         or_(Task.status.in_(ACTIVE_TASK_STATUSES), Task.id.in_(recent_ids)),
-        _one_row_per_entry(),
+        one_row_per_entry(),
     )
     return db.scalars(stmt.order_by(Task.created_at.desc(), Task.id.desc())).all()
 
@@ -117,7 +70,7 @@ def list_tasks(user: User = Depends(require_authenticated_user), db: Session = D
         .where(
             Task.owner_id == user.id,
             ~trashed_project,
-            _one_row_per_entry(),
+            one_row_per_entry(),
         )
         .order_by(Task.created_at.desc())
         .limit(200)
@@ -159,7 +112,7 @@ def list_task_history(
     stmt = select(Task).options(selectinload(Task.project)).where(Task.owner_id == user.id)
     if not include_cancelled:
         stmt = stmt.where(Task.status != "cancelled")
-    stmt = stmt.where(_one_row_per_entry())
+    stmt = stmt.where(one_row_per_entry())
     if cursor:
         created_at, task_id = _decode_task_cursor(cursor)
         stmt = stmt.where(or_(

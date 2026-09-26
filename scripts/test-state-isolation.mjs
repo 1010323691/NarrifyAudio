@@ -173,6 +173,46 @@ test('task control confirms the status over the SSE stream, not from the POST re
   assert.equal(store.tasks.find((task) => task.id === 'task-1')?.status, 'cancelled')
 })
 
+test('a rerun supersedes its terminal row over the stream and reset clears the memory', async () => {
+  // The stream's ``superseded`` frame is the ONLY signal that the server stopped
+  // showing a terminal row because a re-run of the same entry replaced it: the
+  // store must drop the row AND remember its id (the task centre merges rows
+  // from /history that the live stream never tracked). reset() must clear the
+  // memory, or a new account's rows would be filtered out by the old one's.
+  let emit
+  const load = harness({ '@/api/tasks': {
+    controlTask: async () => ({}),
+    listTasks: async () => [],
+    streamAllTasks: (onEvent) => { emit = onEvent; return () => {} },
+  } })
+  const store = load('@/stores/task').useTaskStore()
+  store.bindProject('proj-1')
+  store.setTaskCenterOpen(true) // opens the stream; the harness captures its emitter
+  emit({ task_id: 'task-1', type: 'snapshot_all', tasks: [{ id: 'task-1', status: 'succeeded' }] })
+  assert.equal(store.tasks.map((task) => task.id).join(','), 'task-1')
+  emit({ task_id: 'task-1', type: 'superseded' })
+  emit({ task_id: 'task-2', type: 'snapshot', task: { id: 'task-2', status: 'pending' } })
+  assert.equal(store.tasks.map((task) => task.id).join(','), 'task-2')
+  assert.equal(store.supersededIds.has('task-1'), true)
+  assert.equal(store.supersededIds.has('task-2'), false)
+  // A reconnect replays the server's visible view: the superseded terminal
+  // row must not be resurrected by the additive upsert path.
+  emit({ task_id: 'task-2', type: 'snapshot_all', tasks: [{ id: 'task-2', status: 'pending' }] })
+  assert.equal(store.tasks.map((task) => task.id).join(','), 'task-2')
+  store.reset()
+  assert.equal(store.tasks.length, 0)
+  assert.equal(store.supersededIds.size, 0)
+  // Reconnect WITHOUT a live superseded frame (the new stream session never
+  // tracked the old row): the replayed snapshot is the only truth, so a
+  // terminal row the server no longer lists must be pruned from the store.
+  store.bindProject('proj-1')
+  store.setTaskCenterOpen(true)
+  emit({ task_id: 'task-9', type: 'snapshot_all', tasks: [{ id: 'task-9', status: 'succeeded' }] })
+  assert.equal(store.tasks.map((task) => task.id).join(','), 'task-9')
+  emit({ task_id: 'task-8', type: 'snapshot_all', tasks: [{ id: 'task-8', status: 'pending' }] })
+  assert.equal(store.tasks.map((task) => task.id).join(','), 'task-8')
+})
+
 test('a delayed task category control cannot repopulate state after reset', async () => {
   const old = deferred()
   const load = harness({ '@/api/tasks': {

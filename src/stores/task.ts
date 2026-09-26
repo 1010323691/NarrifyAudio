@@ -20,6 +20,11 @@ const SNAPSHOT_WAIT_TIMEOUT_MS = 10_000
 export const useTaskStore = defineStore('task', () => {
   const tasks = ref<TaskSnapshot[]>([])
   const loading = ref(false)
+  // Rows the stream reported as superseded (a re-run of the same entry replaced
+  // the terminal row, so the server no longer displays it). The store list is
+  // not the task centre's only source — /history rows stay in the view — so the
+  // ids are remembered separately for the merge to filter them out too.
+  const supersededIds = ref(new Set<string>())
 
   // ONE multiplexed SSE stream for the whole app (every event carries `task_id`).
   // Browsers cap simultaneous HTTP/1.1 connections per host at ~6 and this console
@@ -82,10 +87,31 @@ export const useTaskStore = defineStore('task', () => {
 
   function applyEvent(id: string, e: { type: string; [k: string]: any }) {
     if (e.type === 'snapshot_all') {
-      // Keep history-page records while refreshing recent and active live state.
-      for (const task of Array.isArray(e.tasks) ? e.tasks : []) upsert(task)
+      // The replay is the server's visible view for this stream's scope: upsert
+      // its rows and drop the store rows it no longer lists — a terminal row
+      // superseded by a re-run must not survive a reconnect next to its
+      // replacement (the `superseded` frame only covers rows this stream
+      // session itself tracked). Rows the task centre loaded from /history
+      // are unaffected: they live in the view's own merge, which re-adds them
+      // only while the server still lists them there.
+      const incoming = Array.isArray(e.tasks) ? e.tasks : []
+      const visible = new Set(incoming.map((task) => task.id))
+      for (const task of incoming) upsert(task)
+      if (tasks.value.some((task) => !visible.has(task.id))) {
+        tasks.value = tasks.value.filter((task) => visible.has(task.id))
+      }
       snapshotReceived = true
       wakeSnapshotWaiters()
+      if (allStream && !shouldKeepStream()) closeStream()
+      return
+    }
+    if (e.type === 'superseded') {
+      // A re-run of the same entry replaced this terminal row: drop it from the
+      // live state (the 完成/失败 row must not sit next to the new 进行中 row)
+      // and remember the id so the task centre's history merge can drop it too.
+      const index = tasks.value.findIndex((task) => task.id === id)
+      if (index !== -1) tasks.value.splice(index, 1)
+      supersededIds.value.add(id)
       if (allStream && !shouldKeepStream()) closeStream()
       return
     }
@@ -328,8 +354,9 @@ export const useTaskStore = defineStore('task', () => {
     snapshotWaiters = []
     closeStream()
     tasks.value = []
+    supersededIds.value = new Set()
     loading.value = false
   }
 
-  return { tasks, projectTasks, loading, refresh, control, controlCategory, reset, bindProject, activeTasks, setTaskCenterOpen }
+  return { tasks, projectTasks, loading, refresh, control, controlCategory, reset, bindProject, activeTasks, setTaskCenterOpen, supersededIds }
 })

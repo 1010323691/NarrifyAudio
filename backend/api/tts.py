@@ -621,7 +621,7 @@ def run_batch(
     if req.indices:
         label = f"音频合成（{len(req.indices)} 段）"
     else:
-        label = "音频合成（续合）"
+        label = "音频合成"
     if len(scripts) == 1:
         label += f" · {scripts[0]}"
     elif len(scripts) > 1:

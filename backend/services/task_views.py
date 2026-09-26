@@ -9,6 +9,12 @@ retired (5a) — this is the only copy. Frame contract (all frames are
 - ``{"type": "progress"|"phase"|"log"|"llm_rate"|"llm_chars"|"segments", "task_id": ...}``
 - ``{"type": "status", "status": ..., "task": <snapshot>, "task_id": ...}`` — terminal /
   lifecycle transitions (the snapshot already carries the mapped status)
+- ``{"type": "superseded", "task_id": ...}`` — a terminal row left the visible
+  view because a newer run of the same entry superseded it: the client drops
+  the old terminal row (the list shows the new run, not 完成/失败 + 进行中
+  side by side). The stream names rows it tracked and pruned, plus — right
+  after the replay and whenever fresh rows enter — rows it never tracked
+  because the client loaded them from /history beyond the live window
 - ``{"type": "ping"}`` — idle keepalive (the stream never ends on its own)
 """
 from __future__ import annotations
@@ -25,6 +31,7 @@ from ..platform.database import SessionLocal
 from ..platform.models import Task as DurableTask
 from ..platform.models import TaskEvent
 from ..platform.security import session_is_valid_for_user
+from ..platform.task_identity import superseded_ids_hidden_by, superseded_task_ids
 from .task_operations import task_module
 
 
@@ -222,11 +229,17 @@ def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None
 
 def _new_frames(rows_fn, seen: dict[str, int]) -> list[dict]:
     """All not-yet-seen frames for the rows ``rows_fn`` returns, in row order.
-    Rows that disappeared from the view are pruned from ``seen``."""
+    Rows that disappeared from the view are pruned from ``seen``; the ones
+    hidden because a newer run of the same entry superseded them also get a
+    ``superseded`` frame, so a long-lived client drops the old terminal row
+    instead of keeping it next to the new run. Rows that enter the view fresh
+    name their hidden predecessors the same way — including predecessors the
+    window never tracked (the client loaded them from /history)."""
     emitted: list[dict] = []
     with SessionLocal() as db:
         rows = rows_fn(db)
         current_ids = {row.id for row in rows}
+        fresh_ids = [row.id for row in rows if row.id not in seen]
         for task in rows:
             events = db.scalars(
                 select(TaskEvent)
@@ -239,22 +252,33 @@ def _new_frames(rows_fn, seen: dict[str, int]) -> list[dict]:
                 frame = event_frame(db, task, event)
                 if frame is not None:
                     emitted.append(frame)
-        for task_id in list(seen):
-            if task_id not in current_ids:
-                seen.pop(task_id, None)
+        pruned = [task_id for task_id in seen if task_id not in current_ids]
+        for task_id in pruned:
+            seen.pop(task_id, None)
+        superseded: set[str] = set()
+        if pruned:
+            superseded.update(superseded_task_ids(db, pruned))
+        if fresh_ids:
+            superseded.update(superseded_ids_hidden_by(db, fresh_ids))
+        for task_id in sorted(superseded):
+            emitted.append({"type": "superseded", "task_id": task_id})
     return emitted
 
 
-def snapshot_payload(rows_fn) -> tuple[list[dict], dict[str, int]]:
+def snapshot_payload(rows_fn) -> tuple[list[dict], dict[str, int], set[str]]:
     """Initial replay on one self-opened session: the ``snapshot_all`` task
-    snapshots and the per-task seen-sequence map the poll ticks resume from."""
+    snapshots, the per-task seen-sequence map the poll ticks resume from, and
+    the rows the replayed rows supersede that no stream ever tracked (client
+    history beyond the newest-200 replay) — named right after the replay so
+    a reconnect drops them from the merged list too."""
     seen: dict[str, int] = {}
     with SessionLocal() as db:
         rows = rows_fn(db)
         for task in rows:
             events = task_events(db, task.id)
             seen[task.id] = events[-1].sequence if events else 0
-        return [task_snapshot(db, t) for t in rows], seen
+        hidden = superseded_ids_hidden_by(db, [task.id for task in rows]) if rows else set()
+        return [task_snapshot(db, t) for t in rows], seen, hidden
 
 
 def session_still_valid(auth_token: str, user_id: str) -> bool:
@@ -276,8 +300,10 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
     cannot freeze the event loop for every other connection on it.
     """
     next_auth_check = 0.0
-    snapshots, seen = await anyio.to_thread.run_sync(snapshot_payload, rows_fn)
+    snapshots, seen, hidden = await anyio.to_thread.run_sync(snapshot_payload, rows_fn)
     yield sse({"type": "snapshot_all", "tasks": snapshots})
+    for task_id in sorted(hidden):
+        yield sse({"type": "superseded", "task_id": task_id})
     while True:
         if await is_disconnected():
             return
