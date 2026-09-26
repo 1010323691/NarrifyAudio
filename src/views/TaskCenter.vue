@@ -416,16 +416,19 @@ onDeactivated(() => {
 /* Keep each task readable as a single horizontal entry. Narrow screens can scroll the row. */
 .task-center__dialog{width:min(1120px,100%)}
 .task-center__task-list{overflow:auto;padding:0 18px}
-.task-center__task-row{display:grid;grid-template-columns:32px max-content max-content minmax(180px,1fr) max-content max-content;align-items:center;gap:12px;width:100%;min-width:900px;padding:10px 0}
+/* 标题/详情/状态列取固定宽度（内容过长省略号截断，hover 可见全文），保证各行
+ * 时间、进度条、详情、状态列纵向对齐，且行宽不足压缩时不因行内容宽度不同
+ * 产生错位；进度条列 1fr 吃满剩余空间。状态胶囊最宽为 3 个汉字（68px）。 */
+.task-center__task-row{display:grid;grid-template-columns:32px minmax(0,380px) max-content minmax(180px,1fr) minmax(0,150px) 70px;align-items:center;gap:12px;width:100%;min-width:900px;padding:10px 0}
 .task-center__task-icon{width:30px;height:30px}
-.task-center__task-title{min-width:0;font-size:12px;white-space:nowrap}
+.task-center__task-title{min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task-center__task-time{color:hsl(var(--muted-foreground));font-size:10px;white-space:nowrap;font-variant-numeric:tabular-nums}
 .task-center__task-progress{width:auto;min-width:180px;gap:8px;margin:0}
 .task-center__task-progress>div{min-width:80px}
 .task-center__task-progress>span{flex:none;width:34px;white-space:nowrap}
 .task-center__task-detail{display:flex;align-items:center;gap:5px;min-width:0;margin:0;color:hsl(var(--muted-foreground));font-size:10px;white-space:nowrap}
 .task-center__task-detail svg{flex:none;color:hsl(var(--primary))}
-.task-center__task-detail span{white-space:nowrap}
+.task-center__task-detail span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task-center__task-detail.is-error,.task-center__task-detail.is-error svg{color:hsl(var(--destructive))}
 .task-center__task-row>:last-child{justify-self:end;white-space:nowrap}
 @media(max-width:520px){.task-center__task-list{padding:0 12px}.task-center__task-row{gap:9px}}
