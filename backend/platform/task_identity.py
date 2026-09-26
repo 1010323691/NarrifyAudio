@@ -80,3 +80,40 @@ def superseded_task_ids(db: Session, task_ids: Iterable[str]) -> set[str]:
         return set()
     rows = db.scalars(select(Task.id).where(Task.id.in_(ids), ~one_row_per_entry())).all()
     return set(rows)
+
+
+def superseded_ids_hidden_by(
+    db: Session, newer_task_ids: Iterable[str], limit: int = 500
+) -> set[str]:
+    """Terminal rows ``one_row_per_entry`` hides because a newer non-cancelled
+    run of the same entry is among ``newer_task_ids`` — regardless of whether
+    any stream ever tracked those old rows. The stream window (active + newest
+    200) can miss a re-run's predecessor: the 任务中心 preloads up to 500
+    ``/history`` rows, so an old row beyond the replay still sits in the
+    client's list — name it with a ``superseded`` frame or it stays next to
+    its replacement. Newest hidden rows first, capped at the client's preload
+    size (a hidden row the client holds can only be one of its newest 500)."""
+    ids = list(newer_task_ids)
+    if not ids:
+        return set()
+    newer = aliased(Task)
+    hidden_by = exists(
+        select(newer.id).where(
+            newer.id.in_(ids),
+            newer.owner_id == Task.owner_id,
+            newer.project_id == Task.project_id,
+            same_entry_predicate(newer),
+            newer.status != "cancelled",
+            or_(
+                newer.created_at > Task.created_at,
+                and_(newer.created_at == Task.created_at, newer.id > Task.id),
+            ),
+        )
+    )
+    rows = db.scalars(
+        select(Task.id)
+        .where(Task.status.not_in(ACTIVE_TASK_STATUSES), hidden_by)
+        .order_by(Task.created_at.desc(), Task.id.desc())
+        .limit(limit)
+    ).all()
+    return set(rows)
