@@ -41,7 +41,9 @@ const allTasks = computed(() => {
     if (task.project_name && task.task_type) byId.set(task.id, task)
   }
   return [...byId.values()]
-    .filter((task) => task.status !== 'cancelled')
+    // 被新运行替换的终态行不再展示（服务端历史接口也不会再返回它们），
+    // 历史页里已加载的旧条目同样要按此过滤，否则重跑后同名任务会成对出现。
+    .filter((task) => task.status !== 'cancelled' && !taskStore.supersededIds.has(task.id))
     .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))
 })
 

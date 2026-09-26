@@ -197,6 +197,116 @@ def test_aggregate_stream_live_frames_pruning_and_disconnect():
     assert any(f["type"] == "ping" for f in frames)
 
 
+def _parse_entry_task(user_id: str, project_id: str, source: str, status: str, created_at: datetime) -> str:
+    task_id = str(uuid.uuid4())
+    with SessionLocal() as db:
+        db.add(Task(
+            id=task_id, owner_id=user_id, project_id=project_id,
+            task_type="script.parse", status=status, progress=100 if status == "succeeded" else 0,
+            payload={"source_name": source, "label": f"文本解析（{source}）"},
+            created_at=created_at, updated_at=created_at,
+        ))
+        db.commit()
+    return task_id
+
+
+def test_superseded_frame_emitted_when_rerun_replaces_old_row():
+    """A re-run of the same entry hides the old terminal row in the view; the
+    long-lived stream must tell the client (a ``superseded`` frame) so the
+    完成/失败 row is replaced by the new 进行中 row instead of sitting next to it."""
+    a = _register(f"v1superseded-{uuid.uuid4().hex[:10]}@example.com")
+    uid = a["json"]["user"]["id"]
+    token = a["cookie"]
+    project_id = str(uuid.uuid4())
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    old_id = _parse_entry_task(uid, project_id, "第018章 庆典.txt", "succeeded", base)
+
+    state = {"rows": [old_id], "disconnected": False}
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id.in_(state["rows"]))).all()
+
+    async def disconnected():
+        return state["disconnected"]
+
+    async def drive():
+        frames: list[dict] = []
+        gen = task_views.aggregate_stream(rows_fn, token, uid, disconnected)
+
+        async def take():
+            raw = await asyncio.wait_for(gen.__anext__(), 3.0)
+            frames.append(json.loads(raw[len("data: "):]))
+            return frames[-1]
+
+        snap = await take()
+        assert snap["type"] == "snapshot_all"
+        assert {t["id"] for t in snap["tasks"]} == {old_id}
+        # The user re-runs the entry: a new queued run appears and the old
+        # completed row drops out of the (entry-deduplicated) view.
+        new_id = _parse_entry_task(uid, project_id, "第018章 庆典.txt", "queued", base + timedelta(hours=1))
+        _add_event(new_id, 1, "submitted", {})
+        state["rows"] = [new_id]
+        got: dict[str, dict] = {}
+        for _ in range(30):
+            frame = await take()
+            if frame.get("type") == "superseded" and frame.get("task_id") == old_id:
+                got["superseded"] = frame
+            if frame.get("type") == "snapshot" and frame.get("task_id") == new_id:
+                got["snapshot"] = frame
+            if len(got) == 2:
+                break
+        assert "superseded" in got, f"the old row was never told to be dropped: {frames}"
+        assert "snapshot" in got, f"the new run was never delivered: {frames}"
+        assert got["snapshot"]["task"]["status"] == "pending"
+        state["disconnected"] = True
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), 3.0)
+
+    asyncio.run(drive())
+
+
+def test_window_exit_without_rerun_emits_no_superseded():
+    """A terminal row that simply ages out of the live window (no re-run of the
+    entry) is pruned silently — it is still part of the /history record, so a
+    ``superseded`` frame for it would make it vanish from the centre."""
+    a = _register(f"v1prune-{uuid.uuid4().hex[:10]}@example.com")
+    uid = a["json"]["user"]["id"]
+    token = a["cookie"]
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    old_id = _parse_entry_task(uid, str(uuid.uuid4()), "第018章 庆典.txt", "succeeded", base)
+
+    state = {"rows": [old_id], "disconnected": False}
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id.in_(state["rows"]))).all()
+
+    async def disconnected():
+        return state["disconnected"]
+
+    async def drive():
+        frames: list[dict] = []
+        gen = task_views.aggregate_stream(rows_fn, token, uid, disconnected)
+
+        async def take():
+            raw = await asyncio.wait_for(gen.__anext__(), 3.0)
+            frames.append(json.loads(raw[len("data: "):]))
+            return frames[-1]
+
+        snap = await take()
+        assert snap["type"] == "snapshot_all"
+        assert {t["id"] for t in snap["tasks"]} == {old_id}
+        state["rows"] = []  # the row ages out of the live window, nothing re-runs
+        for _ in range(8):
+            await take()
+        state["disconnected"] = True
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), 3.0)
+        assert not any(f["type"] == "superseded" for f in frames), \
+            f"an aged-out row must not be reported as superseded: {[f for f in frames if f['type'] != 'ping']}"
+
+    asyncio.run(drive())
+
+
 def test_user_tasks_project_filter():
     a = _register(f"v1proj-{uuid.uuid4().hex[:10]}@example.com")
     uid = a["json"]["user"]["id"]
