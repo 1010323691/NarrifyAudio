@@ -193,11 +193,11 @@ async function save() {
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label>文本解析 Worker 并发数</Label>
+            <Label>文本解析 LLM 并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input v-model.number="draft.generation.parse_worker_concurrency" type="number" min="1" max="32" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
-                控制每个后台 Worker 进程同时执行的文本解析任务数（1–32）；多个 Worker 进程的总并发为各进程之和。
+                控制每个后台 Worker 进程内主解析的 LLM 同时请求数。解析工作槽位为该值的 2 倍、最多提前准备或等待该队列。多进程总并发为各进程限额之和。
               </span>
             </div>
           </div>

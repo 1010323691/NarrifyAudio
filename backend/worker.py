@@ -17,8 +17,15 @@ from .core.concurrency import set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
 
-PARSE_WORKER_MAX = 32
+PARSE_LLM_CONCURRENCY_MAX = 32
+PARSE_WORKER_MAX = PARSE_LLM_CONCURRENCY_MAX * 2
+PARSE_WORKER_MULTIPLIER = 2
 PARSE_TASK_TYPES = ("script.parse",)
+
+
+def parse_worker_slot_count(llm_concurrency: int) -> int:
+    """Allow two parse tasks per LLM slot for preparation and queueing."""
+    return min(PARSE_WORKER_MAX, max(1, int(llm_concurrency)) * PARSE_WORKER_MULTIPLIER)
 
 
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
@@ -46,15 +53,16 @@ def _parse_worker_coordinator(worker_id: str, stop: threading.Event) -> None:
     try:
         while not stop.is_set():
             try:
-                limit = parse_worker_concurrency(maximum=PARSE_WORKER_MAX)
-                set_concurrency(limit)
+                llm_limit = parse_worker_concurrency(maximum=PARSE_LLM_CONCURRENCY_MAX)
+                worker_limit = parse_worker_slot_count(llm_limit)
+                set_concurrency(llm_limit)
                 for slot, (thread, slot_stop) in list(workers.items()):
                     if not thread.is_alive():
                         workers.pop(slot, None)
-                    elif slot > limit:
+                    elif slot > worker_limit:
                         slot_stop.set()
                 occupied = set(workers)
-                while len(workers) < limit and not stop.is_set():
+                while len(workers) < worker_limit and not stop.is_set():
                     slot = next((item for item in range(next_slot, PARSE_WORKER_MAX + 1) if item not in occupied), None)
                     if slot is None:
                         slot = next((item for item in range(1, next_slot) if item not in occupied), None)
