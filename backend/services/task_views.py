@@ -148,6 +148,7 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
         "seg_chars_total": int(metrics.get("segments", {}).get("chars_total") or 0),
         "result": result,
         "error": task.error_message or "",
+        "error_code": getattr(task, "error_code", "") or "",
         "created": epoch(task.created_at),
         "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat() if getattr(task, "updated_at", None) else "",
@@ -170,6 +171,7 @@ def task_center_item(db: Session, task: DurableTask, progress_payload: dict | No
         "progress": max(0.0, min(1.0, task.progress / 100.0)),
         "current": str(progress_payload.get("current") or ""),
         "error": task.error_message or "",
+        "error_code": getattr(task, "error_code", "") or "",
         "created": epoch(task.created_at),
         "created_at": task.created_at.isoformat(),
     }

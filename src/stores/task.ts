@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { controlTask, streamAllTasks } from '@/api/tasks'
+import { controlTask, controlTaskCategory, streamAllTasks } from '@/api/tasks'
 import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
+import type { TaskCenterCategoryId } from '@/utils/taskCenter'
 import { taskModuleKey } from '@/utils/taskTypes'
 
 const ACTIVE: TaskStatus[] = ['pending', 'running', 'paused']
@@ -153,6 +154,20 @@ export const useTaskStore = defineStore('task', () => {
         if (e.task) tasks.value[tasks.value.indexOf(t)] = e.task
         else t.status = e.status
         break
+      case 'paused':
+        t.status = 'paused'
+        t.error_code = 'manual_pause'
+        t.current = '用户已暂停任务'
+        break
+      case 'resumed':
+        t.status = 'running'
+        t.error_code = ''
+        t.current = ''
+        break
+      case 'resume_requested':
+        t.status = 'pending'
+        t.current = '等待启动'
+        break
       case 'final':
         if (e.task) tasks.value[tasks.value.indexOf(t)] = e.task
         break
@@ -276,6 +291,28 @@ export const useTaskStore = defineStore('task', () => {
     ensureStream()
   }
 
+  async function controlCategory(
+    projectId: string, category: TaskCenterCategoryId, action: 'pause' | 'resume' | 'cancel',
+  ) {
+    const requestGeneration = generation
+    const response = await controlTaskCategory(projectId, category, action)
+    if (requestGeneration !== generation) return response.changed
+    for (const item of response.tasks) {
+      const task = tasks.value.find((candidate) => candidate.id === item.id)
+      if (!task) continue
+      task.status = item.status === 'queued' || item.status === 'retrying' ? 'pending' : item.status as TaskStatus
+      task.error_code = item.error_code ?? (task.status === 'paused' ? 'manual_pause' : '')
+      task.current = task.status === 'paused'
+        ? '用户已暂停任务'
+        : task.status === 'cancelling' ? '取消中，等待任务安全停止'
+          : task.status === 'cancelled' ? '任务已取消'
+        : task.status === 'pending' ? '等待启动' : ''
+      if (task.status !== 'paused') task.error = ''
+    }
+    ensureStream()
+    return response.changed
+  }
+
   function setTaskCenterOpen(open: boolean) {
     if (taskCenterOpen !== open && allStream) closeStream()
     taskCenterOpen = open
@@ -294,5 +331,5 @@ export const useTaskStore = defineStore('task', () => {
     loading.value = false
   }
 
-  return { tasks, projectTasks, loading, refresh, control, reset, bindProject, activeTasks, setTaskCenterOpen }
+  return { tasks, projectTasks, loading, refresh, control, controlCategory, reset, bindProject, activeTasks, setTaskCenterOpen }
 })

@@ -11,11 +11,23 @@ from sqlalchemy.orm import Session
 
 from ..platform.models import OutboxEvent, Project, QuotaTransaction, Task, TaskAttempt, utcnow
 from ..platform.platform_settings import settings
+from ..platform.task_context import _as_utc
 from ..platform.task_lifecycle import (
+    ACTIVE_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
     append_task_event,
     suppress_pending_dispatch,
 )
+
+
+TASK_CATEGORIES = {
+    "script": ("script.parse",),
+    "voices-foundation": ("voices.foundation",),
+    "voices-clone": ("voices.clone",),
+    "tts": ("tts.batch",),
+    "merge": ("tts.merge",),
+    "bgm": ("bgm.analysis", "bgm.segment", "bgm.match", "bgm.mix", "bgm.package"),
+}
 
 
 class RetryNotAllowedError(ValueError):
@@ -119,7 +131,16 @@ def cancel_task_record(
         return False
     if task.status == "cancelling":
         return False
-    if task.status == "running":
+    active_attempt = None
+    if task.status == "paused":
+        active_attempt = db.scalar(
+            select(TaskAttempt)
+            .where(TaskAttempt.task_id == task.id, TaskAttempt.status == "running")
+            .order_by(TaskAttempt.attempt_no.desc())
+            .with_for_update()
+        )
+    lease_expires = _as_utc(active_attempt.lease_expires_at) if active_attempt is not None else None
+    if task.status == "running" or (lease_expires is not None and lease_expires > utcnow()):
         task.status = "cancelling"
     else:
         task.status = "cancelled"
@@ -152,3 +173,87 @@ def requeue_task_record(
         aggregate_type="task", aggregate_id=task.id, event_type="task.submitted",
         payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
     ))
+
+
+def control_task_category(
+    db: Session, user_id: str, project_id: str, category: str, action: str,
+) -> list[Task]:
+    """Control one project's task batch in a single task-center category."""
+    task_types = TASK_CATEGORIES.get(category)
+    if task_types is None or action not in {"pause", "resume", "cancel"}:
+        raise ValueError("无效的任务分区或批量操作")
+
+    if action == "resume":
+        statuses = {"paused"}
+    elif action == "cancel":
+        statuses = ACTIVE_TASK_STATUSES
+    else:
+        statuses = ACTIVE_TASK_STATUSES - {"paused", "cancelling"}
+    tasks = db.scalars(
+        select(Task)
+        .where(
+            Task.owner_id == user_id,
+            Task.project_id == project_id,
+            Task.task_type.in_(task_types),
+            Task.status.in_(statuses),
+        )
+        .order_by(Task.created_at, Task.id)
+        .with_for_update()
+    ).all()
+    now = utcnow()
+    changed: list[Task] = []
+    for task in tasks:
+        if action == "cancel":
+            if cancel_task_record(db, task):
+                changed.append(task)
+            continue
+        if action == "pause":
+            if task.status == "paused":
+                continue
+            if task.status == "running":
+                # The active worker parks at its next cooperative checkpoint. Its attempt
+                # and any already-metered work stay intact while the task is paused.
+                task.status = "paused"
+            else:
+                # Prevent already-published queue messages and delayed retries from starting.
+                suppress_pending_dispatch(db, task.id)
+                task.status = "paused"
+            task.error_code = "manual_pause"
+            task.error_message = "用户已暂停任务"
+            task.updated_at = now
+            append_task_event(db, task.id, "paused", {"reason": "manual"})
+            changed.append(task)
+            continue
+
+        # Resume the same live attempt when it is still leased. If the worker disappeared
+        # while paused, dispatch a fresh attempt through the ordinary durable outbox.
+        attempt = db.scalar(
+            select(TaskAttempt)
+            .where(TaskAttempt.task_id == task.id, TaskAttempt.status == "running")
+            .order_by(TaskAttempt.attempt_no.desc())
+            .with_for_update()
+        )
+        lease_expires = _as_utc(attempt.lease_expires_at) if attempt is not None else None
+        resume_error_code = task.error_code
+        if attempt is not None and lease_expires is not None and lease_expires > now:
+            task.status = "running"
+            task.error_code = ""
+            task.error_message = ""
+            task.updated_at = now
+            append_task_event(db, task.id, "resumed", {"same_attempt": True})
+        else:
+            task.status = "pending"
+            # LLM-outage recovery is deliberately exempt from the normal attempt cap.
+            # Preserve that marker until claim_task starts the new attempt.
+            task.error_code = "llm_unavailable" if resume_error_code == "llm_unavailable" else ""
+            task.error_message = ""
+            task.finished_at = None
+            task.updated_at = now
+            append_task_event(db, task.id, "resume_requested", {"same_attempt": False})
+            db.add(OutboxEvent(
+                aggregate_type="task", aggregate_id=task.id, event_type="task.submitted",
+                payload={"task_id": task.id, "task_type": task.task_type, "project_id": task.project_id},
+            ))
+        changed.append(task)
+
+    return changed

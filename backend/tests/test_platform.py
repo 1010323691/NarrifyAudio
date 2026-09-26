@@ -144,6 +144,63 @@ def test_task_surface_lists_and_controls_durable_tasks(client: TestClient):
     assert cancelled.json()["status"] == "cancelled"
 
 
+def test_task_center_batch_pause_and_resume_is_category_scoped(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Batch controls"},
+    ).json()
+    other_project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Other book"},
+    ).json()
+    with SessionLocal.begin() as db:
+        script_task = Task(
+            owner_id=first["user"]["id"], project_id=project["id"],
+            task_type="script.parse", status="pending",
+        )
+        tts_task = Task(
+            owner_id=first["user"]["id"], project_id=project["id"],
+            task_type="tts.batch", status="pending",
+        )
+        other_book_script_task = Task(
+            owner_id=first["user"]["id"], project_id=other_project["id"],
+            task_type="script.parse", status="pending",
+        )
+        db.add_all([script_task, tts_task, other_book_script_task])
+        db.flush()
+        script_id, tts_id, other_book_script_id = script_task.id, tts_task.id, other_book_script_task.id
+
+    paused = client.post(
+        "/api/v1/tasks/batch-control", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "category": "script", "action": "pause"},
+    )
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["changed"] == 1
+    assert paused.json()["tasks"][0]["id"] == script_id
+    assert paused.json()["tasks"][0]["status"] == "paused"
+    assert client.get(f"/api/v1/tasks/{tts_id}").json()["status"] == "pending"
+    assert client.get(f"/api/v1/tasks/{other_book_script_id}").json()["status"] == "pending"
+
+    resumed = client.post(
+        "/api/v1/tasks/batch-control", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "category": "script", "action": "resume"},
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["tasks"][0]["id"] == script_id
+    assert resumed.json()["tasks"][0]["status"] == "pending"
+
+    cancelled = client.post(
+        "/api/v1/tasks/batch-control", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "category": "script", "action": "cancel"},
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["changed"] == 1
+    assert cancelled.json()["tasks"][0]["id"] == script_id
+    assert cancelled.json()["tasks"][0]["status"] == "cancelled"
+    assert client.get(f"/api/v1/tasks/{tts_id}").json()["status"] == "pending"
+    assert client.get(f"/api/v1/tasks/{other_book_script_id}").json()["status"] == "pending"
+
+
 def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]

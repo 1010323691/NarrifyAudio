@@ -21,6 +21,7 @@ function harness(overrides = {}) {
     '@/api/config': { getConfig: async () => ({ ui: { theme: 'light' } }), patchConfig: async () => ({}) },
     '@/api/tasks': {
       controlTask: async () => ({}),
+      controlTaskCategory: async () => ({ changed: 0, tasks: [] }),
       listTasks: async () => [],
       streamAllTasks: () => () => {},
     },
@@ -159,7 +160,7 @@ test('task control confirms the status over the SSE stream, not from the POST re
   // confirmation channel. This case pins that contract on both sides.
   let emit
   const load = harness({ '@/api/tasks': {
-    controlTask: async () => ({ id: 'task-1', status: 'cancelled', progress: 0 }),
+    controlTask: async () => ({ id: 'task-1', progress: 0 }),
     listTasks: async () => [],
     streamAllTasks: (onEvent) => { emit = onEvent; return () => {} },
   } })
@@ -170,6 +171,22 @@ test('task control confirms the status over the SSE stream, not from the POST re
   emit({ task_id: 'task-1', type: 'snapshot_all', tasks: [{ id: 'task-1', status: 'running', progress: 0 }] })
   emit({ task_id: 'task-1', type: 'status', status: 'cancelled' })
   assert.equal(store.tasks.find((task) => task.id === 'task-1')?.status, 'cancelled')
+})
+
+test('a delayed task category control cannot repopulate state after reset', async () => {
+  const old = deferred()
+  const load = harness({ '@/api/tasks': {
+    controlTask: async () => ({}),
+    controlTaskCategory: () => old.promise,
+    listTasks: async () => [],
+    streamAllTasks: () => () => {},
+  } })
+  const store = load('@/stores/task').useTaskStore()
+  const pending = store.controlCategory('project-1', 'script', 'pause')
+  store.reset()
+  old.resolve({ changed: 1, tasks: [{ id: 'old-task', status: 'paused', error_code: 'manual_pause' }] })
+  assert.equal(await pending, 1)
+  assert.equal(store.tasks.length, 0)
 })
 
 test('a create response from a signed-out account cannot select its project', async () => {

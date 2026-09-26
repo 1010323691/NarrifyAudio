@@ -24,6 +24,7 @@ class ConcurrencyGate:
         self._cond = threading.Condition()
         self._limit = 1  # always >= 1 (no "unlimited" mode)
         self._active = 0
+        self._local = threading.local()
 
     def set_limit(self, n: int) -> None:
         """Set the max number of concurrent holders (clamped to ``>= 1``)."""
@@ -61,14 +62,37 @@ class ConcurrencyGate:
                 else:
                     self._cond.wait()
             self._active += 1
+            self._local.held = getattr(self._local, "held", 0) + 1
             return True
 
     def release(self) -> None:
-        """Free the slot this thread took (guarded against underflow)."""
+        """Free one slot held by this thread (guarded against underflow)."""
+        held = getattr(self._local, "held", 0)
+        if held <= 0:
+            return
         with self._cond:
             if self._active > 0:
                 self._active -= 1
+                self._local.held = held - 1
             self._cond.notify_all()
+
+    def suspend_current_thread(self) -> int:
+        """Temporarily free every permit held by this thread and return its count."""
+        held = getattr(self._local, "held", 0)
+        for _ in range(held):
+            self.release()
+        return held
+
+    def restore_current_thread(self, count: int, stop_check: Callable[[], bool]) -> bool:
+        """Reacquire a suspended permit set, rolling back if the wait is interrupted."""
+        acquired = 0
+        for _ in range(max(0, count)):
+            if not self.acquire(stop_check=stop_check):
+                for _ in range(acquired):
+                    self.release()
+                return False
+            acquired += 1
+        return True
 
 
 # Module-level singletons shared by callers in this process.

@@ -289,7 +289,7 @@ def merge_audio_package(handle, package: str | None = None) -> dict:
 
         handle.progress(0.05, "启动引擎")
 
-        run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,), fail_prefix="Merge 引擎")
+        run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,), interrupt_on_pause=True, fail_prefix="Merge 引擎")
     finally:
         if acquired:
             merge_gate().release()

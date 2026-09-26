@@ -1,5 +1,6 @@
 import { API_BASE, http } from './client'
 import type { TaskCenterItem, TaskControl } from '@/types'
+import type { TaskCenterCategoryId } from '@/utils/taskCenter'
 
 export interface TaskHistoryPage {
   items: TaskCenterItem[]
@@ -16,6 +17,14 @@ export function listTaskHistory(cursor?: string | null): Promise<TaskHistoryPage
  *  snapshot arrives as a `status` frame on the stream below. */
 export function controlTask(id: string, action: TaskControl): Promise<unknown> {
   return http.post(`/api/v1/tasks/${id}/${action}`)
+}
+
+export function controlTaskCategory(
+  projectId: string,
+  category: TaskCenterCategoryId,
+  action: 'pause' | 'resume' | 'cancel',
+): Promise<{ changed: number; tasks: Array<{ id: string; status: string; error_code?: string }> }> {
+  return http.post('/api/v1/tasks/batch-control', { project_id: projectId, category, action })
 }
 
 // Shared EventSource plumbing. The backend emits every

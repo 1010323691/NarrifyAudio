@@ -854,9 +854,12 @@ def _cleanup_outcome(outcome: TaskOutcome) -> None:
         extra.temp_path.unlink(missing_ok=True)
 
 
-def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool:
+def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
     with SessionLocal() as db:
         task, attempt = _attempt_is_current(db, claim)
+        if task is not None and attempt is not None and task.status == "paused":
+            db.rollback()
+            return None
         if task is None or attempt is None or task.status == "cancelling":
             db.rollback()
             _cleanup_outcome(outcome)
@@ -1104,7 +1107,11 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                 _cleanup_outcome(outcome)
                 raise TaskCancelledError()
             try:
-                completed = complete_claim(claim, outcome)
+                while True:
+                    completed = complete_claim(claim, outcome)
+                    if completed is not None:
+                        break
+                    EngineExecutionContext(claim).check()
             except Exception:
                 _cleanup_outcome(outcome)
                 raise
@@ -1112,6 +1119,9 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                 return "succeeded"
             fail_claim(claim, TaskCancelledError())
             return "cancelled"
+    except TaskCancelled:
+        fail_claim(claim, TaskCancelledError())
+        return "cancelled"
     except TaskExecutionError as exc:
         fail_claim(claim, exc)
         return exc.code

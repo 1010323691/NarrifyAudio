@@ -21,7 +21,9 @@ from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUS
 from ..platform.task_submission import task_dict
 from ..services import task_views
 from .task_operations import (
+    TaskBatchControl,
     TaskSubmit,
+    batch_control_tasks as batch_control_tasks_for_user,
     cancel_task as cancel_task_for_user,
     retry_task as retry_task_for_user,
     submit_task as submit_task_for_user,
@@ -236,3 +238,10 @@ def cancel_task(task_id: str, user: User = Depends(require_csrf), db: Session = 
 @router.post("/{task_id}/retry")
 def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     return retry_task_for_user(task_id, user=user, db=db)
+
+
+@router.post("/batch-control")
+def batch_control_tasks(
+    payload: TaskBatchControl, user: User = Depends(require_csrf), db: Session = Depends(get_db),
+) -> dict:
+    return batch_control_tasks_for_user(payload, user=user, db=db)

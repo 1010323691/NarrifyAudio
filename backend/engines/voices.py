@@ -1085,7 +1085,8 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
             from ..platform.quota import require_quota
             require_quota("TTS", "voices.clone")
             run_tts_subprocess(cmd, handle, on_line, temp_files=(job_file,),
-                       fail_prefix="角色克隆引擎", watchdog_code=124, log_file=run_log)
+                       fail_prefix="角色克隆引擎", watchdog_code=124, log_file=run_log,
+                       interrupt_on_pause=True)
             break  # a clean exit (0)
         except WorkerWatchdogTimeout:
             attempt += 1

@@ -15,11 +15,12 @@ from sqlalchemy import delete, select
 from backend.platform.platform_settings import settings
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import (
-    Project, QuotaTransaction, Task, TaskAttempt, User, utcnow,
+    OutboxEvent, Project, QuotaTransaction, Task, TaskAttempt, User, utcnow,
 )
 from backend.services.task_operations import (
     RetryNotAllowedError,
     check_retry_eligible,
+    control_task_category,
     owned_project,
     owned_task,
     task_module,
@@ -184,3 +185,58 @@ def test_owned_project_excludes_foreign_and_soft_deleted():
         project.deleted_at = utcnow()
         db.flush()
         assert owned_project(db, owner.id, project.id) is None
+
+
+def test_category_pause_and_resume_reuses_live_attempt_and_requeues_idle_task():
+    from datetime import timedelta
+
+    with SessionLocal.begin() as db:
+        owner, project = _fresh_owner(db)
+        idle = Task(owner_id=owner.id, project_id=project.id, task_type="script.parse", status="pending")
+        live = Task(owner_id=owner.id, project_id=project.id, task_type="script.parse", status="running")
+        unrelated = Task(owner_id=owner.id, project_id=project.id, task_type="tts.batch", status="running")
+        db.add_all([idle, live, unrelated])
+        db.flush()
+        attempt = TaskAttempt(
+            task_id=live.id, attempt_no=1, worker_id="worker", lease_token="lease",
+            status="running", lease_expires_at=utcnow() + timedelta(minutes=1),
+        )
+        db.add(attempt)
+        db.flush()
+
+        other_project = Project(
+            owner_id=owner.id,
+            name=f"other-{uuid.uuid4().hex[:12]}",
+            directory_key=f"o{uuid.uuid4().hex[:12]}",
+        )
+        db.add(other_project)
+        db.flush()
+        other_project_task = Task(
+            owner_id=owner.id, project_id=other_project.id,
+            task_type="script.parse", status="pending",
+        )
+        db.add(other_project_task)
+        db.flush()
+
+        paused = control_task_category(db, owner.id, project.id, "script", "pause")
+        assert {task.id for task in paused} == {idle.id, live.id}
+        assert idle.status == live.status == "paused"
+        assert idle.error_code == live.error_code == "manual_pause"
+        assert other_project_task.status == "pending"
+
+        resumed = control_task_category(db, owner.id, project.id, "script", "resume")
+        assert {task.id for task in resumed} == {idle.id, live.id}
+        assert idle.status == "pending"  # no live attempt: ordinary outbox dispatch
+        assert live.status == "running"  # active lease: continue the same attempt
+        assert attempt.status == "running"
+        assert unrelated.status == "running"
+        assert other_project_task.status == "pending"
+        assert db.query(OutboxEvent).filter(OutboxEvent.aggregate_id == idle.id).count() == 1
+
+        control_task_category(db, owner.id, project.id, "script", "pause")
+        cancelled = control_task_category(db, owner.id, project.id, "script", "cancel")
+        assert {task.id for task in cancelled} == {idle.id, live.id}
+        assert idle.status == "cancelled"
+        assert live.status == "cancelling"  # paused live attempt stops cooperatively
+        assert unrelated.status == "running"
+        assert other_project_task.status == "pending"

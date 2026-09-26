@@ -399,6 +399,7 @@ export interface TaskCenterItem {
   progress: number
   current: string
   error: string
+  error_code?: string
   created: number
   created_at: string
 }

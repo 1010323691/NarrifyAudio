@@ -2,7 +2,7 @@
 import { computed, nextTick, onDeactivated, onActivated, ref } from 'vue'
 import {
   Activity, AudioLines, Check, ChevronRight, CircleAlert, Clock3, Combine,
-  FileText, Folder, LoaderCircle, ListTodo, Music4, RefreshCw,
+  FileText, Folder, LoaderCircle, ListTodo, Music4, Pause, Play, RefreshCw,
   ScanText, Users, X,
 } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
@@ -21,6 +21,8 @@ const loading = ref(false)
 const loadingMore = ref(false)
 const loaded = ref(false)
 const error = ref('')
+const controlError = ref('')
+const controllingCategory = ref<TaskCenterCategoryId | null>(null)
 const taskFilter = ref<'all' | 'active' | 'completed'>('all')
 const selectedGroup = ref<{ categoryId: TaskCenterCategoryId; projectId: string } | null>(null)
 const dialogPanel = ref<HTMLElement | null>(null)
@@ -74,6 +76,13 @@ const filteredSelectedTasks = computed(() => selectedTasks.value.filter((task) =
   return true
 }))
 const selectedProjectName = computed(() => selectedTasks.value[0]?.project_name || '未知书籍')
+const selectedActiveTasks = computed(() => selectedTasks.value.filter((task) =>
+  ['pending', 'queued', 'retrying', 'running', 'paused'].includes(task.status),
+))
+const selectedPausableTasks = computed(() => selectedTasks.value.filter((task) =>
+  ['pending', 'queued', 'retrying', 'running'].includes(task.status),
+))
+const selectedResumableTasks = computed(() => selectedTasks.value.filter((task) => task.status === 'paused'))
 
 const taskFilters = [
   { id: 'all', label: '全部' },
@@ -109,7 +118,10 @@ function taskIcon(taskType: string) {
 }
 
 function taskDetail(task: TaskCenterItem) {
-  if (task.status === 'paused') return '等待 LLM 服务恢复，系统会每分钟检查并自动重试'
+  if (task.status === 'paused') {
+    if (task.error_code === 'manual_pause' || task.error === '用户已暂停任务') return task.current || '已暂停，可在当前任务列表中点击启动全部继续'
+    return task.current || task.error || '等待 LLM 服务恢复，系统会每分钟检查并自动重试'
+  }
   if (task.current) return task.current
   if (task.error) return task.error
   if (task.status === 'succeeded') return '任务已完成'
@@ -146,6 +158,21 @@ async function loadPage(next = false) {
   } finally {
     loading.value = false
     loadingMore.value = false
+  }
+}
+
+async function runSelectedGroupControl(action: 'pause' | 'resume' | 'cancel') {
+  if (!selectedGroup.value || !selectedActiveTasks.value.length || controllingCategory.value) return
+  const { categoryId, projectId } = selectedGroup.value
+  controllingCategory.value = categoryId
+  controlError.value = ''
+  try {
+    await taskStore.controlCategory(projectId, categoryId, action)
+  } catch (cause: any) {
+    const actionLabel = action === 'pause' ? '暂停' : action === 'resume' ? '启动' : '取消'
+    controlError.value = cause?.message || `批量${actionLabel}任务失败，请重试。`
+  } finally {
+    controllingCategory.value = null
   }
 }
 
@@ -212,6 +239,11 @@ onDeactivated(() => {
     <div v-if="error" class="task-center__error" role="alert">
       <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ error }}</span>
       <Button variant="outline" size="sm" @click="loadPage()">重试</Button>
+    </div>
+
+    <div v-if="controlError" class="task-center__error" role="alert">
+      <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ controlError }}</span>
+      <Button variant="ghost" size="sm" aria-label="关闭批量控制错误提示" @click="controlError = ''"><X class="h-4 w-4" /></Button>
     </div>
 
     <div v-if="loading && !loaded" class="task-center__loading" role="status">
@@ -282,6 +314,46 @@ onDeactivated(() => {
             <button ref="dialogCloseButton" type="button" class="task-center__close" aria-label="关闭子任务窗口" @click="closeDialog()">
               <X class="h-5 w-5" aria-hidden="true" />
             </button>
+            <div class="task-center__batch-actions" role="group" :aria-label="`${selectedCategory.label}批量控制`">
+              <Button
+                variant="outline"
+                size="sm"
+                class="task-center__batch-control"
+                :disabled="!selectedPausableTasks.length || !!controllingCategory"
+                :aria-busy="controllingCategory === selectedGroup.categoryId"
+                :aria-label="`${selectedProjectName}的${selectedCategory.label}：暂停全部任务`"
+                @click="runSelectedGroupControl('pause')"
+              >
+                <LoaderCircle v-if="controllingCategory === selectedGroup.categoryId" class="h-4 w-4 animate-spin" />
+                <Pause v-else class="h-4 w-4" />
+                暂停全部
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                class="task-center__batch-control"
+                :disabled="!selectedResumableTasks.length || !!controllingCategory"
+                :aria-busy="controllingCategory === selectedGroup.categoryId"
+                :aria-label="`${selectedProjectName}的${selectedCategory.label}：启动全部任务`"
+                @click="runSelectedGroupControl('resume')"
+              >
+                <LoaderCircle v-if="controllingCategory === selectedGroup.categoryId" class="h-4 w-4 animate-spin" />
+                <Play v-else class="h-4 w-4" />
+                启动全部
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                class="task-center__batch-control text-destructive"
+                :disabled="!selectedActiveTasks.length || !!controllingCategory"
+                :aria-label="`${selectedProjectName}的${selectedCategory.label}：取消此批全部任务`"
+                @click="runSelectedGroupControl('cancel')"
+              >
+                <LoaderCircle v-if="controllingCategory === selectedGroup.categoryId" class="h-4 w-4 animate-spin" />
+                <X v-else class="h-4 w-4" />
+                取消全部
+              </Button>
+            </div>
             <div class="task-center__filter" role="group" aria-label="按任务状态筛选">
               <span class="task-center__filter-thumb" :class="`is-${taskFilter}`" aria-hidden="true" />
               <button
@@ -350,4 +422,7 @@ onDeactivated(() => {
 .task-center__filter button[aria-pressed=true]{color:hsl(var(--foreground));font-weight:650}
 .task-center__filter button:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:1px}
 @media(max-width:520px){.task-center__dialog-head{gap:10px}.task-center__dialog-actions{gap:8px}.task-center__filter{grid-template-columns:repeat(3,minmax(58px,1fr))}.task-center__filter button{padding:0 6px}}
+.task-center__batch-actions{display:flex;align-items:center;gap:7px}
+.task-center__batch-control{flex:none;min-height:36px;gap:7px}
+@media(max-width:520px){.task-center__dialog-actions{flex-wrap:wrap;justify-content:flex-end}.task-center__batch-actions{flex-wrap:wrap;justify-content:flex-end}}
 </style>

@@ -148,7 +148,8 @@ class GenerationConfig(BaseModel):
     min_p: float = 0.0  # 0 -> not sent
     presence_penalty: float = 0.0
     banned_tokens: list = Field(default_factory=list)
-    # Concurrent durable script.parse tasks per backend.worker process.
+    # Concurrent primary-parse LLM calls per backend.worker process. The worker
+    # starts up to twice this many script.parse tasks for preparation/prefetch.
     # The voice-foundation setting below controls parallel requests within one voice job.
     parse_worker_concurrency: int = Field(default=4, ge=1, le=32)
     # Max character-foundation LLM jobs generated in parallel by the voices engine.

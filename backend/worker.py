@@ -8,33 +8,69 @@ import threading
 import time
 
 import redis
+from sqlalchemy import func, select
 
 from .platform.outbox import publish_pending
 from .platform.task_worker import recover_database_tasks, resume_llm_unavailable_tasks, run_once
 from .platform.worker_registry import heartbeat, mark_offline
+from .platform.database import SessionLocal
+from .platform.models import Task, TaskAttempt
 from .platform.task_types import SUPPORTED_TASK_TYPES
 from .core.concurrency import set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
 
-PARSE_WORKER_MAX = 32
+PARSE_LLM_CONCURRENCY_MAX = 32
+PARSE_WORKER_MAX = PARSE_LLM_CONCURRENCY_MAX * 2
+PARSE_WORKER_MULTIPLIER = 2
 PARSE_TASK_TYPES = ("script.parse",)
+
+
+def parse_worker_slot_count(llm_concurrency: int, parked_worker_count: int = 0) -> int:
+    """Keep the configured active queue slots available when tasks are parked."""
+    configured_slots = max(1, int(llm_concurrency)) * PARSE_WORKER_MULTIPLIER
+    return min(PARSE_WORKER_MAX, configured_slots + max(0, int(parked_worker_count)))
+
+
+def _paused_parse_worker_count(worker_id: str) -> int:
+    """Count this process's live, manually paused parse attempts.
+
+    Their threads preserve the in-memory execution stack, so the coordinator
+    provisions replacement workers while keeping the number of runnable slots
+    at the configured limit. Other worker processes do not compensate for them.
+    """
+    with SessionLocal() as db:
+        return int(db.scalar(
+            select(func.count(TaskAttempt.id))
+            .join(Task, Task.id == TaskAttempt.task_id)
+            .where(
+                Task.task_type.in_(PARSE_TASK_TYPES),
+                Task.status == "paused",
+                Task.error_code == "manual_pause",
+                TaskAttempt.status == "running",
+                TaskAttempt.worker_id.startswith(f"{worker_id}-parse-", autoescape=True),
+            )
+        ) or 0)
 
 
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
     logger = logging.getLogger("audiobook.worker")
     slot_id = f"{worker_id}-parse-{slot:02d}"
+    idle_delay = 0.25
     try:
         while not stop.is_set() and not slot_stop.is_set():
             try:
                 claim = claim_fair_task(slot_id, task_types=PARSE_TASK_TYPES)
                 if claim is not None:
+                    idle_delay = 0.25
                     _run_claim_fenced(claim)
                 else:
-                    slot_stop.wait(0.2)
+                    slot_stop.wait(idle_delay)
+                    idle_delay = min(idle_delay * 2, 3.0)
             except Exception:
                 logger.exception("Parse worker slot failed; retrying slot=%s", slot)
                 slot_stop.wait(1.0)
+                idle_delay = 0.25
     finally:
         mark_offline(slot_id)
 
@@ -43,18 +79,25 @@ def _parse_worker_coordinator(worker_id: str, stop: threading.Event) -> None:
     logger = logging.getLogger("audiobook.worker")
     workers: dict[int, tuple[threading.Thread, threading.Event]] = {}
     next_slot = 1
+    paused_worker_count = 0
+    last_pause_count_check = 0.0
     try:
         while not stop.is_set():
             try:
-                limit = parse_worker_concurrency(maximum=PARSE_WORKER_MAX)
-                set_concurrency(limit)
+                llm_limit = parse_worker_concurrency(maximum=PARSE_LLM_CONCURRENCY_MAX)
+                now = time.monotonic()
+                if now - last_pause_count_check >= 1.0:
+                    paused_worker_count = _paused_parse_worker_count(worker_id)
+                    last_pause_count_check = now
+                worker_limit = parse_worker_slot_count(llm_limit, paused_worker_count)
+                set_concurrency(llm_limit)
                 for slot, (thread, slot_stop) in list(workers.items()):
                     if not thread.is_alive():
                         workers.pop(slot, None)
-                    elif slot > limit:
+                    elif slot > worker_limit:
                         slot_stop.set()
                 occupied = set(workers)
-                while len(workers) < limit and not stop.is_set():
+                while len(workers) < worker_limit and not stop.is_set():
                     slot = next((item for item in range(next_slot, PARSE_WORKER_MAX + 1) if item not in occupied), None)
                     if slot is None:
                         slot = next((item for item in range(1, next_slot) if item not in occupied), None)
