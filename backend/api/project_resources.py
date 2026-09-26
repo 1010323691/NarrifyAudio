@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..platform.database import get_db
 from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, Task, User
-from ..platform.storage import configured_storage_root, safe_display_name
+from ..platform.storage import safe_project_workspace_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
 from ..services.task_operations import owned_project
@@ -44,26 +45,19 @@ _CACHE_DIRS = {"00_temp", ".cache", "cache"}
 _CACHE_MAX_AGE = timedelta(days=7)
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".zip"}
 _SPLIT_VOLUME_NAME = re.compile(r"^第\s+\d+\s+章(?:\s|\.|$)")
+_PROGRESS_CATEGORIES = (
+    "02_split_text", "03_parsed_json", "04_voice_profiles", "05_audio_chunk",
+    "06_audio_merge", "07_output", "08_bgm",
+)
 
 
 def _safe_project_directory(db: Session, user: User, item: Project) -> Path | None:
     """Resolve a managed project directory without following user-controlled symlinks."""
-    root = configured_storage_root(db).resolve()
-    user_root = root / safe_display_name(user.username)
-    candidate = user_root / item.id
-    if user_root.is_symlink() or candidate.is_symlink():
-        return None
-    try:
-        resolved = candidate.resolve()
-        if not resolved.is_relative_to(root):
-            return None
-    except (OSError, RuntimeError):
-        return None
-    return resolved
+    return safe_project_workspace_path(db, user.username, item.id)
 
 
 def _project_summary(root: Path, *, active: bool) -> dict:
-    """Collect file metadata only; never follows links or reads file contents."""
+    """Collect full file metadata for the project detail view."""
     totals: dict[str, dict[str, int]] = {}
     files: list[dict] = []
     cleanup_count = cleanup_bytes = split_volume_count = 0
@@ -120,15 +114,72 @@ def _project_summary(root: Path, *, active: bool) -> dict:
     }
 
 
+def _stage_has_file(stage_root: Path, *, count_split_volumes: bool = False) -> tuple[bool, int]:
+    """Find stage output without statting and resolving every project file."""
+    if stage_root.is_symlink() or not stage_root.is_dir():
+        return False, 0
+    resolved_root = stage_root.resolve()
+    pending = [stage_root]
+    found = False
+    split_volume_count = 0
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = os.scandir(directory)
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        child = Path(entry.path)
+                        if not child.is_symlink() and child.resolve().is_relative_to(resolved_root):
+                            pending.append(child)
+                    elif entry.is_file(follow_symlinks=False):
+                        if count_split_volumes:
+                            if _SPLIT_VOLUME_NAME.match(entry.name):
+                                split_volume_count += 1
+                                found = True
+                        else:
+                            return True, 0
+                except (OSError, RuntimeError, ValueError):
+                    continue
+    return found, split_volume_count
+
+
+def _project_progress(root: Path) -> dict:
+    """Return only stage presence for project cards using short-circuit scans."""
+    if root.is_symlink() or not root.is_dir():
+        return {"stage_keys": [], "split_volume_count": 0}
+    stage_keys = []
+    split_volume_count = 0
+    for key in _PROGRESS_CATEGORIES:
+        has_output, split_count = _stage_has_file(
+            root / key, count_split_volumes=(key == "02_split_text"),
+        )
+        if has_output:
+            stage_keys.append(key)
+        if key == "02_split_text":
+            split_volume_count = split_count
+    return {"stage_keys": stage_keys, "split_volume_count": split_volume_count}
+
+
 @router.get("/{project_id}/summary")
-def get_project_summary(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+def get_project_summary(project_id: str, progress: bool = False, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, project_id)
-    active = db.scalar(select(Task.id).where(
-        Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)
-    ).limit(1)) is not None
     root = _safe_project_directory(db, user, item)
     if root is None:
         raise HTTPException(409, "项目存储目录不可安全访问")
+    if progress:
+        return {
+            "project_id": item.id,
+            "name": item.name,
+            "updated_at": item.updated_at.isoformat(),
+            **_project_progress(root),
+        }
+    active = db.scalar(select(Task.id).where(
+        Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)
+    ).limit(1)) is not None
     return {
         "project_id": item.id,
         "name": item.name,

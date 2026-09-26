@@ -51,6 +51,24 @@ def project_workspace_path(db: Session | None, username: str, project_id: str) -
     return (root / safe_display_name(username) / project_id).resolve()
 
 
+def safe_project_workspace_path(db: Session | None, username: str, project_id: str) -> Path | None:
+    """Resolve a project directory only when it stays inside managed storage."""
+    if not project_id or Path(project_id).name != project_id or project_id in {".", ".."}:
+        return None
+    root = configured_storage_root(db).resolve()
+    user_root = root / safe_display_name(username)
+    candidate = user_root / project_id
+    if user_root.is_symlink() or candidate.is_symlink():
+        return None
+    try:
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(root):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return resolved
+
+
 def object_path(object_key: str, root: Path | None = None) -> Path:
     root = (root or settings.storage_root).resolve()
     candidate = (root / object_key).resolve()

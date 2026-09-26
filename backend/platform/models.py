@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -78,6 +78,11 @@ class Project(TimestampMixin, Base):
         UniqueConstraint("id", "owner_id", name="uq_projects_id_owner"),
         UniqueConstraint("owner_id", "name", "deleted_at", name="uq_projects_owner_name_deleted"),
         UniqueConstraint("directory_key", name="uq_projects_directory_key"),
+        Index(
+            "uq_projects_owner_active_name", "owner_id", "name", unique=True,
+            sqlite_where=text("deleted_at IS NULL"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
     )
 
 

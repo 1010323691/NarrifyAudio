@@ -11,7 +11,7 @@ import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
-import { deleteProject, getProjectSummary, type ProjectStorageSummary } from '@/api/project'
+import { deleteProject, getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
 
 const router = useRouter()
@@ -19,7 +19,7 @@ const projectStore = useProjectStore()
 const settings = useSettingsStore()
 const { push: toast } = useToast()
 const tasks = ref<DurableTask[]>([])
-const summaries = ref<Record<string, ProjectStorageSummary>>({})
+const summaries = ref<Record<string, ProjectProgressSummary>>({})
 const loading = ref(true)
 const refreshing = ref(false)
 const createOpen = ref(false)
@@ -27,15 +27,16 @@ const name = ref('')
 const pageError = ref('')
 const openError = ref('')
 const deletingProjectId = ref('')
+let loadGeneration = 0
 const STAGE_KEYS = ['02_split_text', '03_parsed_json', '04_voice_profiles', '05_audio_chunk', '06_audio_merge', '07_output', '08_bgm']
 const visibleStageKeys = computed(() => STAGE_KEYS.filter((key) => key !== '07_output' || settings.config?.ui.show_audio_split))
 const stageCount = computed(() => visibleStageKeys.value.length)
 
 const projects = computed(() => [...projectStore.projects].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)))
 
-function stagesWithOutput(summary?: ProjectStorageSummary) {
+function stagesWithOutput(summary?: ProjectProgressSummary) {
   if (!summary) return null
-  const completed = new Set(summary.categories.filter((row) => row.count > 0).map((row) => row.key))
+  const completed = new Set(summary.stage_keys)
   return visibleStageKeys.value.filter((key) =>
     key === '02_split_text' ? summary.split_volume_count > 0 : completed.has(key),
   ).length
@@ -65,16 +66,23 @@ function updatedAt(value: string) {
 }
 
 async function load() {
+  const requestGeneration = ++loadGeneration
   refreshing.value = true
   pageError.value = ''
-  const active = await projectStore.refresh()
-  const tasksResult = await Promise.allSettled([listDurableTasks()])
+  const [active, tasksResult] = await Promise.all([
+    projectStore.refresh(),
+    Promise.allSettled([listDurableTasks()]),
+  ])
+  if (requestGeneration !== loadGeneration) return
   tasks.value = tasksResult[0].status === 'fulfilled' ? tasksResult[0].value : []
   if (projectStore.error) pageError.value = projectStore.error
   else if (tasksResult[0].status === 'rejected') pageError.value = '最近任务暂时无法读取。'
   const visible = projects.value.slice(0, 12)
-  const results = await Promise.allSettled(visible.map((project) => getProjectSummary(project.id)))
-  const next: Record<string, ProjectStorageSummary> = {}
+  loading.value = false
+  refreshing.value = false
+  const results = await Promise.allSettled(visible.map((project) => getProjectProgressSummary(project.id)))
+  if (requestGeneration !== loadGeneration) return
+  const next: Record<string, ProjectProgressSummary> = {}
   results.forEach((result, index) => {
     if (result.status === 'fulfilled') next[visible[index].id] = result.value
   })
@@ -115,7 +123,7 @@ async function openProject(project: ProjectSummary) {
 async function requestDelete(project: ProjectSummary) {
   if (projectStore.busy || deletingProjectId.value) return
   const confirmed = await showConfirm(
-    `删除项目「${project.name}」？删除后，项目会从你的列表中移除。项目文件会保留在存储目录中；如果项目有未完成任务，需要先等待任务完成或取消任务。`,
+    `将项目「${project.name}」移入回收站。本地文件和任务记录会保留一个自然月，可在回收站恢复；到期后会彻底删除。如果项目有未完成任务，需要先等待任务完成或取消任务。`,
     { title: '删除项目', confirmText: '删除项目', destructive: true },
   )
   if (!confirmed) return

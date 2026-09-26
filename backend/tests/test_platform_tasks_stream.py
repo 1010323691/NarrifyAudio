@@ -26,7 +26,7 @@ pytest.importorskip("sqlalchemy")
 from backend.main import app
 from backend.platform.platform_settings import settings
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import Task, TaskEvent, UserSession
+from backend.platform.models import Project, Task, TaskEvent, UserSession, utcnow
 from backend.services import task_views
 from backend.services.task_operations import task_module
 
@@ -211,6 +211,46 @@ def test_user_tasks_project_filter():
         filtered = {t.id for t in _user_tasks(db, uid, project_a)}
     assert in_project in all_rows and out_project in all_rows
     assert in_project in filtered and out_project not in filtered
+
+
+def test_user_task_views_hide_trashed_project_rows_but_keep_orphan_rows(client):
+    account = _register(f"trash-task-view-{uuid.uuid4().hex[:10]}@example.com")
+    user_id = account["json"]["user"]["id"]
+    trashed_project_id = str(uuid.uuid4())
+    orphan_project_id = str(uuid.uuid4())
+    with SessionLocal.begin() as db:
+        db.add(Project(
+            id=trashed_project_id,
+            owner_id=user_id,
+            name="待清理项目",
+            directory_key=f"trash-task-view/{trashed_project_id}",
+            deleted_at=utcnow(),
+        ))
+        trashed_task = Task(
+            owner_id=user_id,
+            project_id=trashed_project_id,
+            task_type="text.format",
+            status="succeeded",
+            progress=100,
+            payload={},
+        )
+        orphan_task = Task(
+            owner_id=user_id,
+            project_id=orphan_project_id,
+            task_type="text.format",
+            status="succeeded",
+            progress=100,
+            payload={},
+        )
+        db.add_all([trashed_task, orphan_task])
+
+    from backend.api.platform_tasks import _user_tasks
+
+    with SessionLocal() as db:
+        stream_rows = {task.id for task in _user_tasks(db, user_id)}
+    listed_rows = {task["id"] for task in account["client"].get("/api/v1/tasks").json()}
+    assert trashed_task.id not in stream_rows | listed_rows
+    assert orphan_task.id in stream_rows & listed_rows
 
 
 def test_task_history_cursor_pages_are_stable_and_user_scoped(client):

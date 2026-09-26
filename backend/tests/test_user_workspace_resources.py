@@ -67,6 +67,32 @@ def test_user_workspace_summary_only_returns_owned_project_storage(client: TestC
     shutil.rmtree(root, ignore_errors=True)
 
 
+def test_project_card_progress_uses_stage_presence_scan_not_full_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from backend.api import project_resources
+
+    def fail_full_scan(_root):
+        raise AssertionError("the project card progress path must not scan every project file")
+
+    monkeypatch.setattr(project_resources, "iter_regular_project_files", fail_full_scan)
+    split = tmp_path / "02_split_text" / "set-a"
+    parsed = tmp_path / "03_parsed_json"
+    audio = tmp_path / "05_audio_chunk" / "nested"
+    split.mkdir(parents=True)
+    parsed.mkdir(parents=True)
+    audio.mkdir(parents=True)
+    (split / "第 001 章 开始.txt").write_text("chapter", encoding="utf-8")
+    (split / "说明.txt").write_text("not a chapter", encoding="utf-8")
+    (parsed / "result.json").write_text("{}", encoding="utf-8")
+    (audio / "chunk.wav").write_bytes(b"audio")
+
+    progress = project_resources._project_progress(tmp_path)
+
+    assert progress == {
+        "stage_keys": ["02_split_text", "03_parsed_json", "05_audio_chunk"],
+        "split_volume_count": 1,
+    }
+
+
 def test_user_workspace_cleanup_is_limited_to_old_cache_and_blocks_active_task(client: TestClient):
     csrf, workspace_id, root = _create_workspace(client)
     temp = root / "00_temp" / "old.tmp"

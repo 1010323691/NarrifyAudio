@@ -19,6 +19,7 @@ from .platform.task_types import SUPPORTED_TASK_TYPES
 from .core.concurrency import set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
+from .services.project_retention import purge_expired_projects
 
 PARSE_LLM_CONCURRENCY_MAX = 32
 PARSE_WORKER_MAX = PARSE_LLM_CONCURRENCY_MAX * 2
@@ -51,6 +52,17 @@ def _paused_parse_worker_count(worker_id: str) -> int:
                 TaskAttempt.worker_id.startswith(f"{worker_id}-parse-", autoescape=True),
             )
         ) or 0)
+
+
+def _project_retention_loop(stop: threading.Event) -> None:
+    """Keep expired project cleanup in the dedicated worker process."""
+    logger = logging.getLogger("audiobook.worker")
+    while not stop.is_set():
+        try:
+            purge_expired_projects()
+        except Exception:
+            logger.exception("Daily project trash cleanup failed")
+        stop.wait(24 * 60 * 60)
 
 
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
@@ -140,7 +152,15 @@ def main() -> None:
     heartbeat(args.worker_id, status="starting", capabilities=capabilities)
     stop = threading.Event()
     parse_workers: list[threading.Thread] = []
+    retention_worker: threading.Thread | None = None
     if not args.once:
+        retention_worker = threading.Thread(
+            target=_project_retention_loop,
+            args=(stop,),
+            name="project-retention-cleanup",
+            daemon=True,
+        )
+        retention_worker.start()
         parse_workers.append(threading.Thread(
             target=_parse_worker_coordinator,
             args=(args.worker_id, stop),
@@ -173,6 +193,8 @@ def main() -> None:
         raise
     finally:
         stop.set()
+        if retention_worker is not None:
+            retention_worker.join(timeout=5)
         for thread in parse_workers:
             thread.join(timeout=2)
         mark_offline(args.worker_id)

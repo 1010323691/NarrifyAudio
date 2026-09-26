@@ -9,6 +9,11 @@ export interface ProjectSummary {
   updated_at: string
 }
 
+export interface TrashedProjectSummary extends ProjectSummary {
+  deleted_at: string
+  expires_at: string
+}
+
 export interface ProjectFileSummary {
   name: string
   relative_path: string
@@ -30,6 +35,14 @@ export interface ProjectStorageSummary {
   cleanup_candidates: { count: number; size_bytes: number; older_than_days: number; blocked_by_active_tasks: boolean }
 }
 
+export interface ProjectProgressSummary {
+  project_id: string
+  name: string
+  updated_at: string
+  stage_keys: string[]
+  split_volume_count: number
+}
+
 /** Active project and its artifact directories (empty when no project is selected). */
 export function getActiveProject(): Promise<ProjectContext> {
   return http.get<ProjectContext>('/api/v1/projects/active')
@@ -48,12 +61,24 @@ export function listProjects(): Promise<ProjectSummary[]> {
   return http.get('/api/v1/projects')
 }
 
+export function listTrashedProjects(): Promise<TrashedProjectSummary[]> {
+  return http.get('/api/v1/projects/trash')
+}
+
+export function restoreProject(projectId: string): Promise<ProjectSummary> {
+  return http.post(`/api/v1/projects/${encodeURIComponent(projectId)}/restore`, {})
+}
+
 export function deleteProject(projectId: string): Promise<{ ok: boolean }> {
   return http.del(`/api/v1/projects/${encodeURIComponent(projectId)}`)
 }
 
 export function getProjectSummary(projectId: string): Promise<ProjectStorageSummary> {
   return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary`)
+}
+
+export function getProjectProgressSummary(projectId: string): Promise<ProjectProgressSummary> {
+  return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary?progress=true`)
 }
 
 export function cleanupProjectTemp(projectId: string): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {
