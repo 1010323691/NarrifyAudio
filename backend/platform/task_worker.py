@@ -1116,10 +1116,13 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         fail_claim(claim, exc)
         return exc.code
     except Exception as exc:
-        from ..engines.llm_transport import LLMUnavailableError
+        from ..engines.llm_transport import LLMHTTPError, LLMUnavailableError
         if isinstance(exc, LLMUnavailableError):
             fail_claim(claim, TaskExecutionError("llm_unavailable", str(exc)))
             return "paused"
+        if isinstance(exc, LLMHTTPError) and exc.status in {400, 401, 403, 404, 422}:
+            fail_claim(claim, TaskExecutionError("llm_configuration_error", str(exc)))
+            return "llm_configuration_error"
         from .quota import QuotaInsufficientError
         if isinstance(exc, QuotaInsufficientError):
             fail_claim(claim, TaskExecutionError("quota_insufficient", str(exc)))
@@ -1258,37 +1261,48 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
 
     with SessionLocal() as db:
         rows = db.execute(
-            select(Task.id, Task.task_type, Task.owner_id, Task.project_id, Task.payload)
+            select(Task.id, Task.task_type, Task.owner_id, Task.project_id)
             .where(Task.status == "paused", Task.error_code == "llm_unavailable")
             .order_by(Task.updated_at.asc())
             .limit(limit)
         ).all()
+        owner_ids = {row.owner_id for row in rows}
+        users = {user.id: user for user in db.scalars(select(User).where(User.id.in_(owner_ids))).all()}
+        workspaces = {}
+        for row in rows:
+            user = users.get(row.owner_id)
+            if user is None:
+                continue
+            key = (row.owner_id, row.project_id)
+            if key not in workspaces:
+                try:
+                    workspaces[key] = project_workspace_path(db, user.username, row.project_id)
+                except Exception:
+                    logging.getLogger("audiobook.worker").exception(
+                        "Unable to resolve paused task workspace owner_id=%s project_id=%s",
+                        row.owner_id, row.project_id,
+                    )
+
+    configs = {}
+    for key, workspace in workspaces.items():
+        token = bind_workspace(workspace)
+        try:
+            configs[key] = core_config.get_config().llm.model_dump(mode="json")
+        except Exception:
+            logging.getLogger("audiobook.worker").exception(
+                "Unable to read paused task LLM config owner_id=%s project_id=%s", *key,
+            )
+        finally:
+            reset_workspace(token)
 
     candidates: list[tuple[str, str, str]] = []
-    for task_id, task_type, owner_id, project_id, payload in rows:
-        payload = payload if isinstance(payload, dict) else {}
-        config = payload.get("config")
-        llm_config = config.get("llm") if isinstance(config, dict) else None
-        if not isinstance(llm_config, dict) or not llm_config.get("base_url"):
-            try:
-                with SessionLocal() as db:
-                    user = db.get(User, owner_id)
-                    if user is None:
-                        continue
-                    workspace = project_workspace_path(db, user.username, project_id)
-                token = bind_workspace(workspace)
-                try:
-                    llm_config = core_config.get_config().llm.model_dump(mode="json")
-                finally:
-                    reset_workspace(token)
-            except Exception:
-                logging.getLogger("audiobook.worker").exception(
-                    "无法读取暂停任务的 LLM 配置 task_id=%s", task_id,
-                )
-                continue
+    for row in rows:
+        llm_config = configs.get((row.owner_id, row.project_id))
+        if not llm_config:
+            continue
         base_url = str(llm_config.get("base_url") or "").strip()
         if base_url:
-            candidates.append((str(task_id), base_url, str(llm_config.get("api_key") or "")))
+            candidates.append((str(row.id), base_url, str(llm_config.get("api_key") or "")))
 
     liveness: dict[tuple[str, str], bool] = {}
     for _task_id, base_url, api_key in candidates:

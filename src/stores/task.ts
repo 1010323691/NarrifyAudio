@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { controlTask, streamAllTasks } from '@/api/tasks'
 import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
+import { taskModuleKey } from '@/utils/taskTypes'
 
 const ACTIVE: TaskStatus[] = ['pending', 'running', 'paused']
 
@@ -41,6 +42,7 @@ export const useTaskStore = defineStore('task', () => {
 
   /** 绑定当前项目 —— 项目切换/登录时由 stores/project.ts 调用（先于 reset/refresh）。 */
   function bindProject(projectId: string | null) {
+    if (boundProjectId !== projectId && allStream && !taskCenterOpen) closeStream()
     boundProjectId = projectId
   }
 
@@ -179,6 +181,7 @@ export const useTaskStore = defineStore('task', () => {
         wakeSnapshotWaiters()
         if (shouldKeepStream()) ensureStream()
       },
+      taskCenterOpen ? null : boundProjectId,
     )
   }
 
@@ -254,7 +257,7 @@ export const useTaskStore = defineStore('task', () => {
           project_id: response.project_id || boundProjectId || '',
           project_name: '',
           task_type: response.task_type || '',
-          module: response.task_type?.split('.', 1)[0] || '',
+          module: taskModuleKey(response.task_type || ''),
           label: '任务状态更新',
           status,
           progress: typeof response.progress === 'number' ? response.progress / 100 : 0,
@@ -274,9 +277,11 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function setTaskCenterOpen(open: boolean) {
+    if (taskCenterOpen !== open && allStream) closeStream()
     taskCenterOpen = open
     if (open) ensureStream()
-    else if (allStream && !hasActive()) closeStream()
+    else if (hasActive()) ensureStream()
+    else if (allStream) closeStream()
   }
 
   function reset() {
@@ -288,8 +293,6 @@ export const useTaskStore = defineStore('task', () => {
     tasks.value = []
     loading.value = false
   }
-
-  refresh()
 
   return { tasks, projectTasks, loading, refresh, control, reset, bindProject, activeTasks, setTaskCenterOpen }
 })

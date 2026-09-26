@@ -156,15 +156,9 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
     }
 
 
-def task_center_item(db: Session, task: DurableTask) -> dict:
+def task_center_item(db: Session, task: DurableTask, progress_payload: dict | None = None) -> dict:
     """Compact history row for the cross-project task center (no log payloads)."""
-    progress_event = db.scalar(
-        select(TaskEvent)
-        .where(TaskEvent.task_id == task.id, TaskEvent.event_type == "progress")
-        .order_by(TaskEvent.sequence.desc())
-        .limit(1)
-    )
-    progress_payload = progress_event.payload if progress_event and isinstance(progress_event.payload, dict) else {}
+    progress_payload = progress_payload if isinstance(progress_payload, dict) else {}
     project = getattr(task, "project", None)
     return {
         "id": task.id,

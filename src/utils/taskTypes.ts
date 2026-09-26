@@ -34,6 +34,21 @@ export function taskModuleLabel(taskType: string): string {
   return taskModuleOf(taskType)?.label ?? '项目任务'
 }
 
+/** Fine-grained module key used by the durable task snapshots and project views. */
+export function taskModuleKey(taskType: string): string {
+  const exact: Record<string, string> = {
+    'voices.foundation': 'voices-foundation',
+    'voices.clone': 'voices-clone',
+    'tts.batch': 'tts-batch',
+    'tts.merge': 'merge',
+    'bgm.analysis': 'bgm-analysis',
+    'bgm.segment': 'bgm-segment',
+    'bgm.mix': 'bgm-mix',
+    'music.suggest_tags': 'music-ai-tags',
+  }
+  return exact[taskType] ?? taskModuleOf(taskType)?.key ?? taskType.split('.', 1)[0]
+}
+
 /** All prefixes belonging to the named modules; unknown keys contribute none. */
 export function modulePrefixes(...keys: string[]): string[] {
   return keys.flatMap((key) => TASK_MODULES.find((mod) => mod.key === key)?.prefixes ?? [])

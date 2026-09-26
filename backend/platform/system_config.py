@@ -62,6 +62,16 @@ def update_feature_defaults_cache(value: dict[str, Any]) -> None:
         _cache.update(value=value, expires=time.monotonic() + _CACHE_TTL_SECONDS)
 
 
+def parse_worker_concurrency(default: int = 4, maximum: int = 32) -> int:
+    """Return the process-wide parse worker limit from shared admin settings."""
+    generation = load_feature_defaults().get("generation", {})
+    value = generation.get("parse_worker_concurrency", default) if isinstance(generation, dict) else default
+    try:
+        return max(1, min(maximum, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 # core.config merges administrator feature defaults on every read; it must not
 # import platform (S3 direction), so this module registers its loader instead.
 # Both entry points (main/worker) import this module before first use.

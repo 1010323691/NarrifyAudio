@@ -626,6 +626,9 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             except QuotaInsufficientError:
                 raise
             except Exception as e:  # noqa: BLE001
+                from .llm_transport import LLMUnavailableError
+                if isinstance(e, LLMUnavailableError):
+                    raise
                 handle.log(f"  [{sp}] LLM 生成描述失败：{e}（改用兜底）", "WARNING")
                 description, ref_text, gender = "", "", ""
         if not description:

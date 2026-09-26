@@ -23,7 +23,8 @@ from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
 from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
-from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, heartbeat_claim, process_task_message, recover_database_tasks
+from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, fail_claim, heartbeat_claim, process_task_message, recover_database_tasks, resume_llm_unavailable_tasks
+from backend.platform.task_contracts import TaskExecutionError
 from backend.platform.task_lifecycle import ACTIVE_TASK_STATUSES
 
 
@@ -1141,6 +1142,55 @@ def test_retry_deadline_applies_to_direct_and_fair_claims(client: TestClient):
         db.get(Task, task_id).next_attempt_at = utcnow() - timedelta(seconds=1)
     claim = claim_fair_task("fair-worker", task_types=("book.analyze",))
     assert claim is not None and claim.task_id == task_id
+
+
+def test_llm_unavailable_task_pauses_and_resumes_even_after_attempt_limit(client: TestClient, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from backend.platform import task_worker
+    from backend.platform.platform_settings import settings
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "LLM recovery"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    for index in range(settings.task_max_attempts + 1):
+        claim = claim_task(task_id, "llm-recovery-worker")
+        assert claim is not None
+        assert fail_claim(claim, TaskExecutionError("llm_unavailable", "endpoint offline")) == "paused"
+        if index < settings.task_max_attempts:
+            with SessionLocal.begin() as db:
+                task = db.get(Task, task_id)
+                task.status = "retrying"
+                task.error_code = "llm_unavailable"
+
+    monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        task_worker.core_config,
+        "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(model_dump=lambda **_kwargs: {
+            "base_url": "http://llm.test/v1", "api_key": "secret",
+        })),
+    )
+    monkeypatch.setattr("backend.engines.llm_transport.llm_server_is_alive", lambda *_args, **_kwargs: True)
+
+    assert resume_llm_unavailable_tasks() == 1
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None and task.status == "retrying"
+        assert task.error_code == "llm_unavailable"
+
+    resumed_claim = claim_task(task_id, "llm-recovery-worker")
+    assert resumed_claim is not None
+    assert resumed_claim.attempt_no == settings.task_max_attempts + 2
 
 
 def test_expired_cancelling_attempt_releases_tts_hold(client: TestClient):

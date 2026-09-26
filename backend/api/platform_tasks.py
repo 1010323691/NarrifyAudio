@@ -9,7 +9,7 @@ from datetime import datetime
 import anyio
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..platform.database import SessionLocal, get_db
@@ -90,7 +90,34 @@ def list_task_history(
     ).all()
     has_more = len(rows) > TASK_HISTORY_PAGE_SIZE
     page = rows[:TASK_HISTORY_PAGE_SIZE]
-    items = [task_views.task_center_item(db, task) for task in page]
+    progress_by_task: dict[str, dict] = {}
+    if page:
+        latest_progress = (
+            select(
+                TaskEvent.task_id,
+                TaskEvent.payload,
+                func.row_number().over(
+                    partition_by=TaskEvent.task_id,
+                    order_by=TaskEvent.sequence.desc(),
+                ).label("row_number"),
+            )
+            .where(
+                TaskEvent.task_id.in_([task.id for task in page]),
+                TaskEvent.event_type == "progress",
+            )
+            .subquery()
+        )
+        progress_by_task = {
+            task_id: payload if isinstance(payload, dict) else {}
+            for task_id, payload in db.execute(
+                select(latest_progress.c.task_id, latest_progress.c.payload)
+                .where(latest_progress.c.row_number == 1)
+            ).all()
+        }
+    items = [
+        task_views.task_center_item(db, task, progress_by_task.get(task.id, {}))
+        for task in page
+    ]
     next_cursor = _encode_task_cursor(page[-1].created_at, page[-1].id) if has_more and page else None
     return {"items": items, "next_cursor": next_cursor}
 
