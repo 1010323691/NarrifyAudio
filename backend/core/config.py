@@ -86,7 +86,6 @@ class BGMConfig(BaseModel):
     fade_out: float = 3.0  # 淡出秒数；混音时钳 min(fade_out, 时长/2)
     loop: bool = True  # 循环策略 = 重复策略：True = -stream_loop -1 循环铺满；False = 只播一遍，其余静音
     min_match_score: int = 1  # 匹配最低分：低于此分不进候选（使用处钳 ≥1）
-    analysis_chars: int = 6000  # 章节 LLM 分析采样字数（头/中/尾三窗各 1/3）
     # 段落级 BGM（segment 模式，engines/bgm.py）——两字段均隐藏（UI 不露出，同
     # generation.check_batch_size 先例）：
     segment_batch_size: int = 20  # 段落分析每批送 LLM 的条目数（条目 ≤200 字硬保证 → 20 条约 4k 字）
@@ -320,12 +319,20 @@ def _load_unlocked() -> AppConfig:
     Workspace set -> the workspace's ``config/app.json``; otherwise the root
     template (a read-only view). A missing workspace file falls back to the root
     template's values, then to pure code defaults — reads never write.
+
+    The ``bgm`` section is forced to code defaults on every load: BGM audio
+    parameters are managed centrally by administrators (``SystemConfig``
+    ``application.features`` → merged on top in ``get_config``), so values
+    persisted in a workspace file no longer take effect. They are wiped from
+    the file on the next ``update_config`` save (the patch's bgm section is
+    stripped, so the persisted section is the default one).
     """
-    return (
+    config = (
         _load_config_file(_active_config_file())
         or _load_config_file(TEMPLATE_FILE)
         or AppConfig()
     )
+    return config.model_copy(update={"bgm": BGMConfig()})
 
 
 def get_config() -> AppConfig:
@@ -441,6 +448,9 @@ def update_config(patch: dict[str, Any]) -> AppConfig:
         key = str(ws.resolve())
         current = _config_cache.get(key) or _load_unlocked()
         data = current.model_dump()
+        # BGM 参数由管理员统一配置：用户侧补丁里的 bgm 段不生效（落盘的始终是
+        # 代码默认值，历史工作空间文件里的旧值随本次保存被清出）。
+        patch.pop("bgm", None)
         _deep_update(data, patch)
         new = AppConfig.model_validate(data)
         new.paths.working_dir = str(ws)

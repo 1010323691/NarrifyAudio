@@ -26,7 +26,7 @@ TASK_CATEGORIES = {
     "voices-clone": ("voices.clone",),
     "tts": ("tts.batch",),
     "merge": ("tts.merge",),
-    "bgm": ("bgm.analysis", "bgm.segment", "bgm.match", "bgm.mix", "bgm.package"),
+    "bgm": ("bgm.segment", "bgm.match", "bgm.mix", "bgm.package"),
 }
 
 
@@ -70,7 +70,6 @@ _MODULE_LABELS = {
     "voices.clone": "voices-clone",
     "tts.batch": "tts-batch",
     "tts.merge": "merge",
-    "bgm.analysis": "bgm-analysis",
     "bgm.segment": "bgm-segment",
     "bgm.mix": "bgm-mix",
     "music.suggest_tags": "music-ai-tags",

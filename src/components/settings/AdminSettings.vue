@@ -372,11 +372,6 @@ async function save() {
               <Input v-model.number="draft.bgm.min_match_score" type="number" min="1" step="1" class="max-w-[100px]" />
               <span class="text-xs text-muted-foreground">低于此分的音乐不进候选</span>
             </div>
-            <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">分析采样字数</Label>
-              <Input v-model.number="draft.bgm.analysis_chars" type="number" min="500" step="500" class="max-w-[100px]" />
-              <span class="text-xs text-muted-foreground">章节 LLM 气氛分析的头/中/尾采样字数</span>
-            </div>
           </div>
         </CardContent>
       </Card>

@@ -175,7 +175,6 @@ def test_lifecycle_control_events_emit_authoritative_status_snapshot(monkeypatch
 
 def test_worker_rejects_unsafe_bgm_paths_from_preexisting_tasks():
     for task_type, payload in (
-        ("bgm.analysis", {"stem": "../outside"}),
         ("bgm.segment", {"stem": r"folder\outside"}),
         ("bgm.mix", {"stem": ".."}),
         ("bgm.match", {"chapters": ["safe", "../outside"]}),

@@ -79,7 +79,6 @@ def test_task_module_labels_snapshot():
         "voices.clone": "voices-clone",
         "tts.batch": "tts-batch",
         "tts.merge": "merge",
-        "bgm.analysis": "bgm-analysis",
         "bgm.segment": "bgm-segment",
         "bgm.mix": "bgm-mix",
         "music.suggest_tags": "music-ai-tags",

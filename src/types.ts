@@ -534,8 +534,6 @@ export interface AppConfig {
     loop: boolean
     /** 匹配最低分：低于此分不进候选（钳 ≥1）。 */
     min_match_score: number
-    /** 章节 LLM 分析采样字数（头/中/尾三窗）。 */
-    analysis_chars: number
     /** 段落分析每批送 LLM 的条目数（隐藏参数，不进设置页）。 */
     segment_batch_size: number
     /** 段落级 intensity 1/2/3 → volume 的倍率（越界/缺失按档 2；结果 clamp ≤2.0）。 */
@@ -637,17 +635,7 @@ export interface ApplySuggestionsResult {
   missing: string[]
 }
 
-// ------------------------------ bgm（背景音乐：章节匹配 + 混音） ------------------------------
-/** LLM chapter-atmosphere analysis (one chapter of ``chapter_music_analysis.json``). */
-export interface ChapterAnalysis {
-  scene: string[]
-  mood: string[]
-  emotion: string[]
-  custom: string[]
-  analyzed_at: string
-  edited: boolean
-  edited_at?: string
-}
+// ------------------------------ bgm（背景音乐：段落级匹配 + 混音） ------------------------------
 /** A chapter's BGM assignment (one chapter of ``bgm_assignments.json``). */
 export interface BgmAssignment {
   /** Snapshot of the chapter tags at match time. */
@@ -727,7 +715,6 @@ export interface BgmChapterRow {
   narration_exists: boolean
   /** True once 08_bgm/<stem>.mp3 exists (a no-BGM chapter's copy2 also counts). */
   mix_exists: boolean
-  analysis: ChapterAnalysis | null
   assignment: BgmAssignment | null
   /** The assignment points at a music file that no longer exists in the library. */
   music_missing: boolean
@@ -741,7 +728,7 @@ export interface BgmChapterRow {
 /** Response of ``GET /api/bgm/chapters``. */
 export interface BgmChaptersResult {
   chapters: BgmChapterRow[]
-  /** Current matching mode: "random" | "llm" (persisted in bgm_assignments.json). */
+  /** Current matching mode: "random" | "segment" (persisted in bgm_assignments.json). */
   mode: string
 }
 /** Response of ``POST /api/bgm/match``. */

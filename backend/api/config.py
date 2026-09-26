@@ -28,6 +28,10 @@ def get_config() -> dict:
     # must never be returned by the workspace-facing settings endpoint.
     if isinstance(data.get("llm"), dict):
         data["llm"]["api_key"] = ""
+    # BGM audio parameters are managed centrally in the administrator console
+    # (SystemConfig feature defaults); the workspace-facing surface no longer
+    # exposes the section at all.
+    data.pop("bgm", None)
     return data
 
 
@@ -40,6 +44,9 @@ def put_config(patch: dict) -> dict:
     Returns the resulting full config.
     """
     _common.require_workspace()
+    # BGM audio parameters are admin-managed; a stale client patching the
+    # section must not persist (the engine forces defaults on load regardless).
+    patch.pop("bgm", None)
     try:
         cfg = core_config.update_config(patch)
     except core_config.WorkspaceNotSetError:
@@ -48,4 +55,6 @@ def put_config(patch: dict) -> dict:
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean 400
         raise HTTPException(400, f"配置无效：{exc}")
-    return cfg.model_dump()
+    data = cfg.model_dump()
+    data.pop("bgm", None)
+    return data

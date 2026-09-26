@@ -732,58 +732,6 @@
     color: hsl(var(--accent-foreground));
   }
 
-  .bgm-parameter-grid {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    align-items: end;
-    gap: 14px;
-  }
-
-  .bgm-field {
-    display: flex;
-    min-width: 0;
-    flex-direction: column;
-    gap: 6px;
-    color: hsl(var(--muted-foreground));
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .bgm-field__input {
-    min-height: 40px;
-    width: 100%;
-    border: 1px solid hsl(var(--input));
-    border-radius: 9px;
-    background: hsl(var(--background));
-    padding: 8px 10px;
-    color: hsl(var(--foreground));
-    outline: none;
-    transition: border-color 160ms ease, box-shadow 160ms ease;
-  }
-
-  .bgm-field__input:focus {
-    border-color: hsl(var(--ring));
-    box-shadow: 0 0 0 3px hsl(var(--ring) / 0.14);
-  }
-
-  .bgm-switch-field {
-    display: flex;
-    min-height: 40px;
-    align-items: center;
-    gap: 9px;
-    border: 1px solid hsl(var(--border));
-    border-radius: 9px;
-    padding: 0 10px;
-    color: hsl(var(--foreground));
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .bgm-save-button {
-    min-height: 40px;
-    width: 100%;
-  }
-
   .bgm-results-list {
     max-height: 34rem;
     overflow-y: auto;
@@ -845,17 +793,6 @@
     flex-wrap: nowrap;
     justify-content: flex-end;
     gap: 7px;
-  }
-
-  .bgm-row__tags {
-    grid-column: 3;
-    display: flex;
-    min-width: 0;
-    max-width: 16rem;
-    flex-wrap: nowrap;
-    gap: 4px;
-    margin-top: 0;
-    overflow: hidden;
   }
 
   .bgm-row__meta {
@@ -929,24 +866,9 @@
     min-width: 0;
   }
 
-  @media (max-width: 1100px) {
-    .bgm-parameter-grid {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-  }
-
   @media (max-width: 700px) {
     .bgm-mode-options {
       grid-template-columns: 1fr;
-    }
-
-    .bgm-parameter-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
-    .bgm-switch-field,
-    .bgm-save-button {
-      grid-column: span 2;
     }
 
     .bgm-row {
@@ -963,12 +885,6 @@
     .bgm-row__status {
       justify-content: flex-start;
       flex-wrap: wrap;
-    }
-
-    .bgm-row__tags {
-      max-width: none;
-      flex-wrap: wrap;
-      margin-top: 9px;
     }
 
     .bgm-row__meta {

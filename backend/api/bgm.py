@@ -1,4 +1,4 @@
-"""BGM chapter analysis, matching, manual edits, and mixing endpoints.
+"""BGM matching, manual edits, and mixing endpoints.
 
 Long-running operations are submitted as durable Worker tasks. Snapshot module
 labels retain their legacy names for the existing task UI.
@@ -30,10 +30,8 @@ from . import _common
 router = APIRouter(prefix="/api/bgm", tags=["bgm"])
 
 # Durable task types dispatched by the task worker.
-ANALYSIS_MODULE = "bgm-analysis"
 MIX_MODULE = "bgm-mix"
 SEGMENT_MODULE = "bgm-segment"
-ANALYSIS_LABEL = "章节气氛分析"
 MIX_LABEL = "背景音乐混音"
 SEGMENT_LABEL = "段落分析"
 
@@ -102,8 +100,8 @@ def _segment_validated_stems(layout, stems: list[str]) -> list[str]:
 
 @router.get("/chapters")
 def list_chapters() -> dict:
-    """One row per ``02_split_text`` stem (sorted), joined with the two 08_bgm
-    JSON caches and the disk facts the frontend badges need:
+    """One row per ``02_split_text`` stem (sorted), joined with the 08_bgm
+    caches and the disk facts the frontend badges need:
 
     * ``narration_exists`` — 06 旁白 present (mixing's input);
     * ``mix_exists`` — 08_bgm/<stem>.mp3 present (a no-BGM chapter's copy2 counts);
@@ -112,21 +110,13 @@ def list_chapters() -> dict:
     """
     layout = resolve_layout()
     if layout.split_text is None:
-        return {"chapters": [], "mode": "llm"}
+        return {"chapters": [], "mode": "random"}
     lib_dir = core_paths.MUSIC_LIBRARY_DIR
-    analysis = (Bgm.load_analysis(layout).get("chapters") or {})
     seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
     data = Bgm.load_assignments(layout)
     chapters = data.get("chapters") or {}
     rows = []
     for stem in Bgm.list_chapter_stems(layout):
-        a = analysis.get(stem)
-        a_out = None
-        if isinstance(a, dict):
-            a_out = {c: [t for t in (a.get(c) or []) if isinstance(t, str)]
-                     for c in music_engine.TAG_CATEGORIES}
-            a_out["analyzed_at"] = a.get("analyzed_at", "")
-            a_out["edited"] = bool(a.get("edited", False))
         e = chapters.get(stem)
         e_out = None
         music_missing = False
@@ -203,14 +193,14 @@ def list_chapters() -> dict:
             "stem": stem,
             "narration_exists": Bgm._find_narration(layout, stem) is not None,
             "mix_exists": (layout.bgm / f"{stem}.mp3").is_file(),
-            "analysis": a_out,
             "assignment": e_out,
             "music_missing": music_missing,
             "segment_analysis": segment_analysis,
             "timeline": timeline,
             "segment_music_missing": segment_music_missing,
         })
-    return {"chapters": rows, "mode": data.get("mode", "llm")}
+    # 「llm」（章节级标签匹配）已下线：现网数据里的旧 mode 值读作 random。
+    return {"chapters": rows, "mode": "segment" if data.get("mode") == "segment" else "random"}
 
 
 def _source_txt_base(layout) -> str:
@@ -235,58 +225,9 @@ def _source_txt_base(layout) -> str:
 # Durable task submission and conflict guards.
 # --------------------------------------------------------------------------- #
 
-class AnalyzeRequest(BaseModel):
-    chapters: list[str]
-
-
 class PackageRequest(BaseModel):
     chapters: list[str] | None = None  # None = all existing chapters
 
-
-@router.post("/analyze")
-def run_analyze(
-    req: AnalyzeRequest,
-    ctx: AuthContext = Depends(get_auth_context),
-    db: Session = Depends(get_db),
-) -> dict:
-    """Submit one durable analysis task per selected chapter."""
-    _common.require_workspace()
-    layout = get_or_prepare_layout()
-    stems = _validated_stems(layout, req.chapters or [])
-    if not stems:
-        raise HTTPException(400, "请选择要分析的章节。")
-    cfg = get_config()
-    if not cfg.llm.model_name:
-        raise HTTPException(400, "尚未配置 LLM 模型（设置 → LLM → model_name）。")
-    active = active_durable_targets(task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db)
-    conflicts = [stem for stem in stems if stem in active]
-    active_matches = active_durable_targets(
-        task_type="bgm.match", payload_key="chapters", ctx=ctx, db=db,
-    )
-    active_mixes = active_durable_targets(task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db)
-    conflicts.extend(
-        stem for stem in stems
-        if (stem in active_matches or stem in active_mixes) and stem not in conflicts
-    )
-    if conflicts:
-        raise HTTPException(409, "以下章节已有分析任务在途：" + "、".join(conflicts))
-    created = []
-    for stem in stems:
-        task = submit_legacy_engine_task(
-            task_type="bgm.analysis",
-            label=f"{ANALYSIS_LABEL}：{stem}",
-            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-analysis:{stem}",
-        )
-        created.append({"stem": stem, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
-
-
-# --------------------------------------------------------------------------- #
-# Durable task submission and conflict guards.
-# --------------------------------------------------------------------------- #
 
 class SegmentAnalyzeRequest(BaseModel):
     chapters: list[str]
@@ -339,12 +280,12 @@ def run_analyze_segment(
 
 
 # --------------------------------------------------------------------------- #
-# 匹配（持久任务：LLM / random / 段落级时间轴重算）
+# 匹配（持久任务：全章节随机 / 段落级时间轴重算）
 # --------------------------------------------------------------------------- #
 
 class MatchRequest(BaseModel):
     chapters: list[str] | None = None  # None = all existing 02 chapters
-    mode: str = "llm"  # "llm" | "random" | "segment"（段落级时间轴重算，零 LLM）
+    mode: str = "random"  # "random" | "segment"（段落级时间轴重算，零 LLM）
 
 
 @router.post("/match")
@@ -363,7 +304,7 @@ def run_match(
             else _segment_validated_stems(layout, Bgm.list_chapter_stems(layout))
         )
     else:
-        if req.mode not in ("llm", "random"):
+        if req.mode not in ("random", "segment"):
             raise HTTPException(400, f"未知匹配模式：{req.mode!r}")
         stems = (
             _validated_stems(layout, req.chapters)
@@ -391,12 +332,9 @@ def run_match(
         if audio_conflicts:
             raise HTTPException(409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts))
     else:
-        active_analyses = active_durable_targets(
-            task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db,
-        )
-        conflicts = [stem for stem in stems if stem in active_analyses or stem in active_matches]
+        conflicts = [stem for stem in stems if stem in active_matches]
         if conflicts:
-            raise HTTPException(409, "以下章节分析或匹配任务在途：" + "、".join(conflicts))
+            raise HTTPException(409, "以下章节匹配任务在途：" + "、".join(conflicts))
 
     task = submit_legacy_engine_task(
         task_type="bgm.match",
@@ -410,7 +348,6 @@ def run_match(
 
 
 class ChapterUpdateRequest(BaseModel):
-    tags: dict[str, list[str]] | None = None
     # Absent = untouched; null = clear (music=None); string = manual pick.
     music: str | None = None
     locked: bool | None = None
@@ -420,8 +357,6 @@ class ChapterUpdateRequest(BaseModel):
 def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
     """Apply a manual edit to one chapter (sync write, not a task):
 
-    * ``tags`` → the analysis entry (``edited: true`` + ``edited_at``; the
-      original ``analyzed_at`` is kept) and the assignment's tag snapshot;
     * ``music`` (key present) → validated against the library (missing 400);
       ``null`` clears; sets ``manual: true`` / ``score: null`` / reason
       「手动指定」;
@@ -431,13 +366,8 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
     layout = get_or_prepare_layout()
     if not stem or stem != Path(stem).name:
         raise HTTPException(400, f"非法章节名：{stem!r}")
-    idx = music_engine.load_index()
     lib_dir = core_paths.MUSIC_LIBRARY_DIR
     now = datetime.now().isoformat(timespec="seconds")
-
-    tags_norm = None
-    if req.tags is not None:
-        tags_norm = music_engine.normalize_track_tags(req.tags, idx["tags"])
 
     music_set = "music" in req.model_fields_set
     if music_set:
@@ -449,37 +379,15 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
                 raise HTTPException(400, f"音乐库中找不到 {m}。")
         # m == "" / None → clear
 
-    if tags_norm is not None:
-        def _mutate_a(a_data: dict) -> None:
-            a_chapters = a_data.setdefault("chapters", {})
-            prev = a_chapters.get(stem) if isinstance(a_chapters.get(stem), dict) else {}
-            a_entry = {c: list(tags_norm.get(c) or [])
-                       for c in music_engine.TAG_CATEGORIES}
-            a_entry["analyzed_at"] = prev.get("analyzed_at", "")
-            a_entry["edited"] = True
-            a_entry["edited_at"] = now
-            a_chapters[stem] = a_entry
-
-        Bgm.update_analysis(layout, _mutate_a)
-
-    # Fallback source for a missing assignment entry — read AFTER the tags
-    # write above (same order as the old inline sequence).
-    fallback_analysis = (Bgm.load_analysis(layout).get("chapters") or {}).get(stem) or {}
-
     def _mutate_d(data: dict) -> None:
         chapters = data.setdefault("chapters", {})
         e = chapters.get(stem)
         if not isinstance(e, dict):
-            a = fallback_analysis
             e = {
-                "tags": {c: [t for t in (a.get(c) or []) if isinstance(t, str)]
-                         for c in music_engine.TAG_CATEGORIES},
+                "tags": {c: [] for c in music_engine.TAG_CATEGORIES},
                 "music": None, "locked": False, "manual": False,
                 "score": None, "reason": "未匹配", "matched_at": now,
             }
-        if tags_norm is not None:
-            e["tags"] = {c: list(tags_norm.get(c) or [])
-                         for c in music_engine.TAG_CATEGORIES}
         if music_set:
             e["music"] = ((req.music or "").strip() or None)
             e["manual"] = True
@@ -586,9 +494,6 @@ def run_mix(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
     active = active_durable_targets(task_type="bgm.mix", payload_key="stem", ctx=ctx, db=db)
-    active_analyses = active_durable_targets(
-        task_type="bgm.analysis", payload_key="stem", ctx=ctx, db=db,
-    )
     active_segments = active_durable_targets(
         task_type="bgm.segment", payload_key="stem", ctx=ctx, db=db,
     )
@@ -597,7 +502,7 @@ def run_mix(
     )
     conflicts = [
         stem for stem in stems
-        if stem in active or stem in active_analyses or stem in active_segments or stem in active_matches
+        if stem in active or stem in active_segments or stem in active_matches
     ]
     if conflicts:
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))

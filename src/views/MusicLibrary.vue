@@ -832,27 +832,27 @@ async function doDeleteTag(cat: MusicTagCategory, name: string) {
 const aiProcessed = new Set<string>()
 let aiWatcherArmed = false
 
-// 章节气氛分析（bgm-analysis）成功也会把新标签自动登记进全局词表——
+// 段落分析（bgm-segment）成功也会把新标签自动登记进全局词表——
 // 本页同样刷新，让新词即时可见。
-const BGM_ANALYSIS_MODULE = 'bgm-analysis'
+const BGM_SEGMENT_MODULE = 'bgm-segment'
 watch(
   () =>
     taskStore.tasks
-      .filter((t) => t.module === AI_MODULE || t.module === BGM_ANALYSIS_MODULE)
+      .filter((t) => t.module === AI_MODULE || t.module === BGM_SEGMENT_MODULE)
       .map((t) => `${t.id}:${t.status}`)
       .join('|'),
   () => {
     if (!aiWatcherArmed) {
       aiWatcherArmed = true
       for (const t of taskStore.tasks) {
-        if ((t.module === AI_MODULE || t.module === BGM_ANALYSIS_MODULE)
+        if ((t.module === AI_MODULE || t.module === BGM_SEGMENT_MODULE)
             && LABEL_TASK_TERMINAL_STATUSES.has(t.status)) aiProcessed.add(t.id)
       }
       return
     }
     let dirty = false
     for (const t of taskStore.tasks) {
-      if (t.module !== AI_MODULE && t.module !== BGM_ANALYSIS_MODULE) continue
+      if (t.module !== AI_MODULE && t.module !== BGM_SEGMENT_MODULE) continue
       if (!LABEL_TASK_TERMINAL_STATUSES.has(t.status)) {
         aiProcessed.delete(t.id)
         continue

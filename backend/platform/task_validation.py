@@ -35,7 +35,7 @@ def legacy_task_payload_error(task_type: str, payload: object) -> str | None:
     """Validate client-controlled path components used by legacy task engines."""
     if not isinstance(payload, dict):
         return "任务参数无效"
-    if task_type in {"bgm.analysis", "bgm.segment", "bgm.mix"}:
+    if task_type in {"bgm.segment", "bgm.mix"}:
         if not is_safe_bgm_stem(payload.get("stem")):
             return "BGM 章节参数无效"
     elif task_type in {"bgm.match", "bgm.package"}:

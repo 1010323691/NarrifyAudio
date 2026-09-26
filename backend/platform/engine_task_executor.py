@@ -79,12 +79,6 @@ def _run_tts_merge(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     )
 
 
-def _run_bgm_analysis(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
-    from ..engines import bgm as bgm_engine
-    cfg = core_config.get_config()
-    return bgm_engine.analyze_chapter(handle, str(payload["stem"]), cfg.llm, cfg.bgm)
-
-
 def _run_bgm_segment(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import bgm as bgm_engine
     cfg = core_config.get_config()
@@ -116,7 +110,7 @@ def _run_bgm_match(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     from ..engines import bgm as bgm_engine
     cfg = core_config.get_config()
     stems = [str(value) for value in (payload.get("chapters") or [])]
-    mode = str(payload.get("mode") or "llm")
+    mode = str(payload.get("mode") or "random")
     if mode == "segment":
         return bgm_engine.recompute_segment_timelines(
             get_or_prepare_layout(),
@@ -264,13 +258,12 @@ def _run_tts_reset(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     return {"engine": "tts.reset", "ok": True, "removed": removed}
 
 
-# S1：13 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
+# S1：12 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
 ENGINE_BRANCHES: dict[str, Callable] = {
     "voices.foundation": _run_voices_foundation,
     "voices.clone": _run_voices_clone,
     "tts.batch": _run_tts_batch,
     "tts.merge": _run_tts_merge,
-    "bgm.analysis": _run_bgm_analysis,
     "bgm.segment": _run_bgm_segment,
     "bgm.mix": _run_bgm_mix,
     "music.suggest_tags": _run_music_suggest_tags,
@@ -283,7 +276,7 @@ ENGINE_BRANCHES: dict[str, Callable] = {
 
 
 def _shadow_engine_kind(task_type: str) -> str:
-    """S1 影子双跑：批次 3 之前 execute_engine_task 旧 13 分支 if-chain 的裁决，
+    """S1 影子双跑：批次 3 之前 execute_engine_task 旧 12 分支 if-chain 的裁决，
     逐字保留；注册表查表为主、本函数交叉核对（不一致 fail closed）；一个版本周期后删除。"""
     if task_type not in LEGACY_ENGINE_TASK_TYPES:
         return "<unsupported>"
@@ -295,8 +288,6 @@ def _shadow_engine_kind(task_type: str) -> str:
         return "_run_tts_batch"
     if task_type == "tts.merge":
         return "_run_tts_merge"
-    if task_type == "bgm.analysis":
-        return "_run_bgm_analysis"
     if task_type == "bgm.segment":
         return "_run_bgm_segment"
     if task_type == "bgm.mix":

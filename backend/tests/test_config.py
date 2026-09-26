@@ -364,7 +364,9 @@ def test_bgm_config_defaults():
     assert b.fade_out == 3.0
     assert b.loop is True
     assert b.min_match_score == 1
-    assert b.analysis_chars == 6000
+    # 段落级两字段（隐藏，UI 不露出）
+    assert b.segment_batch_size == 20
+    assert b.segment_volume_tiers == [0.5, 1.0, 1.5]
 
 
 def test_app_config_round_trips_bgm():
@@ -374,6 +376,7 @@ def test_app_config_round_trips_bgm():
     data["bgm"]["fade_out"] = 5.0
     data["bgm"]["loop"] = False
     data["bgm"]["min_match_score"] = 3
+    # 已退役字段：历史配置里的旧键被默认 extra='ignore' 丢弃，读取不报错。
     data["bgm"]["analysis_chars"] = 9000
     back = AppConfig.model_validate(data)
     assert back.bgm.volume == 0.3
@@ -381,10 +384,34 @@ def test_app_config_round_trips_bgm():
     assert back.bgm.fade_out == 5.0
     assert back.bgm.loop is False
     assert back.bgm.min_match_score == 3
-    assert back.bgm.analysis_chars == 9000
+    assert "analysis_chars" not in back.bgm.model_dump()
     # 再次落盘/重读不丢字段（schema 稳定）。
     again = AppConfig.model_validate(back.model_dump())
     assert again.bgm == back.bgm
+
+
+def test_bgm_params_are_admin_managed_workspace_values_ignored(sandbox):
+    # BGM 音频参数由管理员统一配置：工作空间文件里的 bgm 段读取不生效
+    # （强制代码默认值，平台默认值由 get_config 的 platform provider 覆盖）。
+    ws = sandbox / "MyBook"
+    core_config.init_workspace_config(ws)
+    old = _read(ws / "config" / "app.json")
+    old["bgm"]["volume"] = 0.42
+    old["bgm"]["analysis_chars"] = 9000  # 退役字段残留
+    (ws / "config" / "app.json").write_text(json.dumps(old), encoding="utf-8")
+    core_config.set_workspace_pointer(str(ws))
+    core_config.reset_config_cache()
+
+    assert core_config.get_config().bgm == BGMConfig()
+
+    # 用户侧保存（哪怕携带 bgm 段）落盘的始终是代码默认值，历史旧值随保存被清出。
+    cfg = core_config.update_config({"log": {"level": "DEBUG"}, "bgm": {"volume": 0.9}})
+    assert cfg.bgm == BGMConfig()
+    assert cfg.log.level == "DEBUG"
+    saved = _read(ws / "config" / "app.json")
+    assert saved["log"]["level"] == "DEBUG"
+    assert saved["bgm"]["volume"] == BGMConfig().volume
+    assert "analysis_chars" not in saved["bgm"]
 
 
 def test_app_config_missing_bgm_section_falls_back_to_defaults():
