@@ -286,17 +286,13 @@ def test_list_models_malformed_url_raises_fetch_error():
             list_llm_models(bad, "")
 
 
-def test_list_models_non_http_upstream_raises_fetch_error():
+def test_list_models_non_http_upstream_raises_fetch_error(monkeypatch):
     # 上游不是 HTTP 服务（垃圾字节 → BadStatusLine）也必须落在 502 契约内，不能 500。
     import http.client
 
     def bad_status(req, *a, **k):
         raise http.client.BadStatusLine("garbage-bytes")
 
-    monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(urllib.request, "urlopen", bad_status)
-    try:
-        with pytest.raises(LLMModelsFetchError, match="协议异常"):
-            list_llm_models("http://x/v1")
-    finally:
-        monkeypatch.undo()
+    with pytest.raises(LLMModelsFetchError, match="协议异常"):
+        list_llm_models("http://x/v1")
