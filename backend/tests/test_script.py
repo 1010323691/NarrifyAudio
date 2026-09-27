@@ -702,6 +702,24 @@ def test_stream_cancel_propagates_through_process_chunk(monkeypatch):
         process_chunk(handle, LLMConfig(stream=True), "model", "chunk text", 1, 1)
 
 
+def test_stream_http404_propagates_through_process_chunk(monkeypatch):
+    # 4xx (model_not_found / bad key) must escape process_chunk as LLMHTTPError:
+    # the old ``except Exception`` swallowed it into an empty "successful" chunk,
+    # which is what produced the fake progress + whole-file retry loop.
+    def urlopen(req, *a, **k):
+        raise _http_error(404, "model_not_found")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    handle = _LogHandle()
+
+    with pytest.raises(LLMHTTPError) as ei:
+        process_chunk(handle, LLMConfig(stream=True), "model", "chunk text", 1, 1)
+    assert ei.value.status == 404
+    assert "model_not_found" in str(ei.value)
+    # No per-chunk "LLM API error" noise was logged (the error is not a chunk retry).
+    assert not any("调用 LLM API 出错" in msg for _level, msg in handle.logs)
+
+
 # --------------------------------------------------------------------------- #
 # 章标题防丢（split_into_chunks 尾部标题守卫）
 # --------------------------------------------------------------------------- #

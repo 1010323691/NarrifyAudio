@@ -4,6 +4,7 @@ import io
 import uuid
 import shutil
 import threading
+import time
 import zipfile
 from types import SimpleNamespace
 from datetime import timedelta
@@ -21,7 +22,7 @@ from backend.core.observability import record_api_request
 from backend.core import paths as core_paths
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
-from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
+from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, fail_claim, heartbeat_claim, process_task_message, recover_database_tasks, resume_llm_unavailable_tasks
 from backend.platform.task_contracts import TaskExecutionError
@@ -1394,6 +1395,242 @@ def test_llm_unavailable_task_pauses_and_resumes_even_after_attempt_limit(client
                 task.error_code = "llm_unavailable"
 
     monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
+    probe_calls: list[dict] = []
+    monkeypatch.setattr(
+        task_worker.core_config,
+        "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(model_dump=lambda **_kwargs: {
+            "base_url": "http://llm.test/v1", "api_key": "secret",
+            "model_name": "qwen3-27b",
+        })),
+    )
+    monkeypatch.setattr(
+        "backend.engines.llm_transport.llm_server_is_alive",
+        lambda *args, **kwargs: probe_calls.append(kwargs) or True,
+    )
+
+    assert resume_llm_unavailable_tasks() == 1
+    # The probe must be told WHICH model must be loaded — "server answers
+    # /models" alone is exactly the false recovery that redispatched the
+    # incident tasks into model_not_found again.
+    assert probe_calls == [{"model_name": "qwen3-27b"}]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None and task.status == "retrying"
+        assert task.error_code == "llm_unavailable"
+
+    resumed_claim = claim_task(task_id, "llm-recovery-worker")
+    assert resumed_claim is not None
+    assert resumed_claim.attempt_no == settings.task_max_attempts + 2
+
+
+def test_llm_http_error_status_mapping(client: TestClient, monkeypatch):
+    """LLMHTTPError 按状态码分流：404（model_not_found，通常是服务重启后模型
+    尚未加载）→ 暂停等恢复探针；400/401/403/422（配置错误）→ 终态快速失败，
+    不再走可重试的 worker_error 循环。"""
+    from dataclasses import replace
+    from backend.engines.llm_transport import LLMHTTPError
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "LLM HTTP mapping"},
+    ).json()
+
+    def submit() -> str:
+        out = client.post(
+            "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+            json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+                  "idempotency_key": uuid.uuid4().hex},
+        )
+        assert out.status_code == 201, out.text
+        return out.json()["id"]
+
+    raised: dict = {}
+
+    def fake_execute(_claim):
+        raise raised["exc"]
+
+    monkeypatch.setattr(task_worker, "execute_claim", fake_execute)
+
+    # 404 → paused / llm_unavailable（恢复探针每分钟检查模型是否已加载）
+    raised["exc"] = LLMHTTPError(404, "model_not_found")
+    task_404 = submit()
+    assert process_task_message(
+        {"payload": {"task_id": task_404}}, worker_id="http-map-worker") == "paused"
+    with SessionLocal() as db:
+        task = db.get(Task, task_404)
+        assert task.status == "paused"
+        assert task.error_code == "llm_unavailable"
+        assert "model_not_found" in (task.error_message or "")
+
+    # 401 → 终态 llm_configuration_error（密钥错误重试一万次也一样）
+    raised["exc"] = LLMHTTPError(401, "invalid api key")
+    task_401 = submit()
+    assert process_task_message(
+        {"payload": {"task_id": task_401}}, worker_id="http-map-worker") == "llm_configuration_error"
+    with SessionLocal() as db:
+        task = db.get(Task, task_401)
+        assert task.status == "failed"
+        assert task.error_code == "llm_configuration_error"
+
+
+def test_lease_renewal_survives_transient_db_error(client: TestClient, monkeypatch):
+    """租约续期线程的一次性 DB 抖动不能杀死心跳：心跳线程死了，活任务就会丢租约
+    被别的 worker 抢走（进度归零重跑）——这正是本次事故的放大器。"""
+    from dataclasses import replace
+    from backend.engines.llm_transport import LLMUnavailableError
+    from backend.platform import task_worker
+    from backend.platform.platform_settings import settings
+    from backend.platform.task_worker import _run_claim_fenced
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Lease renewal"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    claim = claim_task(submitted.json()["id"], "lease-renewal-worker")
+    assert claim is not None
+
+    # 1s 心跳间隔（默认 120s 租约 → 10s 间隔，测试里等不起）
+    monkeypatch.setattr(task_worker, "settings", replace(settings, task_lease_seconds=3))
+
+    beats: list = []
+
+    def flaky_heartbeat(clm):
+        beats.append(True)
+        if len(beats) == 1:
+            raise RuntimeError("transient db blip")
+        return True
+
+    monkeypatch.setattr(task_worker, "heartbeat_claim", flaky_heartbeat)
+
+    def slow_engine(_clm):
+        time.sleep(2.6)
+        raise LLMUnavailableError("connection refused")
+
+    monkeypatch.setattr(task_worker, "execute_claim", slow_engine)
+
+    assert _run_claim_fenced(claim) == "paused"
+    # 第一次心跳抛异常被吞掉后，线程必须在 ~2s 处再次 tick（主线程睡了 2.6s）。
+    assert len(beats) >= 2
+
+
+def test_resume_probe_uses_payload_snapshot_config(client: TestClient, monkeypatch, tmp_path):
+    """恢复探针必须按任务 payload 的配置快照探活（任务重派后仍按快照执行）：
+    暂停期间用户改了工作区 model_name，按活动配置探活会通过、把任务重派回旧
+    模型 → 再次 404 → 无限循环。"""
+    from types import SimpleNamespace
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Probe snapshot"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    claim = claim_task(task_id, "probe-snapshot-worker")
+    assert claim is not None
+    assert fail_claim(claim, TaskExecutionError("llm_unavailable", "endpoint offline")) == "paused"
+
+    # 提交时快照（任务实际会按它执行）与活动工作区配置指向不同的模型
+    with SessionLocal.begin() as db:
+        db.get(Task, task_id).payload = {
+            "config": {"llm": {
+                "base_url": "http://snap.test/v1", "api_key": "snap-key",
+                "model_name": "snapshot-model",
+            }},
+        }
+
+    # 清掉共享库里其他测试留下的 paused llm_unavailable 任务（恢复扫描是全库的）
+    with SessionLocal.begin() as db:
+        for row in db.execute(
+            select(Task)
+            .where(Task.status == "paused", Task.error_code == "llm_unavailable")
+        ).scalars():
+            if row.id != task_id:
+                row.status = "cancelled"
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+
+    monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        task_worker.core_config,
+        "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(model_dump=lambda **_kwargs: {
+            "base_url": "http://live.test/v1", "api_key": "live-key",
+            "model_name": "live-model",
+        })),
+    )
+    probe_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "backend.engines.llm_transport.llm_server_is_alive",
+        lambda *args, **kwargs: probe_calls.append((args, kwargs)) or True,
+    )
+
+    assert resume_llm_unavailable_tasks() == 1
+    assert probe_calls == [
+        (("http://snap.test/v1", "snap-key"), {"model_name": "snapshot-model"}),
+    ]
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "retrying"
+
+
+def test_resume_stops_and_fails_task_after_max_cycles(client: TestClient, monkeypatch, tmp_path):
+    """端点自报健康但重派后仍持续失败（/models 与 chat 矛盾的病态状态）：
+    连续失败到阈值后任务终态化，不再无限 pause/resume。"""
+    from backend.platform import task_worker
+    from backend.platform.task_lifecycle import append_task_event
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Recovery cap"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    claim = claim_task(task_id, "recovery-cap-worker")
+    assert claim is not None
+    assert fail_claim(claim, TaskExecutionError("llm_unavailable", "endpoint offline")) == "paused"
+
+    # fail_claim 已记 1 次；补齐到阈值
+    with SessionLocal.begin() as db:
+        for index in range(task_worker.LLM_RECOVERY_MAX_CYCLES - 1):
+            append_task_event(db, task_id, "llm_unavailable", {"attempt_id": f"cycle-{index}"})
+
+    # 清掉共享库里其他测试留下的 paused llm_unavailable 任务（恢复扫描是全库的）
+    with SessionLocal.begin() as db:
+        for row in db.execute(
+            select(Task)
+            .where(Task.status == "paused", Task.error_code == "llm_unavailable")
+        ).scalars():
+            if row.id != task_id:
+                row.status = "cancelled"
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+
+    monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
     monkeypatch.setattr(
         task_worker.core_config,
         "get_config",
@@ -1403,15 +1640,37 @@ def test_llm_unavailable_task_pauses_and_resumes_even_after_attempt_limit(client
     )
     monkeypatch.setattr("backend.engines.llm_transport.llm_server_is_alive", lambda *_args, **_kwargs: True)
 
-    assert resume_llm_unavailable_tasks() == 1
+    assert resume_llm_unavailable_tasks() == 0
     with SessionLocal() as db:
         task = db.get(Task, task_id)
-        assert task is not None and task.status == "retrying"
+        assert task.status == "failed"
         assert task.error_code == "llm_unavailable"
+        events = {row.event_type for row in db.execute(
+            select(TaskEvent).where(TaskEvent.task_id == task_id)).scalars()}
+        assert "llm_recovery_exhausted" in events
 
-    resumed_claim = claim_task(task_id, "llm-recovery-worker")
-    assert resumed_claim is not None
-    assert resumed_claim.attempt_no == settings.task_max_attempts + 2
+
+def test_resume_config_helper_prefers_snapshot(monkeypatch):
+    """_resume_llm_config：快照可用则用快照；快照缺失/无 base_url 回退工作区配置。"""
+    from types import SimpleNamespace
+    from backend.platform import task_worker
+
+    workspace = {"base_url": "http://ws.test/v1", "api_key": "ws", "model_name": "ws-model"}
+
+    def row(payload):
+        return SimpleNamespace(payload=payload)
+
+    # 完整快照 → 用快照
+    assert task_worker._resume_llm_config(
+        row({"config": {"llm": {"base_url": "http://snap.test/v1", "model_name": "snap-model"}}}),
+        workspace) == {"base_url": "http://snap.test/v1", "model_name": "snap-model"}
+    # 无快照 / 空 payload / 快照无 base_url → 回退工作区配置
+    assert task_worker._resume_llm_config(row({}), workspace) == workspace
+    assert task_worker._resume_llm_config(row(None), workspace) == workspace
+    assert task_worker._resume_llm_config(
+        row({"config": {"llm": {"base_url": ""}}}), workspace) == workspace
+    # 两侧都没有 → None
+    assert task_worker._resume_llm_config(row({}), None) is None
 
 
 def test_expired_cancelling_attempt_releases_tts_hold(client: TestClient):
