@@ -473,11 +473,14 @@ def check_chunk_fidelity(chunk: str, entries) -> list:
 
 
 # 说话动词簇（提示词编辑 (e) 允许整段删除的纯标签尾巴，含常见语气修饰前缀）。
-# 匹配时按最长优先；「名字/代词 + 修饰 + 动词簇」之外的缺失不豁免。
-# 标签文法三套并存、动词面刻意不同宽：本簇供对齐校验缺口豁免（最宽，与提示词
-# (e) 一致）；机械删标签用 _SAY_VERBS（五归属动词，delete_pure_saying_tags 等）；
-# 头部纯标签剥离用 _LEADING_SAYING_TAG_RE（仅「…道：」）。改任一套时同步核对
-# 另两套与 _NONSPEAK_BEFORE_DAO 知/难 守卫。
+# 匹配时按最长优先。供 _reparse_vote 忠实性门使用：标签含描述性动作时保留动作、
+# 只删说话动词的变体（…衣领，吼道 → …衣领。）计入合法骨架。
+# 标签文法三套并存、动词面刻意不同宽：本簇供重判投票门（_reparse_vote）；机械删
+# 标签用 _SAY_VERBS（五归属动词，delete_pure_saying_tags 等）；头部纯标签剥离用
+# _LEADING_SAYING_TAG_RE（仅「…道：」）。改任一套时同步核对另两套与
+# _NONSPEAK_BEFORE_DAO 知/难 守卫。
+# （旧版本簇还用于 check_chunk_alignment 的标签缺口豁免——对齐校验已改为
+# 50/100 字连续未匹配阈值判档，短标签缺口自然落入忽略档，豁免不再需要。）
 _SAY_TAG_TAILS = (
     "继续说道", "低声道", "冷笑道", "大声说", "轻声说", "开口说", "开口笑",
     "继续说", "继续道", "开口道", "接口道", "回应道", "回答道", "解释道",
@@ -488,80 +491,58 @@ _SAY_TAG_TAILS = (
 )
 
 
-def _is_ignorable_alignment_gap(value: str, speaker_skeletons: set) -> bool:
-    """Ignore source-side fragments the parse prompt itself mandates removing.
-
-    The parser must drop pure speech tags (``林某说道`` / ``老道继续笑道``) while
-    preserving the spoken/narrated text — the prompt's edit (e).  Two exempt shapes:
-    a short fragment (≤4 word chars ending in a say verb, legacy rule) and the full
-    tag grammar ``[名字/代词][语气修饰][说话动词]``.  In the grammar shape the name
-    part must be a speaker of this chunk (or a pronoun), so real missing sentences
-    that merely end in a verb stay flagged.  Everything else, including output-only
-    text, remains an alignment error.
-    """
-    if not value:
-        return False
-    tag_trail = frozenset(_SAY_VERBS)
-    if len(value) <= 4:
-        return value[-1] in tag_trail and any(ch.isalnum() for ch in value[:-1])
-    for tail in _SAY_TAG_TAILS:
-        if not value.endswith(tail):
-            continue
-        # 「知道 / 难道」的「道」不是说话动词（与 _NONSPEAK_BEFORE_DAO 形态守卫
-        # 一致）：整行「林某才知道」缺失仍照报，不因尾「道」+ 说话人名被豁免。
-        if tail == "道" and value[-2] in _NONSPEAK_BEFORE_DAO:
-            continue
-        head = value[: -len(tail)]
-        if not head:
-            return True  # 整个 gap 就是动词簇（名字在别处匹配掉了）
-        for n in range(min(5, len(head)), 0, -1):
-            if _is_tag_name(head[:n], speaker_skeletons):
-                return True
-    return False
+# 连续性阈值（骨架字数）——粗粒度连续性校验的判档线：
+# ≤ _ALIGN_SUSPICIOUS_MIN → 忽略（引号/标点/分段差异、短标签删除、代词替换与
+#   轻微文本整理都落在这个区间内，不累计、不报）；
+# 50 < x ≤ _ALIGN_FAIL_MIN → 标记「可疑」（进日志，通过不阻塞，不触发恢复阶梯）；
+# > _ALIGN_FAIL_MIN → 完整性异常（大段缺失 / 大段新增），ok=False，由调用方触发恢复。
+_ALIGN_SUSPICIOUS_MIN = 50
+_ALIGN_FAIL_MIN = 100
 
 
-def _is_tag_name(name: str, speaker_skeletons: set) -> bool:
-    sk = _skeleton(name)
-    return bool(sk) and (
-        sk in speaker_skeletons
-        or sk in ("他", "她", "它", "你", "我", "您", "他们", "她们", "它们", "你们", "我们")
-    )
+def _classify_alignment_gap(gap: str, large: list, suspicious: list) -> None:
+    """单个连续未匹配区段按骨架字数判档：小段直接忽略（视为覆盖），中段进
+    suspicious，大段进 large（missing 或 extra，依调用侧）。"""
+    if not gap:
+        return
+    if len(gap) <= _ALIGN_SUSPICIOUS_MIN:
+        return  # 短标签删除 / 代词替换 / 轻微整理：连可疑都不标
+    if len(gap) <= _ALIGN_FAIL_MIN:
+        suspicious.append(gap)
+        return
+    large.append(gap)
 
 
 def check_chunk_alignment(chunk: str, entries) -> dict:
-    """Compare the complete local source chunk with parsed entry text.
+    """检查源 chunk 与解析输出是否存在明显的大段内容缺失、重复、错序或新增。
 
-    Unlike :func:`check_chunk_fidelity`, which only checks quoted passages, this
-    check aligns the whole normalized source and output sequences.  Punctuation,
-    whitespace and outer quotation marks are ignored.  Permitted source-side
-    omissions: speaker names moved into the ``speaker`` field and pure speech
-    tags per the prompt (both exempted on the missing side — see
-    :func:`_is_ignorable_alignment_gap`).  The result is a diagnostic mapping so
-    callers can decide whether to escalate without another LLM call.
+    不要求逐字一致：两侧骨架（只留字母/数字/汉字，天然对引号、标点、空白、
+    分段的差异免疫）用 difflib 按原文顺序模糊匹配。每处**连续**未匹配区段
+    独立按骨架字数判档（零散小差异不累计）：
+    ≤ _ALIGN_SUSPICIOUS_MIN → 忽略（短发言标签删除、少量代词替换、轻微整理）；
+    50 < x ≤ _ALIGN_FAIL_MIN → 标记可疑（surfaced 进日志，不阻塞、不触发恢复）；
+    > _ALIGN_FAIL_MIN → 完整性异常——源侧 = 大段缺失（missing），输出侧 =
+    大段新增（extra）；顺序错乱会同时产生两侧大段（difflib 非交叉匹配的
+    必然结果），无需独立检测。说话人名只存 speaker 字段，不进输出骨架。
+
+    返回诊断映射（ok / coverage / missing / extra / suspicious / source /
+    output），调用方自行决定是否升级（恢复阶梯）而不必再跑一次 LLM。
     """
     source = _skeleton(chunk or "")
-    source_positions = [i for i, ch in enumerate(chunk or "") if ch.isalnum()]
-    output_texts: list[str] = []
-    speaker_names: list[str] = []
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        if isinstance(e.get("text"), str):
-            output_texts.append(e["text"])
-        sp = e.get("speaker")
-        if sp and sp != "NARRATOR":
-            speaker_names.append(sp)
-    # speaker 名不进输出骨架：名字（含「名字+说话动词」标签）在 missing 侧按
-    # 豁免规则放行（精确名 / 标签文法），追加到输出尾部反而让 difflib 把插入的
-    # 名字误判为「额外输出」。
-    output = _skeleton("".join(output_texts))
-    speaker_skeletons = {_skeleton(n) for n in speaker_names}
+    # speaker 名不进输出骨架：名字已移入 speaker 字段，追加到输出尾部反而让
+    # difflib 把插入的名字误判为「额外输出」。
+    output = _skeleton("".join(
+        e["text"] for e in entries
+        if isinstance(e, dict) and isinstance(e.get("text"), str)
+    ))
     if not source:
+        extra = [output] if len(output) > _ALIGN_FAIL_MIN else []
         return {
-            "ok": not output,
+            "ok": not extra,
             "coverage": 1.0 if not output else 0.0,
             "missing": [],
-            "extra": [output] if output else [],
+            "extra": extra,
+            "suspicious": [],
             "source": source,
             "output": output,
         }
@@ -569,36 +550,23 @@ def check_chunk_alignment(chunk: str, entries) -> dict:
     matcher = difflib.SequenceMatcher(a=source, b=output, autojunk=False)
     missing: list[str] = []
     extra: list[str] = []
+    suspicious: list[str] = []
     matched = 0
     for tag, a0, a1, b0, b1 in matcher.get_opcodes():
         if tag == "equal":
             matched += a1 - a0
             continue
         if tag in ("delete", "replace"):
-            gap = source[a0:a1]
-            quote_prefix = False
-            if gap and a1 < len(source_positions) and a1 > 0:
-                raw_lo = source_positions[a1 - 1] + 1
-                raw_hi = source_positions[a1] + 1
-                quote_prefix = any(ch in _QUOTE_CHARS for ch in (chunk or "")[raw_lo:raw_hi])
-            if (len(gap) > 1 and gap not in speaker_skeletons
-                    and not _is_ignorable_alignment_gap(gap, speaker_skeletons)
-                    and not (len(gap) <= 4 and quote_prefix)):
-                missing.append(gap)
-            else:
-                matched += a1 - a0
+            _classify_alignment_gap(source[a0:a1], missing, suspicious)
         if tag in ("insert", "replace"):
-            gap = output[b0:b1]
-            if len(gap) > 1:
-                extra.append(gap)
+            _classify_alignment_gap(output[b0:b1], extra, suspicious)
 
-    missing = list(dict.fromkeys(missing))
-    extra = list(dict.fromkeys(extra))
     return {
         "ok": not missing and not extra,
-        "coverage": matched / len(source) if source else 1.0,
+        "coverage": matched / len(source),
         "missing": missing,
         "extra": extra,
+        "suspicious": suspicious,
         "source": source,
         "output": output,
     }
@@ -809,8 +777,10 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     # A parseable reply is NOT automatically faithful: a truncated JSON (repair
     # "salvages" the head and silently drops the tail) or a drifting model (skips a
     # line) both parse cleanly.  ``check_chunk_alignment`` compares the whole
-    # source/output skeletons with the prompt-permitted edits exempt (moved speaker
-    # names, pure speech tags).  When it fails, the remedy follows the diagnosis:
+    # source/output skeletons, judging each CONTIGUOUS unmatched region by length
+    # (≤50 字忽略，50–100 字标记可疑，>100 字 = 完整性异常) — scattered small diffs
+    # (tags, pronouns, light tidy-ups) never trigger recovery, only large missing /
+    # added / reordered blocks do.  When it fails, the remedy follows the diagnosis:
     # budget cut (finish_reason=length) — or finish_reason unreported (None, keep
     # the legacy double-first fallback) → double max_tokens once; self-stopped
     # (stop) → doubling changes nothing, go straight to the split.  Either way the
@@ -827,6 +797,13 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     alignment = check_chunk_alignment(chunk, entries)
     missing = alignment["missing"] or alignment["extra"]
     if alignment["ok"]:
+        if alignment["suspicious"]:
+            handle.log(
+                f"chunk {chunk_num}/{total_chunks} 忠实性校验通过，但 {len(alignment['suspicious'])} 处"
+                f" 50–100 字连续未匹配（如 “{alignment['suspicious'][0][:10]}…”），"
+                f"标记可疑（不阻塞、不触发恢复）",
+                "WARNING",
+            )
         return entries
 
     if finish_reason in ("length", None):
@@ -834,7 +811,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
         # 未报告（None，部分 provider 不返回该字段——保留旧版「先翻倍」兜底
         # 顺序）→ 翻倍 max_tokens 再跑一次；其余终态（stop 等）走切半。
         handle.log(
-            f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
+            f"chunk {chunk_num}/{total_chunks} 忠实性校验检出 {len(missing)} 处大段未匹配"
             f"（如 “{missing[0][:10]}…”）且为预算截断或未报告终态"
             f"（finish_reason={finish_reason if finish_reason else '未报告'}）"
             f" → max_tokens 临时翻倍（{max_tokens} → {max_tokens * 2}）再跑一次",
@@ -863,7 +840,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
         # 如 content_filter，也进此分支，日志按实际值打印）：翻倍无效，
         # 直接对半切开——少解析一段更可能完整输出。
         handle.log(
-            f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
+            f"chunk {chunk_num}/{total_chunks} 忠实性校验检出 {len(missing)} 处大段未匹配"
             f"（如 “{missing[0][:10]}…”）且非预算截断（finish_reason={finish_reason}）"
             f" → 直接对半切开各再跑一次（少解析更可能完整）",
             "WARNING",
@@ -1480,11 +1457,16 @@ def _batch_user_prompt(template: str, context: str, size: int, n: int,
 
 
 def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, context,
-                     roster, stage: str = "断句校验") -> list | None:
+                     roster, stage: str = "断句校验",
+                     single_call: bool = False) -> list | None:
     """Re-run the parse LLM on one flagged entry and resolve the re-derivation by
     majority vote — the 角色匹配检查 consensus rule: one first call plus two retries
     (three total), early-stopping the instant a strict majority is decided, and one
     further (4th) call only when the three still disagree (never guess).
+
+    ``single_call=True``（超长段落重切）只重跑**一次**：唯一回复过忠实性门
+    （:func:`_reparse_vote`）即整体采纳，未过门返回 ``None``——不再多轮投票
+    升级（该条目在解析阶段已跑过一次 LLM，这里只重跑一次，未通过交机械分段）。
 
     The entry text goes in the parse prompt's ``{chunk}`` slot and the pre-built
     context window in ``{context}``, so the model re-derives the entries exactly as the
@@ -1503,7 +1485,7 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
     votes: list = []
     parts_by_sig: dict = {}
 
-    def one_vote(attempt: int) -> None:
+    def one_vote(attempt: int, no_vote_note: str = "，本轮无票") -> None:
         handle.check()  # cooperative cancel / pause between validation calls
         handle.llm_rate(0, 0.0)  # reset the 吞吐 gauge for this call
         try:
@@ -1513,17 +1495,18 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
         except LLMUnavailableError:
             raise
         except Exception as e:  # noqa: BLE001 — a failed call contributes no vote
-            handle.log(f"  {stage}第 {attempt} 次调用失败，本轮无票：{e}", "WARNING")
+            handle.log(f"  {stage}第 {attempt} 次调用失败{no_vote_note}：{e}", "WARNING")
             return
         parts = _parse_entries_reply(reply)
         if not parts:
-            handle.log(f"  {stage}第 {attempt} 次响应无法解析为条目数组，本轮无票", "WARNING")
+            handle.log(f"  {stage}第 {attempt} 次响应无法解析为条目数组{no_vote_note}",
+                       "WARNING")
             return
         sig = _reparse_vote(parts, entry, roster)
         if sig is None:
             handle.log(
                 f"  {stage}第 {attempt} 次结果未通过忠实性校验"
-                f"（文字无法拼回原文 / 角色不在花名册），本轮无票",
+                f"（文字无法拼回原文 / 角色不在花名册）{no_vote_note}",
                 "WARNING",
             )
             return
@@ -1531,6 +1514,15 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
         consume_llm_output(reply, stage)
         votes.append(sig)
         parts_by_sig.setdefault(sig, parts)
+
+    if single_call:
+        # 超长段落重切：只重跑一次 LLM；过门直接采纳，未过门返回 None
+        # （调用方保留原条目，由超长段落机械分段切割兜底——结果没变就不浪费票）。
+        one_vote(1, "，单次重切未通过 → 条目保持原样（交由机械分段兜底）")
+        winner = votes[0] if votes else None
+        if winner is None:
+            return None
+        return parts_by_sig[winner]
 
     for attempt in range(1, 4):  # 基础一次 + 重试两次 = 合计 3 次
         one_vote(attempt)
@@ -1815,8 +1807,9 @@ def instruct_entry_indices(entries: list, max_words: int = INSTRUCT_MAX_WORDS) -
 # 超长段落检查（解析内阶段 A，两半：LLM 重切 + 机械分段兜底）
 #
 # 前半 ``long_paragraph_resplit``：超过 ``max_paragraph_chars`` 字的条目是「文本切割
-# 失败」的嫌疑（旁白与台词合并成一条 / 多段叙述未拆开）→ 带上下文窗口重跑解析 LLM，
-# 经共享重判批协议（:func:`revalidate_entry`）严格多数裁决——忠实性门要求多段需
+# 失败」的嫌疑（旁白与台词合并成一条 / 多段叙述未拆开）→ 带上下文窗口重跑解析 LLM
+# （每条仅 1 次，经共享重判批协议的忠实性门 :func:`revalidate_entry` single_call
+# 模式——结果没变就不多跑）——忠实性门要求多段需
 # ≥2 个不同 speaker，故**同一说话人的长篇独白「拆分」无票**，超长会留到后半兜底
 # （分工是特性：LLM 管语义边界，机械保证长度上界）。
 # 后半 ``split_long_entries``：无论 LLM 改过与否，仍超长的条目确定性切分——
@@ -1844,9 +1837,11 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     门控，由 ``generate_file`` 判断）。
 
     每条超过 ``max_chars`` 字的条目重跑解析 LLM（±n 上下文窗口，与断句失败校验
-    同一形态），经 :func:`revalidate_entry`（stage = 超长段落重切）严格多数裁决：
-    胜出整体替换条目——单条胜出 = 干净重写（条目可能仍超长，由机械分段兜底），
-    多条胜出 = 语义重切；4 次无共识保留原条目（**从不猜**）。全部窗口 + 花名册
+    同一形态），经 :func:`revalidate_entry`（stage = 超长段落重切，
+    ``single_call=True``——**每条只重跑一次 LLM**）：过忠实性门即整体替换条目
+    ——单条胜出 = 干净重写（条目可能仍超长，由机械分段兜底），多条胜出 = 语义重切；
+    未过门保留原条目（**从不猜**），直接交由超长段落机械分段切割（结果没变
+    就不再消耗更多 LLM 调用）。全部窗口 + 花名册
     按**原始**条目列表预建，胜出者按**降序下标**应用（重切 1→N 不移动更小下标
     条目的窗口）。取消立即上抛、不落盘任何文件（基文件在全部阶段返回后才写）。
 
@@ -1887,7 +1882,7 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
 
     handle.log(
         f"超长段落检查：{len(flagged)} 条超过 {max_chars} 字条目，"
-        f"逐条带上下文窗口（±{n} 条）重跑 LLM 重切…"
+        f"逐条带上下文窗口（±{n} 条）重跑 LLM 重切（每条仅 1 次，未过门交机械分段）…"
     )
     # The mechanical check stages share the [0.9, 1.0) progress band (see
     # generate_file): this stage shares the [0.96, 0.98) band with
@@ -1903,9 +1898,10 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         text_len = len((entries[i].get("text") or "").strip())
         handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
         parts = revalidate_entry(handle, llm, generation, sys_prompt, usr_template,
-                                 entries[i], contexts[i], roster, stage="超长段落重切")
+                                 entries[i], contexts[i], roster, stage="超长段落重切",
+                                 single_call=True)
         if parts is None:
-            continue  # 无共识 / 未过忠实性门 → 条目保持原样（机械分段兜底）
+            continue  # 单次重切未过忠实性门 → 条目保持原样（机械分段兜底）
         if updated is None:
             updated = list(entries)
         updated[i:i + 1] = [
