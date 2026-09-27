@@ -79,5 +79,9 @@ jobs:
       # ——本机 16 核的 -n 4 基准不适用于 CI（基准数据见 CLAUDE.md）。
       # 全套件跑在 sqlite + 临时存储上（conftest 覆盖 NARRIFY_DATABASE_URL 等），
       # 不需要 PostgreSQL/Memurai；无 DB 的真实库用例自动 skip。
+      # skip 数与本地预期不同，属正常（不是失败）：本地（Windows）4 skipped =
+      # 2 个真实 DB 用例 + redis 验收 + storage migration（环境无 PG/Redis）；
+      # Linux 上 test_pathio 的 Windows-only 用例新增 1 个 skip（共 5），
+      # test_audio 的 3 个 FFmpeg 用例两端都执行（本机 PATH 与 CI 均有 FFmpeg）。
       - name: 全量测试套件
         run: .venv/bin/python -m pytest backend/tests -n 2 --dist loadscope
