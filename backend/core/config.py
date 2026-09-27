@@ -171,6 +171,10 @@ class GenerationConfig(BaseModel):
     spot_check_adaptive: bool = True
     spot_check_min_rate: float = 0.01
     spot_check_max_rate: float = 0.10
+    # 解析内「归属抽样」总开关（用户解析页可切换，默认开 = 现有行为不变）：与
+    # spot_check_rate 分离——率是管理台控制的比例（0 也关闭），本字段是整段开/关。
+    # 关 = 解析任务跳过抽样阶段并留一行日志（spot_* 结果字段为 0，不写历史文件）。
+    spot_check_enabled: bool = True
     # 解析内「断句失败校验」开关（设置页可切换，默认开 = 现有行为不变）：外层双引号包裹
     # 且引号内含「…道：」标签的条目逐条重跑解析 LLM 校验。关 = 解析任务跳过该阶段并留
     # 一行日志（结果字段 suspicious / suspicious_fixed 为 0）。
@@ -184,6 +188,17 @@ class GenerationConfig(BaseModel):
     # 每个内部 chunk 边界两侧 check_context_window 条。关 = 跳过该阶段并留一行日志
     # （boundary_checked / boundary_fixed 为 0）。
     check_boundary_speakers: bool = True
+    # 解析内「instruct 检查」开关（用户解析页可切换，默认开 = 现有行为不变）：空
+    # instruct 或 ≥35 words 的条目疑似声音指导生成失败/失控 → 先机械继承旁白段
+    # 内邻近有效值，剩余 target 一批一次 LLM 请求只修 instruct 字段。关 = 跳过该
+    # 阶段并留一行日志（instruct_checked / instruct_fixed 为 0）。
+    validate_instructs: bool = True
+    # 解析内「chunk 忠实性校验」开关（用户解析页可切换，默认开 = 现有行为不变）：
+    # 每个 chunk 解析后整体比对源文骨架，检出大段缺失（尾部截断 / 模型自停丢段）
+    # 时按诊断恢复——预算截断翻倍 max_tokens 重跑一次，模型自停对半切开各重跑一次。
+    # 关 = 跳过校验与恢复（缺失直接保留、记日志）；**JSON 可解析性的 max_retries
+    # 重试不受本开关影响、恒执行**。
+    check_chunk_alignment: bool = True
     # 解析内重判阶段的批几何（自已退役的 speaker_check 段迁入）：每次 LLM 调用重判的
     # 目标条目数 / 目标块两侧的上下文条数。角色匹配检查与归属抽样两者都用；
     # 断句失败校验只用 context_window。设置页不露出（config/app.json 可编辑）。

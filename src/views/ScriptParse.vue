@@ -4,7 +4,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { cancelParseBatch, generateScriptFiles } from '@/api/script'
 import { listDir } from '@/api/files'
-import type { FileItem, TaskSnapshot } from '@/types'
+import type { FileItem, ParseChecks, TaskSnapshot } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
@@ -16,6 +16,7 @@ import CardFooter from '@/components/ui/CardFooter.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Progress from '@/components/ui/Progress.vue'
+import Switch from '@/components/ui/Switch.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import LiveStreamPanel from '@/components/ui/LiveStreamPanel.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
@@ -24,6 +25,7 @@ import {
   FileText,
   ScanText,
   Loader2,
+  X,
   XCircle,
   RefreshCw,
   ListChecks,
@@ -34,8 +36,10 @@ const settings = useSettingsStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 
-// LLM / 生成参数 / Prompt 的配置编辑在「设置」页（含解析内检查的三个开关）；本页
-// 只从 settings.config 读取已保存的模型名，不再本地编辑 / 保存。
+// LLM / 生成参数 / Prompt 由管理员设置管理；解析内 6 项 LLM 检查开关在本页
+// 「解析检查项」子窗口（「选择待解析文件」卡右上角按钮进入）：勾选状态随
+// 「开始处理」的任务提交（固化进每个任务的配置快照），并记忆进项目配置作
+// 下次页面初值（见下方 checks 状态）。
 
 // ---- File selection (02_split_text) + per-file parse jobs ------------------------
 // The user checks one or more split .txt files; each becomes an independent backend
@@ -151,6 +155,62 @@ function progressIndicator(row: JobRow): string {
 // "In flight" while any job's task hasn't reached a terminal state (drives the button).
 const busy = computed(() => jobRows.value.some((r) => r.active))
 
+// ---- 解析检查项（6 个开关）-----------------------------------------------------
+// 勾选状态只在「开始处理」提交任务时生效：值随请求固化进每个任务的配置快照
+// （提交值 = 任务最终执行值），跑中改本页不影响在跑任务；重跑（重新提交）才用新值。
+// 初值从项目配置读取（上次「开始处理」时记忆的值），缺省全开（true = 现有行为）。
+type CheckKey = keyof ParseChecks
+const CHECK_DEFS: { key: CheckKey; label: string; hint: string }[] = [
+  {
+    key: 'check_chunk_alignment',
+    label: 'chunk 忠实性校验',
+    hint: '检出源文大段缺失（截断 / 模型自停）时恢复重跑：翻倍预算或对半切开。JSON 可解析性重试恒生效。',
+  },
+  {
+    key: 'check_boundary_speakers',
+    label: '角色匹配检查',
+    hint: '重判 chunk 边界两侧条目的说话人归属（chunk 切割会切断跨段上下文）。',
+  },
+  {
+    key: 'validate_instructs',
+    label: 'instruct 检查',
+    hint: '修复空 / 过长的声音指导（instruct）条目：先机械继承邻近有效值，剩余一批送 LLM。',
+  },
+  {
+    key: 'revalidate_splits',
+    label: '断句失败校验',
+    hint: '对外层双引号内「…道：」标签条目重跑解析校验。',
+  },
+  {
+    key: 'check_long_paragraphs',
+    label: '超长段落检查',
+    hint: '超字数条目先 LLM 语义重切，再机械分段兜底保证字数上界（关闭时机械分段兜底同步关闭，条目可能超过上限）。',
+  },
+  {
+    key: 'spot_check_enabled',
+    label: '归属抽样',
+    hint: '按管理台设定的抽样率重判部分条目的说话人归属。',
+  },
+]
+const checks = reactive<Record<CheckKey, boolean>>({
+  check_chunk_alignment: true,
+  check_boundary_speakers: true,
+  validate_instructs: true,
+  revalidate_splits: true,
+  check_long_paragraphs: true,
+  spot_check_enabled: true,
+})
+// 「解析检查项」子窗口开关（从「选择待解析文件」卡右上角按钮进入）。
+const checksOpen = ref(false)
+
+function initChecks() {
+  const g = settings.config?.generation
+  for (const d of CHECK_DEFS) {
+    const saved = g?.[d.key]
+    checks[d.key] = saved === undefined ? true : saved
+  }
+}
+
 // 解析日志区显隐（设置页「解析日志显示」，默认关）：开 = 显示「解析进度」Card
 // （每文件实时日志 + 流式反馈）；关 = 整个 Card 隐藏。保存设置后立即生效
 // （settings.config 是响应式的）。
@@ -178,6 +238,7 @@ function reattachJobs() {
 
 onMounted(async () => {
   if (!settings.loaded) await settings.load()
+  initChecks()
   await loadFiles()
   await taskStore.refresh()
   reattachJobs()
@@ -249,9 +310,13 @@ async function startParse() {
   }
   error.value = ''
   try {
-    const r = await generateScriptFiles(names)
+    // 检查开关随任务提交（固化进每个任务的配置快照——提交值即该任务最终执行值）。
+    const r = await generateScriptFiles(names, { ...checks })
     fileJobs.value = r.files.map((f) => ({ name: f.file, taskId: f.task_id }))
     await taskStore.refresh()
+    // 记忆本次勾选进项目配置，作下次页面初值；fire-and-forget，失败不阻断
+    // （与 AudioSplit 的 rememberParams 同款模式）。
+    void settings.save({ generation: { ...checks } })
   } catch (e: any) {
     error.value = e?.message || '启动解析失败'
   }
@@ -296,10 +361,17 @@ async function cancelAll() {
     <!-- 选择待解析文件 -->
     <Card>
       <CardHeader>
-        <CardTitle class="flex items-center gap-2"><FileText class="h-5 w-5" />选择待解析文件</CardTitle>
-        <CardDescription>
-          选择要处理的分册文本，可多选；已完成的文件也可以重新解析。
-        </CardDescription>
+        <div class="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <CardTitle class="flex items-center gap-2"><FileText class="h-5 w-5" />选择待解析文件</CardTitle>
+            <CardDescription>
+              选择要处理的分册文本，可多选；已完成的文件也可以重新解析。
+            </CardDescription>
+          </div>
+          <Button variant="outline" size="sm" class="shrink-0" @click="checksOpen = true">
+            <ListChecks class="h-3.5 w-3.5" />解析检查项
+          </Button>
+        </div>
       </CardHeader>
       <CardContent class="space-y-4">
         <Alert v-if="filesError" variant="destructive">
@@ -407,6 +479,62 @@ async function cancelAll() {
         </span>
       </CardFooter>
     </Card>
+
+    <!-- 解析检查项子窗口：6 个解析内 LLM 检查开关（自「选择待解析文件」卡右上角
+         按钮进入）。勾选状态只随「开始处理」提交的任务生效（固化进每个任务的配置
+         快照），跑中改动不影响在跑任务；重跑（重新提交）用新值。 -->
+    <div
+      v-if="checksOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      role="presentation"
+      @click.self="checksOpen = false"
+    >
+      <div
+        class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-xl border bg-background p-5 shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="parse-checks-title"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="parse-checks-title" class="flex items-center gap-2 text-base font-semibold">
+              <ListChecks class="h-5 w-5 text-primary" />解析检查项
+            </h2>
+            <p class="mt-1 text-xs leading-5 text-muted-foreground">
+              解析过程中的 6 项 LLM 检查。按提交时勾选状态生效并随任务固化，之后修改本窗口或
+              设置都不影响已提交任务；重跑（重新提交）使用最新勾选。
+            </p>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="h-8 w-8 shrink-0 p-0"
+            aria-label="关闭解析检查项窗口"
+            @click="checksOpen = false"
+          >
+            <X class="h-4 w-4" />
+          </Button>
+        </div>
+        <div class="mt-4 space-y-3">
+          <div
+            v-for="d in CHECK_DEFS"
+            :key="d.key"
+            class="flex items-center justify-between gap-4"
+          >
+            <div class="min-w-0">
+              <p class="text-sm">{{ d.label }}</p>
+              <p class="text-xs text-muted-foreground">{{ d.hint }}</p>
+            </div>
+            <Switch
+              :model-value="checks[d.key]"
+              :disabled="busy"
+              @update:model-value="checks[d.key] = $event"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- 解析进度（每文件一行）：仅「解析日志显示」开启时渲染整个 Card
          （实时日志 + 流式反馈）。 -->

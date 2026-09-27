@@ -65,6 +65,19 @@ const TOGGLES: { key: keyof TextToggles; label: string }[] = [
   { key: 'live', label: '实时预览' },
 ]
 
+// 解析内 6 个检查开关是用户「文本解析」页的专属设置（随任务提交、固化进任务配置快照）：
+// 管理台不再提供 UI，保存时也不得把它们持久化成平台默认——否则平台默认值会在
+// get_config 的合并中压过项目配置里存的「上次选择」（与 backend/api/admin.py 的
+// _USER_OWNED_CHECKS 剔除是双保险；顺带清掉历史平台默认里的旧值）。
+const USER_OWNED_CHECKS = [
+  'check_chunk_alignment',
+  'check_boundary_speakers',
+  'validate_instructs',
+  'revalidate_splits',
+  'check_long_paragraphs',
+  'spot_check_enabled',
+] as const
+
 onMounted(async () => {
   active.value = props.section
   // Root (admin) channel — the store keeps it apart from the project config
@@ -86,10 +99,12 @@ async function save() {
     batch_concurrency: Math.max(1, Math.min(128, Math.trunc(Number(config.tts.batch_concurrency) || 80))),
     batch_seed: Math.max(-1, Math.min(2147483647, Math.trunc(seed))),
   }
-  const generation = {
+  const generation: Record<string, unknown> = {
     ...config.generation,
     parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
   }
+  // 用户解析页专属的 6 个检查开关不落平台默认（见上方 USER_OWNED_CHECKS 注释）。
+  for (const key of USER_OWNED_CHECKS) delete generation[key]
   const split = {
     length_target: Math.max(100, Math.min(200000, Math.trunc(Number(config.split?.length_target) || 3000))),
   }
@@ -305,37 +320,26 @@ watch(
             <div class="flex flex-wrap items-center gap-3">
               <Input v-model.number="draft.generation.spot_check_rate" type="number" step="0.01" min="0" max="0.5" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
-                设置解析结果的抽样复核比例；0 表示关闭。
+                设置解析结果的抽样复核比例；0 表示关闭。归属抽样的总开关在用户「文本解析」页。
               </span>
             </div>
           </div>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div class="flex items-center justify-between">
-              <Label class="font-normal">角色匹配检查</Label>
-              <Switch v-model="draft.generation.check_boundary_speakers" />
-            </div>
-            <div class="flex items-center justify-between">
-              <Label class="font-normal">断句失败校验</Label>
-              <Switch v-model="draft.generation.revalidate_splits" />
-            </div>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="flex items-center justify-between">
               <Label class="font-normal">纯归属标签删除</Label>
               <Switch v-model="draft.generation.delete_saying_tags" />
             </div>
             <div class="flex items-center justify-between">
               <div class="flex flex-col">
-                <Label class="font-normal">超长段落检查</Label>
+                <Label class="font-normal">超长段落上限（字）</Label>
                 <span class="text-xs text-muted-foreground">
-                  设置单段最大字数。
+                  任何条目最终不得超过此字数（机械分段兜底）。超长段落检查开关在用户「文本解析」页。
                 </span>
               </div>
-              <div class="flex items-center gap-2">
-                <Input
-                  v-model.number="draft.generation.max_paragraph_chars"
-                  type="number" min="10" step="10" class="w-20"
-                />
-                <Switch v-model="draft.generation.check_long_paragraphs" />
-              </div>
+              <Input
+                v-model.number="draft.generation.max_paragraph_chars"
+                type="number" min="10" step="10" class="w-20"
+              />
             </div>
             <div class="flex items-center justify-between">
               <Label class="font-normal">纯标点条目吸收</Label>

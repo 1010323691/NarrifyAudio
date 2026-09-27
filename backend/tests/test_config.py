@@ -88,13 +88,40 @@ def test_generation_config_check_stage_defaults():
     assert g.absorb_punct_entries is True
     # 同人段落合并（机械后处理，置于超长机械分段之前）default ON
     assert g.merge_same_speaker is True
-    # round-trip（自定义值不丢）
+    # 用户解析页专属的 3 个开关 default ON（= 现有行为不变）；归属抽样总开关与
+    # spot_check_rate 分离（率 = 比例、本字段 = 整段开/关）
+    assert g.spot_check_enabled is True
+    assert g.validate_instructs is True
+    assert g.check_chunk_alignment is True
+    # round-trip（自定义值不丢，含 False 的开关）
     g2 = GenerationConfig(**json.loads(
         json.dumps(g.model_dump(), ensure_ascii=False)))
     assert g2.check_long_paragraphs is g.check_long_paragraphs
     assert g2.max_paragraph_chars == g.max_paragraph_chars
     assert g2.absorb_punct_entries is g.absorb_punct_entries
     assert g2.merge_same_speaker is g.merge_same_speaker
+    assert g2.spot_check_enabled is g.spot_check_enabled
+    assert g2.validate_instructs is g.validate_instructs
+    assert g2.check_chunk_alignment is g.check_chunk_alignment
+
+
+def test_generation_config_user_owned_checks_round_trip_false():
+    # 开关可显式置 False 且往返不丢（任务快照回放依赖此路径）。
+    g = GenerationConfig(
+        check_chunk_alignment=False,
+        check_boundary_speakers=False,
+        validate_instructs=False,
+        revalidate_splits=False,
+        check_long_paragraphs=False,
+        spot_check_enabled=False,
+    )
+    back = GenerationConfig(**json.loads(json.dumps(g.model_dump(), ensure_ascii=False)))
+    assert back.check_chunk_alignment is False
+    assert back.check_boundary_speakers is False
+    assert back.validate_instructs is False
+    assert back.revalidate_splits is False
+    assert back.check_long_paragraphs is False
+    assert back.spot_check_enabled is False
 
 
 # --------------------------------------------------------------------------- #

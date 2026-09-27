@@ -57,8 +57,28 @@ def _resolve_split_file(name: str) -> Path:
     return candidate
 
 
+class ParseChecks(BaseModel):
+    """User-selected parse-check switches, submitted WITH the task.
+
+    Each field is optional (``None`` = not selected); only provided fields override
+    the task's config snapshot, so a partial selection leaves the other switches at
+    their configured values. The submitted values are the per-task authority — they
+    win over both the workspace config and admin platform defaults because the merge
+    happens AFTER the snapshot is built from ``get_config()``.
+    """
+    check_chunk_alignment: bool | None = None
+    check_boundary_speakers: bool | None = None
+    validate_instructs: bool | None = None
+    revalidate_splits: bool | None = None
+    check_long_paragraphs: bool | None = None
+    spot_check_enabled: bool | None = None
+
+
 class GenerateFilesRequest(BaseModel):
     files: list[str]  # 02_split_text 下的文件名（不含路径）
+    # 解析检查开关（用户解析页勾选）：随任务提交、固化进每个任务的配置快照；
+    # 缺省 = 沿用当前生效配置（旧客户端兼容）。
+    checks: ParseChecks | None = None
 
 
 @router.post("/generate-files")
@@ -84,6 +104,13 @@ def generate_files(
         "prompts": prompts.model_dump(mode="json"),
         "generation": cfg.generation.model_dump(mode="json"),
     }
+    if req.checks is not None:
+        # 用户勾选的检查开关 = 每任务权威值，压过工作区配置与管理员平台默认
+        # （合并发生在 get_config() 之后）；随 Task.payload 各自入库，重跑
+        # （重新提交）才会带新值。
+        checks = req.checks.model_dump(exclude_none=True)
+        if checks:
+            snapshot["generation"].update(checks)
     created = []
     for name in names:
         path = _resolve_split_file(name)

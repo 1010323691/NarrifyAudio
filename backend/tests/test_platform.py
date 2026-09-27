@@ -442,6 +442,70 @@ def test_script_batch_http_routes_use_persistent_tasks(client: TestClient):
     assert cancelled.json()["cancelled"][0]["id"] == task_id
 
 
+def test_script_generate_files_checks_merge_into_task_payload(client: TestClient):
+    # 解析检查开关（用户解析页 6 项）随任务提交：提交值合并进该 Task 的
+    # config 快照（每任务权威值，压过工作区配置与平台默认）；未提交键保留生效配置值。
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    workspace = Path(client.get("/api/v1/projects/active").json()["path"])
+    source = workspace / "02_split_text" / "chapter.txt"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("A short chapter.", encoding="utf-8")
+    with SessionLocal.begin() as db:
+        account = db.get(UserQuotaAccount, first["user"]["id"])
+        assert account is not None
+        account.available_units = 1000
+
+    submitted = client.post(
+        "/api/script/generate-files",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "files": [source.name],
+            "checks": {
+                "check_chunk_alignment": False,
+                "check_boundary_speakers": False,
+                "validate_instructs": False,
+                "revalidate_splits": True,
+                "check_long_paragraphs": False,
+                "spot_check_enabled": False,
+            },
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+    task_id = submitted.json()["task_ids"][0]
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        gen = task.payload["config"]["generation"]
+    assert gen["check_chunk_alignment"] is False
+    assert gen["check_boundary_speakers"] is False
+    assert gen["validate_instructs"] is False
+    assert gen["revalidate_splits"] is True  # 显式提交 True 也原样固化
+    assert gen["check_long_paragraphs"] is False
+    assert gen["spot_check_enabled"] is False
+    # checks 之外的键保留生效配置值（合并只覆盖 6 键，不清空快照）
+    assert gen["chunk_size"] == 3000
+    assert gen["spot_check_rate"] == 0.05
+
+    # 不带 checks（旧客户端兼容）：6 键取当前生效配置值（默认全 True）
+    plain = client.post(
+        "/api/script/generate-files",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [source.name]},
+    )
+    assert plain.status_code == 200, plain.text
+    plain_id = plain.json()["task_ids"][0]
+    with SessionLocal() as db:
+        plain_task = db.get(Task, plain_id)
+        assert plain_task is not None
+        plain_gen = plain_task.payload["config"]["generation"]
+    for key in (
+        "check_chunk_alignment", "check_boundary_speakers", "validate_instructs",
+        "revalidate_splits", "check_long_paragraphs", "spot_check_enabled",
+    ):
+        assert plain_gen[key] is True
+
+
 def test_idempotent_task_submission_and_quota_guard(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
