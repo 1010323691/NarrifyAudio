@@ -76,6 +76,15 @@ const splitVia = ref<'whole' | 'length' | 'smart' | null>(null)
 const wholeBookDone = computed(() => zeroChapters.value && !!splitResult.value && splitVia.value === 'whole')
 // 零章节按字数分册已完成。
 const lengthSplitDone = computed(() => zeroChapters.value && !!splitResult.value && splitVia.value === 'length')
+// 按字数分册完成注记：实际册均字数（边界不足降册数时会大于目标，不用固定文案）。
+const lengthPerVolumeChars = computed(() => {
+  const files = splitResult.value?.files ?? []
+  if (!files.length) return null
+  const total = files.reduce((sum, f) => sum + (f.chars || 0), 0)
+  return Math.round(total / files.length)
+})
+// 按字数分册的引擎警告（降册数 / 整本降级）——完成注记里展示，降级事实可见。
+const lengthWarnings = ref<string[]>([])
 const showSeqWarning = computed(
   () => !!analysis.value && !zeroChapters.value && analysis.value.sequence.hasIssues && !seqWarningDismissed.value,
 )
@@ -117,6 +126,7 @@ function resetDownstream() {
   splitResult.value = null
   smartResult.value = null
   splitVia.value = null
+  lengthWarnings.value = []
   error.value = ''
   seqWarningDismissed.value = false
   smartOriginalCount.value = null
@@ -299,10 +309,23 @@ async function runByLength() {
   busySplit.value = true
   error.value = ''
   try {
-    const r = toBookSplitResult(await runSplitTask({ by_length: true }))
+    const raw = await runSplitTask({ by_length: true })
+    const r = toBookSplitResult(raw)
+    const report = raw.report as Record<string, unknown> | undefined
+    const rawWarnings = Array.isArray(report?.warnings) ? (report as Record<string, unknown>).warnings : []
+    lengthWarnings.value = (rawWarnings as Array<Record<string, unknown>>)
+      .map((w) => String(w.detail ?? w.type ?? ''))
+      .filter(Boolean)
+    const perVolume = r.files.length ? Math.round(r.files.reduce((s, f) => s + f.chars, 0) / r.files.length) : null
     splitVia.value = 'length'
     splitResult.value = r
-    toast({ title: '按字数分册完成', variant: 'success', description: `已平均拆分为 ${r.file_count} 册（约 3000 字/册，不切段落、不截断句子）` })
+    toast({
+      title: '按字数分册完成',
+      variant: 'success',
+      description: perVolume
+        ? `已拆分为 ${r.file_count} 册（册均约 ${perVolume} 字，不切段落、不截断句子）`
+        : `已拆分为 ${r.file_count} 册`,
+    })
   } catch (e: any) {
     if (e?.name === 'AbortError') return
     error.value = e?.message || '按字数分册失败'
@@ -517,9 +540,13 @@ function download(p: string) {
     </Alert>
     <Alert v-else-if="lengthSplitDone" variant="info">
       <div class="flex flex-wrap items-center gap-2">
-        <span>已按字数分册完成：共 {{ splitResult?.file_count }} 册（约 3000 字/册、字数平均、未切段落、未截断句子）。</span>
+        <span>
+          已按字数分册完成：共 {{ splitResult?.file_count }} 册
+          <template v-if="lengthPerVolumeChars != null">（册均约 {{ lengthPerVolumeChars }} 字，未切段落、未截断句子）</template>。
+        </span>
         <Button size="sm" variant="outline" :disabled="busySplit" @click="runWholeBook">改按整本处理</Button>
       </div>
+      <p v-for="w in lengthWarnings" :key="w" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ w }}</p>
     </Alert>
     <Alert v-else-if="wholeBookDone" variant="info">
       已按整本处理：全部文本已写为单个文件 <code class="text-xs">{{ splitResult?.files[0]?.name }}</code>。

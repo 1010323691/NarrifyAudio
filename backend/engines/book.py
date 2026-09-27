@@ -1698,9 +1698,9 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
 # (6200 chars at target 3000 -> 3100 + 3100, never 3000 + 3000 + 200).
 # Cut-point tiers, best first — a paragraph and a sentence are NEVER cut:
 #   1. paragraph boundaries (``\\n\\n``);
-#   2. sentence boundaries (right after 。！？…) — used only where paragraph
-#      breaks are missing, so a single giant paragraph still splits cleanly
-#      at sentence ends;
+#   2. sentence boundaries (right after 。！？…) — tried second within the
+#      snap window, so a cut whose window holds no paragraph break (e.g. inside
+#      one giant paragraph) still lands on a sentence end instead of degrading;
 #   3. degradation: not enough boundaries of either kind -> fewer segments
 #      (they grow, stay equal), down to a single whole-book segment.
 
@@ -1714,9 +1714,10 @@ _SENTENCE_END_CHARS = "。！？…"
 
 
 def _sentence_end_boundaries(text: str, nl: list[int], a: int, b: int) -> list[int]:
-    """Cut points p in (a, b) right after a sentence-ending character (。！？…),
-    keeping non-newline content on both sides. Called only where paragraph
-    boundaries are missing, so a paragraph is never cut mid-sentence."""
+    """Cut points p in (a, b) right after a sentence-ending character (。！？…).
+    The fallback tier for cuts whose snap window holds no paragraph break (a
+    whole book with no blank lines, or one giant paragraph after a clustered
+    short-paragraph prefix) — a paragraph is never cut mid-sentence."""
     out: list[int] = []
     # Line-scan: formatted text is one line per paragraph; only lines inside
     # [a, b) can host a cut point.
@@ -1744,8 +1745,9 @@ def _sentence_end_boundaries(text: str, nl: list[int], a: int, b: int) -> list[i
 def split_by_length(text: str, target_chars: Optional[int] = None) -> dict:
     """Split chapter-less text into near-equal segments of about ``target_chars``
     (default :data:`DEFAULT_LENGTH_TARGET_CHARS`), cut only at paragraph or
-    sentence boundaries — never mid-paragraph when a paragraph break exists,
-    never mid-sentence.
+    sentence boundaries — paragraph breaks are preferred inside the snap
+    window; where a window holds none (e.g. one giant paragraph) the cut
+    falls back to sentence ends. A sentence is never cut.
 
     Returns ``{status, segments, target, segment_count, warnings, error}``.
     ``segments`` are ``{seq, start, end, chars}`` tiling ``[0, len(text))``
@@ -1782,14 +1784,15 @@ def split_by_length(text: str, target_chars: Optional[int] = None) -> dict:
     paragraph_bounds = [
         b for b in _paragraph_boundaries(text, 0, len(text)) if char_count(b, len(text)) > 0
     ]
-    if wanted - 1 > len(paragraph_bounds):
-        # Not enough paragraph breaks: sentence ends become the fallback tier
-        # (a whole book with no blank lines still splits at 。！？…).
-        all_bounds = sorted(
-            set(paragraph_bounds) | set(_sentence_end_boundaries(text, nl, 0, len(text)))
-        )
-    else:
-        all_bounds = paragraph_bounds
+    # The available pool is ALWAYS the union of both tiers: sentence ends
+    # become relevant at any cut whose snap window holds no paragraph break —
+    # e.g. a short-paragraph prefix followed by one giant paragraph, where
+    # paragraph breaks are "enough" globally but clustered, so later cuts
+    # would otherwise fall outside every window and degrade to whole-book
+    # even though the giant paragraph is full of sentence ends.
+    all_bounds = sorted(
+        set(paragraph_bounds) | set(_sentence_end_boundaries(text, nl, 0, len(text)))
+    )
 
     # The pick loop below consumes one boundary strictly to the right of the
     # previous cut per segment, so count-1 <= len(all_bounds) guarantees every

@@ -1028,6 +1028,28 @@ def test_length_split_empty_text_errors():
         assert res["segment_count"] == 0
 
 
+def test_length_split_crlf_gap_and_lone_carriage_return():
+    # CRLF paragraph gap: recognized as a paragraph boundary; cuts land
+    # inside the gap; tiling stays lossless.
+    crlf_text = "\r\n\r\n".join("甲" * 200 for _ in range(31))
+    res = B.split_by_length(crlf_text, target_chars=3000)
+    assert res["status"] == "ok"
+    assert res["segment_count"] == 2
+    for s in res["segments"][1:]:
+        assert crlf_text[s["start"]: s["start"] + 4] == "\r\n\r\n"
+    assert "".join(crlf_text[s["start"]: s["end"]] for s in res["segments"]) == crlf_text
+    # A lone \r also counts as a line break: 310 \r-joined sentences of 20
+    # chars (6200 chars, no blank lines) still split evenly at sentence ends.
+    cr_text = "\r".join(("乙" * 19 + "。") for _ in range(310))
+    res_cr = B.split_by_length(cr_text, target_chars=3000)
+    assert res_cr["status"] == "ok"
+    assert res_cr["segment_count"] == 2
+    for s in res_cr["segments"]:
+        if s["end"] < len(cr_text):
+            assert cr_text[s["end"] - 1] in "。！？…"
+    assert "".join(cr_text[s["start"]: s["end"]] for s in res_cr["segments"]) == cr_text
+
+
 def test_length_split_segment_naming_uses_smart_convention():
     # The worker names by-length segments through make_smart_filenames with
     # empty titles: 第 001 章.txt ... — and the names must pass the generated
