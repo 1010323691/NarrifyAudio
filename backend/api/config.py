@@ -10,20 +10,14 @@ from . import _common
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 
-@router.get("")
-def get_config() -> dict:
-    """Return the full config (all sections).
+def _workspace_facing_config_data() -> dict:
+    """The effective merged config as exposed to the workspace-facing surface.
 
-    Empty ``prompts`` are seeded from the bundled defaults (mirroring the source
-    ``get_config``) so the 文本解析 page can show and edit the full prompt on first
-    open. This only affects the response — the stored config is left untouched.
+    Invariants that must hold for *every* endpoint returning config to the
+    workbench (GET and PUT alike): the shared LLM credential is masked and the
+    admin-managed ``bgm`` section is omitted.
     """
     data = core_config.get_config().model_dump()
-    prompts = data.setdefault("prompts", {})
-    if not prompts.get("system_prompt"):
-        prompts["system_prompt"] = load_default_prompts()[0]
-    if not prompts.get("user_prompt"):
-        prompts["user_prompt"] = load_default_prompts()[1]
     # Shared model credentials are managed in the administrator console and
     # must never be returned by the workspace-facing settings endpoint.
     if isinstance(data.get("llm"), dict):
@@ -32,6 +26,23 @@ def get_config() -> dict:
     # (SystemConfig feature defaults); the workspace-facing surface no longer
     # exposes the section at all.
     data.pop("bgm", None)
+    return data
+
+
+@router.get("")
+def get_config() -> dict:
+    """Return the full config (all sections).
+
+    Empty ``prompts`` are seeded from the bundled defaults (mirroring the source
+    ``get_config``) so the 文本解析 page can show and edit the full prompt on first
+    open. This only affects the response — the stored config is left untouched.
+    """
+    data = _workspace_facing_config_data()
+    prompts = data.setdefault("prompts", {})
+    if not prompts.get("system_prompt"):
+        prompts["system_prompt"] = load_default_prompts()[0]
+    if not prompts.get("user_prompt"):
+        prompts["user_prompt"] = load_default_prompts()[1]
     return data
 
 
@@ -66,7 +77,8 @@ def put_config(patch: dict) -> dict:
     # ``split.length_target`` back to 3000 — a client that replaces its store
     # with the response (the settings store does) would then show the code
     # default on the workbench while the engine still runs with the value the
-    # administrator configured.
-    data = core_config.get_config().model_dump()
-    data.pop("bgm", None)
-    return data
+    # administrator configured. The shared helper applies the same
+    # workspace-facing invariants as the GET: ``llm.api_key`` is masked (the
+    # merged view carries the administrator's shared credential) and ``bgm``
+    # is omitted.
+    return _workspace_facing_config_data()

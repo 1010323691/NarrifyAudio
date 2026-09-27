@@ -753,10 +753,11 @@ def test_durable_worker_by_length_uses_admin_configured_split_target(client: Tes
     patched = client.patch(
         "/api/v1/admin/settings/application",
         headers={"X-CSRF-Token": admin_csrf},
-        json={"split": {"length_target": 2000}},
+        json={"split": {"length_target": 2000}, "llm": {"api_key": "e2e-shared-llm-key"}},
     )
     assert patched.status_code == 200, patched.text
     assert patched.json()["config"]["split"]["length_target"] == 2000
+    assert patched.json()["config"]["llm"]["api_key"] == "e2e-shared-llm-key"
     try:
         first = _register(client, f"{uuid.uuid4()}@example.com")
         csrf = first["csrf_token"]
@@ -770,6 +771,8 @@ def test_durable_worker_by_length_uses_admin_configured_split_target(client: Tes
         assert saved.status_code == 200, saved.text
         assert saved.json()["log"]["level"] == "DEBUG"
         assert saved.json()["split"]["length_target"] == 2000
+        # 合并视图携带的管理员共享凭据不得经用户侧响应泄漏（与 GET 掩码一致）。
+        assert saved.json()["llm"]["api_key"] == ""
         # 6200 chars：单个长段落，310 个 20 字段落句（无章节标记、无空行）。
         body = (("甲" * 19 + "。") * 310).encode("utf-8")
         uploaded = client.post(
