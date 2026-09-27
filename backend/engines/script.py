@@ -2034,8 +2034,9 @@ def split_long_text(text: str, max_chars: int) -> list[str]:
 
 def split_long_entries(entries: list, max_chars: int, title_test) -> tuple:
     """超长条目的机械分段（确定性兜底，解析内阶段 A 的后半，归属抽样之后——
-    speaker 已定稿，切段只继承父条目的 speaker / instruct；受
-    ``generation.check_long_paragraphs`` 门控，由 ``generate_file`` 判断）。
+    speaker 已定稿，切段只继承父条目的 speaker / instruct；**恒执行、不受
+    ``generation.check_long_paragraphs`` 控制**——字数硬上界是常态保证，
+    由 ``generate_file`` 在管线末段无条件调用）。
 
     对每条仍超过 ``max_chars`` 的条目调 :func:`split_long_text`：speaker /
     instruct 继承（instruct 只给首段——声音指导随段重复会重复朗读），**非级联**
@@ -3087,8 +3088,9 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 max_para, context_window=int(generation.check_context_window or 0),
             )
         else:
-            # 开关关闭：整体跳过并留一行日志（含机械分段兜底），结果字段保持 0。
-            handle.log("超长段落检查已关闭（配置）——本任务跳过该阶段（含机械分段兜底）")
+            # 开关关闭：跳过 LLM 语义重切并留一行日志；机械分段兜底（长度硬上界
+            # 保证）**恒执行、不受本开关控制**（管线末段的机械分段兜底）。
+            handle.log("超长段落检查已关闭（配置）——本任务跳过 LLM 语义重切（机械分段兜底恒生效）")
             long_checked, long_fixed = 0, 0
 
         # 归属抽样（机械旁白合并之前——重判可把 NARRATOR 条改成角色条，合并必须看到
@@ -3160,25 +3162,23 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             merged_pairs = 0
 
         # 超长段落检查·机械分段兜底（管线**末段**，同人合并之后——speaker 已定稿，
-        # 切段只继承父条目 speaker / instruct；硬保证：最终没有任何条目超过
-        # max_paragraph_chars。同人合并的 ≤10 强制合并可能造出超限块，由本阶段
-        # 切回；切出的段绝不会被回粘（本阶段是最后一步，其后无合并）。
-        if generation.check_long_paragraphs:
-            all_entries, long_split = split_long_entries(
-                all_entries, max_para, is_chapter_title,
+        # 切段只继承父条目 speaker / instruct；**恒执行、不受 check_long_paragraphs
+        # 控制**——字数硬上界是常态保证，LLM 重切开关关闭时超限条目仍由本阶段切回。
+        # 硬保证：最终没有任何条目超过 max_paragraph_chars。同人合并的 ≤10 强制合并
+        # 可能造出超限块，由本阶段切回；切出的段绝不会被回粘（本阶段是最后一步，
+        # 其后无合并）。
+        all_entries, long_split = split_long_entries(
+            all_entries, max_para, is_chapter_title,
+        )
+        if long_split:
+            handle.log(
+                f"超长段落机械分段：{long_split} 条仍超 {max_para} 字的条目已按句界 / "
+                f"子句界 / 定宽切开（硬保证：最终无 {max_para} 字以上条目）"
             )
-            if long_split:
-                handle.log(
-                    f"超长段落机械分段：{long_split} 条 LLM 重切后仍超 {max_para} 字的"
-                    f"条目已按句界 / 子句界 / 定宽切开"
-                    f"（硬保证：最终无 {max_para} 字以上条目）"
-                )
-            else:
-                handle.log(
-                    f"超长段落机械分段：0 条仍超 {max_para} 字（无分段；硬保证已满足）"
-                )
         else:
-            long_split = 0
+            handle.log(
+                f"超长段落机械分段：0 条仍超 {max_para} 字（无分段；硬保证已满足）"
+            )
 
         out_name = f"{src.stem}.json"
         out_path = output_path or ((get_or_prepare_layout().parsed_json / out_name) if get_or_prepare_layout().parsed_json is not None else None)
@@ -3221,9 +3221,9 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             "instruct_fixed": instruct_fixed,
             # 纯归属标签清理：确定性删除的独立短标签条数（零 LLM 成本；开关关闭时为 0）
             "tags_deleted": tags_deleted,
-            # 超长段落检查（LLM 重切 + 机械分段兜底；check_long_paragraphs 关闭时全 0）
-            # —— long_checked = 送 LLM 的超长条目数、long_fixed = 经投票替换条数、
-            # long_split = 机械切分的条目数（机械分段恒在 LLM 重切之后运行）
+            # 超长段落检查 —— long_checked / long_fixed = LLM 重切（check_long_paragraphs
+            # 关闭时为 0）、long_split = 机械切分的条目数（机械分段兜底恒执行，
+            # 开关关闭时仍可能 > 0）
             "long_checked": long_checked,
             "long_fixed": long_fixed,
             "long_split": long_split,

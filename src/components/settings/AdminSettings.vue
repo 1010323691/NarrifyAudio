@@ -333,7 +333,7 @@ watch(
               <div class="flex flex-col">
                 <Label class="font-normal">超长段落上限（字）</Label>
                 <span class="text-xs text-muted-foreground">
-                  任何条目最终不得超过此字数（机械分段兜底）。超长段落检查开关在用户「文本解析」页。
+                  任何条目最终不得超过此字数（机械分段兜底恒生效）。超长段落检查开关（只控制 LLM 语义重切）在用户「文本解析」页。
                 </span>
               </div>
               <Input

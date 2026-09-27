@@ -3767,9 +3767,9 @@ def test_generate_file_merge_before_split_forced_over200(tmp_path, monkeypatch, 
     assert out[0]["instruct"] == "a" and out[1]["instruct"] == ""
 
 
-def test_generate_file_long_paragraph_off_skips_stage(tmp_path, monkeypatch, workspace):
-    # check_long_paragraphs=False → 整体跳过（含机械分段）：零重切调用、超长条目
-    # 原样落盘、结果字段全 0、一行「已关闭（配置）」日志。
+def test_generate_file_long_paragraph_llm_off_still_mechanically_splits(tmp_path, monkeypatch, workspace):
+    # check_long_paragraphs=False → 跳过 LLM 语义重切（零重切调用、long_checked/fixed
+    # 为 0），但机械分段兜底**恒执行**：超长条目仍被切开，最终无超过硬上界的条目。
     parse_reply = json.dumps([
         {"speaker": "NARRATOR", "text": LONG_SRC, "instruct": "a"},
     ], ensure_ascii=False)
@@ -3790,12 +3790,16 @@ def test_generate_file_long_paragraph_off_skips_stage(tmp_path, monkeypatch, wor
                          delete_saying_tags=False, spot_check_rate=0.0,
                          check_boundary_speakers=False, check_long_paragraphs=False),
     )
-    assert calls["n"] == 1  # 只有解析
+    assert calls["n"] == 1  # 只有解析（LLM 重切零调用）
     assert result["long_checked"] == 0 and result["long_fixed"] == 0
-    assert result["long_split"] == 0
+    assert result["long_split"] == 1  # 机械分段兜底恒执行：开关关也切回
+    assert result["count"] >= 2  # 212 字 → 至少切 2 段
     out = json.loads((workspace / "03_parsed_json" / "longchap.json").read_text("utf-8"))
-    assert out[0]["text"] == LONG_SRC  # 超长条目原样（开关关闭 = 不做任何处理）
+    assert all(len(e["text"].strip()) <= 200 for e in out)  # 硬保证
+    assert _SKEL("".join(e["text"] for e in out)) == _SKEL(LONG_SRC)  # 骨架无损
+    assert all(e["speaker"] == "NARRATOR" for e in out)
     assert any("超长段落检查已关闭（配置）" in m for _l, m in handle.logs)
+    assert any("超长段落机械分段" in m for _l, m in handle.logs)
 
 
 def test_generate_file_absorb_punct_e2e(tmp_path, monkeypatch, workspace):
