@@ -474,6 +474,10 @@ def check_chunk_fidelity(chunk: str, entries) -> list:
 
 # 说话动词簇（提示词编辑 (e) 允许整段删除的纯标签尾巴，含常见语气修饰前缀）。
 # 匹配时按最长优先；「名字/代词 + 修饰 + 动词簇」之外的缺失不豁免。
+# 标签文法三套并存、动词面刻意不同宽：本簇供对齐校验缺口豁免（最宽，与提示词
+# (e) 一致）；机械删标签用 _SAY_VERBS（五归属动词，delete_pure_saying_tags 等）；
+# 头部纯标签剥离用 _LEADING_SAYING_TAG_RE（仅「…道：」）。改任一套时同步核对
+# 另两套与 _NONSPEAK_BEFORE_DAO 知/难 守卫。
 _SAY_TAG_TAILS = (
     "继续说道", "低声道", "冷笑道", "大声说", "轻声说", "开口说", "开口笑",
     "继续说", "继续道", "开口道", "接口道", "回应道", "回答道", "解释道",
@@ -502,6 +506,10 @@ def _is_ignorable_alignment_gap(value: str, speaker_skeletons: set) -> bool:
         return value[-1] in tag_trail and any(ch.isalnum() for ch in value[:-1])
     for tail in _SAY_TAG_TAILS:
         if not value.endswith(tail):
+            continue
+        # 「知道 / 难道」的「道」不是说话动词（与 _NONSPEAK_BEFORE_DAO 形态守卫
+        # 一致）：整行「林某才知道」缺失仍照报，不因尾「道」+ 说话人名被豁免。
+        if tail == "道" and value[-2] in _NONSPEAK_BEFORE_DAO:
             continue
         head = value[: -len(tail)]
         if not head:
@@ -767,8 +775,19 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     budget_doubled = False
     for attempt in range(max_retries + 1):
         handle.check()  # cooperative cancel / pause point between attempts
-        entries, _raw, finish_reason = _attempt(
-            temperature, max_tokens * 2 if budget_doubled else max_tokens)
+        try:
+            entries, _raw, finish_reason = _attempt(
+                temperature, max_tokens * 2 if budget_doubled else max_tokens)
+        except LLMHTTPError:
+            # 严格网关拒绝翻倍预算（4xx）：回退原预算重试——「可恢复的预算截断」
+            # 不应升级为整任务 fast-fail；原预算下的 4xx 仍按既有契约上抛。
+            if not budget_doubled or attempt >= max_retries:
+                raise
+            handle.log(
+                f"chunk {chunk_num}/{total_chunks}: 翻倍 max_tokens（{max_tokens * 2}）"
+                f"被上游拒绝 → 回退原预算 {max_tokens} 重试", "WARNING")
+            budget_doubled = False
+            continue
         if entries:
             if attempt > 0:
                 handle.log(f"  Succeeded on retry {attempt + 1}")
@@ -792,7 +811,8 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     # line) both parse cleanly.  ``check_chunk_alignment`` compares the whole
     # source/output skeletons with the prompt-permitted edits exempt (moved speaker
     # names, pure speech tags).  When it fails, the remedy follows the diagnosis:
-    # budget cut (finish_reason=length) → double max_tokens once; self-stopped
+    # budget cut (finish_reason=length) — or finish_reason unreported (None, keep
+    # the legacy double-first fallback) → double max_tokens once; self-stopped
     # (stop) → doubling changes nothing, go straight to the split.  Either way the
     # split in half is the last rung (halves run with recover=False).
     if not recover:
@@ -809,16 +829,26 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     if alignment["ok"]:
         return entries
 
-    if finish_reason == "length":
-        # 输出被预算切断（JSON 整体被截 / 尾部丢段）→ 翻倍 max_tokens 再跑一次。
+    if finish_reason in ("length", None):
+        # 输出被预算切断（finish_reason=length：JSON 整体被截 / 尾部丢段），或
+        # 未报告（None，部分 provider 不返回该字段——保留旧版「先翻倍」兜底
+        # 顺序）→ 翻倍 max_tokens 再跑一次；其余终态（stop 等）走切半。
         handle.log(
             f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
-            f"（如 “{missing[0][:10]}…”）且输出被预算切断（finish_reason=length）"
+            f"（如 “{missing[0][:10]}…”）且为预算截断或未报告终态"
+            f"（finish_reason={finish_reason if finish_reason else '未报告'}）"
             f" → max_tokens 临时翻倍（{max_tokens} → {max_tokens * 2}）再跑一次",
             "WARNING",
         )
         handle.check()
-        bigger, _raw, _fr = _attempt(temperature, max_tokens * 2)
+        try:
+            bigger, _raw, _fr = _attempt(temperature, max_tokens * 2)
+        except LLMHTTPError:
+            # 严格网关拒绝翻倍预算（如 400：超模型上限）：放弃翻倍、按现有结果
+            # 走切半兜底——「可恢复的预算截断」不应升级为整任务 fast-fail。
+            handle.log(f"chunk {chunk_num}: 翻倍 max_tokens（{max_tokens * 2}）被上游拒绝"
+                       f" → 放弃翻倍，按现有结果切半", "WARNING")
+            bigger, _raw, _fr = None, "", None
         if bigger:
             alignment2 = check_chunk_alignment(chunk, bigger)
             if alignment2["ok"]:
@@ -829,13 +859,12 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                 entries, alignment, missing = bigger, alignment2, \
                     (alignment2["missing"] or alignment2["extra"])
     else:
-        # 模型自己停笔（漂移 / 内容没放下）：翻倍无效，直接对半切开——
-        # 少解析一段更可能完整输出。
+        # 模型自己停笔（finish_reason=stop，漂移 / 内容没放下）：翻倍无效，
+        # 直接对半切开——少解析一段更可能完整输出。
         handle.log(
             f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
-            f"（如 “{missing[0][:10]}…”）但非预算截断"
-            f"（finish_reason={finish_reason or '未知'}）→ 直接对半切开各再跑一次"
-            f"（少解析更可能完整）",
+            f"（如 “{missing[0][:10]}…”）但模型自停（finish_reason=stop）"
+            f" → 直接对半切开各再跑一次（少解析更可能完整）",
             "WARNING",
         )
 
@@ -1067,7 +1096,9 @@ def _reparse_vote(parts, entry: dict, roster: frozenset):
     # 原文骨架去掉尾部动词簇，同样计入合法变体（仍保持骨架精确相等，投票语义不变）。
     orig_sk = _skeleton(orig)
     for tail in _SAY_TAG_TAILS:
-        if len(orig_sk) > len(tail) and orig_sk.endswith(tail):
+        # 与缺口豁免同一守卫：「知道 / 难道」的「道」不是说话动词
+        if (len(orig_sk) > len(tail) and orig_sk.endswith(tail)
+                and not (tail == "道" and orig_sk[-2] in _NONSPEAK_BEFORE_DAO)):
             allowed.add(orig_sk[: -len(tail)])
     if joined not in allowed:
         return None
