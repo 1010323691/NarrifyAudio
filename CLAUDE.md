@@ -34,12 +34,12 @@ npm.cmd run build                # 类型检查 + 生产构建（dist/）
 npm.cmd run build:all            # 前端构建 + 后端 compileall + 分层门禁（lint-imports）
 npm.cmd run lint:imports         # 分层门禁单独运行
 npm.cmd run test:state-isolation # 前端状态隔离回归（node:test 沙箱跑 Pinia store）
-.\.venv\Scripts\python.exe -m pytest backend/tests -n auto --dist loadscope  # 后端全量测试（多进程并行，见下方说明）
+.\.venv\Scripts\python.exe -m pytest backend/tests -n 4 --dist loadscope  # 后端全量测试（4 进程并行，见下方说明）
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py  # 单个文件
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py -k 名称片段  # 单个用例
 ```
 
-测试默认跑在 sqlite + 临时存储上（`backend/tests/conftest.py` 覆盖 `NARRIFY_DATABASE_URL` / `NARRIFY_STORAGE_ROOT`），全套件不需要本机 PostgreSQL/Memurai 在运行；少数真实 DB 用例（`test_migrations`、`test_postgres_cancellation_concurrency` 等）带 `skipif`，无 DB 时自动跳过。全量套件用 pytest-xdist 多进程并行跑（`-n auto --dist loadscope`，16 核实测 90s→约 40s）；`loadscope` 不可省——`test_platform` 有用例依赖同文件前序用例留下的模块级 DB 状态，同一文件必须整体留在一个 worker 内按序执行。
+测试默认跑在 sqlite + 临时存储上（`backend/tests/conftest.py` 覆盖 `NARRIFY_DATABASE_URL` / `NARRIFY_STORAGE_ROOT`），全套件不需要本机 PostgreSQL/Memurai 在运行；少数真实 DB 用例（`test_migrations`、`test_postgres_cancellation_concurrency` 等）带 `skipif`，无 DB 时自动跳过。全量套件用 pytest-xdist 并行跑，worker 数**固定 4**（实测：串行 90s，`-n 2/4/8/12/16` = 61s/37s/61s/57s/71s——套件含大量派生子进程的测试，超过 4 worker 后 CPU 超额订阅，比串行还慢，故不用 `-n auto`）；`loadscope` 不可省——`test_platform` 有用例依赖同文件前序用例留下的模块级 DB 状态，同一文件必须整体留在一个 worker 内按序执行。
 
 提交后端改动前跑完整后端测试套件；涉及前端或共享流程时额外跑 `npm.cmd run typecheck` 和 `npm.cmd run build`。不可逆数据库变更前先备份（历史备份在 `.backups/`）。
 
