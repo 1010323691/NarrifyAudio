@@ -17,7 +17,9 @@ import pytest
 
 from backend.engines.llm_transport import (
     LLMHTTPError,
+    LLMModelsFetchError,
     build_chat_body,
+    list_llm_models,
     llm_server_is_alive,
     request_chat_completion,
     request_chat_completion_stream,
@@ -226,3 +228,71 @@ def test_is_alive_without_model_name_keeps_legacy_semantics(monkeypatch):
     assert llm_server_is_alive("http://x/v1") is True
     monkeypatch.setattr(urllib.request, "urlopen", http_500)
     assert llm_server_is_alive("http://x/v1") is False
+
+
+# --------------------------------------------------------------------------- #
+# 管理台「拉取模型」：/models 列表解析。复用探活的同一 payload 形状
+# （字符串项或 {"id": ...} 项），但返回名称列表供 UI 下拉。
+# --------------------------------------------------------------------------- #
+def test_list_models_sends_bearer_and_hits_models_path(monkeypatch):
+    captured: dict = {}
+
+    def fake_urlopen(req, *a, **k):
+        captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
+        return _ModelsResp(b'{"data": [{"id": "m1"}]}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert list_llm_models("http://x/v1/", "key-1") == ["m1"]
+    assert captured["url"] == "http://x/v1/models"
+    assert captured["auth"] == "Bearer key-1"
+
+
+def test_list_models_extracts_ids_deduped_in_order(monkeypatch):
+    body = json.dumps({"data": [{"id": "a"}, "b", {"id": "a"}, "c", {"id": "c"}]}).encode("utf-8")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _ModelsResp(body))
+    assert list_llm_models("http://x/v1", "key") == ["a", "b", "c"]
+
+
+def test_list_models_raises_with_user_facing_message(monkeypatch):
+    # 非 JSON / 无 data 列表 / HTTP 错误 / 连接失败 → 一律 raise，消息可直接展示。
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _ModelsResp(b"not json"))
+    with pytest.raises(LLMModelsFetchError):
+        list_llm_models("http://x/v1")
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _ModelsResp(b'{"no_data": []}'))
+    with pytest.raises(LLMModelsFetchError):
+        list_llm_models("http://x/v1")
+
+    def http_401(req, *a, **k):
+        raise urllib.error.HTTPError("http://x/v1/models", 401, "auth", {}, io.BytesIO(b"denied"))
+
+    def conn_refused(req, *a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", http_401)
+    with pytest.raises(LLMModelsFetchError, match="HTTP 401"):
+        list_llm_models("http://x/v1", "bad-key")
+    monkeypatch.setattr(urllib.request, "urlopen", conn_refused)
+    with pytest.raises(LLMModelsFetchError, match="connection refused"):
+        list_llm_models("http://x/v1")
+
+
+def test_list_models_malformed_url_raises_fetch_error():
+    # 畸形地址（非数字端口 / URL 含空格 / 无效 IPv6）必须落在中文错误契约内，
+    # 不能把裸 ValueError/InvalidURL 漏到端点层变成 500。
+    for bad in ("http://x:12ab/v1", "http://x/v1 bad", "http://[::1:9/v1"):
+        with pytest.raises(LLMModelsFetchError, match="地址无效"):
+            list_llm_models(bad, "")
+
+
+def test_list_models_non_http_upstream_raises_fetch_error(monkeypatch):
+    # 上游不是 HTTP 服务（垃圾字节 → BadStatusLine）也必须落在 502 契约内，不能 500。
+    import http.client
+
+    def bad_status(req, *a, **k):
+        raise http.client.BadStatusLine("garbage-bytes")
+
+    monkeypatch.setattr(urllib.request, "urlopen", bad_status)
+    with pytest.raises(LLMModelsFetchError, match="协议异常"):
+        list_llm_models("http://x/v1")

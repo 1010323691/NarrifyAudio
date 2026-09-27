@@ -5,6 +5,7 @@
 import { onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
+import { listLlmModels } from '@/api/admin'
 import type { AppConfig, TextToggles } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -15,6 +16,7 @@ import CardDescription from '@/components/ui/CardDescription.vue'
 import CardContent from '@/components/ui/CardContent.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
+import Select from '@/components/ui/Select.vue'
 import Textarea from '@/components/ui/Textarea.vue'
 import Switch from '@/components/ui/Switch.vue'
 import Alert from '@/components/ui/Alert.vue'
@@ -28,6 +30,7 @@ import {
   AudioLines,
   Music4,
   Scissors,
+  RefreshCw,
 } from 'lucide-vue-next'
 
 const props = withDefaults(defineProps<{ section?: 'text' | 'models' | 'audio' }>(), { section: 'text' })
@@ -39,6 +42,11 @@ const draft = ref<AppConfig | null>(null)
 const originalPrompts = ref<AppConfig['prompts'] | null>(null)
 const saving = ref(false)
 const active = ref<'text' | 'models' | 'audio'>('text')
+// 「拉取模型」：草稿值探测（无需先保存），结果下拉点选即填入模型名称。
+const fetchingModels = ref(false)
+const fetchedModels = ref<string[]>([])
+const pickedModel = ref('')
+const modelsTried = ref(false)
 
 watch(() => props.section, (value) => {
   active.value = value
@@ -118,6 +126,53 @@ async function save() {
   if (ok) toast({ title: '设置已保存', variant: 'success', description: '平台功能配置已更新，新启动的任务会使用新配置。' })
   else toast({ title: '保存失败', variant: 'destructive' })
 }
+
+// 用表单当前草稿值探测（未保存也能拉）；地址为空时只提示不发请求。
+async function fetchModels() {
+  if (!draft.value || fetchingModels.value) return
+  const baseUrl = draft.value.llm.base_url.trim()
+  if (!baseUrl) {
+    toast({ title: '请先填写 API 地址', variant: 'destructive', description: '填好 LLM 服务地址后再拉取模型列表。' })
+    return
+  }
+  fetchingModels.value = true
+  fetchedModels.value = []
+  modelsTried.value = false
+  try {
+    const result = await listLlmModels({ base_url: baseUrl, api_key: draft.value.llm.api_key })
+    fetchedModels.value = result.models
+    // 当前模型名若在新列表里，回填下拉选中项（watch 不 immediate，须手动同步）。
+    if (result.models.length && result.models.includes(draft.value.llm.model_name)) {
+      pickedModel.value = draft.value.llm.model_name
+    }
+    if (result.models.length) {
+      toast({ title: `已获取 ${result.models.length} 个模型`, variant: 'success' })
+    } else {
+      toast({ title: '未获取到模型', variant: 'destructive', description: '该服务返回了空列表。' })
+    }
+  } catch (cause: any) {
+    toast({ title: '拉取模型失败', variant: 'destructive', description: cause?.message || String(cause) })
+  } finally {
+    fetchingModels.value = false
+    modelsTried.value = true
+  }
+}
+
+function onPickModel(value: string | number) {
+  const name = String(value)
+  if (!name || !draft.value) return
+  pickedModel.value = name
+  draft.value.llm.model_name = name
+}
+
+// 手动输入与下拉保持一致：名字在列表里则选中；不在列表里则清空选中（避免残留旧值）。
+watch(
+  () => draft.value?.llm.model_name,
+  (name) => {
+    if (name && fetchedModels.value.includes(name)) pickedModel.value = name
+    else if (fetchedModels.value.length) pickedModel.value = ''
+  },
+)
 </script>
 
 <template>
@@ -185,7 +240,18 @@ async function save() {
             </div>
             <div class="space-y-1.5">
               <Label>模型名称</Label>
-              <Input v-model="draft.llm.model_name" placeholder="如 qwen3:14b（必填）" />
+              <div class="flex flex-wrap items-center gap-2">
+                <Input v-model="draft.llm.model_name" placeholder="如 qwen3:14b（必填）" class="min-w-0 flex-1" />
+                <Button variant="outline" size="sm" :disabled="fetchingModels" @click="fetchModels">
+                  <RefreshCw class="h-4 w-4" :class="fetchingModels ? 'animate-spin' : ''" />
+                  {{ fetchingModels ? '拉取中…' : '拉取模型' }}
+                </Button>
+              </div>
+              <Select v-if="fetchedModels.length" :modelValue="pickedModel" class="mt-2" @update:modelValue="onPickModel">
+                <option value="" disabled hidden></option>
+                <option v-for="m in fetchedModels" :key="m" :value="m">{{ m }}</option>
+              </Select>
+              <p v-else-if="modelsTried" class="mt-1 text-xs text-muted-foreground">该服务没有返回任何模型。</p>
             </div>
           </div>
         </CardContent>

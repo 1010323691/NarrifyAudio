@@ -247,3 +247,125 @@ def test_api_requests_today_uses_a_separate_daily_aggregate(monkeypatch: pytest.
     for _ in range(8):
         observability.record_api_request("/api/health", 200, 1.0)
     assert observability.api_requests_today() == 8
+
+
+# --------------------------------------------------------------------------- #
+# LLM 模型列表拉取（GET /api/v1/admin/llm/models）：只读探测端点，
+# 管理员可用表单草稿值探测未保存的配置；上游失败转 502 + 中文 detail。
+# --------------------------------------------------------------------------- #
+class _FakeModelsResp:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_llm_models_listing_requires_admin(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    registered = client.post(
+        "/api/auth/register",
+        json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    import io
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeModelsResp(b'{"data": []}'))
+
+    forbidden = client.get("/api/v1/admin/llm/models?base_url=http://x/v1")
+    assert forbidden.status_code == 403, forbidden.text
+
+    csrf, _ = _create_admin(client)
+    # 读端点不需要 CSRF 头；带参数探测表单草稿值。
+    ok = client.get("/api/v1/admin/llm/models?base_url=http://x/v1&api_key=k")
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"models": []}
+
+
+def test_llm_models_listing_maps_upstream_errors_to_502(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    csrf, _ = _create_admin(client)
+
+    import io
+    import urllib.error
+    import urllib.request
+
+    body = b'{"data": [{"id": "qwen3-14b"}, "llama3:8b"]}'
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeModelsResp(body))
+    ok = client.get("/api/v1/admin/llm/models?base_url=http://x/v1&api_key=k")
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"models": ["qwen3-14b", "llama3:8b"]}
+
+    def http_500(req, *a, **k):
+        raise urllib.error.HTTPError("http://x/v1/models", 500, "boom", {}, io.BytesIO(b"boom"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", http_500)
+    bad = client.get("/api/v1/admin/llm/models?base_url=http://x/v1&api_key=k")
+    assert bad.status_code == 502, bad.text
+    assert "500" in bad.json()["detail"]
+
+    def conn_refused(req, *a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", conn_refused)
+    refused = client.get("/api/v1/admin/llm/models?base_url=http://x/v1&api_key=k")
+    assert refused.status_code == 502, refused.text
+    assert "连接失败" in refused.json()["detail"]
+
+
+def test_llm_models_listing_falls_back_to_saved_config(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    # 省略 base_url 参数时用已保存平台配置探测（get_config 回退分支）。
+    import urllib.request
+    from types import SimpleNamespace
+
+    import backend.core.config as core_config_mod
+
+    _create_admin(client)
+    captured: list = []
+
+    def fake_urlopen(request, *a, **k):
+        captured.append(request)
+        return _FakeModelsResp(b'{"data": ["saved-model"]}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        core_config_mod, "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(base_url="http://saved-host:9999/v1", api_key="saved-key")),
+    )
+    ok = client.get("/api/v1/admin/llm/models")
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"models": ["saved-model"]}
+    assert captured[0].full_url == "http://saved-host:9999/v1/models"
+    assert captured[0].get_header("Authorization") == "Bearer saved-key"
+
+
+def test_llm_models_listing_empty_saved_url_returns_422(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    # 已保存配置无地址且未传参数 → 422，不发上游请求。
+    import urllib.request
+    from types import SimpleNamespace
+
+    import backend.core.config as core_config_mod
+
+    _create_admin(client)
+    called: list = []
+
+    def fail_if_called(request, *a, **k):
+        called.append(1)
+        return _FakeModelsResp(b"{}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_if_called)
+    monkeypatch.setattr(
+        core_config_mod, "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(base_url="", api_key="")),
+    )
+    resp = client.get("/api/v1/admin/llm/models")
+    assert resp.status_code == 422, resp.text
+    assert "地址" in resp.json()["detail"]
+    assert not called

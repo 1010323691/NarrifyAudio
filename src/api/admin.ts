@@ -168,6 +168,14 @@ export function updateApplicationSettings(config: Record<string, unknown>): Prom
   return http.patch('/api/v1/admin/settings/application', config)
 }
 
+export function listLlmModels(params?: { base_url?: string; api_key?: string }): Promise<{ models: string[] }> {
+  const query = new URLSearchParams()
+  if (params?.base_url) query.set('base_url', params.base_url)
+  if (params?.api_key) query.set('api_key', params.api_key)
+  const qs = query.toString()
+  return http.get(`/api/v1/admin/llm/models${qs ? `?${qs}` : ''}`)
+}
+
 export function updateRegistrationSettings(enabled: boolean): Promise<RegistrationSettings> {
   return http.patch('/api/v1/admin/settings/registration', { enabled })
 }

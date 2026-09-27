@@ -12,6 +12,7 @@ two paths cannot drift — tests/test_llm_transport.py diff-covers that.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -78,6 +79,56 @@ def llm_server_is_alive(
         return exc.code < 500
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError):
         return False
+
+
+class LLMModelsFetchError(RuntimeError):
+    """The configured endpoint could not be listed (admin 「拉取模型」surface)."""
+
+
+def list_llm_models(base_url: str, api_key: str = "", *, timeout: float = 10.0) -> list[str]:
+    """Return the model names an OpenAI-compatible endpoint lists at ``/models``.
+
+    Deduplicated, server order preserved. Entries may be bare strings or
+    ``{"id": ...}`` objects (same payload shapes ``llm_server_is_alive``
+    accepts). Raises :class:`LLMModelsFetchError` with a user-facing Chinese
+    message on HTTP / network failure or when no parseable ``data`` list
+    comes back.
+    """
+    url = base_url.rstrip("/") + "/models"
+    try:
+        # Request construction can reject malformed URLs (bad port, spaces,
+        # schemeless hosts) before any socket is touched — keep that inside the
+        # error contract too, so callers always see LLMModelsFetchError.
+        request = urllib.request.Request(
+            url, method="GET",
+            headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:200]
+        raise LLMModelsFetchError(f"LLM 服务返回 HTTP {exc.code}：{detail}") from exc
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        raise LLMModelsFetchError(f"LLM 服务连接失败：{exc}") from exc
+    except (http.client.InvalidURL, ValueError) as exc:
+        raise LLMModelsFetchError(f"LLM 服务地址无效：{exc}") from exc
+    except http.client.HTTPException as exc:
+        # 其他协议级异常（如非 HTTP TCP 服务的 BadStatusLine）。InvalidURL 是
+        # HTTPException 子类，须由上面的子句先捕获。
+        raise LLMModelsFetchError(f"LLM 服务响应协议异常：{exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise LLMModelsFetchError("LLM 服务响应不是有效 JSON") from exc
+    models = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        raise LLMModelsFetchError("LLM 服务响应中没有模型列表（data）")
+    names: list[str] = []
+    for item in models:
+        name = item if isinstance(item, str) else (item.get("id") if isinstance(item, dict) else None)
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    return names
 
 
 def build_chat_body(model, messages, temperature, top_p, presence_penalty,
