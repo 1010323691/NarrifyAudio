@@ -79,12 +79,12 @@ jobs:
       # ——本机 16 核的 -n 4 基准不适用于 CI（基准数据见 CLAUDE.md）。
       # 全套件跑在 sqlite + 临时存储上（conftest 覆盖 NARRIFY_DATABASE_URL 等），
       # 不需要 PostgreSQL/Memurai；无 DB 的真实库用例自动 skip。
-      # skip 构成两端不同、skip 数随之不同，属正常（不是失败）：
-      # - Windows-only 用例（test_pathio，skipif os.name != "nt"）在 Linux 上跳过；
-      # - 真实环境用例（真实 DB、redis 验收、storage migration）两端环境都不提供，
-      #   故两端都跳过（CI 不启动 PostgreSQL/Redis）；
-      # - test_audio 的 3 个 FFmpeg 用例在 ffmpeg/ffprobe 不在 PATH 时跳过——本 job
-      #   安装了 FFmpeg，应与本机（PATH 有 FFmpeg）一样执行。
+      # skip 构成两端不同（本 CI 8 skipped，本地基准 4 skipped），属正常（不是失败）：
+      # - 真实 DB ×2（无 NARRIFY_TEST_POSTGRES_URL）+ redis 验收（无 NARRIFY_TEST_REDIS_URL）：两端都跳过；
+      # - storage migration ×4：CI runner 无 PG 二进制故跳过，装有 PG 的本机执行；
+      # - test_pathio（Windows-only）：Linux 上跳过；
+      # - test_admin_console 的 symlink 用例：本地非提权 Windows 无目录 symlink 权限故跳过，CI 执行；
+      # - test_audio FFmpeg ×3：仅当 ffmpeg/ffprobe 不在 PATH 时跳过——本 job 安装 FFmpeg，两端都执行。
       # 命令带 -rs 让 SKIPPED 原因逐条进日志；数量与本地对不上时先看这些行再判断。
       - name: 全量测试套件
         run: .venv/bin/python -m pytest backend/tests -n 2 --dist loadscope -rs
