@@ -22,7 +22,7 @@ from backend.core.observability import record_api_request
 from backend.core import paths as core_paths
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.artifact_publication import PublicationJournal
-from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, utcnow
+from backend.platform.models import OutboxEvent, ProjectFile, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path, sha256_file, task_attempt_path, project_workspace_path
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, fail_claim, heartbeat_claim, process_task_message, recover_database_tasks, resume_llm_unavailable_tasks
 from backend.platform.task_contracts import TaskExecutionError
@@ -1522,6 +1522,155 @@ def test_lease_renewal_survives_transient_db_error(client: TestClient, monkeypat
     assert _run_claim_fenced(claim) == "paused"
     # 第一次心跳抛异常被吞掉后，线程必须在 ~2s 处再次 tick（主线程睡了 2.6s）。
     assert len(beats) >= 2
+
+
+def test_resume_probe_uses_payload_snapshot_config(client: TestClient, monkeypatch, tmp_path):
+    """恢复探针必须按任务 payload 的配置快照探活（任务重派后仍按快照执行）：
+    暂停期间用户改了工作区 model_name，按活动配置探活会通过、把任务重派回旧
+    模型 → 再次 404 → 无限循环。"""
+    from types import SimpleNamespace
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Probe snapshot"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    claim = claim_task(task_id, "probe-snapshot-worker")
+    assert claim is not None
+    assert fail_claim(claim, TaskExecutionError("llm_unavailable", "endpoint offline")) == "paused"
+
+    # 提交时快照（任务实际会按它执行）与活动工作区配置指向不同的模型
+    with SessionLocal.begin() as db:
+        db.get(Task, task_id).payload = {
+            "config": {"llm": {
+                "base_url": "http://snap.test/v1", "api_key": "snap-key",
+                "model_name": "snapshot-model",
+            }},
+        }
+
+    # 清掉共享库里其他测试留下的 paused llm_unavailable 任务（恢复扫描是全库的）
+    with SessionLocal.begin() as db:
+        for row in db.execute(
+            select(Task)
+            .where(Task.status == "paused", Task.error_code == "llm_unavailable")
+        ).scalars():
+            if row.id != task_id:
+                row.status = "cancelled"
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+
+    monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        task_worker.core_config,
+        "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(model_dump=lambda **_kwargs: {
+            "base_url": "http://live.test/v1", "api_key": "live-key",
+            "model_name": "live-model",
+        })),
+    )
+    probe_calls: list[tuple] = []
+    monkeypatch.setattr(
+        "backend.engines.llm_transport.llm_server_is_alive",
+        lambda *args, **kwargs: probe_calls.append((args, kwargs)) or True,
+    )
+
+    assert resume_llm_unavailable_tasks() == 1
+    assert probe_calls == [
+        (("http://snap.test/v1", "snap-key"), {"model_name": "snapshot-model"}),
+    ]
+    with SessionLocal() as db:
+        assert db.get(Task, task_id).status == "retrying"
+
+
+def test_resume_stops_and_fails_task_after_max_cycles(client: TestClient, monkeypatch, tmp_path):
+    """端点自报健康但重派后仍持续失败（/models 与 chat 矛盾的病态状态）：
+    连续失败到阈值后任务终态化，不再无限 pause/resume。"""
+    from backend.platform import task_worker
+    from backend.platform.task_lifecycle import append_task_event
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Recovery cap"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+
+    claim = claim_task(task_id, "recovery-cap-worker")
+    assert claim is not None
+    assert fail_claim(claim, TaskExecutionError("llm_unavailable", "endpoint offline")) == "paused"
+
+    # fail_claim 已记 1 次；补齐到阈值
+    with SessionLocal.begin() as db:
+        for index in range(task_worker.LLM_RECOVERY_MAX_CYCLES - 1):
+            append_task_event(db, task_id, "llm_unavailable", {"attempt_id": f"cycle-{index}"})
+
+    # 清掉共享库里其他测试留下的 paused llm_unavailable 任务（恢复扫描是全库的）
+    with SessionLocal.begin() as db:
+        for row in db.execute(
+            select(Task)
+            .where(Task.status == "paused", Task.error_code == "llm_unavailable")
+        ).scalars():
+            if row.id != task_id:
+                row.status = "cancelled"
+                row.finished_at = utcnow()
+                row.updated_at = utcnow()
+
+    monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
+    monkeypatch.setattr(
+        task_worker.core_config,
+        "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(model_dump=lambda **_kwargs: {
+            "base_url": "http://llm.test/v1", "api_key": "secret",
+        })),
+    )
+    monkeypatch.setattr("backend.engines.llm_transport.llm_server_is_alive", lambda *_args, **_kwargs: True)
+
+    assert resume_llm_unavailable_tasks() == 0
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "failed"
+        assert task.error_code == "llm_unavailable"
+        events = {row.event_type for row in db.execute(
+            select(TaskEvent).where(TaskEvent.task_id == task_id)).scalars()}
+        assert "llm_recovery_exhausted" in events
+
+
+def test_resume_config_helper_prefers_snapshot(monkeypatch):
+    """_resume_llm_config：快照可用则用快照；快照缺失/无 base_url 回退工作区配置。"""
+    from types import SimpleNamespace
+    from backend.platform import task_worker
+
+    workspace = {"base_url": "http://ws.test/v1", "api_key": "ws", "model_name": "ws-model"}
+
+    def row(payload):
+        return SimpleNamespace(payload=payload)
+
+    # 完整快照 → 用快照
+    assert task_worker._resume_llm_config(
+        row({"config": {"llm": {"base_url": "http://snap.test/v1", "model_name": "snap-model"}}}),
+        workspace) == {"base_url": "http://snap.test/v1", "model_name": "snap-model"}
+    # 无快照 / 空 payload / 快照无 base_url → 回退工作区配置
+    assert task_worker._resume_llm_config(row({}), workspace) == workspace
+    assert task_worker._resume_llm_config(row(None), workspace) == workspace
+    assert task_worker._resume_llm_config(
+        row({"config": {"llm": {"base_url": ""}}}), workspace) == workspace
+    # 两侧都没有 → None
+    assert task_worker._resume_llm_config(row({}), None) is None
 
 
 def test_expired_cancelling_attempt_releases_tts_hold(client: TestClient):

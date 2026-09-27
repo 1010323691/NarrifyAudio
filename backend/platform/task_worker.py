@@ -49,6 +49,7 @@ from .models import (
     ProjectFile,
     Task,
     TaskAttempt,
+    TaskEvent,
     TaskResult,
     User,
     UserQuotaAccount,
@@ -1348,13 +1349,36 @@ def recover_database_tasks(limit: int = 100) -> int:
     return recovered
 
 
+# 恢复探测通过后重派仍连续失败（如端点 /models 与 chat 矛盾）时的终止阈值：
+# 每个循环至少含一次失败尝试 + 一个 60s 探针周期，30 ≈ 30 分钟，足够覆盖任何
+# 合法的模型加载窗口，又能终止病态端点上的无限 pause/resume 循环。
+LLM_RECOVERY_MAX_CYCLES = 30
+
+
+def _resume_llm_config(row: Any, workspace_llm: dict | None) -> dict | None:
+    """暂停任务重派后实际执行的 LLM 配置：优先取提交时写进 payload 的配置
+    快照（script.parse 执行器回放的就是该快照），缺省回退活动工作区配置。
+
+    若按活动配置探活，用户暂停期间改 model_name（最自然的修复动作）后探针会
+    通过，但任务仍按旧快照模型重派 → 再次 404 → 每 60s 无限循环。
+    """
+    payload = row.payload
+    if isinstance(payload, dict):
+        snapshot = payload.get("config")
+        if isinstance(snapshot, dict):
+            llm = snapshot.get("llm")
+            if isinstance(llm, dict) and str(llm.get("base_url") or "").strip():
+                return llm
+    return workspace_llm
+
+
 def resume_llm_unavailable_tasks(limit: int = 500) -> int:
     """Probe paused LLM tasks and redispatch them once their configured endpoint responds."""
     from ..engines.llm_transport import llm_server_is_alive
 
     with SessionLocal() as db:
         rows = db.execute(
-            select(Task.id, Task.task_type, Task.owner_id, Task.project_id)
+            select(Task.id, Task.task_type, Task.owner_id, Task.project_id, Task.payload)
             .where(Task.status == "paused", Task.error_code == "llm_unavailable")
             .order_by(Task.updated_at.asc())
             .limit(limit)
@@ -1390,7 +1414,7 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
 
     candidates: list[tuple[str, str, str, str]] = []
     for row in rows:
-        llm_config = configs.get((row.owner_id, row.project_id))
+        llm_config = _resume_llm_config(row, configs.get((row.owner_id, row.project_id)))
         if not llm_config:
             continue
         base_url = str(llm_config.get("base_url") or "").strip()
@@ -1413,6 +1437,30 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
             task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
             if task is None or task.status != "paused" or task.error_code != "llm_unavailable":
                 db.rollback()
+                continue
+            cycles = db.scalar(
+                select(func.count(TaskEvent.id))
+                .where(
+                    TaskEvent.task_id == task.id,
+                    TaskEvent.event_type == "llm_unavailable",
+                )
+            ) or 0
+            if cycles >= LLM_RECOVERY_MAX_CYCLES:
+                # 端点自报健康但任务重派后仍持续失败（病态 /models 与 chat 矛盾）：
+                # 终态化以终止无限 pause/resume 循环，用户重新提交即可恢复。
+                task.status = "failed"
+                task.error_message = (
+                    f"LLM 恢复探测通过后任务仍失败（累计 {cycles} 次），已停止自动重试；"
+                    "请检查 LLM 配置与服务状态后重新提交。"
+                )
+                task.finished_at = now
+                task.updated_at = now
+                append_task_event(db, task.id, "llm_recovery_exhausted", {"cycles": cycles})
+                db.commit()
+                logging.getLogger("audiobook.worker").warning(
+                    "LLM recovery exhausted for task %s after %d cycles; task failed",
+                    task.id, cycles,
+                )
                 continue
             pending_event = db.scalar(
                 select(OutboxEvent.id)
