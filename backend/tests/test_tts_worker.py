@@ -599,10 +599,13 @@ def test_row_output_paths_fallback_and_override():
         os.path.join(fb, "0004.mp3"), os.path.join(fb, "0004.wav"))
     # Pooled rows carry their own chapter dir + local line number (file number =
     # file_index + 1, zero-padded to the pool width). The segment-table index is
-    # never used for the file number once file_index is present.
+    # never used for the file number once file_index is present. Joined with
+    # os.path.join like the implementation, so the expectation adapts to the
+    # runner platform (byte-identical on Windows, the production platform).
     assert tw._row_output_paths({"index": 12, "out_dir": r"C:\ws\05_audio_chunk\t",
                                  "file_index": 37}, fb, 5) == (
-        r"C:\ws\05_audio_chunk\t\00038.mp3", r"C:\ws\05_audio_chunk\t\00038.wav")
+        os.path.join(r"C:\ws\05_audio_chunk\t", "00038.mp3"),
+        os.path.join(r"C:\ws\05_audio_chunk\t", "00038.wav"))
     # zfill pads but never truncates: a number wider than `width` keeps its digits.
     assert tw._row_output_paths({"index": 0, "file_index": 99999}, fb, 4) == (
         os.path.join(fb, "100000.mp3"), os.path.join(fb, "100000.wav"))

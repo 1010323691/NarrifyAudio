@@ -28,3 +28,7 @@ huggingface_hub>=0.25
 # Tests (the full suite runs multi-process via pytest-xdist; see CLAUDE.md)
 pytest>=9.1
 pytest-xdist>=3.8
+# Newer starlette hard-requires httpx2 for starlette.testclient (long-lived local
+# venvs on starlette 1.7.0 only get a deprecation warning); declare it so fresh
+# environments (CI) can collect the TestClient-using test modules.
+httpx2>=2.13

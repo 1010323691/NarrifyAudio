@@ -613,7 +613,7 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     assert current.status_code == 200, current.text
     info = current.json()
     assert info["project_id"]
-    assert info["path"].split("\\")[-2] == first["user"]["username"]
+    assert info["path"].replace("\\", "/").split("/")[-2] == first["user"]["username"]
 
     rejected = client.put(
         "/api/v1/projects/active",

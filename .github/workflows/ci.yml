@@ -1,0 +1,90 @@
+# CI 门禁：与本地 `npm run build:all` + 后端全量测试等价（见 CLAUDE.md「常用命令」）。
+# - frontend: 类型检查 + Vite 生产构建 + Pinia 状态隔离回归
+# - backend:  语法检查 + api→services→platform→core 分层门禁 + pytest 全量套件
+#
+# 私有仓库免费 runner 分钟有限：两个 job 并行跑，同一分支的旧运行自动取消。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: 前端 typecheck / build / state-isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # build 已含 vue-tsc --noEmit 类型检查 + Vite 生产构建
+      - name: 类型检查 + 生产构建
+        run: npm run build
+
+      # Pinia store 竞态隔离回归（node:test 沙箱跑真实 store 代码，改 store 行为的门禁）
+      - name: 状态隔离回归
+        run: npm run test:state-isolation
+
+  backend:
+    name: 后端 compileall / 分层门禁 / pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      # test_audio 的 FFmpeg 集成用例按 shutil.which 探测 PATH，装上才跑
+      - name: 安装 FFmpeg
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+
+      - name: 安装核心依赖（不含 TTS GPU 栈）
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --quiet --upgrade pip
+          # requirements.txt 的 TTS 块（qwen-tts/transformers/accelerate/huggingface_hub）
+          # 会拖进数 GB 的 torch CUDA 轮子；测试套件从不 import torch/模型代码——TTS
+          # worker 是子进程且顶层仅 stdlib（test_tts_worker.py 钉住这一隔离），真实 TTS
+          # 冒烟只在带 GPU 的本机跑。CI 因此只装核心依赖。
+          grep -Ev '^(qwen-tts|transformers|accelerate|huggingface_hub)\b' \
+            backend/requirements.txt > /tmp/requirements-ci.txt
+          .venv/bin/python -m pip install --quiet -r /tmp/requirements-ci.txt
+          # 分层门禁 CLI（本地由共享 .venv 提供，见 scripts/build-all.mjs）
+          .venv/bin/python -m pip install --quiet import-linter
+
+      # 本地 build:all 的后端两半：Python 语法/字节码检查 + .importlinter 分层契约
+      - name: compileall + lint-imports
+        run: |
+          .venv/bin/python -m compileall -q backend tts-engine
+          .venv/bin/lint-imports
+
+      # 套件固定用 xdist + loadscope（test_platform 依赖同文件前序用例的模块级状态，
+      # 同一文件必须留在一个 worker 内按序跑）。worker 数按 runner 的 2 vCPU 取 2
+      # ——本机 16 核的 -n 4 基准不适用于 CI（基准数据见 CLAUDE.md）。
+      # 全套件跑在 sqlite + 临时存储上（conftest 覆盖 NARRIFY_DATABASE_URL 等），
+      # 不需要 PostgreSQL/Memurai；无 DB 的真实库用例自动 skip。
+      # skip 构成两端不同（本 CI 8 skipped，本地基准 4 skipped），属正常（不是失败）：
+      # - 真实 DB ×2（无 NARRIFY_TEST_POSTGRES_URL）+ redis 验收（无 NARRIFY_TEST_REDIS_URL）：两端都跳过；
+      # - storage migration ×4：CI runner 无 PG 二进制故跳过，装有 PG 的本机执行；
+      # - test_pathio（Windows-only）：Linux 上跳过；
+      # - test_admin_console 的 symlink 用例：本地非提权 Windows 无目录 symlink 权限故跳过，CI 执行；
+      # - test_audio FFmpeg ×3：仅当 ffmpeg/ffprobe 不在 PATH 时跳过——本 job 安装 FFmpeg，两端都执行。
+      # 命令带 -rs 让 SKIPPED 原因逐条进日志；数量与本地对不上时先看这些行再判断。
+      - name: 全量测试套件
+        run: .venv/bin/python -m pytest backend/tests -n 2 --dist loadscope -rs
