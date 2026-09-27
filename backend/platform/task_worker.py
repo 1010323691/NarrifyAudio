@@ -1159,8 +1159,14 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
     def renew() -> None:
         interval = max(1.0, min(10.0, settings.task_lease_seconds / 3))
         while not stop.wait(interval):
-            if not heartbeat_claim(claim):
-                return
+            try:
+                if not heartbeat_claim(claim):
+                    return
+            except Exception:
+                # A transient DB hiccup must not kill the lease-renewal thread: a
+                # dead heartbeat is exactly how a live task loses its lease and gets
+                # re-claimed (progress reset to zero) mid-execution.
+                continue
             report_worker("running", claim.task_id)
 
     heartbeat = threading.Thread(target=renew, name=f"lease-{claim.task_id[:8]}", daemon=True)
@@ -1200,9 +1206,16 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         if isinstance(exc, LLMUnavailableError):
             fail_claim(claim, TaskExecutionError("llm_unavailable", str(exc)))
             return "paused"
-        if isinstance(exc, LLMHTTPError) and exc.status in {400, 401, 403, 404, 422}:
+        if isinstance(exc, LLMHTTPError) and exc.status in {400, 401, 403, 422}:
             fail_claim(claim, TaskExecutionError("llm_configuration_error", str(exc)))
             return "llm_configuration_error"
+        if isinstance(exc, LLMHTTPError) and exc.status == 404:
+            # model_not_found usually means the configured model is not loaded yet
+            # (server restarted mid-batch, model still loading): wait for the
+            # recovery probe to confirm the model is back, instead of parking the
+            # task as misconfigured.
+            fail_claim(claim, TaskExecutionError("llm_unavailable", str(exc)))
+            return "paused"
         from .quota import QuotaInsufficientError
         if isinstance(exc, QuotaInsufficientError):
             fail_claim(claim, TaskExecutionError("quota_insufficient", str(exc)))
@@ -1375,24 +1388,25 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
         finally:
             reset_workspace(token)
 
-    candidates: list[tuple[str, str, str]] = []
+    candidates: list[tuple[str, str, str, str]] = []
     for row in rows:
         llm_config = configs.get((row.owner_id, row.project_id))
         if not llm_config:
             continue
         base_url = str(llm_config.get("base_url") or "").strip()
         if base_url:
-            candidates.append((str(row.id), base_url, str(llm_config.get("api_key") or "")))
+            model = str(llm_config.get("model_name") or "").strip()
+            candidates.append((str(row.id), base_url, str(llm_config.get("api_key") or ""), model))
 
-    liveness: dict[tuple[str, str], bool] = {}
-    for _task_id, base_url, api_key in candidates:
-        key = (base_url, api_key)
+    liveness: dict[tuple[str, str, str], bool] = {}
+    for _task_id, base_url, api_key, model in candidates:
+        key = (base_url, api_key, model)
         if key not in liveness:
-            liveness[key] = llm_server_is_alive(base_url, api_key)
+            liveness[key] = llm_server_is_alive(base_url, api_key, model_name=model or None)
 
     resumed = 0
-    for task_id, base_url, api_key in candidates:
-        if not liveness.get((base_url, api_key), False):
+    for task_id, base_url, api_key, model in candidates:
+        if not liveness.get((base_url, api_key, model), False):
             continue
         now = utcnow()
         with SessionLocal() as db:

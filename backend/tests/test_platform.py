@@ -4,6 +4,7 @@ import io
 import uuid
 import shutil
 import threading
+import time
 import zipfile
 from types import SimpleNamespace
 from datetime import timedelta
@@ -1394,16 +1395,25 @@ def test_llm_unavailable_task_pauses_and_resumes_even_after_attempt_limit(client
                 task.error_code = "llm_unavailable"
 
     monkeypatch.setattr(task_worker, "project_workspace_path", lambda *_args: tmp_path)
+    probe_calls: list[dict] = []
     monkeypatch.setattr(
         task_worker.core_config,
         "get_config",
         lambda: SimpleNamespace(llm=SimpleNamespace(model_dump=lambda **_kwargs: {
             "base_url": "http://llm.test/v1", "api_key": "secret",
+            "model_name": "qwen3-27b",
         })),
     )
-    monkeypatch.setattr("backend.engines.llm_transport.llm_server_is_alive", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        "backend.engines.llm_transport.llm_server_is_alive",
+        lambda *args, **kwargs: probe_calls.append(kwargs) or True,
+    )
 
     assert resume_llm_unavailable_tasks() == 1
+    # The probe must be told WHICH model must be loaded — "server answers
+    # /models" alone is exactly the false recovery that redispatched the
+    # incident tasks into model_not_found again.
+    assert probe_calls == [{"model_name": "qwen3-27b"}]
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         assert task is not None and task.status == "retrying"
@@ -1412,6 +1422,106 @@ def test_llm_unavailable_task_pauses_and_resumes_even_after_attempt_limit(client
     resumed_claim = claim_task(task_id, "llm-recovery-worker")
     assert resumed_claim is not None
     assert resumed_claim.attempt_no == settings.task_max_attempts + 2
+
+
+def test_llm_http_error_status_mapping(client: TestClient, monkeypatch):
+    """LLMHTTPError 按状态码分流：404（model_not_found，通常是服务重启后模型
+    尚未加载）→ 暂停等恢复探针；400/401/403/422（配置错误）→ 终态快速失败，
+    不再走可重试的 worker_error 循环。"""
+    from dataclasses import replace
+    from backend.engines.llm_transport import LLMHTTPError
+    from backend.platform import task_worker
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "LLM HTTP mapping"},
+    ).json()
+
+    def submit() -> str:
+        out = client.post(
+            "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+            json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+                  "idempotency_key": uuid.uuid4().hex},
+        )
+        assert out.status_code == 201, out.text
+        return out.json()["id"]
+
+    raised: dict = {}
+
+    def fake_execute(_claim):
+        raise raised["exc"]
+
+    monkeypatch.setattr(task_worker, "execute_claim", fake_execute)
+
+    # 404 → paused / llm_unavailable（恢复探针每分钟检查模型是否已加载）
+    raised["exc"] = LLMHTTPError(404, "model_not_found")
+    task_404 = submit()
+    assert process_task_message(
+        {"payload": {"task_id": task_404}}, worker_id="http-map-worker") == "paused"
+    with SessionLocal() as db:
+        task = db.get(Task, task_404)
+        assert task.status == "paused"
+        assert task.error_code == "llm_unavailable"
+        assert "model_not_found" in (task.error_message or "")
+
+    # 401 → 终态 llm_configuration_error（密钥错误重试一万次也一样）
+    raised["exc"] = LLMHTTPError(401, "invalid api key")
+    task_401 = submit()
+    assert process_task_message(
+        {"payload": {"task_id": task_401}}, worker_id="http-map-worker") == "llm_configuration_error"
+    with SessionLocal() as db:
+        task = db.get(Task, task_401)
+        assert task.status == "failed"
+        assert task.error_code == "llm_configuration_error"
+
+
+def test_lease_renewal_survives_transient_db_error(client: TestClient, monkeypatch):
+    """租约续期线程的一次性 DB 抖动不能杀死心跳：心跳线程死了，活任务就会丢租约
+    被别的 worker 抢走（进度归零重跑）——这正是本次事故的放大器。"""
+    from dataclasses import replace
+    from backend.engines.llm_transport import LLMUnavailableError
+    from backend.platform import task_worker
+    from backend.platform.platform_settings import settings
+    from backend.platform.task_worker import _run_claim_fenced
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post(
+        "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Lease renewal"},
+    ).json()
+    submitted = client.post(
+        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
+        json={"project_id": project["id"], "task_type": "text.format", "payload": {},
+              "idempotency_key": uuid.uuid4().hex},
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    claim = claim_task(submitted.json()["id"], "lease-renewal-worker")
+    assert claim is not None
+
+    # 1s 心跳间隔（默认 120s 租约 → 10s 间隔，测试里等不起）
+    monkeypatch.setattr(task_worker, "settings", replace(settings, task_lease_seconds=3))
+
+    beats: list = []
+
+    def flaky_heartbeat(clm):
+        beats.append(True)
+        if len(beats) == 1:
+            raise RuntimeError("transient db blip")
+        return True
+
+    monkeypatch.setattr(task_worker, "heartbeat_claim", flaky_heartbeat)
+
+    def slow_engine(_clm):
+        time.sleep(2.6)
+        raise LLMUnavailableError("connection refused")
+
+    monkeypatch.setattr(task_worker, "execute_claim", slow_engine)
+
+    assert _run_claim_fenced(claim) == "paused"
+    # 第一次心跳抛异常被吞掉后，线程必须在 ~2s 处再次 tick（主线程睡了 2.6s）。
+    assert len(beats) >= 2
 
 
 def test_expired_cancelling_attempt_releases_tts_hold(client: TestClient):

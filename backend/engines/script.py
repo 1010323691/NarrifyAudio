@@ -31,6 +31,7 @@ from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
 from .book import decode_buffer
 from .llm_transport import (
+    LLMHTTPError,
     LLMUnavailableError,
     request_chat_completion as _llm_chat_completion,
     request_chat_completion_stream,
@@ -680,6 +681,12 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
         except TaskCancelled:
             raise  # a cancel raised mid-stream must propagate, not be retried
         except LLMUnavailableError:
+            raise
+        except LLMHTTPError:
+            # 4xx (bad key / model_not_found / …) is a configuration problem, not a
+            # transient chunk failure: swallowing it here produced empty "successful"
+            # chunks, fake progress, and pointless whole-file retries. The task
+            # layer maps the status (404 → pause for recovery, else fast-fail).
             raise
         except Exception as e:  # noqa: BLE001 — a failed call retries, then gives up
             handle.log(f"调用 LLM API 出错：{e}", "ERROR")

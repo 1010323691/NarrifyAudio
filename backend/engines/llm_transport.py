@@ -42,17 +42,39 @@ class LLMUnavailableError(RuntimeError):
     """The configured LLM endpoint cannot currently accept requests."""
 
 
-def llm_server_is_alive(base_url: str, api_key: str = "", *, timeout: float = 5.0) -> bool:
-    """Probe an OpenAI-compatible endpoint; any non-5xx HTTP response proves liveness."""
+def llm_server_is_alive(
+    base_url: str, api_key: str = "", *, timeout: float = 5.0, model_name: str | None = None,
+) -> bool:
+    """Probe an OpenAI-compatible endpoint; any non-5xx HTTP response proves liveness.
+
+    With ``model_name`` set the server must additionally list that model in its
+    ``/models`` payload: a freshly restarted server that has not loaded the
+    configured model yet answers ``/models`` fine, but redispatching against it
+    would only re-fail the attempt with ``model_not_found``.
+    """
     url = base_url.rstrip("/") + "/models"
     request = urllib.request.Request(
         url, method="GET",
         headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout):
-            return True
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            if not model_name:
+                return True
+            try:
+                payload = json.loads(resp.read().decode("utf-8", "replace"))
+            except json.JSONDecodeError:
+                return False
+            models = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(models, list):
+                return False
+            return any(item == model_name or (isinstance(item, dict) and item.get("id") == model_name)
+                       for item in models)
     except urllib.error.HTTPError as exc:
+        # With a required model we cannot verify it on the error path — treat
+        # any HTTP error (4xx included) as "not recovered".
+        if model_name:
+            return False
         return exc.code < 500
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError, ValueError):
         return False
@@ -186,6 +208,10 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
 
     Returns the same ``(content, finish_reason, usage)`` triple as the non-streaming
     call. Raises on HTTP / network / parse failure — the caller's retry loop handles it.
+    5xx and connection failures raise ``LLMUnavailableError``; other HTTP errors raise
+    ``LLMHTTPError`` (same contract as the non-streaming verb) so callers can fast-fail
+    a configuration problem (e.g. ``model_not_found``) instead of retrying it as a
+    transient chunk failure.
     ``handle`` may be ``None`` (no UI forwarding / no mid-stream cancel) for tests.
 
     No ``extra_body`` pass-through, deliberately (Q15 arbitration): the non-streaming
@@ -306,7 +332,7 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
         detail = e.read().decode("utf-8", "replace")[:300]
         if 500 <= e.code < 600:
             raise LLMUnavailableError(f"LLM 服务暂不可用（HTTP {e.code}）：{detail}") from e
-        raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+        raise LLMHTTPError(e.code, detail) from e
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
         raise LLMUnavailableError(f"LLM 服务连接失败：{e}") from e
 
