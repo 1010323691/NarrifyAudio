@@ -41,7 +41,8 @@ def put_config(patch: dict) -> dict:
     persist it there. Requires a workspace (409 otherwise) — config travels with
     the project; the root template is never written. The request body *is* the
     patch, e.g. ``{"log": {"level": "DEBUG"}, "tts": {"batch_concurrency": 6}}``.
-    Returns the resulting full config.
+    Returns the resulting full config as the effective merged view (same source
+    as the GET above).
     """
     _common.require_workspace()
     # BGM audio parameters are admin-managed; a stale client patching the
@@ -52,13 +53,20 @@ def put_config(patch: dict) -> dict:
     patch.pop("bgm", None)
     patch.pop("split", None)
     try:
-        cfg = core_config.update_config(patch)
+        core_config.update_config(patch)
     except core_config.WorkspaceNotSetError:
         raise HTTPException(
             409, "尚未设置工作空间——配置随工程，请先在「开始」页选择文件夹。"
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean 400
         raise HTTPException(400, f"配置无效：{exc}")
-    data = cfg.model_dump()
+    # The response is the effective *merged* config (same source as the GET
+    # above). The workspace file stores forced code defaults for the
+    # admin-managed sections, so returning the raw workspace config would send
+    # ``split.length_target`` back to 3000 — a client that replaces its store
+    # with the response (the settings store does) would then show the code
+    # default on the workbench while the engine still runs with the value the
+    # administrator configured.
+    data = core_config.get_config().model_dump()
     data.pop("bgm", None)
     return data

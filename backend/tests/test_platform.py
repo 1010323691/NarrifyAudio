@@ -760,6 +760,16 @@ def test_durable_worker_by_length_uses_admin_configured_split_target(client: Tes
     try:
         first = _register(client, f"{uuid.uuid4()}@example.com")
         csrf = first["csrf_token"]
+        # 用户侧 PUT 响应是有效合并配置：split 段回管理员配置值（而非工作区强制
+        # 默认），否则前端整店替换（切主题等）会把工作台展示的目标字数刷回 3000。
+        saved = client.put(
+            "/api/config",
+            headers={"X-CSRF-Token": csrf},
+            json={"log": {"level": "DEBUG"}},
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["log"]["level"] == "DEBUG"
+        assert saved.json()["split"]["length_target"] == 2000
         # 6200 chars：单个长段落，310 个 20 字段落句（无章节标记、无空行）。
         body = (("甲" * 19 + "。") * 310).encode("utf-8")
         uploaded = client.post(
