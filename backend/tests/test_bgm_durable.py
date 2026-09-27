@@ -237,6 +237,15 @@ def test_chapters_rows(workspace):
     assert res["mode"] == "random"
 
 
+def test_chapters_legacy_llm_mode_reads_as_random(workspace):
+    # 章节级 "llm" 模式已下线：存量数据持久化的旧 mode 值读取时归一为 random。
+    layout = core_paths.get_or_prepare_layout()
+    data = bgm_engine.load_assignments(layout)
+    data["mode"] = "llm"
+    bgm_engine.save_assignments(layout, data)
+    assert api_bgm.list_chapters()["mode"] == "random"
+
+
 def test_chapters_segment_row_fields(workspace):
     # segment_analysis: null / fresh (stale=False) / stale (03 deleted after the
     # analysis — the fingerprint must mismatch); a fresh cached timeline remains

@@ -111,6 +111,10 @@ def _run_bgm_match(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     cfg = core_config.get_config()
     stems = [str(value) for value in (payload.get("chapters") or [])]
     mode = str(payload.get("mode") or "random")
+    # 升级前提交、升级后执行的在途任务 payload 可能带退役的 "llm" 模式：
+    # 执行前归一为 random，防止落入无标签评分分支静默退化、并回写退役 mode 值。
+    if mode not in ("random", "segment"):
+        mode = "random"
     if mode == "segment":
         return bgm_engine.recompute_segment_timelines(
             get_or_prepare_layout(),
