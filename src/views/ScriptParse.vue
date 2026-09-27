@@ -184,7 +184,7 @@ const CHECK_DEFS: { key: CheckKey; label: string; hint: string }[] = [
   {
     key: 'check_long_paragraphs',
     label: '超长段落检查',
-    hint: '超字数条目先 LLM 语义重切，再机械分段兜底保证字数上界。',
+    hint: '超字数条目先 LLM 语义重切，再机械分段兜底保证字数上界（关闭时机械分段兜底同步关闭，条目可能超过上限）。',
   },
   {
     key: 'spot_check_enabled',

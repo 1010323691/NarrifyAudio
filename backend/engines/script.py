@@ -3106,11 +3106,15 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 handle, llm, generation, all_entries, spot_rate, rng,
             )
         else:
-            # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
+            # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段
+            # 保持 0（与其余 5 个开关的关闭分支同风格——直接置零值，不经函数调用）。
+            # 8 键形状须与 spot_check_speakers 的零值早退保持一致（见其 stats 定义）。
             handle.log("归属抽样已关闭（配置）——本任务跳过该阶段")
-            all_entries, spot_stats = spot_check_speakers(
-                handle, llm, generation, all_entries, 0.0, rng,
-            )
+            spot_stats = {
+                "checked": 0, "fixed": 0, "rate": 0.0,
+                "random_n": 0, "random_errors": 0, "random_rate": None,
+                "risk_n": 0, "risk_errors": 0,
+            }
 
         # 纯标点条目吸收（确定性零 LLM 成本；必须在超长机械分段**之前**——吸收把
         # 「……」拼进邻接 NARRATOR 可能把它推过上限，随后的机械分段兜底切回：
