@@ -859,11 +859,12 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                 entries, alignment, missing = bigger, alignment2, \
                     (alignment2["missing"] or alignment2["extra"])
     else:
-        # 模型自己停笔（finish_reason=stop，漂移 / 内容没放下）：翻倍无效，
+        # 非预算截断（常见为模型自停 finish_reason=stop；服务端透传的其他终态，
+        # 如 content_filter，也进此分支，日志按实际值打印）：翻倍无效，
         # 直接对半切开——少解析一段更可能完整输出。
         handle.log(
             f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
-            f"（如 “{missing[0][:10]}…”）但模型自停（finish_reason=stop）"
+            f"（如 “{missing[0][:10]}…”）且非预算截断（finish_reason={finish_reason}）"
             f" → 直接对半切开各再跑一次（少解析更可能完整）",
             "WARNING",
         )
