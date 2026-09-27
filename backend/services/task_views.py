@@ -6,7 +6,7 @@ retired (5a) — this is the only copy. Frame contract (all frames are
 ``data:`` lines, no ``event:`` field):
 
 - ``{"type": "snapshot_all", "tasks": [...]}``` — replayed once on connect
-- ``{"type": "progress"|"phase"|"log"|"llm_rate"|"llm_chars"|"segments", "task_id": ...}``
+- ``{"type": "progress"|"phase"|"log"|"segments", "task_id": ...}``
 - ``{"type": "status", "status": ..., "task": <snapshot>, "task_id": ...}`` — terminal /
   lifecycle transitions (the snapshot already carries the mapped status), plus a
   one-shot catch-up when a row leaves the live window with a terminal transition
@@ -87,7 +87,7 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
     logs = []
     current = ""
     phase = ""
-    metrics: dict[str, dict] = {}
+    segments: dict = {}
     for event in events:
         payload = event.payload if isinstance(event.payload, dict) else {}
         if event.event_type == "progress":
@@ -102,18 +102,17 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
                     "t": epoch(event.created_at),
                 }
             )
-        elif event.event_type in {"llm_rate", "llm_chars", "segments"}:
-            metrics[event.event_type] = payload
-    for metric_type in ("llm_rate", "llm_chars", "segments"):
-        if metric_type not in metrics:
-            latest_metric = db.scalar(
-                select(TaskEvent)
-                .where(TaskEvent.task_id == task.id, TaskEvent.event_type == metric_type)
-                .order_by(TaskEvent.sequence.desc())
-                .limit(1)
-            )
-            if latest_metric is not None and isinstance(latest_metric.payload, dict):
-                metrics[metric_type] = latest_metric.payload
+        elif event.event_type == "segments":
+            segments = payload
+    if not segments:
+        latest_segments = db.scalar(
+            select(TaskEvent)
+            .where(TaskEvent.task_id == task.id, TaskEvent.event_type == "segments")
+            .order_by(TaskEvent.sequence.desc())
+            .limit(1)
+        )
+        if latest_segments is not None and isinstance(latest_segments.payload, dict):
+            segments = latest_segments.payload
     if not phase:
         last_phase = db.scalar(
             select(TaskEvent)
@@ -148,14 +147,10 @@ def task_snapshot(db: Session, task: DurableTask) -> dict:
         "current": current,
         "logs": logs,
         "llm_stream": "",
-        "llm_cps": float(metrics.get("llm_rate", {}).get("cps") or 0),
-        "llm_cps_10s": float(metrics.get("llm_rate", {}).get("cps10") or 0),
-        "llm_chars": int(metrics.get("llm_chars", {}).get("chars") or 0),
-        "llm_secs": float(metrics.get("llm_chars", {}).get("secs") or 0),
-        "seg_done": int(metrics.get("segments", {}).get("done") or 0),
-        "seg_total": int(metrics.get("segments", {}).get("total") or 0),
-        "seg_chars_done": int(metrics.get("segments", {}).get("chars_done") or 0),
-        "seg_chars_total": int(metrics.get("segments", {}).get("chars_total") or 0),
+        "seg_done": int(segments.get("done") or 0),
+        "seg_total": int(segments.get("total") or 0),
+        "seg_chars_done": int(segments.get("chars_done") or 0),
+        "seg_chars_total": int(segments.get("chars_total") or 0),
         "result": result,
         "error": task.error_message or "",
         "error_code": getattr(task, "error_code", "") or "",
@@ -208,8 +203,8 @@ def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None
             "msg": payload.get("msg") or "",
             "t": epoch(event.created_at),
         }
-    if event.event_type in {"llm_rate", "llm_chars", "segments"}:
-        return {"type": event.event_type, "task_id": task.id, **payload}
+    if event.event_type == "segments":
+        return {"type": "segments", "task_id": task.id, **payload}
     if event.event_type in {"succeeded", "failed", "cancelled"}:
         status = legacy_status("cancelled" if event.event_type == "cancelled" else event.event_type)
         return {"type": "status", "status": status, "task_id": task.id, "task": task_snapshot(db, task)}

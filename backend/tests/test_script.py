@@ -345,21 +345,14 @@ def _sse_frame(obj) -> bytes:
 
 
 class _Handle:
-    """Minimal TaskHandle: records llm_chunk / llm_rate calls; ``cancelled`` is fixed per test."""
+    """Minimal TaskHandle: records llm_chunk calls; ``cancelled`` is fixed per test."""
 
     def __init__(self, cancelled: bool = False):
         self.cancelled = cancelled
         self.chunks: list = []
-        self.rates: list = []
 
     def llm_chunk(self, text: str) -> None:
         self.chunks.append(text)
-
-    def llm_rate(self, chars: int, cps: float) -> None:
-        self.rates.append(cps)
-
-    def llm_chars(self, chars: int, secs: float) -> None:
-        pass  # display telemetry only — generate_file reports per-chunk throughput here
 
     def log(self, *a, **k):
         pass
