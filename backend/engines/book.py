@@ -1691,6 +1691,217 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
     return out
 
 
+# ======================= Length-based splitting (no-chapter fallback) ======
+# When no legitimate chapter structure is detected, split the whole book into
+# evenly sized segments near a target length: segment count n =
+# round(total_chars / target), so every segment is exactly total_chars / n
+# (6200 chars at target 3000 -> 3100 + 3100, never 3000 + 3000 + 200).
+# Cut-point tiers, best first — a paragraph and a sentence are NEVER cut:
+#   1. paragraph boundaries (``\\n\\n``);
+#   2. sentence boundaries (right after 。！？…) — tried second within the
+#      snap window, so a cut whose window holds no paragraph break (e.g. inside
+#      one giant paragraph) still lands on a sentence end instead of degrading;
+#   3. degradation: not enough boundaries of either kind -> fewer segments
+#      (they grow, stay equal), down to a single whole-book segment.
+
+DEFAULT_LENGTH_TARGET_CHARS = 3_000
+
+# Characters that END a sentence: a cut right after one of these never splits
+# a sentence. Closing quote/paren forms are deliberately NOT included —
+# unbalanced quotes across a boundary are cosmetic; a cut after ” without
+# sentence punctuation inside could split a sentence.
+_SENTENCE_END_CHARS = "。！？…"
+
+
+def _sentence_end_boundaries(text: str, nl: list[int], a: int, b: int) -> list[int]:
+    """Cut points p in (a, b) right after a sentence-ending character (。！？…).
+    The fallback tier for cuts whose snap window holds no paragraph break (a
+    whole book with no blank lines, or one giant paragraph after a clustered
+    short-paragraph prefix) — a paragraph is never cut mid-sentence."""
+    out: list[int] = []
+    # Line-scan: formatted text is one line per paragraph; only lines inside
+    # [a, b) can host a cut point.
+    line_start = a
+    for line_end in nl:
+        if line_end >= b:
+            break
+        line = text[line_start:line_end]
+        for i, ch in enumerate(line):
+            if ch in _SENTENCE_END_CHARS:
+                p = line_start + i + 1
+                if a < p < b and range_char_count(nl, a, p) > 0 and range_char_count(nl, p, b) > 0:
+                    out.append(p)
+        line_start = line_end + 1
+    if line_start < b:
+        line = text[line_start:b]
+        for i, ch in enumerate(line):
+            if ch in _SENTENCE_END_CHARS:
+                p = line_start + i + 1
+                if a < p < b and range_char_count(nl, a, p) > 0 and range_char_count(nl, p, b) > 0:
+                    out.append(p)
+    return out
+
+
+def split_by_length(text: str, target_chars: Optional[int] = None) -> dict:
+    """Split chapter-less text into near-equal segments of about ``target_chars``
+    (default :data:`DEFAULT_LENGTH_TARGET_CHARS`), cut only at paragraph or
+    sentence boundaries — paragraph breaks are preferred inside the snap
+    window; where a window holds none (e.g. one giant paragraph) the cut
+    falls back to sentence ends. A sentence is never cut.
+
+    Returns ``{status, segments, target, segment_count, warnings, error}``.
+    ``segments`` are ``{seq, start, end, chars}`` tiling ``[0, len(text))``
+    exactly — concatenating ``text[s:e]`` over the segments reproduces the
+    original exactly. ``status`` is ``"error"`` only when the input is empty
+    (an empty book has nothing to write); every other shape degrades safely
+    instead of cutting a paragraph or a sentence."""
+    try:
+        target = int(target_chars) if target_chars is not None else DEFAULT_LENGTH_TARGET_CHARS
+    except (TypeError, ValueError):
+        target = DEFAULT_LENGTH_TARGET_CHARS
+    if target <= 0:
+        target = DEFAULT_LENGTH_TARGET_CHARS
+    nl = build_newline_positions(text)
+
+    def char_count(a: int, b: int) -> int:
+        return range_char_count(nl, a, b)
+
+    total = char_count(0, len(text))
+    if total <= 0:
+        return {
+            "status": "error",
+            "error": "文本为空，无法按字数拆分",
+            "segments": [],
+            "target": target,
+            "segment_count": 0,
+            "warnings": [],
+        }
+
+    warnings: list[dict] = []
+    # Even division: round(total / target) segments, each exactly total / n —
+    # a floor division would leave a short tail segment (3000 + 200).
+    wanted = max(1, int(total / target + 0.5))
+    paragraph_bounds = [
+        b for b in _paragraph_boundaries(text, 0, len(text)) if char_count(b, len(text)) > 0
+    ]
+    # The available pool is ALWAYS the union of both tiers: sentence ends
+    # become relevant at any cut whose snap window holds no paragraph break —
+    # e.g. a short-paragraph prefix followed by one giant paragraph, where
+    # paragraph breaks are "enough" globally but clustered, so later cuts
+    # would otherwise fall outside every window and degrade to whole-book
+    # even though the giant paragraph is full of sentence ends.
+    all_bounds = sorted(
+        set(paragraph_bounds) | set(_sentence_end_boundaries(text, nl, 0, len(text)))
+    )
+
+    # The pick loop below consumes one boundary strictly to the right of the
+    # previous cut per segment, so count-1 <= len(all_bounds) guarantees every
+    # cut lands on a real boundary — a paragraph or a sentence is never cut.
+    safe_count = min(wanted, len(all_bounds) + 1)
+    if safe_count < wanted:
+        if safe_count > 1:
+            warnings.append(
+                {
+                    "type": "length_split_reduced",
+                    "detail": (
+                        f"段落与句子边界不足，已从 {wanted} 册降为 {safe_count} 册"
+                        "（不切段落、不截断句子），每册字数相应变大"
+                    ),
+                }
+            )
+        else:
+            warnings.append(
+                {
+                    "type": "length_split_degraded",
+                    "detail": "段落与句子边界不足，已按整本单册输出（不切段落、不截断句子）",
+                }
+            )
+    count = safe_count
+    per = total / count
+
+    if count == 1:
+        cuts: list[int] = []
+    else:
+        span = len(text) / count
+        cuts = []
+        prev = 0
+        for m in range(1, count):
+            t = _index_at_char_count(text, nl, 0, int(round(per * m)))
+            t = max(t, prev + 1)
+            lo = int(t - INFER_SNAP_TOLERANCE * span)
+            hi = int(t + INFER_SNAP_TOLERANCE * span)
+
+            def pick_nearest(pool: list[int], center: int, in_window: bool) -> Optional[int]:
+                win = [b for b in pool if prev < b < len(text) and (lo <= b <= hi if in_window else True)]
+                if not win:
+                    return None
+                return min(win, key=lambda b: (abs(b - center), b))
+
+            # Tier 1: paragraph breaks (only when the text actually has any —
+            # a chapter-less book is often one paragraph, then every cut comes
+            # from tier 2); tier 2: sentence ends. Within the tolerance window
+            # each tier is tried first; outside it, paragraphs stay preferred.
+            pick = pick_nearest(paragraph_bounds, t, True) if paragraph_bounds else None
+            if pick is None:
+                pick = pick_nearest(all_bounds, t, True)
+            if pick is None:
+                pick = pick_nearest(paragraph_bounds, t, False) if paragraph_bounds else None
+            if pick is None:
+                pick = pick_nearest(all_bounds, t, False)
+            if pick is None:
+                # Cannot happen when count <= len(all_bounds) + 1; guard so a
+                # degenerate input degrades to whole-book instead of crashing.
+                return {
+                    "status": "ok",
+                    "segments": [{"seq": 1, "start": 0, "end": len(text), "chars": total}],
+                    "target": target,
+                    "segment_count": 1,
+                    "warnings": warnings
+                    + [
+                        {
+                            "type": "length_split_degraded",
+                            "detail": "段落与句子边界不足，已按整本单册输出（不切段落、不截断句子）",
+                        }
+                    ],
+                    "error": None,
+                }
+            cuts.append(pick)
+            prev = pick
+
+    points = [0, *cuts, len(text)]
+    segments = [
+        {
+            "seq": i + 1,
+            "start": points[i],
+            "end": points[i + 1],
+            "chars": char_count(points[i], points[i + 1]),
+        }
+        for i in range(len(points) - 1)
+    ]
+    if not (
+        points[0] == 0
+        and points[-1] == len(text)
+        and all(a < b for a, b in zip(points, points[1:]))
+        and "".join(text[s:e] for s, e in zip(points, points[1:])) == text
+    ):
+        return {
+            "status": "error",
+            "error": "按字数拆分结构自检未通过（边界/拼接异常），已放弃输出。",
+            "segments": [],
+            "target": target,
+            "segment_count": 0,
+            "warnings": warnings,
+        }
+    return {
+        "status": "ok",
+        "segments": segments,
+        "target": target,
+        "segment_count": len(segments),
+        "warnings": warnings,
+        "error": None,
+    }
+
+
 def is_generated_split_output_name(name: str) -> bool:
     """Return whether a top-level split output name follows a generated convention."""
     return (
