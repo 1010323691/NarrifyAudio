@@ -8,7 +8,9 @@ retired (5a) — this is the only copy. Frame contract (all frames are
 - ``{"type": "snapshot_all", "tasks": [...]}``` — replayed once on connect
 - ``{"type": "progress"|"phase"|"log"|"llm_rate"|"llm_chars"|"segments", "task_id": ...}``
 - ``{"type": "status", "status": ..., "task": <snapshot>, "task_id": ...}`` — terminal /
-  lifecycle transitions (the snapshot already carries the mapped status)
+  lifecycle transitions (the snapshot already carries the mapped status), plus a
+  one-shot catch-up when a row leaves the live window with a terminal transition
+  the client never saw (a batch finishing past the newest-200 window)
 - ``{"type": "superseded", "task_id": ...}`` — a terminal row left the visible
   view because a newer run of the same entry superseded it: the client drops
   the old terminal row (the list shows the new run, not 完成/失败 + 进行中
@@ -32,6 +34,7 @@ from ..platform.models import Task as DurableTask
 from ..platform.models import TaskEvent
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_identity import superseded_ids_hidden_by, superseded_task_ids
+from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
 from .task_operations import task_module
 
 
@@ -227,14 +230,19 @@ def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None
     return None
 
 
-def _new_frames(rows_fn, seen: dict[str, int]) -> list[dict]:
+def _new_frames(rows_fn, seen: dict[str, int], delivered: dict[str, str]) -> list[dict]:
     """All not-yet-seen frames for the rows ``rows_fn`` returns, in row order.
     Rows that disappeared from the view are pruned from ``seen``; the ones
     hidden because a newer run of the same entry superseded them also get a
     ``superseded`` frame, so a long-lived client drops the old terminal row
     instead of keeping it next to the new run. Rows that enter the view fresh
     name their hidden predecessors the same way — including predecessors the
-    window never tracked (the client loaded them from /history)."""
+    window never tracked (the client loaded them from /history). ``delivered``
+    tracks the last status the client was told per row; a pruned row whose
+    terminal transition still differs from it gets ONE catch-up ``status``
+    frame — its completion can land in the same poll tick it leaves the
+    newest-200 window (a batch finishing past the window), and without the
+    frame the client keeps showing it as running forever."""
     emitted: list[dict] = []
     with SessionLocal() as db:
         rows = rows_fn(db)
@@ -251,10 +259,25 @@ def _new_frames(rows_fn, seen: dict[str, int]) -> list[dict]:
                 seen[task.id] = max(seen.get(task.id, 0), event.sequence)
                 frame = event_frame(db, task, event)
                 if frame is not None:
+                    # Only frames embedding a full snapshot tell the client a
+                    # status — remember that one per row.
+                    if "task" in frame:
+                        delivered[task.id] = frame["task"]["status"]
                     emitted.append(frame)
         pruned = [task_id for task_id in seen if task_id not in current_ids]
         for task_id in pruned:
+            row = db.get(DurableTask, task_id)
+            if row is not None and row.status in TERMINAL_TASK_STATUSES:
+                status = legacy_status(row.status)
+                if delivered.get(task_id) != status:
+                    emitted.append({
+                        "type": "status",
+                        "status": status,
+                        "task_id": task_id,
+                        "task": task_snapshot(db, row),
+                    })
             seen.pop(task_id, None)
+            delivered.pop(task_id, None)
         superseded: set[str] = set()
         if pruned:
             superseded.update(superseded_task_ids(db, pruned))
@@ -265,20 +288,24 @@ def _new_frames(rows_fn, seen: dict[str, int]) -> list[dict]:
     return emitted
 
 
-def snapshot_payload(rows_fn) -> tuple[list[dict], dict[str, int], set[str]]:
+def snapshot_payload(rows_fn) -> tuple[list[dict], dict[str, int], set[str], dict[str, str]]:
     """Initial replay on one self-opened session: the ``snapshot_all`` task
-    snapshots, the per-task seen-sequence map the poll ticks resume from, and
+    snapshots, the per-task seen-sequence map the poll ticks resume from,
     the rows the replayed rows supersede that no stream ever tracked (client
-    history beyond the newest-200 replay) — named right after the replay so
-    a reconnect drops them from the merged list too."""
+    history beyond the newest-200 replay), and the per-task status the replay
+    just told the client (the prune catch-up compares against it) — the
+    superseded rows are named right after the replay so a reconnect drops
+    them from the merged list too."""
     seen: dict[str, int] = {}
+    delivered: dict[str, str] = {}
     with SessionLocal() as db:
         rows = rows_fn(db)
         for task in rows:
             events = task_events(db, task.id)
             seen[task.id] = events[-1].sequence if events else 0
+            delivered[task.id] = legacy_status(task.status)
         hidden = superseded_ids_hidden_by(db, [task.id for task in rows]) if rows else set()
-        return [task_snapshot(db, t) for t in rows], seen, hidden
+        return [task_snapshot(db, t) for t in rows], seen, hidden, delivered
 
 
 def session_still_valid(auth_token: str, user_id: str) -> bool:
@@ -300,7 +327,7 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
     cannot freeze the event loop for every other connection on it.
     """
     next_auth_check = 0.0
-    snapshots, seen, hidden = await anyio.to_thread.run_sync(snapshot_payload, rows_fn)
+    snapshots, seen, hidden, delivered = await anyio.to_thread.run_sync(snapshot_payload, rows_fn)
     yield sse({"type": "snapshot_all", "tasks": snapshots})
     for task_id in sorted(hidden):
         yield sse({"type": "superseded", "task_id": task_id})
@@ -312,7 +339,7 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
             if not await anyio.to_thread.run_sync(session_still_valid, auth_token, user_id):
                 return
             next_auth_check = now + 5.0
-        frames = await anyio.to_thread.run_sync(_new_frames, rows_fn, seen)
+        frames = await anyio.to_thread.run_sync(_new_frames, rows_fn, seen, delivered)
         for frame in frames:
             yield sse(frame)
         if not frames:

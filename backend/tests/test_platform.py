@@ -2200,7 +2200,7 @@ def test_task_stream_poll_units_run_in_worker_threads(client: TestClient, monkey
     windows: list[tuple[int, int, int]] = []
     frames: list[str] = []
 
-    def slow_frames(rows_fn, seen):
+    def slow_frames(rows_fn, seen, delivered):
         state["submitted"] += 1
         before = heartbeats
         ident = threading.get_ident()
