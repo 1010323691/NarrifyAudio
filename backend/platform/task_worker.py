@@ -23,6 +23,7 @@ from ..core.paths import WORKSPACE_DIRS
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.task_control import TaskCancelled
 from ..engines.book import (
+    DEFAULT_LENGTH_TARGET_CHARS,
     EXPECTED_CHAPTER_FORMAT,
     analyze_text,
     base_name,
@@ -34,6 +35,7 @@ from ..engines.book import (
     is_generated_split_output_name,
     chapter_content,
     smart_repair,
+    split_by_length,
 )
 from ..engines.text import format_text
 from ..engines import script as script_engine
@@ -399,7 +401,8 @@ def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[st
     if not chapters:
         result["error"] = (
             f"未检测到章节（系统识别的格式：{EXPECTED_CHAPTER_FORMAT}）。"
-            "可「不处理，按整本继续」（整本输出为单个文件），或重新上传原文。"
+            "可「按字数分册」（约 3000 字/册、字数平均、不切段落、不截断句子）"
+            "、「不处理，按整本继续」（整本输出为单个文件），或重新上传原文。"
         )
     return result
 
@@ -713,6 +716,18 @@ def _execute_book_analyze(claim: TaskClaim) -> TaskOutcome:
     )
 
 
+def _length_target_from_payload(payload: dict[str, Any]) -> int:
+    """``length_target`` for the by_length branch (invalid/absent -> default)."""
+    raw = payload.get("length_target")
+    if isinstance(raw, bool):
+        return DEFAULT_LENGTH_TARGET_CHARS
+    try:
+        target = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LENGTH_TARGET_CHARS
+    return target if target > 0 else DEFAULT_LENGTH_TARGET_CHARS
+
+
 def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
     item, source_text, _encoding, _source_path = _prepare_text_claim(claim)
     raw = analyze_text(source_text)
@@ -723,12 +738,57 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
     repair_status: str | None = None
     repair_report: dict[str, Any] | None = None
     baseline_chars: int | None = None
+    length_target: int | None = None
     if bool(claim.payload.get("whole_book")):
         name = make_whole_book_filename(base)
         outputs.append((name, "text/plain; charset=utf-8", source_text.encode("utf-8")))
+    elif bool(claim.payload.get("by_length")):
+        # 零章节兜底：未识别出章节结构时按目标字数平均分册，切点只落
+        # 段落/句子边界（不切段落、不截断句子）。
+        length_target = _length_target_from_payload(claim.payload)
+        result = split_by_length(source_text, length_target)
+        if result["status"] == "error":
+            raise TaskExecutionError("invalid_structure", result.get("error") or "按字数拆分失败")
+        segments = result["segments"]
+        names = make_smart_filenames([{"final_num": s["seq"], "title": ""} for s in segments])
+        final_chapters = [
+            {
+                "seq": s["seq"],
+                "num": s["seq"],
+                "numStr": str(s["seq"]),
+                "title": "",
+                "chars": s["chars"],
+                "orig_num": None,
+                "orig_numStr": "",
+                "final_num": s["seq"],
+                "actions": ["length_split"],
+                "confidence": "high",
+            }
+            for s in segments
+        ]
+        outputs.extend(
+            (name, "text/plain; charset=utf-8", source_text[s["start"]:s["end"]].encode("utf-8"))
+            for name, s in zip(names, segments)
+        )
+        repair_report = {
+            "actions": [
+                {
+                    "seq": s["seq"],
+                    "orig_num": None,
+                    "orig_numStr": "",
+                    "orig_title": "",
+                    "final_num": s["seq"],
+                    "actions": ["length_split"],
+                    "confidence": "high",
+                }
+                for s in segments
+            ],
+            "warnings": result["warnings"],
+            "removed": [],
+        }
     else:
         if not bool(claim.payload.get("smart")):
-            raise TaskExecutionError("invalid_payload", "分册任务必须启用 smart 或 whole_book")
+            raise TaskExecutionError("invalid_payload", "分册任务必须启用 smart、by_length 或 whole_book")
         if not chapters:
             raise TaskExecutionError("no_chapters", "未检测到章节，无法分册")
         repair = smart_repair(source_text, chapters)
@@ -777,6 +837,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
             "report": repair_report or {"actions": [], "warnings": [], "removed": []},
             "baseline_chars": baseline_chars,
             "original_count": len(chapters),
+            "length_target": length_target,
             "expected_format": EXPECTED_CHAPTER_FORMAT,
             "files": [{"name": name, "chars": len(data.decode("utf-8").replace("\n", "").replace("\r", ""))} for name, _, data in outputs],
         },

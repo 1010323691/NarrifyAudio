@@ -901,3 +901,141 @@ def test_smart_round_trip_and_tiling_invariants():
             if not any((s, e) == (c["start"], c["end"]) for c in res["chapters"]):
                 excised = excised[:s] + excised[e:]
         assert excised == "".join(text[c["start"]: c["end"]] for c in res["chapters"])
+
+
+# --------------------------------------------------------------------------- #
+# Length-based splitting (chapter-less fallback: split_by_length)
+# --------------------------------------------------------------------------- #
+
+def test_length_split_even_division_uses_paragraph_bounds():
+    # 31 paragraphs x 200 chars = 6200 chars. Target 3000 -> wanted =
+    # round(6200/3000) = 2 segments near 3100 each — never a short 200-char tail.
+    text = "\n\n".join("甲" * 200 for _ in range(31))
+    res = B.split_by_length(text, target_chars=3000)
+    assert res["status"] == "ok"
+    assert res["target"] == 3000
+    assert res["segment_count"] == 2
+    segs = res["segments"]
+    assert segs[0]["start"] == 0
+    assert segs[-1]["end"] == len(text)
+    assert all(a["end"] == b["start"] for a, b in zip(segs, segs[1:]))
+    assert sum(s["chars"] for s in segs) == 6200
+    # no short tail: both segments stay far above half the target
+    assert all(s["chars"] >= 2800 for s in segs)
+    # cuts land on paragraph gaps (this text has plenty of them)
+    for s in segs[1:]:
+        assert text[s["start"]: s["start"] + 2] == "\n\n"
+    # lossless tiling
+    assert "".join(text[s["start"]: s["end"]] for s in segs) == text
+    assert res["warnings"] == []
+
+
+def test_length_split_even_division_5800():
+    # 29 paragraphs x 200 = 5800 -> wanted = round(5800/3000) = 2 (~2900 each).
+    text = "\n\n".join("甲" * 200 for _ in range(29))
+    res = B.split_by_length(text, target_chars=3000)
+    assert res["status"] == "ok"
+    assert res["segment_count"] == 2
+    chars = [s["chars"] for s in res["segments"]]
+    assert sum(chars) == 5800
+    assert all(c >= 2600 for c in chars)
+
+
+def test_length_split_single_paragraph_splits_at_sentence_ends():
+    # One giant paragraph, no blank lines: 310 sentences of 20 chars = 6200.
+    # The paragraph tier is empty, so cuts must fall on sentence ends — and
+    # never mid-sentence: each cut is right after 。.
+    text = ("甲" * 19 + "。") * 310
+    res = B.split_by_length(text, target_chars=3000)
+    assert res["status"] == "ok"
+    assert res["segment_count"] == 2
+    assert [s["chars"] for s in res["segments"]] == [3100, 3100]
+    for s in res["segments"]:
+        if s["end"] < len(text):
+            assert text[s["end"] - 1] in "。！？…"
+        if s["start"] > 0:
+            assert text[s["start"] - 1] in "。！？…"
+    assert "".join(text[s["start"]: s["end"]] for s in res["segments"]) == text
+
+
+def test_length_split_falls_back_to_sentences_only_where_paragraphs_lack():
+    # Two paragraphs (1 internal gap); wanted = round(5000/1000) = 5 needs 4
+    # cuts, so 3 come from sentence ends inside the long paragraphs.
+    p1 = ("甲" * 99 + "。") * 20  # 2000 chars, single line
+    p2 = ("乙" * 99 + "。") * 30  # 3000 chars, single line
+    text = p1 + "\n\n" + p2
+    res = B.split_by_length(text, target_chars=1000)
+    assert res["status"] == "ok"
+    assert res["segment_count"] == 5
+    segs = res["segments"]
+    assert sum(s["chars"] for s in segs) == 5000
+    # every cut is on a legal boundary: a paragraph gap or right after a
+    # sentence-ending character; no segment is cut mid-sentence.
+    for s in segs[1:]:
+        at_gap = text[s["start"]: s["start"] + 2] == "\n\n"
+        after_sentence = text[s["start"] - 1] in "。！？…"
+        assert at_gap or after_sentence, f"cut at {s['start']} is not on a boundary"
+    assert "".join(text[s["start"]: s["end"]] for s in segs) == text
+    # near-even: no segment strays far from 5000/5
+    assert all(abs(s["chars"] - 1000) <= 200 for s in segs)
+
+
+def test_length_split_reduces_count_when_boundaries_run_short():
+    # 4 paragraphs x 1200 filler chars (no punctuation anywhere): only 3 legal
+    # cut points exist, so wanted = round(4800/1000) = 5 must degrade to 4.
+    text = "\n\n".join("甲" * 1200 for _ in range(4))
+    res = B.split_by_length(text, target_chars=1000)
+    assert res["status"] == "ok"
+    assert res["segment_count"] == 4
+    assert all(s["chars"] == 1200 for s in res["segments"])
+    assert [w["type"] for w in res["warnings"]] == ["length_split_reduced"]
+    assert "5 册降为 4 册" in res["warnings"][0]["detail"]
+
+
+def test_length_split_without_any_boundary_degrades_to_whole_book():
+    text = "甲" * 6200  # one paragraph, no sentence punctuation at all
+    res = B.split_by_length(text, target_chars=3000)
+    assert res["status"] == "ok"
+    assert res["segment_count"] == 1
+    assert res["segments"] == [{"seq": 1, "start": 0, "end": len(text), "chars": 6200}]
+    assert [w["type"] for w in res["warnings"]] == ["length_split_degraded"]
+
+
+def test_length_split_small_text_is_single_segment():
+    text = "这是一本很短的小说，只有几百字而已。"
+    res = B.split_by_length(text)
+    assert res["status"] == "ok"
+    assert res["target"] == 3000  # default target
+    assert res["segment_count"] == 1
+    assert res["warnings"] == []
+    assert res["segments"][0]["end"] == len(text)
+
+
+def test_length_split_invalid_target_falls_back_to_default():
+    text = "甲" * 300
+    for bad in (None, 0, -5, "abc"):
+        res = B.split_by_length(text, bad)
+        assert res["target"] == B.DEFAULT_LENGTH_TARGET_CHARS == 3000
+        assert res["status"] == "ok"
+
+
+def test_length_split_empty_text_errors():
+    for text in ("", "\n\n", "\r\n\r\n"):
+        res = B.split_by_length(text)
+        assert res["status"] == "error"
+        assert res["error"]
+        assert res["segments"] == []
+        assert res["segment_count"] == 0
+
+
+def test_length_split_segment_naming_uses_smart_convention():
+    # The worker names by-length segments through make_smart_filenames with
+    # empty titles: 第 001 章.txt ... — and the names must pass the generated
+    # split-output check so downstream stages accept them.
+    res = B.split_by_length("\n\n".join("丁" * 99 + "。" for _ in range(100)), target_chars=500)
+    assert res["status"] == "ok"
+    names = B.make_smart_filenames([{"final_num": s["seq"], "title": ""} for s in res["segments"]])
+    assert names[0] == "第 001 章.txt"
+    assert names[1] == "第 002 章.txt"
+    assert all(B.is_generated_split_output_name(n) for n in names)
+    assert len(names) == res["segment_count"]

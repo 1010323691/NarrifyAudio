@@ -70,8 +70,12 @@ const smartOriginalCount = ref<number | null>(null)
 const error = ref('')
 
 const zeroChapters = computed(() => !!analysis.value && analysis.value.chapter_count === 0)
+// 记录 splitResult 由哪条路径产出（零章节提示条的切换依据）。
+const splitVia = ref<'whole' | 'length' | 'smart' | null>(null)
 // 零章节整本分册已完成（提示条从「选择」切换为「已按整本处理」注记）。
-const wholeBookDone = computed(() => zeroChapters.value && !!splitResult.value)
+const wholeBookDone = computed(() => zeroChapters.value && !!splitResult.value && splitVia.value === 'whole')
+// 零章节按字数分册已完成。
+const lengthSplitDone = computed(() => zeroChapters.value && !!splitResult.value && splitVia.value === 'length')
 const showSeqWarning = computed(
   () => !!analysis.value && !zeroChapters.value && analysis.value.sequence.hasIssues && !seqWarningDismissed.value,
 )
@@ -112,6 +116,7 @@ function resetDownstream() {
   analysis.value = null
   splitResult.value = null
   smartResult.value = null
+  splitVia.value = null
   error.value = ''
   seqWarningDismissed.value = false
   smartOriginalCount.value = null
@@ -254,6 +259,7 @@ async function split() {
   try {
     const result = await runSplitTask({ smart: true })
     const r = toBookSplitResult(result)
+    splitVia.value = 'smart'
     splitResult.value = r
     if (r.chapters?.length) applyFinalAnalysis(r.chapters, r.files.map((f) => f.name))
     toast({ title: '分册完成', variant: 'success', description: `已按智能识别结果生成 ${r.file_count} 个分册文件` })
@@ -273,12 +279,34 @@ async function runWholeBook() {
   error.value = ''
   try {
     const r = toBookSplitResult(await runSplitTask({ whole_book: true }))
+    splitVia.value = 'whole'
     splitResult.value = r
     toast({ title: '整本分册完成', variant: 'success', description: `已生成整本文件 ${r.files[0]?.name ?? ''}` })
   } catch (e: any) {
     if (e?.name === 'AbortError') return
     error.value = e?.message || '整本分册失败'
     toast({ title: '整本分册失败', variant: 'destructive', description: error.value })
+  } finally {
+    busySplit.value = false
+  }
+}
+
+// 零章节默认路径「按字数分册」：未识别出章节结构时按约 3000 字/册平均拆分
+//（6200 字 → 3100+3100，不出现短尾章），切点只落段落/句子边界，不切段落、
+// 不截断句子；边界不足时自动降册数。
+async function runByLength() {
+  if (!formatResult.value || !projectSet.value || busySplit.value) return
+  busySplit.value = true
+  error.value = ''
+  try {
+    const r = toBookSplitResult(await runSplitTask({ by_length: true }))
+    splitVia.value = 'length'
+    splitResult.value = r
+    toast({ title: '按字数分册完成', variant: 'success', description: `已平均拆分为 ${r.file_count} 册（约 3000 字/册，不切段落、不截断句子）` })
+  } catch (e: any) {
+    if (e?.name === 'AbortError') return
+    error.value = e?.message || '按字数分册失败'
+    toast({ title: '按字数分册失败', variant: 'destructive', description: error.value })
   } finally {
     busySplit.value = false
   }
@@ -324,11 +352,16 @@ async function runSmart() {
 
 async function formatAndRecognize() {
   await run()
-  if (!formatResult.value || !analysis.value || zeroChapters.value) return
+  if (!formatResult.value || !analysis.value) return
+  if (zeroChapters.value) {
+    // 未识别出章节结构：默认走「按字数分册」（约 3000 字/册、字数平均）。
+    await runByLength()
+    return
+  }
   await runSmart()
 }
 
-async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) {
+async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean; by_length?: boolean }) {
   if (!formatResult.value?.file_id || !formatResult.value.project_id) {
     throw new Error('排版产物未建立项目归属，无法提交分册任务。')
   }
@@ -339,7 +372,7 @@ async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean }) 
       input_file_id: formatResult.value.file_id,
       ...payload,
     },
-    idempotency_key: `book-split:${formatResult.value.file_id}:${payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
+    idempotency_key: `book-split:${formatResult.value.file_id}:${payload.by_length ? 'length' : payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
   })
   const task = await waitForTask.wait(submitted.id)
   if (task.status !== 'succeeded' || !task.result) {
@@ -393,6 +426,7 @@ const ACTION_LABELS: Record<string, string> = {
   renumbered: '重编号',
   gap_absorbed: '吸收跳号',
   kept: '保留',
+  length_split: '按字数拆分',
 }
 const CONFIDENCE_LABELS: Record<SmartConfidence, string> = { high: '高', medium: '中', low: '低' }
 function actionLabels(actions: string[]) {
@@ -465,17 +499,26 @@ function download(p: string) {
 
     <Alert v-if="error" variant="destructive">{{ error }}</Alert>
 
-    <!-- 零章节：整本继续 / 重新上传 二选一（整本分册完成后切换为注记） -->
-    <Alert v-else-if="zeroChapters && !wholeBookDone" variant="warning">
+    <!-- 零章节：按字数分册（默认）/ 整本继续 / 重新上传（完成任一分册后切换为注记） -->
+    <Alert v-else-if="zeroChapters && !wholeBookDone && !lengthSplitDone" variant="warning">
       <AlertTriangle class="h-4 w-4 shrink-0" />
       <div class="space-y-2">
         <p>{{ analysis?.error }}</p>
         <div class="flex gap-2">
-          <Button size="sm" :disabled="busySplit || !formatResult || !projectSet" @click="runWholeBook">
+          <Button size="sm" :disabled="busySplit || !formatResult || !projectSet" @click="runByLength">
+            {{ busySplit ? '分册中…' : '按字数分册（约 3000 字/册）' }}
+          </Button>
+          <Button size="sm" variant="outline" :disabled="busySplit || !formatResult || !projectSet" @click="runWholeBook">
             不处理，按整本继续
           </Button>
           <Button size="sm" variant="outline" @click="resetPage">重新上传原文</Button>
         </div>
+      </div>
+    </Alert>
+    <Alert v-else-if="lengthSplitDone" variant="info">
+      <div class="flex flex-wrap items-center gap-2">
+        <span>已按字数分册完成：共 {{ splitResult?.file_count }} 册（约 3000 字/册、字数平均、未切段落、未截断句子）。</span>
+        <Button size="sm" variant="outline" :disabled="busySplit" @click="runWholeBook">改按整本处理</Button>
       </div>
     </Alert>
     <Alert v-else-if="wholeBookDone" variant="info">
@@ -600,7 +643,7 @@ function download(p: string) {
       </CardHeader>
       <CardContent>
         <p class="text-sm text-muted-foreground">
-          未检测到任何章节（系统识别的格式：{{ analysis.expected_format }}）。可「不处理，按整本继续」或重新上传原文。
+          未检测到任何章节（系统识别的格式：{{ analysis.expected_format }}）。可「按字数分册」（约 3000 字/册、字数平均、不切段落、不截断句子），或「不处理，按整本继续」、重新上传原文。
         </p>
       </CardContent>
     </Card>

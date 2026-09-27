@@ -689,6 +689,49 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     assert split_listing.json()["items"]
 
 
+def test_durable_worker_splits_chapterless_text_by_length(client: TestClient):
+    # 零章节兜底：未识别出章节结构的文本用 by_length 分册（约 3000 字/册、
+    # 字数平均、只切段落/句子边界）。
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    # Chapter-less text: one giant paragraph of 310 sentences x 20 chars
+    # (6200 chars total) — no chapter markers, no blank-line gaps.
+    body = (("甲" * 19 + "。") * 310).encode("utf-8")
+    uploaded = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("novel.txt", body, "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    source = uploaded.json()
+    submitted = client.post(
+        "/api/v1/tasks",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "project_id": source["project_id"],
+            "task_type": "book.split",
+            "payload": {"input_file_id": source["file_id"], "by_length": True},
+            "idempotency_key": f"book-split-length-{uuid.uuid4()}",
+        },
+    )
+    assert submitted.status_code == 201, submitted.text
+    task_id = submitted.json()["id"]
+    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-length-split-worker") == "succeeded"
+    task = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert task["status"] == "succeeded"
+    result = task["result"]
+    assert result["engine"] == "book.split"
+    assert result["length_target"] == 3000  # default target
+    assert result["file_count"] == 2
+    assert [c["actions"] for c in result["chapters"]] == [["length_split"], ["length_split"]]
+    chars = [c["chars"] for c in result["chapters"]]
+    assert sum(chars) == 6200
+    assert all(c >= 2800 for c in chars)  # even division, no short tail
+    project_files = client.get(f"/api/v1/projects/{source['project_id']}/files").json()
+    split_files = [item for item in project_files if item["module"] == "02_split_text"]
+    assert len(split_files) == 2
+
+
 def test_legacy_audio_packaging_route_uses_durable_worker(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
