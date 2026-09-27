@@ -536,13 +536,17 @@ def check_chunk_alignment(chunk: str, entries) -> dict:
         if isinstance(e, dict) and isinstance(e.get("text"), str)
     ))
     if not source:
-        extra = [output] if len(output) > _ALIGN_FAIL_MIN else []
+        # 无源文本：输出侧同样按长度判档（与主路径一致——小段忽略、中段可疑、
+        # 大段才算「原文不存在的新增」），避免退化情形下 >100 字外的输出静默通过。
+        extra: list[str] = []
+        suspicious: list[str] = []
+        _classify_alignment_gap(output, extra, suspicious)
         return {
             "ok": not extra,
             "coverage": 1.0 if not output else 0.0,
             "missing": [],
             "extra": extra,
-            "suspicious": [],
+            "suspicious": suspicious,
             "source": source,
             "output": output,
         }
@@ -3060,7 +3064,8 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         # 需要被抽样审计；同一说话人的长篇独白「拆分」过不了重判忠实性门，
         # 超长会留到本阶段后半的机械分段兜底——分工是特性：LLM 管语义边界，
         # 机械保证长度硬上界）：超过 max_paragraph_chars 字的条目带上下文窗口
-        # 重跑解析 LLM，严格多数胜出者整体替换条目（4 次无共识保留原样，从不猜）。
+        # 重跑解析 LLM（每条仅 1 次，single_call 模式——结果没变不再多跑），
+        # 过忠实性门者整体替换条目，未过门保留原样交机械分段（从不猜）。
         max_para = int(generation.max_paragraph_chars or 200)
         if generation.check_long_paragraphs:
             all_entries, long_checked, long_fixed = long_paragraph_resplit(

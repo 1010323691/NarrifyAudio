@@ -849,6 +849,20 @@ def test_check_chunk_alignment_reordered_blocks_fail_both_sides():
     assert any(len(g) > _ALIGN_FAIL_MIN for g in res["extra"])
 
 
+def test_check_chunk_alignment_empty_source_uses_same_bands():
+    # 空 source 早退分支与主路径同一判档：≤50 字输出忽略、50–100 字标记可疑
+    # （不阻塞）、>100 字判大段新增（extra）→ ok False。
+    small = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 30}])
+    assert small["ok"] is True and not small["extra"] and not small["suspicious"]
+    mid = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 60}])
+    assert mid["ok"] is True and not mid["extra"]
+    assert any(_ALIGN_SUSPICIOUS_MIN < len(g) <= _ALIGN_FAIL_MIN
+               for g in mid["suspicious"])
+    large = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 120}])
+    assert large["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in large["extra"])
+
+
 def test_split_balanced_prefers_paragraph_boundary():
     chunk = "甲" * 50 + "\n\n" + "乙" * 50
     assert split_chunk_balanced(chunk) == ("甲" * 50, "乙" * 50)
