@@ -37,6 +37,8 @@ from backend.engines.script import (
     INSTRUCT_MAX_WORDS,
     adaptive_spot_rate,
     SPOT_CHECK_HISTORY_CAP,
+    _ALIGN_FAIL_MIN,
+    _ALIGN_SUSPICIOUS_MIN,
     _append_spot_history,
     _has_attribution_tag,
     _is_pure_saying_tag,
@@ -795,16 +797,70 @@ def test_fidelity_ignores_short_and_empty_quotes():
 # 对半切开（split_chunk_balanced）
 # --------------------------------------------------------------------------- #
 
-def test_complete_local_text_alignment_catches_non_quote_loss_and_additions():
-    source = "alpha beta. gamma"
-    assert check_chunk_alignment(source, [
-        {"speaker": "NARRATOR", "text": "alpha beta"},
-        {"speaker": "NARRATOR", "text": "gamma"},
-    ])["ok"]
-    missing = check_chunk_alignment(source, [{"speaker": "NARRATOR", "text": "alpha beta"}])
-    assert missing["ok"] is False and "gamma" in missing["missing"]
-    extra = check_chunk_alignment(source, [{"speaker": "NARRATOR", "text": "alpha beta gamma delta"}])
-    assert extra["ok"] is False and extra["extra"]
+def test_check_chunk_alignment_large_block_loss_fails():
+    # 规则 4/5：连续未匹配 > 100 字（骨架）→ 完整性异常 → ok False。源侧大段缺失
+    # 进 missing、输出侧大段新增进 extra，各侧独立判。
+    source = "开篇" + "甲" * 100 + "收束" + "乙" * 125
+    missing = check_chunk_alignment(source, [
+        {"speaker": "NARRATOR", "text": "开篇" + "甲" * 100 + "收束" + "乙" * 20},
+    ])
+    assert missing["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in missing["missing"])
+
+    extra = check_chunk_alignment("开篇" + "甲" * 100, [
+        {"speaker": "NARRATOR", "text": "开篇" + "甲" * 100 + "乙" * 125},
+    ])
+    assert extra["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in extra["extra"])
+    assert not extra["missing"]
+
+
+def test_check_chunk_alignment_suspicious_band_passes():
+    # 规则 4：50 < 连续未匹配 ≤ 100 字 → 标记可疑：仍 ok True（不阻塞、不触发
+    # 恢复阶梯），区段暴露在 suspicious 供日志，不进 missing/extra。
+    res = check_chunk_alignment("甲" * 100 + "乙" * 60, [
+        {"speaker": "NARRATOR", "text": "甲" * 100},
+    ])
+    assert res["ok"] is True
+    assert not res["missing"] and not res["extra"]
+    assert any(_ALIGN_SUSPICIOUS_MIN < len(g) <= _ALIGN_FAIL_MIN
+               for g in res["suspicious"])
+
+
+def test_check_chunk_alignment_small_gaps_ignored():
+    # 规则 1/3：≤ 50 字连续未匹配（短标签删除 / 代词替换 / 轻微整理）→ 忽略，
+    # 不累计、不报。
+    res = check_chunk_alignment("甲" * 100 + "乙" * 30 + "丙" * 30, [
+        {"speaker": "NARRATOR", "text": "甲" * 100 + "丙" * 30},
+    ])
+    assert res["ok"] is True
+    assert not res["missing"] and not res["extra"] and not res["suspicious"]
+
+
+def test_check_chunk_alignment_reordered_blocks_fail_both_sides():
+    # 规则 5：顺序错乱 → difflib 非交叉匹配在两侧各留大段连续未匹配
+    # （missing 与 extra 同时出现）→ ok False，无需独立检测器。
+    a, b = "甲" * 120, "乙" * 120
+    res = check_chunk_alignment(a + b, [
+        {"speaker": "NARRATOR", "text": b + a},
+    ])
+    assert res["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in res["missing"])
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in res["extra"])
+
+
+def test_check_chunk_alignment_empty_source_uses_same_bands():
+    # 空 source 早退分支与主路径同一判档：≤50 字输出忽略、50–100 字标记可疑
+    # （不阻塞）、>100 字判大段新增（extra）→ ok False。
+    small = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 30}])
+    assert small["ok"] is True and not small["extra"] and not small["suspicious"]
+    mid = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 60}])
+    assert mid["ok"] is True and not mid["extra"]
+    assert any(_ALIGN_SUSPICIOUS_MIN < len(g) <= _ALIGN_FAIL_MIN
+               for g in mid["suspicious"])
+    large = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 120}])
+    assert large["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in large["extra"])
 
 
 def test_split_balanced_prefers_paragraph_boundary():
@@ -839,8 +895,10 @@ def _chat_payload(content: str, finish_reason: str = "stop") -> bytes:
 
 
 def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch):
-    # 首轮回复被 token 预算切断（finish_reason=length，静默丢了一条引语）：忠实性校验
-    # 捕获，分诊判「预算截断」-> max_tokens 临时翻倍再跑一次，其完整回复被采纳（共 2 次调用）。
+    # 首轮回复被 token 预算切断（finish_reason=length，静默丢了 >100 字的一段内容）：
+    # 忠实性校验捕获，分诊判「预算截断」-> max_tokens 临时翻倍再跑一次，其完整回复
+    # 被采纳（共 2 次调用）。
+    missing_line = f"{LQ}那就一直走，直到看见尽头{'乙' * 110}。{RQ}她答。"
     partial = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
         {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
@@ -848,7 +906,7 @@ def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch)
     full = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
         {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
-        {"speaker": "B", "text": f"{LQ}那就一直走。{RQ}"},
+        {"speaker": "B", "text": missing_line},
     ], ensure_ascii=False)
     calls = {"n": 0, "temps": [], "max_tokens": []}
 
@@ -862,7 +920,7 @@ def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch)
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
-    chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n{LQ}那就一直走。{RQ}她答。"
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n{missing_line}"
     result = process_chunk(
         _Handle(),
         LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
@@ -870,7 +928,7 @@ def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch)
     )
 
     assert [e["text"] for e in result] == [
-        "他道", f"{LQ}这条路没有尽头。{RQ}", f"{LQ}那就一直走。{RQ}",
+        "他道", f"{LQ}这条路没有尽头。{RQ}", missing_line,
     ]
     assert calls["n"] == 2
     assert calls["temps"] == [0.6, 0.6]
@@ -878,10 +936,11 @@ def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch)
 
 
 def test_process_chunk_fidelity_split_in_half(monkeypatch):
-    # 原发 finish_reason=stop 却静默丢了后半引语（模型自己停笔）：分诊判「质量不达标」，
-    # 翻倍无意义，直接对半切开：chunk 在段落边界切开，两半各再跑一次
+    # 原发 finish_reason=stop 却静默丢了 >100 字的后半引语（模型自己停笔）：分诊判
+    # 「质量不达标」，翻倍无意义，直接对半切开：chunk 在段落边界切开，两半各再跑一次
     # （1 + 1 + 1 = 3 次调用，阶梯到头不递归），内容全部找回，且全程不翻倍预算。
-    chunk = f"A说：{LQ}第一句话内容。{RQ}\n\nB说：{LQ}第二句话内容。{RQ}"
+    second = "第二句话内容" + "乙" * 110
+    chunk = f"A说：{LQ}第一句话内容。{RQ}\n\nB说：{LQ}{second}。{RQ}"
     left, _right = split_chunk_balanced(chunk)  # the paragraph boundary, mid-chunk
     left_json = json.dumps([
         {"speaker": "NARRATOR", "text": "A说"},
@@ -889,7 +948,7 @@ def test_process_chunk_fidelity_split_in_half(monkeypatch):
     ], ensure_ascii=False)
     right_json = json.dumps([
         {"speaker": "NARRATOR", "text": "B说"},
-        {"speaker": "B", "text": f"{LQ}第二句话内容。{RQ}"},
+        {"speaker": "B", "text": f"{LQ}{second}。{RQ}"},
     ], ensure_ascii=False)
     full_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=chunk)
     left_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=left)
@@ -912,15 +971,15 @@ def test_process_chunk_fidelity_split_in_half(monkeypatch):
     )
 
     assert [e["text"] for e in result] == [
-        "A说", f"{LQ}第一句话内容。{RQ}", "B说", f"{LQ}第二句话内容。{RQ}",
+        "A说", f"{LQ}第一句话内容。{RQ}", "B说", f"{LQ}{second}。{RQ}",
     ]
     assert calls["n"] == 3
     assert calls["max_tokens"] == [100, 100, 100]  # stop 直达切分，无一次翻倍
 
 
 def test_process_chunk_fidelity_unrecoverable_keeps_best(monkeypatch):
-    # 原发 stop 且静默丢行，chunk 又无任何安全切分边界（阶梯到头）：分诊判「质量不达标」
-    # 直奔切分、切分失败 -> 优雅保留最好结果（共 1 次调用，不翻倍不循环），不丢弃。
+    # 原发 stop 且静默丢 >100 字内容，chunk 又无任何安全切分边界（阶梯到头）：分诊判
+    # 「质量不达标」直奔切分、切分失败 -> 优雅保留最好结果（共 1 次调用，不翻倍不循环），不丢弃。
     partial = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
     ], ensure_ascii=False)
@@ -936,7 +995,7 @@ def test_process_chunk_fidelity_unrecoverable_keeps_best(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
     # 无换行、无句末标点 → split_chunk_balanced 找不到任何安全边界，不可再切
-    chunk = f"他道：{LQ}这条路没有尽头{RQ}她答"
+    chunk = f"他道：{LQ}这条路没有尽头{'乙' * 110}{RQ}她答"
     result = process_chunk(
         _Handle(),
         LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
@@ -981,25 +1040,33 @@ def test_process_chunk_truncated_json_doubles_budget_on_retry(monkeypatch):
 
 def test_check_chunk_alignment_speaker_name_not_flagged_missing():
     # 纯标签删除（提示词编辑 (e)）：名字只留在 speaker 字段，「名字+说话动词」的
-    # 标签缺口（6 字，超出旧 ≤4 规则）整体豁免，不再误判为「缺失」。
+    # 标签缺口（6 字骨架）落在 ≤50 字忽略档，不误判为「缺失」。
     res = check_chunk_alignment(f"东方明风笑道：{LQ}走吧。{RQ}", [
         {"speaker": "东方明风", "text": f"{LQ}走吧。{RQ}"},
     ])
     assert res["ok"] is True and not res["missing"] and not res["extra"]
 
 
-def test_check_chunk_alignment_tag_grammar_exemption():
-    # 「代词+修饰+动词」（5 字，超出旧 ≤4 规则）：整个标签豁免；同长度的叙述行
-    # 缺失仍照报。
+def test_check_chunk_alignment_tag_gap_ignored_long_loss_flagged():
+    # 短标签/短叙述行删除（≤50 字）→ 忽略；> 100 字的叙述段缺失 → 完整性异常
+    # （旧「标签文法豁免」路径已并入长度判档，不再特判）。
     source = f"他继续笑道：{LQ}此事不可说。{RQ}\n\n她转身离去。"
     kept = check_chunk_alignment(source, [
         {"speaker": "NARRATOR", "text": f"{LQ}此事不可说。{RQ}她转身离去。"},
     ])
     assert kept["ok"] is True and not kept["missing"]
-    dropped = check_chunk_alignment(source, [
+    # 短标签删除（5 字缺口）现在同样被忽略——规则只看「明显大段」
+    short_drop = check_chunk_alignment(source, [
         {"speaker": "NARRATOR", "text": f"{LQ}此事不可说。{RQ}"},
     ])
-    assert dropped["ok"] is False and "她转身离去" in dropped["missing"]
+    assert short_drop["ok"] is True and not short_drop["missing"]
+    long_loss = f"他继续笑道：{LQ}此事不可说。{RQ}\n\n" + \
+        f"她转身离去，再也没有回来。{'甲' * 100}"
+    res = check_chunk_alignment(long_loss, [
+        {"speaker": "NARRATOR", "text": f"{LQ}此事不可说。{RQ}"},
+    ])
+    assert res["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in res["missing"])
 
 
 def test_reparse_vote_accepts_speech_verb_removed_variant():
@@ -1022,6 +1089,7 @@ def test_reparse_vote_accepts_speech_verb_removed_variant():
 def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch):
     # finish_reason 未报告（None，部分 provider 不返回该字段）：保留旧版「先翻倍」
     # 兜底顺序（只有 stop 才直达切半），翻倍后的完整回复被采纳（共 2 次调用）。
+    missing_line = f"{LQ}那就一直走，直到看见尽头{'乙' * 110}。{RQ}她答。"
     partial = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
         {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
@@ -1029,7 +1097,7 @@ def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch)
     full = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
         {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
-        {"speaker": "B", "text": f"{LQ}那就一直走。{RQ}"},
+        {"speaker": "B", "text": missing_line},
     ], ensure_ascii=False)
     calls = {"n": 0, "max_tokens": []}
 
@@ -1041,7 +1109,7 @@ def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch)
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
-    chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n{LQ}那就一直走。{RQ}她答。"
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n{missing_line}"
     result = process_chunk(
         _Handle(),
         LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
@@ -1049,19 +1117,34 @@ def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch)
     )
 
     assert [e["text"] for e in result] == [
-        "他道", f"{LQ}这条路没有尽头。{RQ}", f"{LQ}那就一直走。{RQ}",
+        "他道", f"{LQ}这条路没有尽头。{RQ}", missing_line,
     ]
     assert calls["n"] == 2
     assert calls["max_tokens"] == [100, 200]
 
 
-def test_check_chunk_alignment_zhidao_not_exempted():
-    # 「知道」的「道」不是说话动词（_NONSPEAK_BEFORE_DAO 形态守卫）：整行
-    # 「林某才知道」缺失仍照报，不因尾「道」+ 说话人名被整体豁免。
-    res = check_chunk_alignment(f"林某才知道。{LQ}走吧。{RQ}", [
+def test_check_chunk_alignment_zhidao_line_judged_by_length():
+    # 旧「道」尾豁免已从对齐校验移除：以「…才知道」结尾的缺失不再特判，只按
+    # 连续未匹配长度判档——短行（≤50 字）忽略，> 100 字照报为缺失
+    # （知/难 形态守卫如今只作用于 _reparse_vote 投票门）。
+    short = check_chunk_alignment(f"林某才知道。{LQ}走吧。{RQ}", [
         {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
     ])
-    assert res["ok"] is False and "林某才知道" in res["missing"]
+    assert short["ok"] is True and not short["missing"]
+    long_line = (
+        "林某才终于明白这条路其实从来没有尽头，"
+        "当年师傅说的那番话他一个字也没有听进去，"
+        "此刻回想起来才觉得自己实在是荒唐至极。"
+        "窗外夜色深沉，烛火摇曳，把他的影子拉得很长，"
+        "他在这条路上走了整整十年从未有过一丝动摇，"
+        "直到此刻才恍然大悟"
+    )
+    assert len("".join(c for c in long_line if c.isalnum())) > _ALIGN_FAIL_MIN
+    res = check_chunk_alignment(f"{long_line}。{LQ}走吧。{RQ}", [
+        {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
+    ])
+    assert res["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in res["missing"])
 
 
 def test_reparse_vote_rejects_zhidao_tail_variant():
@@ -1080,7 +1163,8 @@ def test_reparse_vote_rejects_zhidao_tail_variant():
 def test_process_chunk_doubled_budget_rejected_falls_back_to_split(monkeypatch):
     # 严格网关拒绝翻倍预算（LLMHTTPError/4xx）：分诊阶段放弃翻倍、回落到切半
     # 兜底，不把「可恢复的预算截断」升级为整任务 fast-fail。
-    chunk = f"A说：{LQ}第一句话内容。{RQ}\n\nB说：{LQ}第二句话内容。{RQ}"
+    second = "第二句话内容" + "乙" * 110
+    chunk = f"A说：{LQ}第一句话内容。{RQ}\n\nB说：{LQ}{second}。{RQ}"
     left, _right = split_chunk_balanced(chunk)
     left_json = json.dumps([
         {"speaker": "NARRATOR", "text": "A说"},
@@ -1088,7 +1172,7 @@ def test_process_chunk_doubled_budget_rejected_falls_back_to_split(monkeypatch):
     ], ensure_ascii=False)
     right_json = json.dumps([
         {"speaker": "NARRATOR", "text": "B说"},
-        {"speaker": "B", "text": f"{LQ}第二句话内容。{RQ}"},
+        {"speaker": "B", "text": f"{LQ}{second}。{RQ}"},
     ], ensure_ascii=False)
     full_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=chunk)
     left_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=left)
@@ -1114,7 +1198,7 @@ def test_process_chunk_doubled_budget_rejected_falls_back_to_split(monkeypatch):
     )
 
     assert [e["text"] for e in result] == [
-        "A说", f"{LQ}第一句话内容。{RQ}", "B说", f"{LQ}第二句话内容。{RQ}",
+        "A说", f"{LQ}第一句话内容。{RQ}", "B说", f"{LQ}{second}。{RQ}",
     ]
     assert calls["n"] == 4
     assert calls["max_tokens"] == [100, 200, 100, 100]
@@ -1476,6 +1560,44 @@ def test_revalidate_cancel_propagates(monkeypatch):
                          "sys", "CTX={context}\nSOURCE TEXT:\n{chunk}",
                          SUSP_ENTRY, "ctx", ROSTER)
     assert calls["n"] == 0  # 取消在任何调用之前上抛
+
+
+def test_revalidate_single_call_mode_exact_one_call(monkeypatch):
+    # single_call=True（超长段落重切用）：恰好 1 次 LLM 调用——过门直接采纳、
+    # 未过门返回 None（交由机械分段兜底）；两种结局都不再发起第二次调用。
+    good = {"n": 0}
+
+    def urlopen_good(req, *a, **k):
+        good["n"] += 1
+        if good["n"] > 1:
+            raise AssertionError("single_call 必须恰好一次调用")
+        return _BodyResp(_chat_payload(W_KEEP))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen_good)
+    parts = revalidate_entry(
+        _Handle(), _LLM, GenerationConfig(),
+        "sys", "CTX={context}\nSOURCE TEXT:\n{chunk}", SUSP_ENTRY, "ctx", ROSTER,
+        single_call=True)
+    assert good["n"] == 1
+    assert [(p["speaker"], p["text"]) for p in parts] == [
+        ("NARRATOR", "林某冷笑道。"), ("林某", "二哥还没出来吗？")]
+
+    bad_reply = json.dumps(
+        [{"speaker": "陌生人", "text": SUSP_ENTRY["text"]}], ensure_ascii=False)
+    bad = {"n": 0}
+
+    def urlopen_bad(req, *a, **k):
+        bad["n"] += 1
+        if bad["n"] > 1:
+            raise AssertionError("single_call 必须恰好一次调用")
+        return _BodyResp(_chat_payload(bad_reply))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen_bad)
+    assert revalidate_entry(
+        _Handle(), _LLM, GenerationConfig(),
+        "sys", "CTX={context}\nSOURCE TEXT:\n{chunk}", SUSP_ENTRY, "ctx", ROSTER,
+        single_call=True) is None
+    assert bad["n"] == 1
 
 
 def test_validate_no_flagged_entries_skips_llm(monkeypatch):
@@ -3255,9 +3377,9 @@ def test_long_resplit_zero_hit_leaves_log(monkeypatch):
     assert handle.logs == [("INFO", "超长段落检查：0 条超过 200 字条目（无 LLM 重切，零 LLM 调用）")]
 
 
-def test_long_resplit_majority_replaces_entry(monkeypatch):
-    # 一条超长条目（213 字）→ 2 次相同重切回复（2:0 即止）→ 整体替换为 3 条；
-    # 上下文窗口带「LONGER than 200 characters」注记 + 花名册。
+def test_long_resplit_single_call_replaces_entry(monkeypatch):
+    # 一条超长条目（213 字）→ 单次重切回复过忠实性门（恰好 1 次调用，不再投票）
+    # → 整体替换为 3 条；上下文窗口带「LONGER than 200 characters」注记 + 花名册。
     entries = [
         {"speaker": "NARRATOR", "text": LONG_SRC, "instruct": "a"},
         {"speaker": "林某", "text": "我先走了。", "instruct": "c"},
@@ -3281,7 +3403,7 @@ def test_long_resplit_majority_replaces_entry(monkeypatch):
     out, checked, fixed = long_paragraph_resplit(
         handle, _LLM, GenerationConfig(check_context_window=1),
         "sys", "CTX={context}\nSOURCE TEXT:\n{chunk}", entries, 200)
-    assert calls["n"] == 2  # 2:0 严格多数即止
+    assert calls["n"] == 1  # 每条只重跑一次 LLM（single_call）
     assert (checked, fixed) == (1, 1)
     assert [(x["speaker"], x["text"]) for x in out] == [
         ("NARRATOR", LONG_HEAD), ("林某", "我们明天再谈。"),
@@ -3295,8 +3417,9 @@ def test_long_resplit_majority_replaces_entry(monkeypatch):
     assert any("条目 1（超长 212 字）" in m for _l, m in handle.logs)
 
 
-def test_long_resplit_no_consensus_keeps_entry(monkeypatch):
-    # 4 次回复均未过忠实性门（角色不在花名册）→ 零票、4 次后保留原条目（从不猜）
+def test_long_resplit_gate_fail_keeps_entry(monkeypatch):
+    # 单次重切回复未过忠实性门（角色不在花名册）→ 恰好 1 次调用、保留原条目
+    # （从不猜；机械分段兜底）——不再像旧协议那样跑满 4 次投票。
     entries = [
         {"speaker": "NARRATOR", "text": LONG_SRC, "instruct": "a"},
         {"speaker": "林某", "text": "我先走了。", "instruct": "c"},
@@ -3306,8 +3429,8 @@ def test_long_resplit_no_consensus_keeps_entry(monkeypatch):
 
     def urlopen(req, *a, **k):
         calls["n"] += 1
-        if calls["n"] > 4:
-            raise AssertionError(f"LLM called {calls['n']} times, expected 4")
+        if calls["n"] > 1:
+            raise AssertionError(f"LLM called {calls['n']} times, expected 1")
         return _BodyResp(_chat_payload(bad))
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
@@ -3315,9 +3438,9 @@ def test_long_resplit_no_consensus_keeps_entry(monkeypatch):
     out, checked, fixed = long_paragraph_resplit(
         handle, _LLM, GenerationConfig(), "sys", "CTX={context}\nSOURCE TEXT:\n{chunk}",
         entries, 200)
-    assert calls["n"] == 4
+    assert calls["n"] == 1
     assert out is entries and (checked, fixed) == (1, 0)
-    assert any("超长段落重切4 次仍无共识" in m for _l, m in handle.logs)
+    assert any("单次重切未通过" in m for _l, m in handle.logs)
 
 
 def test_long_resplit_cancel_propagates(monkeypatch):
@@ -3337,8 +3460,8 @@ def test_long_resplit_cancel_propagates(monkeypatch):
 
 
 def test_generate_file_long_paragraph_llm_resplit(tmp_path, monkeypatch, workspace):
-    # A 段 LLM 重切路径 e2e：1 解析 + 2 重切（2:0）= 3 次调用；重切后全部 ≤ 200 字
-    # → 机械分段 0 条（long_split=0）。
+    # A 段 LLM 重切路径 e2e：1 解析 + 1 单次重切（过门采纳）= 2 次调用；重切后
+    # 全部 ≤ 200 字 → 机械分段 0 条（long_split=0）。
     parse_reply = json.dumps([
         {"speaker": "NARRATOR", "text": LONG_SRC, "instruct": "a"},
         {"speaker": "林某", "text": "我先走了。", "instruct": "c"},
@@ -3368,7 +3491,7 @@ def test_generate_file_long_paragraph_llm_resplit(tmp_path, monkeypatch, workspa
                          delete_saying_tags=False, spot_check_rate=0.0,
                          check_boundary_speakers=False),
     )
-    assert calls["n"] == 3
+    assert calls["n"] == 2  # 1 解析 + 1 单次重切
     assert result["long_checked"] == 1 and result["long_fixed"] == 1
     assert result["long_split"] == 0  # LLM 重切后已在上限内
     assert all(len(e["text"].strip()) <= 200 for e in result["entries"])
@@ -3380,8 +3503,8 @@ def test_generate_file_long_paragraph_llm_resplit(tmp_path, monkeypatch, workspa
 
 
 def test_generate_file_long_paragraph_mech_fallback(tmp_path, monkeypatch, workspace):
-    # A 段机械兜底路径 e2e：重切回复 = 原样单条（同人独白过不了多主体门）→ 投票
-    # 采纳（long_fixed=1）后仍 212 字 → 机械分段切开（long_split=1）；硬保证成立。
+    # A 段机械兜底路径 e2e：单次重切回复 = 原样单条（同人独白过不了多主体门）→
+    # 过门采纳（long_fixed=1）后仍 212 字 → 机械分段切开（long_split=1）；硬保证成立。
     parse_reply = json.dumps([
         {"speaker": "NARRATOR", "text": LONG_SRC, "instruct": "a"},
         {"speaker": "林某", "text": "我先走了。", "instruct": "c"},
@@ -3409,7 +3532,7 @@ def test_generate_file_long_paragraph_mech_fallback(tmp_path, monkeypatch, works
                          delete_saying_tags=False, spot_check_rate=0.0,
                          check_boundary_speakers=False),
     )
-    assert calls["n"] == 3
+    assert calls["n"] == 2  # 1 解析 + 1 单次重切
     assert result["long_checked"] == 1 and result["long_fixed"] == 1
     assert result["long_split"] == 1
     assert result["count"] == 3  # 2 段切分 + 1 台词条
@@ -3434,7 +3557,7 @@ def test_generate_file_merge_before_split_forced_over200(tmp_path, monkeypatch, 
         {"speaker": "NARRATOR", "text": long_a, "instruct": "a"},
         {"speaker": "NARRATOR", "text": short_b, "instruct": "b"},
     ], ensure_ascii=False)
-    # 重切回复 = 原样单条（同人独白过不了多主体门）→ 投票采纳后仍超长 → 交给机械分段
+    # 重切回复 = 原样单条（同人独白过不了多主体门）→ 单次重切采纳后仍超长 → 交给机械分段
     resplit_reply = json.dumps([
         {"speaker": "NARRATOR", "text": long_a, "instruct": "a"},
     ], ensure_ascii=False)
@@ -3458,7 +3581,7 @@ def test_generate_file_merge_before_split_forced_over200(tmp_path, monkeypatch, 
                          delete_saying_tags=False, spot_check_rate=0.0,
                          check_boundary_speakers=False),
     )
-    assert calls["n"] == 3  # 1 解析 + 2 重切（2:0 采纳原样）
+    assert calls["n"] == 2  # 1 解析 + 1 单次重切（采纳原样）
     assert result["long_checked"] == 1 and result["long_fixed"] == 1
     assert result["merged_same_speaker"] == 1  # 仅 ≤10 强制路径（215 > 100）
     assert result["long_split"] == 1  # 合并造出的 >200 块由末段切回
