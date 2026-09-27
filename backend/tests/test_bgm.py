@@ -1,22 +1,13 @@
 """Tests for the BGM engine (背景音乐系统 · 匹配链):
 
-* ``engines.bgm`` pure functions (``sample_chapter_text`` / ``parse_analysis_reply`` /
-  ``score_track`` / ``match_chapter`` — seeded rng, adjacent de-dup with staged
-  relaxation, generic fallback, random mode) and ``build_mix_cmd`` (element-pinned,
-  including the short-chapter fade clamp ``min(fade, duration/2)``);
+* ``engines.bgm`` pure functions (``score_track`` / ``match_chapter`` — seeded
+  rng, adjacent de-dup with staged relaxation, generic fallback, random mode)
+  and ``build_mix_cmd`` (element-pinned, including the short-chapter fade clamp
+  ``min(fade, duration/2)``);
 * the two ``08_bgm`` JSON caches (missing-not-written / corrupt downgrade /
   ``write_bytes`` no CRLF / atomic save);
 * ``match_stems`` (ordered pass, locked-skip, single-chapter re-match boundary,
-  mode persistence, tag snapshots);
-* ``analyze_chapter`` e2e (fake LLM: success updates only its own stem + auto-match
-  at the tail (mechanical, no extra LLM call) / retry feedback carries the parse
-  error + last reply (system byte-identical across attempts) / total failure fails
-  the task with zero writes (old empty-record success semantics removed) / new tags
-  registered into the GLOBAL registry (cross-bucket clash skipped, first bucket
-  wins, no index rewrite when all known) / locked chapter auto-match skipped
-  (assignment verbatim, analysis updated) / parallel RMW transactions no lost
-  updates / cancel-while-queued ≤1 s with zero writes / gate balance /
-  model-empty fast-fail);
+  mode persistence, empty tag buckets — chapter analysis is gone);
 * ``mix_chapter`` e2e (fake Popen: success / rc≠0 / <1 KiB / cancel kills /
   narration missing / music missing / ``music=None`` copy2 byte-identical /
   ``merge_gate`` balance).
@@ -93,7 +84,7 @@ def sandbox(monkeypatch, tmp_path):
     yield {"root": tmp_path, "ws": ws, "lib": lib, "mgr": mgr}
     # drain any leaked tasks / gate slots (cooperative cancel honours by the engine)
     for t in list(mgr.list()):
-        if t.module in ("bgm-analysis", "bgm-segment", "bgm-mix") and t.status not in TERMINAL:
+        if t.module in ("bgm-segment", "bgm-mix") and t.status not in TERMINAL:
             try:
                 mgr.control(t.id, "cancel")
             except KeyError:
@@ -101,7 +92,7 @@ def sandbox(monkeypatch, tmp_path):
     deadline = time.time() + 5
     while time.time() < deadline:
         stuck = [t for t in mgr.list()
-                 if t.module in ("bgm-analysis", "bgm-segment", "bgm-mix")
+                 if t.module in ("bgm-segment", "bgm-mix")
                  and t.status not in TERMINAL]
         if not stuck and concurrency.gate().active == 0 and concurrency.merge_gate().active == 0:
             break
@@ -128,60 +119,6 @@ def _wait_until(pred, timeout: float = 8.0, step: float = 0.02) -> None:
             return
         time.sleep(step)
     raise AssertionError(f"condition not met within {timeout}s")
-
-
-# --------------------------------------------------------------------------- #
-# sample_chapter_text
-# --------------------------------------------------------------------------- #
-
-def test_sample_short_text_is_verbatim():
-    assert bgm_engine.sample_chapter_text("短文本", 100) == "短文本"
-    # len == n exactly → the whole text (the ≤ boundary)
-    assert bgm_engine.sample_chapter_text("12345", 5) == "12345"
-
-
-def test_sample_long_text_three_windows():
-    long = "头" + "a" * 20 + "中" + "b" * 20 + "尾" + "c" * 20
-    s = bgm_engine.sample_chapter_text(long, 15)
-    assert s.startswith("头aaaa") and s.endswith("ccccc")
-    assert s.count("……") == 2
-    # the sample stays bounded: three windows + two separators
-    assert len(s) <= 15 + 2 * len("\n……\n")
-
-
-def test_sample_zero_budget():
-    # n = 0 → still goes the window path (50 > 0) with w = 1; the three
-    # identical windows collapse to one via first-seen dedup.
-    assert bgm_engine.sample_chapter_text("x" * 50, 0) == "x"
-    # barely-longer text: w = max(1, n//3) = 1 → three 1-char windows
-    s = bgm_engine.sample_chapter_text("abcdef", 4)  # len 6 > 4
-    assert s == "a\n……\nc\n……\nf"
-
-
-# --------------------------------------------------------------------------- #
-# parse_analysis_reply
-# --------------------------------------------------------------------------- #
-
-def test_parse_analysis_reply_caps_and_dedup():
-    p = bgm_engine.parse_analysis_reply(
-        '{"scene": ["战斗", "战斗", "日常"], "mood": ["紧张", "热血", "压抑", "悲伤"], '
-        '"emotion": ["愤怒", "孤独"], "custom": ["a", "a"]}'
-    )
-    assert p == {"scene": ["战斗", "日常"], "mood": ["紧张", "热血", "压抑"],
-                 "emotion": ["愤怒", "孤独"], "custom": ["a"]}
-
-
-def test_parse_analysis_reply_fenced_and_garbage():
-    p = bgm_engine.parse_analysis_reply('```json\n{"scene": ["森林"], "mood": [], "emotion": [], "custom": []}\n```')
-    assert p is not None and p["scene"] == ["森林"]
-    assert bgm_engine.parse_analysis_reply("这不是 JSON") is None
-    assert bgm_engine.parse_analysis_reply("[1, 2, 3]") is None  # arrays are not objects
-    assert bgm_engine.parse_analysis_reply("null") is None
-
-
-def test_parse_analysis_reply_missing_buckets_default_empty():
-    p = bgm_engine.parse_analysis_reply('{"mood": ["紧张"]}')
-    assert p == {"scene": [], "mood": ["紧张"], "emotion": [], "custom": []}
 
 
 # --------------------------------------------------------------------------- #
@@ -370,7 +307,7 @@ def test_analysis_missing_not_written(sandbox):
     assert data == {"version": 1, "model": "", "chapters": {}}
     assert not (sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME).exists()
     data2 = bgm_engine.load_assignments(layout)
-    assert data2["chapters"] == {} and data2["mode"] == "llm"
+    assert data2["chapters"] == {} and data2["mode"] == "random"
 
 
 def test_analysis_corrupt_downgrades(sandbox):
@@ -577,27 +514,21 @@ def test_list_chapter_stems(sandbox):
 # match_stems
 # --------------------------------------------------------------------------- #
 
-def test_match_stems_llm_pass_prev_is_fresh_result(sandbox):
-    # Both chapters match 战斗/紧张; the first pick excludes the second's → no repeat.
+def test_match_stems_random_pass_prev_is_fresh_result(sandbox):
+    # Random mode: both enabled tracks are candidates; the second chapter's
+    # neighbour is the first's FRESH result → excluded → the other track.
     layout = core_paths.get_or_prepare_layout()
-    analysis = bgm_engine.load_analysis(layout)
-    for stem in (STEM, STEM2):
-        analysis["chapters"][stem] = {"scene": ["战斗"], "mood": ["紧张", "热血"],
-                                      "emotion": [], "custom": [], "analyzed_at": "t", "edited": False}
-    bgm_engine.save_analysis(layout, analysis)
-    res = bgm_engine.match_stems(layout, [STEM, STEM2], "llm", 1, rng=random.Random(11))
-    assert res["mode"] == "llm" and res["matched"] == 2 and res["no_bgm"] == 0
+    res = bgm_engine.match_stems(layout, [STEM, STEM2], "random", 1, rng=random.Random(11))
+    assert res["mode"] == "random" and res["matched"] == 2 and res["no_bgm"] == 0
     a1 = res["assignments"]["chapters"][STEM]
     a2 = res["assignments"]["chapters"][STEM2]
-    # only battle.mp3 scores; the second chapter's neighbour (a1) is the SAME file →
-    # blocked → relaxed (the only enabled track).
-    assert a1["music"] == "battle.mp3" and a1["score"] == 8
-    assert a2["music"] == "battle.mp3" and "放宽" in a2["reason"]
-    # tag snapshot + bookkeeping
-    assert a1["tags"]["mood"] == ["紧张", "热血"] and a1["manual"] is False and a1["locked"] is False
-    assert a1["matched_at"]
+    assert {a1["music"], a2["music"]} == {"battle.mp3", "calm.mp3"}
+    # no chapter analysis anymore → empty tag buckets in the entry
+    assert a1["tags"] == {"scene": [], "mood": [], "emotion": [], "custom": []}
+    assert a1["score"] == 0 and a1["manual"] is False and a1["locked"] is False
+    assert "随机" in a1["reason"] and a1["matched_at"]
     on_disk = bgm_engine.load_assignments(layout)
-    assert on_disk["mode"] == "llm" and on_disk["chapters"][STEM2]["music"] == "battle.mp3"
+    assert on_disk["mode"] == "random" and on_disk["chapters"][STEM2]["music"] == a2["music"]
 
 
 def test_match_stems_locked_skipped_whole(sandbox):
@@ -608,16 +539,11 @@ def test_match_stems_locked_skipped_whole(sandbox):
                               "manual": False, "score": None, "reason": "手动指定",
                               "matched_at": "old-t"}
     bgm_engine.save_assignments(layout, data)
-    analysis = bgm_engine.load_analysis(layout)
-    analysis["chapters"][STEM2] = {"scene": [], "mood": ["紧张"], "emotion": [],
-                                   "custom": [], "analyzed_at": "t", "edited": False}
-    bgm_engine.save_analysis(layout, analysis)
-    res = bgm_engine.match_stems(layout, [STEM, STEM2], "llm", 1, rng=random.Random(1))
+    res = bgm_engine.match_stems(layout, [STEM, STEM2], "random", 1, rng=random.Random(1))
     assert res["skipped_locked"] == 1 and res["matched"] == 1
     locked = res["assignments"]["chapters"][STEM]
     assert locked["music"] == "calm.mp3" and locked["matched_at"] == "old-t"  # verbatim
-    # the locked neighbour constrains STEM2: calm.mp3 is the generic-only pool? No —
-    # STEM2 tags 紧张 → battle.mp3 scores; prev = calm.mp3 → battle is free.
+    # the locked neighbour constrains STEM2: prev = calm.mp3 → excluded → battle
     assert res["assignments"]["chapters"][STEM2]["music"] == "battle.mp3"
 
 
@@ -625,17 +551,16 @@ def test_match_stems_single_chapter_boundary_uses_existing_neighbours(sandbox):
     # Re-matching ONLY STEM2 must read prev/next from the EXISTING assignments and
     # never touch the neighbours' entries.
     layout = core_paths.get_or_prepare_layout()
-    analysis = bgm_engine.load_analysis(layout)
-    analysis["chapters"][STEM2] = {"scene": ["战斗"], "mood": ["紧张"], "emotion": [],
-                                   "custom": [], "analyzed_at": "t", "edited": False}
-    bgm_engine.save_analysis(layout, analysis)
     data = bgm_engine.load_assignments(layout)
     data["chapters"][STEM] = {"tags": {}, "music": "battle.mp3", "locked": False,
-                              "manual": False, "score": 3, "reason": "…", "matched_at": "t1"}
+                              "manual": False, "score": 0, "reason": "…", "matched_at": "t1"}
     bgm_engine.save_assignments(layout, data)
+    # one enabled track left → the prev exclusion fully blocks the pool → relaxed
+    music_engine.update_index(lambda idx: idx["tracks"].update(
+        {n: {**t, "enabled": n == "battle.mp3"} for n, t in idx["tracks"].items()}))
     before = json.loads((sandbox["ws"] / "08_bgm" / bgm_engine.ASSIGNMENTS_NAME)
                         .read_bytes().decode("utf-8"))
-    res = bgm_engine.match_stems(layout, [STEM2], "llm", 1, rng=random.Random(1))
+    res = bgm_engine.match_stems(layout, [STEM2], "random", 1, rng=random.Random(1))
     after = json.loads((sandbox["ws"] / "08_bgm" / bgm_engine.ASSIGNMENTS_NAME)
                        .read_bytes().decode("utf-8"))
     assert after["chapters"][STEM] == before["chapters"][STEM]  # neighbour untouched
@@ -649,11 +574,11 @@ def test_match_stems_no_bgm_and_random_mode(sandbox):
     # disable everything → every chapter gets music=None (still a matched entry)
     music_engine.update_index(lambda idx: idx["tracks"].update(
         {n: {**t, "enabled": False} for n, t in idx["tracks"].items()}))
-    res = bgm_engine.match_stems(layout, [STEM], "llm", 1, rng=random.Random(1))
+    res = bgm_engine.match_stems(layout, [STEM], "random", 1, rng=random.Random(1))
     assert res["no_bgm"] == 1 and res["matched"] == 0
     e = res["assignments"]["chapters"][STEM]
     assert e["music"] is None and e["matched_at"]  # matched_at distinguishes 判无 vs 从未
-    # random mode over an empty enabled pool → also None
+    # random mode over an empty enabled pool → same None outcome
     res2 = bgm_engine.match_stems(layout, [STEM2], "random", 1, rng=random.Random(1))
     assert res2["assignments"]["chapters"][STEM2]["music"] is None
     assert res2["mode"] == "random"
@@ -664,293 +589,6 @@ def test_match_stems_no_bgm_and_random_mode(sandbox):
     e3 = res3["assignments"]["chapters"][STEM]
     assert e3["music"] in ("battle.mp3", "calm.mp3")
     assert e3["score"] == 0 and "随机" in e3["reason"]
-
-
-# --------------------------------------------------------------------------- #
-# analyze_chapter e2e (fake LLM)
-# --------------------------------------------------------------------------- #
-
-def _fake_llm(reply, calls=None, fail_times=0):
-    def fake(base_url, api_key, model, messages, temperature, top_p,
-             presence_penalty, max_tokens, **kw):
-        if calls is not None:
-            calls.append(model)
-        if fail_times:
-            fail_times[0] -= 1
-            raise RuntimeError("boom")
-        return (reply, "stop", None)
-    return fake
-
-
-def test_analyze_success_updates_only_own_stem(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_or_prepare_layout()
-    # pre-seed another stem's entry — it must survive verbatim
-    analysis = bgm_engine.load_analysis(layout)
-    analysis["chapters"][STEM2] = {"scene": ["森林"], "mood": [], "emotion": [],
-                                   "custom": [], "analyzed_at": "t0", "edited": False}
-    bgm_engine.save_analysis(layout, analysis)
-    calls = []
-    monkeypatch.setattr(
-        bgm_engine, "_llm_chat_completion",
-        _fake_llm('{"scene": ["战斗"], "mood": ["紧张"], "emotion": [], "custom": []}',
-                  calls=calls),
-    )
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "succeeded"
-    data = bgm_engine.load_analysis(layout)
-    assert data["model"] == "test-model"
-    assert data["chapters"][STEM]["mood"] == ["紧张"] and data["chapters"][STEM]["edited"] is False
-    assert data["chapters"][STEM2] == analysis["chapters"][STEM2]  # untouched
-    assert concurrency.gate().active == 0  # slot released
-    # auto-match at the task tail: mechanical (exactly ONE LLM call total) and
-    # the chapter is left ready to mix (battle.mp3 scores 紧张+3 / 战斗+2)
-    assert len(calls) == 1
-    res = mgr.get(tid).result
-    assert res["stem"] == STEM and res["new_tags"] == []
-    assert res["skipped_locked"] is False
-    assert res["match"]["music"] == "battle.mp3"
-    asg = bgm_engine.load_assignments(layout)
-    e = asg["chapters"][STEM]
-    assert e["music"] == "battle.mp3" and e["manual"] is False and e["matched_at"]
-    assert STEM2 not in asg["chapters"]  # 只自动匹配所选章，邻章不触碰
-
-
-def test_analyze_thinking_off_and_budget(sandbox, monkeypatch):
-    # 思考模型加固（与音乐库 AI 推荐同一根因）：章节气氛分析必须关思考
-    # （extra_body={"enable_thinking": False}）且预算充足（max_tokens=2048）。
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    seen = []
-
-    def fake(base_url, api_key, model, messages, temperature, top_p,
-             presence_penalty, max_tokens, **kw):
-        seen.append({"max_tokens": max_tokens, **kw})  # max_tokens 是命名参数，不进 **kw
-        return ('{"scene": ["战斗"], "mood": [], "emotion": [], "custom": []}',
-                "stop", None)
-
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", fake)
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "succeeded"
-    assert len(seen) == 1
-    assert seen[0]["extra_body"] == {"enable_thinking": False}
-    assert seen[0]["max_tokens"] == 2048
-
-
-def test_analyze_all_failures_fail_task_zero_writes(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    calls = []
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion",
-                        _fake_llm("", calls=calls, fail_times=[3]))
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "failed"  # 全败 = 任务失败（旧空标签语义已移除）
-    t = mgr.get(tid)
-    assert len(calls) == 3
-    assert "章节气氛分析失败" in t.error and "3 次" in t.error and "boom" in t.error
-    assert not (sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME).exists()  # 零落盘
-    assert concurrency.gate().active == 0  # slot released
-    # 解析失败变体：三次回复均不可解析 → 同一失败路径、错误带「回复不可解析」
-    calls2 = []
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion",
-                        _fake_llm("这不是 JSON", calls=calls2))
-    tid2 = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                      bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid2) == "failed"
-    assert len(calls2) == 3
-    assert "回复不可解析" in mgr.get(tid2).error
-    assert not (sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME).exists()  # 仍零落盘
-
-
-def test_analyze_retry_feedback_carries_error_and_last_reply(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    calls: list[list[str]] = []
-    good = '{"scene": ["战斗"], "mood": [], "emotion": [], "custom": []}'
-
-    def fake(base_url, api_key, model, messages, temperature, top_p,
-             presence_penalty, max_tokens, **kw):
-        calls.append([m["content"] for m in messages])
-        if len(calls) == 1:
-            return ("上次回复垃圾文本", "stop", None)  # 不可解析
-        return (good, "stop", None)
-
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", fake)
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "succeeded"
-    assert len(calls) == 2
-    sys1, user1 = calls[0]
-    sys2, user2 = calls[1]
-    assert sys1 == sys2  # system 跨尝试逐字节不变
-    assert "【重试】" not in user1
-    assert "【重试】" in user2
-    assert "问题：回复不可解析" in user2
-    assert "上次回复垃圾文本" in user2  # 上次回复原文节选
-    assert bgm_engine._ANALYSIS_FORMAT_HINT in user2  # 重试块复述输出格式
-    assert "只输出 JSON" in user2  # 措辞中性化（对象/数组两面都正确，不再钉死「对象」）
-
-
-def test_analyze_registers_new_tags_globally(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_or_prepare_layout()
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm(
-        '{"scene": [], "mood": [], "emotion": [], "custom": ["赛博朋克"]}'))
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "succeeded"
-    t = mgr.get(tid)
-    assert t.result["new_tags"] == ["赛博朋克"]
-    assert any(e["msg"].startswith("音乐库新增标签") for e in t.logs)  # 任务日志留痕
-    idx = music_engine.load_index()
-    assert "赛博朋克" in idx["tags"]["custom"]
-    assert bgm_engine.load_analysis(layout)["chapters"][STEM]["custom"] == ["赛博朋克"]
-    # 全已知回复 → new_tags 空、索引文件字节不变（不重写）
-    before = (sandbox["lib"] / "music_index.json").read_bytes()
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm(
-        '{"scene": ["战斗"], "mood": ["紧张"], "emotion": [], "custom": []}'))
-    tid2 = mgr.create("bgm-analysis", f"章节气氛分析：{STEM2}",
-                      bgm_engine.analyze_chapter, STEM2, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid2) == "succeeded"
-    assert mgr.get(tid2).result["new_tags"] == []
-    assert (sandbox["lib"] / "music_index.json").read_bytes() == before
-
-
-def test_analyze_new_tag_cross_bucket_clash_not_registered(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_or_prepare_layout()
-    # 「悲伤」= 内置词表 mood + emotion 双桶已注册（grandfathered）→ 回复再出现也跳过；
-    # 「霓虹」= 新名同时出现在 scene 与 mood → 只入首桶（TAG_CATEGORIES 序 = scene）
-    reply = ('{"scene": ["霓虹"], "mood": ["霓虹", "悲伤"], '
-             '"emotion": [], "custom": ["悲伤"]}')
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm(reply))
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "succeeded"
-    assert mgr.get(tid).result["new_tags"] == ["霓虹"]
-    idx = music_engine.load_index()
-    assert "霓虹" in idx["tags"]["scene"]
-    assert "霓虹" not in idx["tags"]["mood"]
-    assert "悲伤" not in idx["tags"]["custom"]  # 任意桶已存在 → 跳过
-    e = bgm_engine.load_analysis(layout)["chapters"][STEM]
-    assert e["scene"] == ["霓虹"] and e["mood"] == ["霓虹", "悲伤"]  # analysis 保留原样
-
-
-def test_analyze_locked_chapter_auto_match_skipped(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    layout = core_paths.get_or_prepare_layout()
-    locked = {
-        "tags": {c: [] for c in music_engine.TAG_CATEGORIES},
-        "music": "calm.mp3", "locked": True, "manual": True,
-        "score": None, "reason": "手动指定", "matched_at": "old-t",
-    }
-    bgm_engine.save_assignments(layout, {"chapters": {STEM: locked}, "mode": "llm"})
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm(
-        '{"scene": ["战斗"], "mood": ["紧张"], "emotion": [], "custom": []}'))
-    cfg = core_config.get_config()
-    mgr = sandbox["mgr"]
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "succeeded"
-    t = mgr.get(tid)
-    assert t.result["skipped_locked"] is True
-    assert t.result["match"] == locked  # 锁定章 assignment 原样保留
-    asg = bgm_engine.load_assignments(layout)
-    assert asg["chapters"][STEM] == locked  # matched_at 等逐字节不动
-    an = bgm_engine.load_analysis(layout)
-    assert an["chapters"][STEM]["mood"] == ["紧张"]  # analysis 正常更新
-    assert any("已锁定" in e["msg"] for e in t.logs)
-
-
-def test_analyze_parallel_tasks_no_lost_updates(sandbox):
-    """update_analysis / update_assignments = 锁内 读→改→写 原子事务：两个并发
-    事务（barrier + sleep 拉开 读→写 窗口，修复前 load 在锁外时必丢写）的整文件
-    重写不得互相丢条目——analyze 尾部（写 analysis + 自动匹配写 assignments）
-    正是这两个事务的调用方。"""
-    layout = core_paths.get_or_prepare_layout()
-
-    def run_pair(update_fn, entry):
-        barrier = threading.Barrier(2)
-
-        def worker(key):
-            barrier.wait()  # 锁外对齐——两线程同时冲向事务
-            time.sleep(0.05)
-
-            def mut(d):
-                time.sleep(0.1)  # 锁内拉开 读→写 窗口（修复前 load 在锁外 → 他线程此刻可读走旧快照）
-                d["chapters"][key] = entry
-
-            update_fn(layout, mut)
-
-        ts = [threading.Thread(target=worker, args=(k,)) for k in (STEM, STEM2)]
-        for t in ts:
-            t.start()
-        for t in ts:
-            t.join()
-
-    run_pair(bgm_engine.update_analysis,
-             {"scene": ["战斗"], "mood": ["紧张"], "emotion": [], "custom": [],
-              "analyzed_at": "t", "edited": False})
-    run_pair(bgm_engine.update_assignments,
-             {"tags": {}, "music": "battle.mp3", "locked": False, "manual": False,
-              "score": 5, "reason": "r", "matched_at": "t"})
-    a = bgm_engine.load_analysis(layout)
-    assert STEM in a["chapters"] and STEM2 in a["chapters"]  # 两章都在
-    asg = bgm_engine.load_assignments(layout)
-    assert STEM in asg["chapters"] and STEM2 in asg["chapters"]
-
-
-def test_analyze_model_empty_fast_fail(sandbox):
-    mgr = sandbox["mgr"]
-    cfg = core_config.get_config()
-    assert not cfg.llm.model_name
-    tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                     bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "failed"
-    assert "尚未配置 LLM 模型" in mgr.get(tid).error
-
-
-def test_analyze_missing_chapter_file(sandbox):
-    mgr = sandbox["mgr"]
-    cfg = core_config.get_config()
-    tid = mgr.create("bgm-analysis", "章节气氛分析：不存在",
-                     bgm_engine.analyze_chapter, "不存在", cfg.llm, cfg.bgm).id
-    assert _wait_terminal(mgr, tid) == "failed"
-    assert "未找到章节文件" in mgr.get(tid).error
-
-
-def test_analyze_cancel_while_queued(sandbox, monkeypatch):
-    core_config.update_config({"llm": {"model_name": "test-model"}})
-    monkeypatch.setattr(bgm_engine, "_llm_chat_completion", _fake_llm("{}"))
-    g = concurrency.gate()
-    g.acquire()  # the test holds the only slot
-    try:
-        cfg = core_config.get_config()
-        mgr = sandbox["mgr"]
-        t0 = time.time()
-        tid = mgr.create("bgm-analysis", f"章节气氛分析：{STEM}",
-                         bgm_engine.analyze_chapter, STEM, cfg.llm, cfg.bgm).id
-        _wait_until(lambda: mgr.get(tid).status is TaskStatus.RUNNING, timeout=3)
-        mgr.control(tid, "cancel")
-        _wait_until(lambda: mgr.get(tid).status is TaskStatus.CANCELLED, timeout=3)
-        assert time.time() - t0 < 2.5  # one stop_check poll (0.2 s) + overhead
-        assert g.active == 1  # the worker never took the slot (no release underflow)
-        assert not (sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME).exists()  # 零落盘
-    finally:
-        g.release()
-        assert g.active == 0
 
 
 # --------------------------------------------------------------------------- #

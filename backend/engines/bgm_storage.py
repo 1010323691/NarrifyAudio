@@ -46,7 +46,7 @@ def _default_analysis() -> dict:
 
 
 def _default_assignments() -> dict:
-    return {"version": 1, "mode": "llm", "updated_at": "", "chapters": {}}
+    return {"version": 1, "mode": "random", "updated_at": "", "chapters": {}}
 
 
 def _default_segment_analysis() -> dict:

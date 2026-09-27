@@ -1,14 +1,12 @@
 <script setup lang="ts">
-// 背景音乐（阶段 7）：章节气氛分析（LLM 缓存）→ 匹配（标签评分 / 随机）→ 最终混音。
+// 背景音乐（阶段 7）：段落分析（LLM 缓存）→ 匹配（随机 / 段落级时间轴）→ 最终混音。
 // 行 / 派生 / SSE / F5 全复刻 Merge.vue 范本：任务按 label 尾部「：{stem}」派生式重挂
 // （无本地 job 列表、不依赖后端注册表），终态经 getter 式 watch 驱动行刷新。
 import { computed, nextTick, onActivated, onMounted, reactive, ref, watch } from 'vue'
-import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import {
-  analyzeChapters,
   analyzeSegmentChapters,
   bgmPreviewUrl,
   getChapters,
@@ -27,7 +25,6 @@ import type {
   MusicLibrary,
   MusicTagCategory,
   TaskSnapshot,
-  TrackTags,
 } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -40,7 +37,6 @@ import CardFooter from '@/components/ui/CardFooter.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Progress from '@/components/ui/Progress.vue'
-import Switch from '@/components/ui/Switch.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
@@ -57,14 +53,12 @@ import {
   Music,
   Music4,
   Package,
-  Pencil,
   RefreshCw,
   Shuffle,
   Wand2,
   XCircle,
 } from 'lucide-vue-next'
 
-const settings = useSettingsStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -81,7 +75,7 @@ async function resolveDurable<T>(response: T | { task_id: string }): Promise<T> 
 // 行数据（磁盘口径：02 章节 stem + 两个 08_bgm JSON 缓存 + 06/08 存在性）
 // ---------------------------------------------------------------------------
 const chapterRows = ref<BgmChapterRow[]>([])
-const mode = ref('llm')
+const mode = ref('random')
 // 段落级模式是当前页面的交互状态，不会在每次任务完成后写回 assignments.mode。
 // 因此章节列表刷新只能在首次加载时从后端初始化，不能覆盖用户刚选的模式。
 let modeInitialized = false
@@ -95,9 +89,9 @@ const packaging = ref(false)
 const packageSelection = ref<string[]>([])
 
 // ---------------------------------------------------------------------------
-// 行任务派生：bgm-analysis / bgm-segment / bgm-mix 任务按 label 尾部「：{stem}」归位。
+// 行任务派生：bgm-segment / bgm-mix 任务按 label 尾部「：{stem}」归位。
 // ---------------------------------------------------------------------------
-const BGM_MODULES = ['bgm-analysis', 'bgm-segment', 'bgm-mix']
+const BGM_MODULES = ['bgm-segment', 'bgm-mix']
 const tasksByStem = useLabelDerivedTasks(BGM_MODULES)
 
 type RowVariant = 'default' | 'secondary' | 'success' | 'warning' | 'destructive' | 'outline'
@@ -105,10 +99,9 @@ type RowVariant = 'default' | 'secondary' | 'success' | 'warning' | 'destructive
 interface BgmRow {
   stem: string
   data: BgmChapterRow
-  task: TaskSnapshot | undefined // 混音在途优先于段落分析在途、分析在途
+  task: TaskSnapshot | undefined // 混音在途优先于段落分析在途
   mixTask: TaskSnapshot | undefined
   segmentTask: TaskSnapshot | undefined
-  analysisTask: TaskSnapshot | undefined
   failedTask: TaskSnapshot | undefined
   label: string
   variant: RowVariant
@@ -123,18 +116,17 @@ function segmentTimelineReady(row: BgmChapterRow): boolean {
   )
 }
 
-// 行状态优先级：混音中 > 段落分析中 > 分析中 > 未合并（narration 缺失）> 已混音
+// 行状态优先级：混音中 > 段落分析中 > 未合并（narration 缺失）> 已混音
 // （无 BGM 章 copy2 后同样命中；段落级章 music=null 是正常形态，不误显「无 BGM」）
 // > ⚠ 已删除（含时间轴曲目出库）> 已匹配（段落级章附时间轴 Badge）> 无 BGM
-// > 段落已分析 / 段落分析已失效 > 已分析 > 未分析。
+// > 段落已分析 / 段落分析已失效 > 未匹配。
 const rows = computed<BgmRow[]>(() => {
   const { active, failed } = tasksByStem.value
   return chapterRows.value.map((d) => {
     const a = active.get(d.stem)
     const mixTask = a?.module === 'bgm-mix' ? a : undefined
     const segmentTask = a?.module === 'bgm-segment' ? a : undefined
-    const analysisTask = a?.module === 'bgm-analysis' ? a : undefined
-    const task = mixTask ?? segmentTask ?? analysisTask
+    const task = mixTask ?? segmentTask
     const asg = d.assignment
     const music = asg?.music ?? null
     const missing = d.music_missing
@@ -160,9 +152,6 @@ const rows = computed<BgmRow[]>(() => {
     } else if (segmentTask) {
       label = '段落分析中'
       variant = 'secondary'
-    } else if (analysisTask) {
-      label = '分析中'
-      variant = 'secondary'
     } else if (segMode && d.mix_exists) {
       label = '已混音（段落级）'
       variant = 'success'
@@ -184,11 +173,8 @@ const rows = computed<BgmRow[]>(() => {
     } else if (d.segment_analysis) {
       label = d.segment_analysis.stale ? '段落分析已失效' : '段落已分析'
       variant = d.segment_analysis.stale ? 'warning' : 'outline'
-    } else if (d.analysis) {
-      label = '已分析'
-      variant = 'outline'
     } else {
-      label = '未分析'
+      label = '未匹配'
       variant = 'secondary'
     }
     // 段落级章的混音可行性 = 旁白在 + 时间轴在 + 曲目未出库（music=null 是正常形态）。
@@ -209,7 +195,6 @@ const rows = computed<BgmRow[]>(() => {
       task,
       mixTask,
       segmentTask,
-      analysisTask,
       failedTask: task ? undefined : failed.get(d.stem),
       label,
       variant,
@@ -235,7 +220,7 @@ const pendingAnalysisStems = computed(() =>
       if (r.task || r.data.mix_exists) return false
       return mode.value === 'segment'
         ? !r.data.segment_analysis || r.data.segment_analysis.stale
-        : !r.data.analysis
+        : !r.data.assignment
     })
     .map((r) => r.stem),
 )
@@ -244,8 +229,7 @@ const pendingMixStems = computed(() =>
 )
 const bgmActive = computed(() =>
   taskStore
-    .activeTasks('bgm-analysis')
-    .concat(taskStore.activeTasks('bgm-segment'))
+    .activeTasks('bgm-segment')
     .concat(taskStore.activeTasks('bgm-mix')),
 )
 
@@ -270,7 +254,8 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
       return prev && JSON.stringify(prev) === JSON.stringify(c) ? prev : c
     })
     if (!modeInitialized) {
-      mode.value = res.mode || 'llm'
+      // 后端对历史「llm」mode 值读作 random，前端只认 random / segment。
+      mode.value = res.mode === 'segment' ? 'segment' : 'random'
       modeInitialized = true
     }
     if (reloadLibrary) lib.value = libRes
@@ -320,16 +305,19 @@ function selectPendingMix() {
 // ---------------------------------------------------------------------------
 // 提交 / 取消 / 重试
 // ---------------------------------------------------------------------------
-async function doAnalyze() {
-  if (!selectedNames.value.length || submitting.value) return
+async function doRematchSelected() {
+  if (!selectedNames.value.length || submitting.value || matching.value) return
   submitting.value = true
   error.value = ''
   try {
-    await analyzeChapters(selectedNames.value)
-    await taskStore.refresh()
+    const r = await resolveDurable(await matchChapters(selectedNames.value, mode.value)) as any
+    matchNote.value = `匹配完成：${r.matched} 章命中 · ${r.no_bgm} 章无 BGM${r.skipped_locked ? ` · ${r.skipped_locked} 章锁定跳过` : ''}`
+    toast({ title: '重匹配完成', variant: 'success', description: matchNote.value })
+    await refreshRows({ reloadLibrary: false })
   } catch (e: any) {
     if (e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
+    if (error.value.includes('在途')) toast({ title: '提交被拒绝', variant: 'destructive', description: error.value })
   } finally {
     submitting.value = false
   }
@@ -391,16 +379,6 @@ function cancelAll() {
 // ---------------------------------------------------------------------------
 // 行操作
 // ---------------------------------------------------------------------------
-async function doAnalyzeRow(stem: string) {
-  try {
-    await analyzeChapters([stem])
-    await taskStore.refresh()
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    toast({ title: '分析启动失败', variant: 'destructive', description: e?.message })
-  }
-}
-
 async function doSegmentAnalyzeRow(stem: string) {
   try {
     await analyzeSegmentChapters([stem])
@@ -471,13 +449,6 @@ async function doPackageDownload(chapters: string[]) {
   }
 }
 
-function rowTags(row: BgmRow): TrackTags {
-  const tags = mode.value === 'segment'
-    ? row.data.segment_analysis?.tags
-    : null
-  return (tags ?? row.data.analysis ?? row.data.assignment?.tags ?? {}) as TrackTags
-}
-
 async function doRematch(stem: string) {
   if (matching.value) return
   matching.value = true
@@ -494,8 +465,8 @@ async function doRematch(stem: string) {
   }
 }
 
-// 模式切换：章节模式（llm / random）= 立即全量重匹配（assignments.mode 持久化在后端，
-// 章节模式匹配会写 segment:false 把任何遗留段落级时间轴作废）；段落级模式不做
+// 模式切换：全章节随机 = 立即全量重匹配（assignments.mode 持久化在后端，
+// 随机匹配会写 segment:false 把任何遗留段落级时间轴作废）；段落级模式不做
 // 章节重匹配——只置模式并提示段落分析会自动生成时间轴。
 async function switchMode(m: string) {
   if (m === mode.value || matching.value) return
@@ -507,7 +478,7 @@ async function switchMode(m: string) {
   }
   pendingMode.value = m
   matching.value = true
-  matchNote.value = `正在切换为「${m === 'random' ? '全章节随机' : 'LLM 标签匹配'}」并重匹配全部章节，请稍候…`
+  matchNote.value = '正在切换为「全章节随机」并重匹配全部章节，请稍候…'
   // 先让选中态和处理中反馈完成一次绘制，再发起全量匹配请求。
   await nextTick()
   await waitForPaint()
@@ -515,7 +486,7 @@ async function switchMode(m: string) {
     const r = await resolveDurable(await matchChapters(null, m)) as any
     mode.value = m
     pendingMode.value = null
-    matchNote.value = `已切换为「${m === 'random' ? '全章节随机' : 'LLM 标签匹配'}」并重匹配：${r.matched} 章命中 · ${r.no_bgm} 章无 BGM${r.skipped_locked ? ` · ${r.skipped_locked} 章锁定跳过` : ''}`
+    matchNote.value = `已切换为「全章节随机」并重匹配：${r.matched} 章命中 · ${r.no_bgm} 章无 BGM${r.skipped_locked ? ` · ${r.skipped_locked} 章锁定跳过` : ''}`
     toast({ title: '重匹配完成', variant: 'success', description: matchNote.value })
     // 匹配接口已经完成持久化，音乐库没有变化，无需再次拉取整份库数据。
     await nextTick()
@@ -584,51 +555,6 @@ async function saveManual() {
 }
 
 // ---------------------------------------------------------------------------
-// 编辑标签弹层（四类分桶 + 自定义；写入 analysis，edited:true）
-// ---------------------------------------------------------------------------
-const editStem = ref<string | null>(null)
-const editTags = reactive<TrackTags>({ scene: [], mood: [], emotion: [], custom: [] })
-const editCustom = ref('')
-const editBusy = ref(false)
-
-function openEdit(row: BgmRow) {
-  editStem.value = row.stem
-  const src = row.data.analysis ?? row.data.assignment?.tags ?? { scene: [], mood: [], emotion: [], custom: [] }
-  for (const c of ['scene', 'mood', 'emotion', 'custom'] as MusicTagCategory[]) {
-    editTags[c] = [...(src[c] ?? [])]
-  }
-  editCustom.value = ''
-}
-
-function toggleEditTag(cat: MusicTagCategory, name: string) {
-  const i = editTags[cat].indexOf(name)
-  if (i >= 0) editTags[cat].splice(i, 1)
-  else editTags[cat].push(name)
-}
-
-function addEditCustom() {
-  const v = editCustom.value.trim()
-  if (v && !editTags.custom.includes(v)) editTags.custom.push(v)
-  editCustom.value = ''
-}
-
-async function saveEdit() {
-  if (!editStem.value || editBusy.value) return
-  editBusy.value = true
-  try {
-    await updateChapter(editStem.value, { tags: { ...editTags } })
-    toast({ title: '标签已更新', variant: 'success', description: editStem.value })
-    editStem.value = null
-    await refreshRows()
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    toast({ title: '保存失败', variant: 'destructive', description: e?.message })
-  } finally {
-    editBusy.value = false
-  }
-}
-
-// ---------------------------------------------------------------------------
 // 时间轴查看弹层（段落级章：GET /api/bgm/timeline/{stem} 的完整时间轴文件）
 // ---------------------------------------------------------------------------
 const timelineStem = ref<string | null>(null)
@@ -655,46 +581,6 @@ function fmtMs(sec: number): string {
   const s = Math.max(0, Math.floor(sec))
   const m = Math.floor(s / 60)
   return `${m}:${String(s % 60).padStart(2, '0')}`
-}
-
-// ---------------------------------------------------------------------------
-// 音频参数（config.bgm fire-and-forget 保存，分集页先例）
-// ---------------------------------------------------------------------------
-const draft = reactive({
-  volume: 0.18,
-  fade_in: 1.5,
-  fade_out: 3.0,
-  loop: true,
-  min_match_score: 1,
-  analysis_chars: 6000,
-})
-const paramsSaved = ref(false)
-const paramsSaving = ref(false)
-
-function seedDraft() {
-  const b = settings.config?.bgm
-  if (!b) return
-  draft.volume = b.volume
-  draft.fade_in = b.fade_in
-  draft.fade_out = b.fade_out
-  draft.loop = b.loop
-  draft.min_match_score = b.min_match_score
-  draft.analysis_chars = b.analysis_chars
-}
-
-async function saveParams() {
-  if (paramsSaving.value) return
-  paramsSaving.value = true
-  try {
-    await settings.save({ bgm: { ...draft } })
-    paramsSaved.value = true
-    setTimeout(() => (paramsSaved.value = false), 2000)
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    toast({ title: '保存失败', variant: 'destructive', description: e?.message })
-  } finally {
-    paramsSaving.value = false
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -730,15 +616,13 @@ watch(
         const stem = labelKeyOf(t.label)
         if (t.module === 'bgm-mix') {
           toast({ title: '混音完成', variant: 'success', description: stem })
-        } else if (t.module === 'bgm-segment') {
+        } else {
           const r = t.result as { timeline?: boolean } | null
           toast({
             title: '段落分析完成',
             variant: 'success',
             description: r?.timeline ? `${stem}（已自动生成时间轴）` : `${stem}（时间轴未生成，请检查音频输入后重试段落分析）`,
           })
-        } else {
-          toast({ title: '章节分析完成', variant: 'success', description: `${stem}（已自动匹配）` })
         }
         scheduleRefresh()
       }
@@ -747,15 +631,13 @@ watch(
 )
 
 onMounted(async () => {
-  if (!settings.loaded) await settings.load()
-  seedDraft()
   await taskStore.refresh()
   await refreshRows()
 })
 
 // keep-alive 缓存页：重新进入时刷新磁盘口径。
 onActivated(() => {
-  if (settings.loaded) void refreshRows()
+  void refreshRows()
 })
 
 const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
@@ -797,13 +679,9 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
-        <!-- 三个 radio 必须同 name 组：无 name 的原生 radio 互不排斥（全亮/全灭的根因）；
+        <!-- 两个 radio 必须同 name 组：无 name 的原生 radio 互不排斥（全亮/全灭的根因）；
              选中态恒由 :checked 驱动（switchMode 是唯一写 mode 的地方）。 -->
         <div class="bgm-mode-options">
-          <label class="bgm-mode-option" :class="{ 'is-selected': displayedMode === 'llm' }">
-            <input type="radio" name="bgm-match-mode" :checked="displayedMode === 'llm'" :disabled="matching" class="h-4 w-4 accent-primary" @change="switchMode('llm')" />
-            LLM 标签匹配
-          </label>
           <label class="bgm-mode-option" :class="{ 'is-selected': displayedMode === 'random' }">
             <input type="radio" name="bgm-match-mode" :checked="displayedMode === 'random'" :disabled="matching" class="h-4 w-4 accent-primary" @change="switchMode('random')" />
             全章节随机
@@ -818,57 +696,12 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
       </Card>
     </div>
 
-    <!-- 音频参数 -->
-    <Card class="bgm-control-card">
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2"><Music class="h-5 w-5" />音频参数</CardTitle>
-        <CardDescription>
-          设置音量、淡入淡出、循环和最低匹配分。
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="bgm-parameter-grid">
-        <label class="bgm-field">
-          BGM 音量（0~2）
-          <input v-model.number="draft.volume" type="number" min="0" max="2" step="0.01"
-            class="bgm-field__input" />
-        </label>
-        <label class="bgm-field">
-          淡入（秒）
-          <input v-model.number="draft.fade_in" type="number" min="0" step="0.1"
-            class="bgm-field__input" />
-        </label>
-        <label class="bgm-field">
-          淡出（秒）
-          <input v-model.number="draft.fade_out" type="number" min="0" step="0.1"
-            class="bgm-field__input" />
-        </label>
-        <label class="bgm-switch-field">
-          循环铺满
-          <Switch :model-value="draft.loop" @update:model-value="draft.loop = $event" />
-        </label>
-        <label class="bgm-field">
-          匹配最低分
-          <input v-model.number="draft.min_match_score" type="number" min="1" step="1"
-            class="bgm-field__input" />
-        </label>
-        <label class="bgm-field">
-          LLM 采样字数
-          <input v-model.number="draft.analysis_chars" type="number" min="500" step="500"
-            class="bgm-field__input" />
-        </label>
-        <Button variant="outline" size="sm" class="bgm-save-button" :disabled="paramsSaving" @click="saveParams">
-          <Loader2 v-if="paramsSaving" class="h-3.5 w-3.5 animate-spin" />
-          {{ paramsSaved ? '已保存' : '保存参数' }}
-        </Button>
-      </CardContent>
-    </Card>
-
     <!-- 章节匹配结果 -->
     <Card class="bgm-results-card">
       <CardHeader>
         <CardTitle class="flex items-center gap-2"><Music4 class="h-5 w-5" />章节匹配结果</CardTitle>
         <CardDescription>
-          查看匹配和混音状态。可分别全选待解析和待混音章节。
+          查看匹配和混音状态。可分别全选待处理章节和待混音章节。
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
@@ -905,19 +738,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
               </div>
             </div>
 
-              <!-- 段落模式的标签已用于生成时间轴，不在条目操作区重复展示。 -->
-              <div v-if="mode !== 'segment'" class="bgm-row__tags">
-                <template v-for="cat in TAG_CATS" :key="cat.key">
-                  <Badge
-                    v-for="t in rowTags(row)[cat.key] ?? []"
-                    :key="cat.key + t"
-                    variant="outline"
-                    :class="cat.cls"
-                  >{{ t }}</Badge>
-                </template>
-              </div>
-
-              <div v-if="mode !== 'segment'" class="bgm-row__meta">
+              <div class="bgm-row__meta">
               <!-- BGM -->
               <div class="bgm-row__track">
                 <template v-if="row.data.assignment?.music">
@@ -931,11 +752,6 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                 <span v-else-if="row.data.assignment" class="text-xs text-muted-foreground">—（无 BGM）</span>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </div>
-              <!-- 匹配分（段落级章的音乐由时间轴逐段决定，无单分数） -->
-              <span class="w-14 shrink-0 text-right text-xs tabular-nums text-muted-foreground"
-                :title="row.data.assignment?.reason || ''">
-                {{ row.data.assignment?.score ?? '—' }}
-              </span>
               </div>
 
               <div v-if="row.data.mix_exists" class="bgm-row__player">
@@ -979,27 +795,15 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                     variant="outline"
                     size="sm"
                     :class="mode === 'segment' ? 'order-1' : ''"
-                    :disabled="!projectSet || submitting"
-                    @click="mode === 'segment' ? doSegmentAnalyzeRow(row.stem) : doAnalyzeRow(row.stem)"
+                    :disabled="!projectSet || submitting || matching"
+                    @click="mode === 'segment' ? doSegmentAnalyzeRow(row.stem) : doRematch(row.stem)"
                   >
-                    <Wand2 class="h-3.5 w-3.5" />{{ mode === 'segment' ? '段落分析' : '分析' }}
+                    <Wand2 class="h-3.5 w-3.5" />{{ mode === 'segment' ? '段落分析' : '重匹配' }}
                   </Button>
                   <Button
                     v-if="mode !== 'segment'"
                     variant="outline"
                     size="sm"
-                    :disabled="!projectSet || matching || mode === 'segment'"
-                    :title="mode === 'segment' ? '段落级章的时间轴由段落分析自动生成' : ''"
-                    @click="doRematch(row.stem)"
-                  >
-                    <Shuffle class="h-3.5 w-3.5" />重匹配
-                  </Button>
-                  <Button
-                    v-if="mode !== 'segment'"
-                    variant="outline"
-                    size="sm"
-                    :disabled="mode === 'segment'"
-                    :title="mode === 'segment' ? '段落级章的曲目由时间轴逐段决定' : ''"
                     @click="openManual(row)"
                   >
                     <Music class="h-3.5 w-3.5" />选曲
@@ -1012,9 +816,6 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
                     @click="openTimeline(row)"
                   >
                     <ListMusic class="h-3.5 w-3.5" />时间轴
-                  </Button>
-                  <Button v-if="mode !== 'segment'" variant="outline" size="sm" @click="openEdit(row)">
-                    <Pencil class="h-3.5 w-3.5" />标签
                   </Button>
                   <Button
                     variant="outline"
@@ -1044,7 +845,7 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
 
         <div class="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" :disabled="submitting || !pendingAnalysisStems.length" @click="selectPendingAnalysis">
-            <ListChecks class="h-3.5 w-3.5" />全选待解析
+            <ListChecks class="h-3.5 w-3.5" />{{ mode === 'segment' ? '全选待解析' : '全选未匹配' }}
           </Button>
           <Button variant="outline" size="sm" :disabled="submitting || !pendingMixStems.length" @click="selectPendingMix">
             <ListChecks class="h-3.5 w-3.5" />全选待混音
@@ -1067,10 +868,10 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
             variant="outline"
             class="min-w-[11rem] flex-1"
             :disabled="!projectSet || submitting || !selectedNames.length"
-            @click="mode === 'segment' ? doSegmentAnalyze() : doAnalyze()"
+            @click="mode === 'segment' ? doSegmentAnalyze() : doRematchSelected()"
           >
             <Wand2 class="h-4 w-4" />
-            {{ mode === 'segment' ? '段落分析所选' : '分析所选' }}（{{ selectedNames.length }} 章）
+            {{ mode === 'segment' ? '段落分析所选' : '重匹配所选' }}（{{ selectedNames.length }} 章）
           </Button>
           <Button
             class="min-w-[11rem] flex-1"
@@ -1154,62 +955,6 @@ const TAG_CATS: { key: MusicTagCategory; label: string; cls: string }[] = [
       </div>
     </div>
 
-    <!-- 编辑标签弹层 -->
-    <div
-      v-if="editStem"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      @click.self="editStem = null"
-    >
-      <div class="w-full max-w-lg rounded-xl border bg-background p-4 shadow-lg">
-        <h2 class="text-lg font-semibold">编辑章节标签：{{ editStem }}</h2>
-        <p class="mt-1 text-xs text-muted-foreground">
-          修改标签后请重新匹配，让新标签生效。
-        </p>
-        <div class="mt-3 space-y-3">
-          <div v-for="cat in TAG_CATS" :key="cat.key" class="space-y-1">
-            <p class="text-xs font-medium text-muted-foreground">{{ cat.label }}</p>
-            <div class="flex flex-wrap gap-1">
-              <button
-                v-for="t in (lib?.tags ?? {})[cat.key] ?? []"
-                :key="t"
-                type="button"
-                class="rounded-md border px-2 py-0.5 text-xs transition-colors"
-                :class="editTags[cat.key].includes(t)
-                  ? 'border-primary bg-primary/10 text-foreground'
-                  : 'border-border text-muted-foreground hover:bg-accent/50'"
-                @click="toggleEditTag(cat.key, t)"
-              >{{ t }}</button>
-              <button
-                v-if="cat.key === 'custom'"
-                type="button"
-                class="rounded-md border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent/50"
-                @click="addEditCustom"
-              >+ {{ editCustom || '自定义标签' }}</button>
-              <span v-if="!((lib?.tags ?? {})[cat.key] ?? []).length && !editTags[cat.key].length" class="text-xs text-muted-foreground">（空）</span>
-            </div>
-            <div v-if="cat.key === 'custom'" class="flex gap-2">
-              <input
-                v-model="editCustom"
-                type="text"
-                placeholder="输入自定义标签后点上方 + 添加"
-                class="h-7 flex-1 rounded-md border border-input bg-background px-2 text-xs"
-                @keyup.enter="addEditCustom"
-              />
-            </div>
-          </div>
-          <p v-if="editTags.custom.length" class="text-xs text-muted-foreground">
-            已选自定义：{{ editTags.custom.join('、') }}
-          </p>
-        </div>
-        <div class="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" @click="editStem = null">关闭</Button>
-          <Button size="sm" :disabled="editBusy" @click="saveEdit">
-            <Loader2 v-if="editBusy" class="h-3.5 w-3.5 animate-spin" />
-            保存
-          </Button>
-        </div>
-      </div>
-    </div>
 
     <!-- 时间轴查看弹层（段落级章：08_bgm/timelines/<stem>.json 的完整内容） -->
     <div

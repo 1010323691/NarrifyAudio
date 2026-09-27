@@ -175,7 +175,6 @@ def test_lifecycle_control_events_emit_authoritative_status_snapshot(monkeypatch
 
 def test_worker_rejects_unsafe_bgm_paths_from_preexisting_tasks():
     for task_type, payload in (
-        ("bgm.analysis", {"stem": "../outside"}),
         ("bgm.segment", {"stem": r"folder\outside"}),
         ("bgm.mix", {"stem": ".."}),
         ("bgm.match", {"chapters": ["safe", "../outside"]}),
@@ -188,6 +187,29 @@ def test_worker_rejects_unsafe_bgm_paths_from_preexisting_tasks():
         )
         with pytest.raises(TaskExecutionError, match="BGM"):
             execute_engine_task(claim)
+
+
+def test_bgm_match_executor_normalizes_legacy_llm_mode(monkeypatch):
+    # 升级前提交、升级后执行的在途任务 payload 可能带退役的 "llm" mode：
+    # executor 分支在执行前归一为 random（不进无标签评分分支、不回写退役值）。
+    from backend.platform import engine_task_executor as ete
+
+    seen = {}
+
+    def fake_match_stems(layout, stems, mode, min_score, handle=None):
+        seen["mode"] = mode
+        return {"mode": mode, "matched": 0, "no_bgm": 0, "skipped_locked": 0}
+
+    monkeypatch.setattr("backend.engines.bgm.match_stems", fake_match_stems)
+    monkeypatch.setattr(ete, "get_or_prepare_layout", lambda: object())
+    monkeypatch.setattr(
+        ete.core_config, "get_config",
+        lambda: SimpleNamespace(bgm=SimpleNamespace(min_match_score=1)),
+    )
+    ete._run_bgm_match(
+        object(), None, {"chapters": ["ch1"], "mode": "llm"}, {}, {},
+    )
+    assert seen["mode"] == "random"
 
 
 def test_task_read_queries_do_not_lock_but_controls_can(monkeypatch):

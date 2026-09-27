@@ -24,18 +24,18 @@ def _claim(task_type: str) -> TaskClaim:
     )
 
 
-def test_table_has_all_19_types_with_policy_sets_pinned():
-    assert len(TASK_TYPES) == 19
+def test_table_has_all_18_types_with_policy_sets_pinned():
+    assert len(TASK_TYPES) == 18
     assert set(TASK_TYPES) == SUPPORTED_TASK_TYPES
     # 策略集合按批次 2 的字面量钉扎——单一事实源即注册表，集合只能从表导出。
     assert BILLABLE_TASK_TYPES == frozenset({
         "script.parse", "voices.foundation", "voices.clone", "tts.batch",
-        "bgm.analysis", "bgm.segment", "music.suggest_tags",
+        "bgm.segment", "music.suggest_tags",
     })
     assert ADMIN_ONLY_TASK_TYPES == frozenset({"music.suggest_tags"})
     assert LEGACY_ENGINE_TASK_TYPES == frozenset({
         "voices.foundation", "voices.clone", "tts.batch", "tts.merge",
-        "bgm.analysis", "bgm.segment", "bgm.mix", "bgm.match", "bgm.package",
+        "bgm.segment", "bgm.mix", "bgm.match", "bgm.package",
         "music.suggest_tags", "audio.zip", "audio.export", "tts.reset",
     })
 
@@ -59,7 +59,7 @@ def test_every_type_binds_to_a_live_executor_in_its_dispatcher():
             assert runner.__name__ == spec.executor, name
             assert task_worker._shadow_dispatch_kind(name) == spec.executor
             assert engine_task_executor._shadow_engine_kind(name) == "<unsupported>"
-    assert len(engine_task_executor.ENGINE_BRANCHES) == 13
+    assert len(engine_task_executor.ENGINE_BRANCHES) == 12
     assert len(task_worker.DIRECT_EXECUTORS) == 6
 
 

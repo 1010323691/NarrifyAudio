@@ -127,21 +127,6 @@ def _write_timeline(stem: str, spans: list[dict], duration: float) -> dict:
     return tl
 
 
-def test_analyze_submits_one_durable_task_per_chapter(workspace, monkeypatch):
-    created = _install_durable_mocks(monkeypatch)
-    result = api_bgm.run_analyze(api_bgm.AnalyzeRequest(chapters=["ch1", "ch2", "ch1"]), _api_context(), object())
-    assert result == {"task_ids": ["task-1", "task-2"], "chapters": [
-        {"stem": "ch1", "task_id": "task-1"}, {"stem": "ch2", "task_id": "task-2"}
-    ]}
-    assert [call["task_type"] for call in created] == ["bgm.analysis", "bgm.analysis"]
-    assert [call["payload"]["stem"] for call in created] == ["ch1", "ch2"]
-
-    _install_durable_mocks(monkeypatch, {"bgm.match": {"ch1"}})
-    with pytest.raises(HTTPException) as exc:
-        api_bgm.run_analyze(api_bgm.AnalyzeRequest(chapters=["ch1"]), _api_context(), object())
-    assert exc.value.status_code == 409
-
-
 def test_segment_analysis_submits_durable_tasks_and_checks_audio_conflicts(workspace, monkeypatch):
     _seed_scripts(workspace, ["ch1"])
     created = _install_durable_mocks(monkeypatch)
@@ -163,9 +148,9 @@ def test_match_submits_durable_tasks_and_rejects_active_conflicts(workspace, mon
     assert created[0]["task_type"] == "bgm.match"
     assert created[0]["payload"]["mode"] == "random"
 
-    _install_durable_mocks(monkeypatch, {"bgm.analysis": {"ch1"}})
+    _install_durable_mocks(monkeypatch, {"bgm.match": {"ch1"}})
     with pytest.raises(HTTPException) as exc:
-        api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1"], mode="llm"), _api_context(), object())
+        api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1"], mode="random"), _api_context(), object())
     assert exc.value.status_code == 409
 
 
@@ -206,10 +191,10 @@ def test_durable_audio_conflicts_include_unscoped_batches(workspace, monkeypatch
 def test_bgm_routes_keep_input_and_configuration_guards(workspace, monkeypatch):
     _install_durable_mocks(monkeypatch)
     with pytest.raises(HTTPException) as empty:
-        api_bgm.run_analyze(api_bgm.AnalyzeRequest(chapters=[]), _api_context(), object())
+        api_bgm.run_match(api_bgm.MatchRequest(chapters=[]), _api_context(), object())
     assert empty.value.status_code == 400
     with pytest.raises(HTTPException) as traversal:
-        api_bgm.run_analyze(api_bgm.AnalyzeRequest(chapters=["../escape"]), _api_context(), object())
+        api_bgm.run_match(api_bgm.MatchRequest(chapters=["../escape"]), _api_context(), object())
     assert traversal.value.status_code == 400
     with pytest.raises(HTTPException) as mode:
         api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1"], mode="unknown"), _api_context(), object())
@@ -219,13 +204,9 @@ def test_bgm_routes_keep_input_and_configuration_guards(workspace, monkeypatch):
 def test_chapters_rows(workspace):
     ws = workspace
     layout = core_paths.get_or_prepare_layout()
-    # ch1: full pipeline state (06 + 08 + analysis + assignment with live music)
+    # ch1: full pipeline state (06 + 08 + assignment with live music)
     (ws / "08_bgm").mkdir(parents=True, exist_ok=True)
     (ws / "08_bgm" / "ch1.mp3").write_bytes(b"MIXED")
-    analysis = bgm_engine.load_analysis(layout)
-    analysis["chapters"]["ch1"] = {"scene": ["战斗"], "mood": ["紧张"], "emotion": [],
-                                   "custom": [], "analyzed_at": "t0", "edited": True}
-    bgm_engine.save_analysis(layout, analysis)
     # ch2: narration is a .wav (fallback) + assignment points at a deleted music
     (ws / "06_audio_merge" / "ch2.mp3").unlink()
     (ws / "06_audio_merge" / "ch2.wav").write_bytes(b"WAVNARR")
@@ -242,20 +223,27 @@ def test_chapters_rows(workspace):
     r1 = rows["ch1"]
     assert r1["narration_exists"] is True and r1["mix_exists"] is True
     assert r1["music_missing"] is False
-    assert r1["analysis"]["mood"] == ["紧张"] and r1["analysis"]["edited"] is True
     assert r1["assignment"]["music"] == "t1.mp3" and r1["assignment"]["score"] == 3
 
     r2 = rows["ch2"]
     assert r2["narration_exists"] is True  # the .wav fallback counts
     assert r2["mix_exists"] is False
     assert r2["music_missing"] is True     # ⚠ 已删除
-    assert r2["analysis"] is None
 
     r3 = rows["ch3"]
     assert r3["narration_exists"] is True  # fixture seed
-    assert r3["mix_exists"] is False and r3["analysis"] is None
+    assert r3["mix_exists"] is False
     assert r3["assignment"]["music"] == "t1.mp3" and r3["music_missing"] is False
-    assert res["mode"] == "llm"
+    assert res["mode"] == "random"
+
+
+def test_chapters_legacy_llm_mode_reads_as_random(workspace):
+    # 章节级 "llm" 模式已下线：存量数据持久化的旧 mode 值读取时归一为 random。
+    layout = core_paths.get_or_prepare_layout()
+    data = bgm_engine.load_assignments(layout)
+    data["mode"] = "llm"
+    bgm_engine.save_assignments(layout, data)
+    assert api_bgm.list_chapters()["mode"] == "random"
 
 
 def test_chapters_segment_row_fields(workspace):
@@ -324,7 +312,7 @@ def test_chapters_no_workspace_empty(monkeypatch, tmp_path):
                                        encoding="utf-8")
     core_config.reset_config_cache()
     try:
-        assert api_bgm.list_chapters() == {"chapters": [], "mode": "llm"}
+        assert api_bgm.list_chapters() == {"chapters": [], "mode": "random"}
     finally:
         core_config.reset_config_cache()
 
@@ -372,27 +360,6 @@ def test_timeline_no_workspace(monkeypatch, tmp_path):
 
 
 # -- PUT /chapters/{stem} -------------------------------------------------------------
-
-def test_update_chapter_tags(workspace):
-    ws = workspace
-    layout = core_paths.get_or_prepare_layout()
-    analysis = bgm_engine.load_analysis(layout)
-    analysis["chapters"]["ch1"] = {"scene": [], "mood": ["旧标签"], "emotion": [],
-                                   "custom": [], "analyzed_at": "t0", "edited": False}
-    bgm_engine.save_analysis(layout, analysis)
-
-    res = api_bgm.update_chapter(
-        "ch1", api_bgm.ChapterUpdateRequest(tags={"mood": ["紧张"], "custom": ["我的"]}))
-    assert res["locked"] is False and res["manual"] is False
-    a = bgm_engine.load_analysis(layout)["chapters"]["ch1"]
-    assert a["edited"] is True and a["edited_at"]
-    assert a["analyzed_at"] == "t0"  # the original analysis time is kept
-    assert a["mood"] == ["紧张"] and a["custom"] == ["我的"]  # 紧张 = vocab mood; 我的 → custom
-    e = bgm_engine.load_assignments(layout)["chapters"]["ch1"]
-    assert e["tags"]["mood"] == ["紧张"]  # the snapshot followed the edit
-    assert e["music"] == "t1.mp3"        # music untouched (key absent)
-    assert e["reason"] == "r"
-
 
 def test_update_chapter_music_and_lock(workspace):
     # manual pick
@@ -444,7 +411,6 @@ def test_write_endpoints_no_workspace_409(monkeypatch, tmp_path):
     core_config.reset_config_cache()
     try:
         for call in (
-            lambda: api_bgm.run_analyze(api_bgm.AnalyzeRequest(chapters=["ch1"])),
             lambda: api_bgm.run_analyze_segment(api_bgm.SegmentAnalyzeRequest(chapters=["ch1"])),
             lambda: api_bgm.run_match(api_bgm.MatchRequest()),
             lambda: api_bgm.run_mix(api_bgm.MixRequest(chapters=["ch1"])),

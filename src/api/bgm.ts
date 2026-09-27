@@ -1,4 +1,4 @@
-// BGM API (背景音乐：章节气氛分析 / 匹配 / 手动干预 / 混音；后端 /api/bgm)。
+// BGM API (背景音乐：段落分析 / 匹配 / 手动干预 / 混音；后端 /api/bgm)。
 // 瘦客户端：只做 HTTP 封装，无处理逻辑。
 
 import { API_BASE, http } from './client'
@@ -9,7 +9,6 @@ import type {
   BgmAssignment,
   BgmPackageResult,
   BgmTimelineResult,
-  TrackTags,
 } from '@/types'
 
 /** All chapter rows (disk-state basis = 02_split_text stems). Read-only. */
@@ -21,11 +20,6 @@ export function getChapters(): Promise<BgmChaptersResult> {
  *  files API serves it for the inline player). */
 export function bgmPreviewUrl(stem: string): string {
   return `${API_BASE}/api/files/download/08_bgm/${encodeURIComponent(stem + '.mp3')}`
-}
-
-/** Start one LLM mood-analysis Task per selected chapter. */
-export function analyzeChapters(chapters: string[]): Promise<BgmBatchResult> {
-  return http.post<BgmBatchResult>('/api/bgm/analyze', { chapters })
 }
 
 /** (Re-)match the selected chapters (empty/omitted = all) through the durable Worker. */
@@ -44,15 +38,14 @@ export function getTimeline(stem: string): Promise<BgmTimelineResult> {
   return http.get<BgmTimelineResult>(`/api/bgm/timeline/${encodeURIComponent(stem)}`)
 }
 
-/** Manual edit of one chapter: tags and/or music (null = clear) and/or lock.
+/** Manual edit of one chapter: music (null = clear) and/or lock.
  *  Omitted keys are untouched. */
 export function updateChapter(
   stem: string,
-  patch: { tags?: TrackTags; music?: string | null; locked?: boolean; __setMusic?: boolean },
+  patch: { music?: string | null; locked?: boolean; __setMusic?: boolean },
 ): Promise<BgmAssignment> {
   const { __setMusic, ...rest } = patch
   const body: Record<string, unknown> = {}
-  if (rest.tags !== undefined) body.tags = rest.tags
   if (__setMusic) body.music = rest.music ?? null
   if (rest.locked !== undefined) body.locked = rest.locked
   return http.put<BgmAssignment>(`/api/bgm/chapters/${encodeURIComponent(stem)}`, body)

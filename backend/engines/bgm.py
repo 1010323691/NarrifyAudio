@@ -1,9 +1,18 @@
-"""The BGM engine (背景音乐系统 · 阶段 3/4): chapter mood analysis (LLM),
-deterministic tag matching, and the final per-chapter mix.
+"""The BGM engine (背景音乐系统 · 阶段 3/4): paragraph-level scene analysis
+(LLM), deterministic tag matching, and the final per-chapter mix.
+
+Modes: whole-chapter RANDOM (every enabled track is a candidate, no tags) or
+paragraph-level (LLM scene blocks → per-chapter timeline). The chapter-level
+LLM tag-matching mode was removed; ``score_track`` and the ``llm`` branch of
+``match_chapter`` survive ONLY as the mechanical per-scene track pick used by
+``recompute_segment_timelines``.
 
 Artifacts (all under the workspace's ``08_bgm/``):
-* ``chapter_music_analysis.json`` — LLM mood tags per chapter (a CACHE: tag
-  edits / re-matching never re-call the LLM);
+* ``chapter_music_analysis.json`` — LEGACY chapter tag cache: the chapter
+  analysis LLM face is gone, so this module no longer writes it; the file may
+  still exist on disk (music-library tag rename/delete rewrites it for
+  consistency via ``bgm_storage.update_analysis``), and paragraph analysis
+  reads it as an optional whole-chapter atmosphere reference;
 * ``segment_music_analysis.json`` — LLM paragraph-level BGM needs per chapter
   (a CACHE: the entry fingerprint anchors staleness; the timeline below can be
   re-derived from it with ZERO LLM calls after TTS durations change);
@@ -18,8 +27,8 @@ Artifacts (all under the workspace's ``08_bgm/``):
 
 The music library itself (``music_library/`` at the project root) is managed
 by :mod:`backend.engines.music`; this module reads it (for matching) and
-references it by file name (for mixing). The LLM analysis faces (chapter AND
-paragraph) are the write paths here: out-of-vocabulary tags they find are
+references it by file name (for mixing). The paragraph-analysis face is the
+only LLM write path here: out-of-vocabulary tags it finds are
 registered into the global tag registry (``music.update_index``) so later
 chapters and manual track tagging can reuse them. The LLM only ever DESCRIBES
 music needs (tags + intensity + a per-paragraph action) — it never picks a
@@ -45,7 +54,6 @@ from backend.core.config import get_config
 from backend.core.concurrency import gate, merge_gate
 from backend.core.task_control import TaskCancelled
 from backend.engines.audio import probe_duration
-from backend.engines.book import decode_buffer
 from backend.engines import music as music_engine
 from .bgm_storage import (
     ANALYSIS_NAME, ASSIGNMENTS_NAME, SEGMENT_ANALYSIS_NAME, TIMELINE_DIR,
@@ -62,7 +70,6 @@ from backend.engines.llm_transport import (
     llm_json_with_retry,
     request_chat_completion as _llm_chat_completion,
 )
-from backend.engines.voices import extract_json_object
 
 log = logging.getLogger("audiobook.bgm")
 
@@ -72,14 +79,9 @@ log = logging.getLogger("audiobook.bgm")
 #: the timeline's recorded duration vs a fresh probe of the 06 file.
 _STALE_TOLERANCE_S = 0.5
 
-#: Per-bucket caps for LLM chapter-analysis tags (anti overflow).
+#: Per-bucket caps for LLM analysis tags (anti overflow — the paragraph face
+#: validates scene tags against these caps too).
 _ANALYSIS_CAPS = {"scene": 2, "mood": 3, "emotion": 2, "custom": 2}
-
-#: The exact JSON shape the analysis LLM must return (echoed into the prompt
-#: and into every parse-failure retry).
-_ANALYSIS_FORMAT_HINT = (
-    '{"scene": [...], "mood": [...], "emotion": [...], "custom": [...]}'
-)
 
 #: The exact JSON shape the paragraph-analysis LLM must return (one array of
 #: contiguous SCENE BLOCKS — several entries map to one scene, gaps between
@@ -105,59 +107,8 @@ _WEIGHT_ORDER = ("mood", "scene", "emotion", "custom")
 # pure functions (rng injectable — everything here is unit-testable)
 # --------------------------------------------------------------------------- #
 
-def sample_chapter_text(text: str, n: int) -> str:
-    """The text handed to the LLM: the whole text when it fits in ``n`` chars,
-    else head / middle / tail windows of ``n // 3`` joined by ``\\n……\\n``."""
-    n = max(0, int(n))
-    if len(text) <= n:
-        return text
-    w = max(1, n // 3)
-    head = text[:w]
-    mid_start = max(0, (len(text) - w) // 2)
-    mid = text[mid_start:mid_start + w]
-    tail = text[-w:]
-    parts = [s for s in (head, mid, tail) if s]
-    # a window may repeat when the text is barely longer than n — keep first-seen
-    seen: set[str] = set()
-    out: list[str] = []
-    for s in parts:
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return "\n……\n".join(out)
-
-
-def parse_analysis_reply(content: str) -> dict | None:
-    """Parse an LLM analysis reply into the four tag buckets.
-
-    Returns ``{scene, mood, emotion, custom}`` (each capped at
-    :data:`_ANALYSIS_CAPS`, de-duplicated, stripped) or ``None`` when the reply
-    is not a JSON object (the caller retries). Out-of-vocabulary names are
-    KEPT (chapter tags are free-form analysis the user can edit — unlike
-    suggest-tags, which is strict in-vocabulary).
-    """
-    data = extract_json_object(content)
-    if not isinstance(data, dict):
-        return None
-    out: dict[str, list[str]] = {}
-    for cat in music_engine.TAG_CATEGORIES:
-        vals = data.get(cat)
-        if not isinstance(vals, list):
-            out[cat] = []
-            continue
-        kept: list[str] = []
-        for v in vals:
-            if not isinstance(v, str):
-                continue
-            name = v.strip()
-            if name and name not in kept:
-                kept.append(name)
-        out[cat] = kept[: _ANALYSIS_CAPS[cat]]
-    return out
-
-
 def score_track(chapter_tags: dict, track_tags: dict) -> tuple[int, str]:
-    """Weighted tag-overlap score between a chapter's analysis and one track.
+    """Weighted tag-overlap score between a set of scene tags and one track.
 
     Same-bucket intersection × category weight (mood 3 / scene 2 / emotion 1 /
     custom 1). The reason string is pinned: ``"mood 命中 紧张, 热血(+6)；scene
@@ -923,7 +874,7 @@ def list_chapter_stems(layout) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Task worker 1: LLM chapter mood analysis (module ``bgm-analysis``)
+# LLM paragraph analysis (module ``bgm-segment``) + tag registry helpers
 # --------------------------------------------------------------------------- #
 
 def _vocab_text(tags: dict[str, list[str]]) -> str:
@@ -932,38 +883,10 @@ def _vocab_text(tags: dict[str, list[str]]) -> str:
     )
 
 
-def _analysis_prompts(sample: str, registry: dict[str, list[str]]) -> tuple[str, str]:
-    """(system, user) for the chapter-analysis LLM call.
-
-    The system prompt embeds the FULL global tag vocabulary — all four
-    buckets INCLUDING custom, so tags auto-registered from earlier chapters
-    are reusable — plus the reuse-first / new-tag rules; the reply must be a
-    single strict JSON object in ``_ANALYSIS_FORMAT_HINT`` shape.
-    """
-    system = (
-        "你是有声书章节气氛分析助手。阅读下面的章节文本节选，为这一章选择气氛标签。\n\n"
-        "现有标签词表（scene=场景 / mood=气氛 / emotion=情绪 / custom=自定义）：\n"
-        f"{_vocab_text(registry)}\n\n"
-        "选择规则：\n"
-        "1. 优先原样复用词表中已有的标签（与词表逐字一致）；只有当词表中确实没有任何"
-        "标签能描述本章时，才允许给出新标签；\n"
-        "2. 新标签必须简短（2~6 字）、含义明确，且与词表中所有已有标签（包括近义标签）"
-        "语义明显不同——禁止给出与已有标签同义、近义或仅措辞不同的标签；\n"
-        "3. 每个标签放入正确的分类：scene=故事发生的地点/情境，mood=章节整体气氛基调，"
-        "emotion=主要情绪，custom=以上三类都不合适的补充；\n"
-        "4. 数量上限：scene 最多 2 个、mood 最多 3 个、emotion 最多 2 个、custom 最多 2 个；"
-        "某类选不出就留空数组。\n\n"
-        f"输出格式：{_ANALYSIS_FORMAT_HINT}\n"
-        "只输出这一个 JSON 对象，不要解释、不要前后缀、不要代码围栏。"
-    )
-    user = f"章节文本节选：\n{sample}"
-    return system, user
-
-
 def register_analysis_tags(parsed: dict, handle=None) -> list[str]:
-    """Register the chapter reply's out-of-vocabulary tag names into the GLOBAL
-    music tag registry (``music_library/music_index.json``) — one atomic
-    :func:`backend.engines.music.update_index` per call.
+    """Register a paragraph-analysis reply's out-of-vocabulary tag names into
+    the GLOBAL music tag registry (``music_library/music_index.json``) — one
+    atomic :func:`backend.engines.music.update_index` per call.
 
     * a name already present in ANY bucket is skipped (the global
       unique-name invariant; the analysis entry keeps it as a free-form tag);
@@ -1136,100 +1059,6 @@ def _log_segment_llm_exchange(stem: str, batch_no: int, attempt_no: int,
     )
 
 
-def analyze_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
-    """Task worker: LLM-analyze ONE chapter's mood tags, register any new tags
-    into the global music tag registry, then auto-match the chapter
-    (mechanical, no LLM) — one-click analyze leaves the chapter ready to mix.
-
-    Slot scope = the whole task (no check phase): the LLM call holds one shared
-    LLM slot; a cancel while queued aborts without taking a slot.
-
-    The LLM reply must be a strict JSON object (four tag buckets); parse
-    failures are retried with the parse error fed back (up to 3 calls). A
-    TOTAL failure fails the task with a clear error and writes NOTHING
-    (analysis / registry / assignments untouched) — the user retries, edits
-    tags by hand, or matches manually; a chapter is never hard-blocked.
-    """
-    handle.check()
-    layout = core_paths.get_or_prepare_layout()
-    if layout.split_text is None:
-        raise RuntimeError("未设置工作空间。")
-    src = layout.split_text / f"{stem}.txt"
-    if not src.is_file():
-        raise RuntimeError(f"未找到章节文件（02_split_text/{stem}.txt）。")
-    if not llm_cfg.model_name:
-        raise RuntimeError("尚未配置 LLM 模型（设置 → LLM → model_name）。")
-
-    text = decode_buffer(src.read_bytes())[0]
-    sample = sample_chapter_text(text, bgm_cfg.analysis_chars)
-    system, user = _analysis_prompts(sample, music_engine.load_index()["tags"])
-
-    handle.progress(0.05, "排队中（等待并发槽位）")
-    if not gate().acquire(stop_check=lambda: handle.cancelled):
-        raise TaskCancelled()  # 排队中被取消——未取槽，不进入 try、不 release
-    try:
-        try:
-            parsed, _attempts = llm_json_with_retry(
-                llm_cfg, system, user, parse_analysis_reply,
-                handle=handle, llm_call=_llm_chat_completion,
-                max_attempts=3,
-                # 同音乐库 AI 推荐：思考模型关思考 + 加大预算作安全网
-                # （传输层对拒绝额外键的严格网关自动单次退化重试）。
-                max_tokens=2048,
-                extra_body={"enable_thinking": False},
-                format_hint=_ANALYSIS_FORMAT_HINT,
-                operation_type="bgm.analysis",
-            )
-        except LLMJSONRetryExhausted as e:
-            # 全败 → 任务失败、零落盘（旧的「3 败 → 空标签记录 + 成功」语义已移除）
-            raise RuntimeError(f"章节气氛分析失败：{e}") from e
-
-        entry = {
-            "scene": parsed.get("scene", []),
-            "mood": parsed.get("mood", []),
-            "emotion": parsed.get("emotion", []),
-            "custom": parsed.get("custom", []),
-            "analyzed_at": datetime.now().isoformat(timespec="seconds"),
-            "edited": False,
-        }
-        parts = [f"{c} {', '.join(entry[c])}"
-                 for c in music_engine.TAG_CATEGORIES if entry[c]]
-        handle.log("分析完成：" + ("、".join(parts) if parts else "（无标签）"))
-
-        handle.progress(0.8, "标签入库")
-        added = register_analysis_tags(parsed, handle)
-        if added:
-            handle.log("音乐库新增标签：" + "、".join(added))
-        else:
-            handle.log("标签均已在音乐库词表中")
-
-        update_analysis(layout, lambda d: (
-            d.update({"model": llm_cfg.model_name}),
-            d["chapters"].__setitem__(stem, entry),
-        ), handle=handle)
-
-        handle.progress(0.9, "匹配音乐")
-        mode = load_assignments(layout).get("mode") or "llm"
-        mres = match_stems(
-            layout, [stem], mode, max(1, int(bgm_cfg.min_match_score)),
-            handle=handle,
-        )
-        match_entry = mres["assignments"]["chapters"].get(stem)
-        skipped_locked = mres["skipped_locked"] > 0
-        if skipped_locked:
-            handle.log("该章已锁定，保留原匹配结果")
-        handle.progress(1.0, "完成")
-        return {
-            "stem": stem,
-            "analysis": entry,
-            "new_tags": added,
-            "skipped_locked": skipped_locked,
-            "match": match_entry,  # 该章 assignment 条目（锁定章 = 原样保留的条目）
-        }
-    finally:
-        gate().release()  # acquire 成功才进入 try——排队中被取消的路径未取槽、不到这里
-
-
 def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
     """Task worker (module ``bgm-segment``): LLM-analyze ONE chapter's
     paragraphs into CONTINUOUS SCENE BLOCKS (batches of
@@ -1242,9 +1071,8 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
     SAME number the mechanical timeline cap uses, and the timeline validation
     (same-track merge / short-span merge / cap merge) is the only quantity
     control.
-    Slot scope = the WHOLE task (like :func:`analyze_chapter`): one shared LLM
-    slot across all batches; a cancel while queued aborts without taking a
-    slot. Writes happen ONLY after the LAST batch succeeds (atomicity — a
+    Slot scope = the WHOLE task: one shared LLM slot across all batches; a
+    cancel while queued aborts without taking a slot. Writes happen ONLY after the LAST batch succeeds (atomicity — a
     failed batch writes nothing: analysis cache / registry / timelines /
     assignments all untouched). The timeline recompute is best-effort: missing
     05/06 inputs leave the task SUCCEEDED with a note — the analysis is the
@@ -2173,7 +2001,6 @@ def match_stems(
     """
     idx = music_engine.load_index()
     tracks = list(idx["tracks"].items())
-    analysis = load_analysis(layout).get("chapters") or {}
     chapter_stems = list_chapter_stems(layout)
     stem_positions = {stem: i for i, stem in enumerate(chapter_stems)}
     rng = rng or random.Random()
@@ -2193,7 +2020,7 @@ def match_stems(
                 skipped_locked += 1
                 fresh[stem] = cur.get("music")  # a locked neighbour still constrains
                 continue
-            cur_tags = analysis.get(stem) or {}
+            cur_tags = {}  # 章节分析已下线：章节模式无标签候选（随机取曲）
             stem_index = stem_positions.get(stem)
             prev_key = (
                 chapter_stems[stem_index - 1]

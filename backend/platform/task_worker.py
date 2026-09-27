@@ -96,7 +96,7 @@ _write_outcome = write_task_outcome
 WORKER_GROUP = os.getenv("NARRIFY_TASK_GROUP", "narrify-workers")
 WORKSPACE_MUTATING_TASK_TYPES = {
     "voices.foundation", "voices.clone", "tts.batch", "tts.merge", "tts.reset",
-    "bgm.analysis", "bgm.segment", "bgm.mix", "bgm.match", "audio.export",
+    "bgm.segment", "bgm.mix", "bgm.match", "audio.export",
 }
 
 

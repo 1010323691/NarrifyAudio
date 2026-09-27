@@ -250,7 +250,6 @@ def test_generic_task_submission_rejects_unsafe_legacy_task_paths(client: TestCl
         "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Unsafe package"},
     ).json()
     invalid_payloads = [
-        ("bgm.analysis", {"stem": "../outside"}),
         ("bgm.segment", {"stem": r"folder\outside"}),
         ("bgm.mix", {"stem": ".."}),
         ("bgm.match", {"chapters": ["safe", "../outside"]}),
