@@ -472,17 +472,52 @@ def check_chunk_fidelity(chunk: str, entries) -> list:
     return missing
 
 
-def _is_ignorable_alignment_gap(value: str) -> bool:
-    """Ignore only short source-side attribution fragments.
+# 说话动词簇（提示词编辑 (e) 允许整段删除的纯标签尾巴，含常见语气修饰前缀）。
+# 匹配时按最长优先；「名字/代词 + 修饰 + 动词簇」之外的缺失不豁免。
+_SAY_TAG_TAILS = (
+    "继续说道", "低声道", "冷笑道", "大声说", "轻声说", "开口说", "开口笑",
+    "继续说", "继续道", "开口道", "接口道", "回应道", "回答道", "解释道",
+    "补充道", "嘟囔道", "嘀咕道", "呢喃道", "大声喊", "轻轻说", "继续笑",
+    "说道", "笑道", "问道", "答道", "喊道", "叫道", "喝道", "吼道", "骂道",
+    "叹道", "哭道", "开口", "接口", "回应", "回答", "解释", "补充", "嘟囔",
+    "嘀咕", "呢喃", "说", "道", "问", "答", "喊", "叫", "喝",
+)
 
-    The parser is allowed to remove mechanical speech tags such as ``林某说道``
-    while preserving the actual spoken/narrated text.  Everything else, including
-    output-only text, remains an alignment error.
+
+def _is_ignorable_alignment_gap(value: str, speaker_skeletons: set) -> bool:
+    """Ignore source-side fragments the parse prompt itself mandates removing.
+
+    The parser must drop pure speech tags (``林某说道`` / ``老道继续笑道``) while
+    preserving the spoken/narrated text — the prompt's edit (e).  Two exempt shapes:
+    a short fragment (≤4 word chars ending in a say verb, legacy rule) and the full
+    tag grammar ``[名字/代词][语气修饰][说话动词]``.  In the grammar shape the name
+    part must be a speaker of this chunk (or a pronoun), so real missing sentences
+    that merely end in a verb stay flagged.  Everything else, including output-only
+    text, remains an alignment error.
     """
-    if not value or len(value) > 4:
+    if not value:
         return False
-    tag_trail = frozenset(globals().get("_SAY_VERBS", "说道问答喊"))
-    return value[-1] in tag_trail and any(ch.isalnum() for ch in value[:-1])
+    tag_trail = frozenset(_SAY_VERBS)
+    if len(value) <= 4:
+        return value[-1] in tag_trail and any(ch.isalnum() for ch in value[:-1])
+    for tail in _SAY_TAG_TAILS:
+        if not value.endswith(tail):
+            continue
+        head = value[: -len(tail)]
+        if not head:
+            return True  # 整个 gap 就是动词簇（名字在别处匹配掉了）
+        for n in range(min(5, len(head)), 0, -1):
+            if _is_tag_name(head[:n], speaker_skeletons):
+                return True
+    return False
+
+
+def _is_tag_name(name: str, speaker_skeletons: set) -> bool:
+    sk = _skeleton(name)
+    return bool(sk) and (
+        sk in speaker_skeletons
+        or sk in ("他", "她", "它", "你", "我", "您", "他们", "她们", "它们", "你们", "我们")
+    )
 
 
 def check_chunk_alignment(chunk: str, entries) -> dict:
@@ -490,21 +525,29 @@ def check_chunk_alignment(chunk: str, entries) -> dict:
 
     Unlike :func:`check_chunk_fidelity`, which only checks quoted passages, this
     check aligns the whole normalized source and output sequences.  Punctuation,
-    whitespace and outer quotation marks are ignored; short attribution tags are
-    the only permitted source-side omission.  The result is a diagnostic mapping
-    so callers can decide whether to escalate without another LLM call.
+    whitespace and outer quotation marks are ignored.  Permitted source-side
+    omissions: speaker names moved into the ``speaker`` field and pure speech
+    tags per the prompt (both exempted on the missing side — see
+    :func:`_is_ignorable_alignment_gap`).  The result is a diagnostic mapping so
+    callers can decide whether to escalate without another LLM call.
     """
     source = _skeleton(chunk or "")
     source_positions = [i for i, ch in enumerate(chunk or "") if ch.isalnum()]
-    output = _skeleton("".join(
-        e.get("text") for e in entries
-        if isinstance(e, dict) and isinstance(e.get("text"), str)
-    ))
-    speaker_skeletons = {
-        _skeleton(e.get("speaker") or "")
-        for e in entries
-        if isinstance(e, dict) and e.get("speaker") and e.get("speaker") != "NARRATOR"
-    }
+    output_texts: list[str] = []
+    speaker_names: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if isinstance(e.get("text"), str):
+            output_texts.append(e["text"])
+        sp = e.get("speaker")
+        if sp and sp != "NARRATOR":
+            speaker_names.append(sp)
+    # speaker 名不进输出骨架：名字（含「名字+说话动词」标签）在 missing 侧按
+    # 豁免规则放行（精确名 / 标签文法），追加到输出尾部反而让 difflib 把插入的
+    # 名字误判为「额外输出」。
+    output = _skeleton("".join(output_texts))
+    speaker_skeletons = {_skeleton(n) for n in speaker_names}
     if not source:
         return {
             "ok": not output,
@@ -531,7 +574,7 @@ def check_chunk_alignment(chunk: str, entries) -> dict:
                 raw_hi = source_positions[a1] + 1
                 quote_prefix = any(ch in _QUOTE_CHARS for ch in (chunk or "")[raw_lo:raw_hi])
             if (len(gap) > 1 and gap not in speaker_skeletons
-                    and not _is_ignorable_alignment_gap(gap)
+                    and not _is_ignorable_alignment_gap(gap, speaker_skeletons)
                     and not (len(gap) <= 4 and quote_prefix)):
                 missing.append(gap)
             else:
@@ -600,15 +643,17 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     then call the LLM up to ``max_retries + 1`` times, cleaning / repairing / salvaging
     the JSON each attempt. Progress is logged through the Task ``handle``.
 
-    Fidelity recovery (appended to the port) is a deliberately short two-step ladder:
-    a parseable reply is verified against the source — every quoted passage of the
-    chunk (≥4 word chars, ``check_chunk_fidelity``) must be present in the output
-    texts, so a truncated / drift-damaged reply that JSON repair would have silently
-    accepted is caught. On failure: (1) ONE re-run with ``max_tokens`` temporarily
-    doubled (truncation is the common root cause); (2) if still unfaithful, split the
-    chunk in half at a safe boundary (``split_chunk_balanced``) and re-run both halves
-    once (``recover=False`` — the halves get no further escalation, so the ladder
-    can't run away). What can't be recovered is kept as-is (never silently dropped).
+    Fidelity recovery (appended to the port) triages the failure by
+    ``finish_reason`` — the two remedies match the two diseases:
+    * ``finish_reason=length``: the output was cut by the token budget (JSON 尾部
+      截断 / 尾部丢段) → re-run ONCE with ``max_tokens`` doubled (真缺预算，加
+      预算就能过).
+    * ``finish_reason=stop`` but unfaithful: the model stopped on its own (drift /
+      内容没放下) → doubling the budget changes nothing, so split the chunk in half
+      at a safe boundary (``split_chunk_balanced``) and re-run both halves once
+      (少解析一段更可能完整输出).  The halves run with ``recover=False`` (no further
+      escalation, so the ladder can't run away).
+    Whatever can't be recovered is kept as-is (never silently dropped).
     """
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     usr_template = user_prompt_template or DEFAULT_USER_PROMPT
@@ -644,11 +689,12 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     ]
 
     def _attempt(temp: float, mt=None):
-        """一次 LLM 调用 + JSON 清理/修复/抢救 → (entries 或 None, 原始响应文本)。
+        """一次 LLM 调用 + JSON 清理/修复/抢救 → (entries 或 None, 原始文本, finish_reason)。
 
-        ``mt`` = 本次调用的 max_tokens 覆盖值（缺省用配置值）——恢复阶梯第 1 步
-        （翻倍 max_tokens 重跑）用它。调用失败 / 响应不可解析 → ``(None, …)`` 交
-        调用方重试；``TaskCancelled`` 恒上抛（取消不重试）。
+        ``mt`` = 本次调用的 max_tokens 覆盖值（缺省用配置值）——恢复阶梯的翻倍
+        重跑用它。调用失败 / 响应不可解析 → ``(None, …, finish_reason 或 None)``
+        交调用方重试；``TaskCancelled`` 恒上抛（取消不重试）。finish_reason 是
+        恢复分诊的依据：length=输出被预算切断，stop=模型自己停笔。
         """
         mt = mt or max_tokens
         try:
@@ -676,8 +722,6 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
             ct = usage.get("completion_tokens", "?") if usage else "?"
             handle.log(f"chunk {chunk_num}/{total_chunks}: finish_reason={finish_reason} | "
                        f"tokens prompt={pt} completion={ct}")
-            if finish_reason == "length":
-                handle.log(f"WARNING: 响应被截断（达到 max_tokens={max_tokens}），可增大 max_tokens。", "WARNING")
         except TaskCancelled:
             raise  # a cancel raised mid-stream must propagate, not be retried
         except LLMUnavailableError:
@@ -690,21 +734,21 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
             raise
         except Exception as e:  # noqa: BLE001 — a failed call retries, then gives up
             handle.log(f"调用 LLM API 出错：{e}", "ERROR")
-            return None, ""
+            return None, "", None
 
         # Clean and extract JSON from the response.
         json_text = clean_json_string(text)
         if not json_text:
             handle.log(f"chunk {chunk_num} 响应中未找到 JSON 数组", "WARNING")
             handle.log(f"Response preview: {text[:300]}...", "WARNING")
-            return None, text
+            return None, text, finish_reason
 
         # Try to parse, with repair attempts.
         entries = repair_json_array(json_text, log=lambda m: handle.log(m, "WARNING"))
         if entries:
             from ..platform.quota import consume_llm_output
             consume_llm_output(text, "script.parse")
-            return entries, text
+            return entries, text, finish_reason
 
         handle.log(f"chunk {chunk_num} 响应无法解析为 JSON", "WARNING")
         handle.log(f"JSON preview: {json_text[:300]}...", "WARNING")
@@ -715,35 +759,48 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
             from ..platform.quota import consume_llm_output
             consume_llm_output(text, "script.parse")
             handle.log(f"正则抢救出 {len(salvaged)} 条 entries（来自畸形响应）")
-            return salvaged, text
-        return None, text
+            return salvaged, text, finish_reason
+        return None, text, finish_reason
 
     entries = None
+    finish_reason = None
+    budget_doubled = False
     for attempt in range(max_retries + 1):
         handle.check()  # cooperative cancel / pause point between attempts
-        entries, _raw = _attempt(temperature)
+        entries, _raw, finish_reason = _attempt(
+            temperature, max_tokens * 2 if budget_doubled else max_tokens)
         if entries:
             if attempt > 0:
                 handle.log(f"  Succeeded on retry {attempt + 1}")
             break
+        # JSON 被整体切断（预算不足）→ 重试时翻倍预算；stop 下的格式漂移按原预算重试。
+        if finish_reason == "length" and not budget_doubled:
+            budget_doubled = True
+            handle.log(
+                f"chunk {chunk_num}/{total_chunks}: 响应被预算截断（finish_reason=length，"
+                f"max_tokens={max_tokens}）→ 重试时翻倍（{max_tokens} → {max_tokens * 2}）",
+                "WARNING")
         if attempt < max_retries:
             handle.log("Retrying...")
 
     if not entries:
         return []
 
-    # -- Fidelity check + recovery (two-step ladder) ------------------------------
+    # -- Fidelity check + triaged recovery ----------------------------------------
     # A parseable reply is NOT automatically faithful: a truncated JSON (repair
     # "salvages" the head and silently drops the tail) or a drifting model (skips a
-    # line) both parse cleanly. Verify the source's quoted passages against the
-    # output, then escalate in exactly two steps: double max_tokens and re-run once;
-    # if that is still unfaithful, split in half and re-run both halves once.
+    # line) both parse cleanly.  ``check_chunk_alignment`` compares the whole
+    # source/output skeletons with the prompt-permitted edits exempt (moved speaker
+    # names, pure speech tags).  When it fails, the remedy follows the diagnosis:
+    # budget cut (finish_reason=length) → double max_tokens once; self-stopped
+    # (stop) → doubling changes nothing, go straight to the split.  Either way the
+    # split in half is the last rung (halves run with recover=False).
     if not recover:
         # 对半切出来的半段：只跑这一次，残余缺失记日志，不再升级（阶梯到头）。
         alignment = check_chunk_alignment(chunk, entries)
         missing = alignment["missing"] or alignment["extra"]
         if not alignment["ok"]:
-            handle.log(f"chunk {chunk_num}（半段）仍缺失 {len(missing)} 处引语段，"
+            handle.log(f"chunk {chunk_num}（半段）仍缺失 {len(missing)} 处，"
                        f"保留现有 {len(entries)} 条", "WARNING")
         return entries
 
@@ -752,30 +809,41 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     if alignment["ok"]:
         return entries
 
-    # Step 1: output was likely cut off at max_tokens — double the budget, run once.
-    handle.log(
-        f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处引语段"
-        f"（如 “{missing[0][:10]}…”） → max_tokens 临时翻倍"
-        f"（{max_tokens} → {max_tokens * 2}）再跑一次",
-        "WARNING",
-    )
-    handle.check()
-    bigger, _raw = _attempt(temperature, max_tokens * 2)
-    if bigger:
-        alignment2 = check_chunk_alignment(chunk, bigger)
-        if alignment2["ok"]:
-            handle.log(f"chunk {chunk_num} 翻倍 max_tokens 后忠实性校验通过")
-            return bigger
-        if len(bigger) > len(entries):
-            # 仍缺失，但内容更全 → 以翻倍结果为准（缺失清单同步更新）
-            entries, alignment = bigger, alignment2
-            missing = alignment["missing"] or alignment["extra"]
+    if finish_reason == "length":
+        # 输出被预算切断（JSON 整体被截 / 尾部丢段）→ 翻倍 max_tokens 再跑一次。
+        handle.log(
+            f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
+            f"（如 “{missing[0][:10]}…”）且输出被预算切断（finish_reason=length）"
+            f" → max_tokens 临时翻倍（{max_tokens} → {max_tokens * 2}）再跑一次",
+            "WARNING",
+        )
+        handle.check()
+        bigger, _raw, _fr = _attempt(temperature, max_tokens * 2)
+        if bigger:
+            alignment2 = check_chunk_alignment(chunk, bigger)
+            if alignment2["ok"]:
+                handle.log(f"chunk {chunk_num} 翻倍 max_tokens 后忠实性校验通过")
+                return bigger
+            if len(bigger) > len(entries):
+                # 仍缺失，但内容更全 → 以翻倍结果为准（缺失清单同步更新）
+                entries, alignment, missing = bigger, alignment2, \
+                    (alignment2["missing"] or alignment2["extra"])
+    else:
+        # 模型自己停笔（漂移 / 内容没放下）：翻倍无效，直接对半切开——
+        # 少解析一段更可能完整输出。
+        handle.log(
+            f"chunk {chunk_num}/{total_chunks} 忠实性校验缺失 {len(missing)} 处"
+            f"（如 “{missing[0][:10]}…”）但非预算截断"
+            f"（finish_reason={finish_reason or '未知'}）→ 直接对半切开各再跑一次"
+            f"（少解析更可能完整）",
+            "WARNING",
+        )
 
-    # Step 2: still missing — split in half at a safe boundary, re-run both halves once.
+    # Still unfaithful — split in half at a safe boundary, re-run both halves once.
     left, right = split_chunk_balanced(chunk)
     if left and right and len(left) < len(chunk) and len(right) < len(chunk):
         handle.log(
-            f"chunk {chunk_num} 翻倍后仍缺失 {len(missing)} 处 → 对半切开"
+            f"chunk {chunk_num} 仍缺失 {len(missing)} 处 → 对半切开"
             f"（{len(left)} + {len(right)} 字）各再跑一次",
             "WARNING",
         )
@@ -965,9 +1033,10 @@ def _reparse_vote(parts, entry: dict, roster: frozenset):
 
     A reply votes only if it is well-formed and faithful to the original entry text:
     the parts' concatenated word-character skeleton (``_skeleton``) must equal the
-    original's skeleton either WITH the leading "…道：" tag intact (tag kept, e.g. as a
-    NARRATOR part) or WITH the tag dropped (the parse prompt's edit (e) — pure speech
-    tags are omitted). The skeleton is immune to the prompt-permitted formatting edits
+    original's skeleton under one of the prompt's permitted edits — tag kept (e.g. as
+    a NARRATOR part), the leading pure tag dropped (edit (e)), or, when the tag
+    carried a descriptive action, only the trailing speech-verb cluster dropped
+    (action retained). The skeleton is immune to the prompt-permitted formatting edits
     (quote / colon / seam-punctuation changes) while any added, dropped, or reordered
     word character is caught. Part speakers must be ``NARRATOR`` or in the file-wide
     roster (no invented names); a multi-part answer needs ≥2 distinct speakers —
@@ -993,6 +1062,13 @@ def _reparse_vote(parts, entry: dict, roster: frozenset):
     joined = _skeleton("".join(texts))
     orig = entry.get("text") or ""
     allowed = {_skeleton(orig), _skeleton(_strip_leading_saying_tag(orig))}
+    # 提示词第三处允许编辑：标签含描述性动作时保留动作、只删说话动词
+    # （史蒂夫猛地抓住杜尘的衣领，吼道 → 史蒂夫猛地抓住杜尘的衣领。）——骨架即
+    # 原文骨架去掉尾部动词簇，同样计入合法变体（仍保持骨架精确相等，投票语义不变）。
+    orig_sk = _skeleton(orig)
+    for tail in _SAY_TAG_TAILS:
+        if len(orig_sk) > len(tail) and orig_sk.endswith(tail):
+            allowed.add(orig_sk[: -len(tail)])
     if joined not in allowed:
         return None
     return tuple((p["speaker"].strip(), _skeleton(p["text"])) for p in parts)
