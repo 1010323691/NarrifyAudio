@@ -503,8 +503,9 @@ export interface AppConfig {
     check_batch_size: number
     /** 解析内重判上下文窗口（角色匹配检查 / 断句失败校验 / 归属抽样共用）；不在设置页露出。 */
     check_context_window: number
-    /** 超长段落检查开关（解析内阶段 A）：超长条目先 LLM 语义重切、后机械分段兜底；
-     *  关闭 = 整体跳过（含机械分段），最终不保证字数上界。 */
+    /** 超长段落检查开关（解析内阶段 A）：只控制 LLM 语义重切——超长条目带上下文
+     *  窗口重跑 LLM 重切；机械分段兜底（字数硬上界保证）恒生效、不受本开关控制，
+     *  关闭时超限条目仍按句界 / 子句界 / 定宽切开。 */
     check_long_paragraphs: boolean
     /** 段落硬上限（字数 = strip 后 Unicode 码点数）：任何条目最终不得超过此值，
      *  由超长段落检查的机械分段兜底保证。 */
@@ -554,7 +555,7 @@ export interface ParseChecks {
   validate_instructs?: boolean
   /** 断句失败校验（「…道：」标签条目重跑校验）。 */
   revalidate_splits?: boolean
-  /** 超长段落检查（LLM 重切 + 机械分段兜底）。 */
+  /** 超长段落检查（只控制 LLM 语义重切；机械分段兜底恒生效）。 */
   check_long_paragraphs?: boolean
   /** 归属抽样总开关（关闭 = 跳过抽样阶段，spot_check_rate 被忽略）。 */
   spot_check_enabled?: boolean
