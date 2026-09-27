@@ -70,7 +70,7 @@ class RegistrationUpdate(BaseModel):
 
 _FEATURE_CONFIG_SECTIONS = {
     "text", "audio", "tts", "llm", "prompts", "persona_prompts",
-    "generation", "ffmpeg", "bgm",
+    "generation", "ffmpeg", "bgm", "split",
 }
 
 

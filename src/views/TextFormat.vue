@@ -85,6 +85,8 @@ const lengthPerVolumeChars = computed(() => {
 })
 // 按字数分册的引擎警告（降册数 / 整本降级）——完成注记里展示，降级事实可见。
 const lengthWarnings = ref<string[]>([])
+// 按字数分册目标字数：管理员后台可配的平台功能默认值（默认 3000）——提示文案展示用。
+const lengthTargetChars = computed(() => settings.config?.split?.length_target ?? 3000)
 const showSeqWarning = computed(
   () => !!analysis.value && !zeroChapters.value && analysis.value.sequence.hasIssues && !seqWarningDismissed.value,
 )
@@ -301,9 +303,9 @@ async function runWholeBook() {
   }
 }
 
-// 零章节默认路径「按字数分册」：未识别出章节结构时按约 3000 字/册平均拆分
-//（6200 字 → 3100+3100，不出现短尾章），切点只落段落/句子边界，不切段落、
-// 不截断句子；边界不足时自动降册数。
+// 零章节默认路径「按字数分册」：未识别出章节结构时按平台配置的目标字数
+//（默认 3000 字/册，管理员后台可调）平均拆分（6200 字 → 3100+3100，不出现
+// 短尾章），切点只落段落/句子边界，不切段落、不截断句子；边界不足时自动降册数。
 async function runByLength() {
   if (!formatResult.value || !projectSet.value || busySplit.value) return
   busySplit.value = true
@@ -529,7 +531,7 @@ function download(p: string) {
         <p>{{ analysis?.error }}</p>
         <div class="flex gap-2">
           <Button size="sm" :disabled="busySplit || !formatResult || !projectSet" @click="runByLength">
-            {{ busySplit ? '分册中…' : '按字数分册（约 3000 字/册）' }}
+            {{ busySplit ? '分册中…' : `按字数分册（约 ${lengthTargetChars} 字/册）` }}
           </Button>
           <Button size="sm" variant="outline" :disabled="busySplit || !formatResult || !projectSet" @click="runWholeBook">
             不处理，按整本继续
@@ -670,7 +672,7 @@ function download(p: string) {
       </CardHeader>
       <CardContent>
         <p class="text-sm text-muted-foreground">
-          未检测到任何章节（系统识别的格式：{{ analysis.expected_format }}）。可「按字数分册」（约 3000 字/册、字数平均、不切段落、不截断句子），或「不处理，按整本继续」、重新上传原文。
+          未检测到任何章节（系统识别的格式：{{ analysis.expected_format }}）。可「按字数分册」（约 {{ lengthTargetChars }} 字/册、字数平均、不切段落、不截断句子），或「不处理，按整本继续」、重新上传原文。
         </p>
       </CardContent>
     </Card>

@@ -49,6 +49,13 @@ class TextConfig(BaseModel):
     live: bool = True  # UI-only: reformat immediately on change
 
 
+class SplitConfig(BaseModel):
+    # 零章节兜底：按字数分册的每册目标字数（平台功能默认值，管理员后台配置，
+    # 经 get_config 的 platform 覆盖生效）。工作空间文件里的值读取不生效、
+    # 用户侧 /api/config 不可写（bgm 同款处理），GET 仍返回有效值供工作台展示。
+    length_target: int = Field(default=3_000, ge=100, le=200_000)
+
+
 class AudioConfig(BaseModel):
     target_duration: str = "10:00"
     naming_format: str = "第 {} 集"
@@ -208,6 +215,7 @@ class AppConfig(BaseModel):
     # disk. Reads therefore never fail on legacy configs.
     paths: PathsConfig = Field(default_factory=PathsConfig)
     text: TextConfig = Field(default_factory=TextConfig)
+    split: SplitConfig = Field(default_factory=SplitConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -320,19 +328,20 @@ def _load_unlocked() -> AppConfig:
     template (a read-only view). A missing workspace file falls back to the root
     template's values, then to pure code defaults — reads never write.
 
-    The ``bgm`` section is forced to code defaults on every load: BGM audio
-    parameters are managed centrally by administrators (``SystemConfig``
-    ``application.features`` → merged on top in ``get_config``), so values
-    persisted in a workspace file no longer take effect. They are wiped from
-    the file on the next ``update_config`` save (the patch's bgm section is
-    stripped, so the persisted section is the default one).
+    The ``bgm`` and ``split`` sections are forced to code defaults on every
+    load: those parameters are managed centrally by administrators
+    (``SystemConfig`` ``application.features`` → merged on top in
+    ``get_config``), so values persisted in a workspace file no longer take
+    effect. They are wiped from the file on the next ``update_config`` save
+    (the patch's sections are stripped, so the persisted sections are the
+    defaults).
     """
     config = (
         _load_config_file(_active_config_file())
         or _load_config_file(TEMPLATE_FILE)
         or AppConfig()
     )
-    return config.model_copy(update={"bgm": BGMConfig()})
+    return config.model_copy(update={"bgm": BGMConfig(), "split": SplitConfig()})
 
 
 def get_config() -> AppConfig:
@@ -450,7 +459,9 @@ def update_config(patch: dict[str, Any]) -> AppConfig:
         data = current.model_dump()
         # BGM 参数由管理员统一配置：用户侧补丁里的 bgm 段不生效（落盘的始终是
         # 代码默认值，历史工作空间文件里的旧值随本次保存被清出）。
+        # split（按字数分册目标字数）同为管理员统一配置，处理一致。
         patch.pop("bgm", None)
+        patch.pop("split", None)
         _deep_update(data, patch)
         new = AppConfig.model_validate(data)
         new.paths.working_dir = str(ws)

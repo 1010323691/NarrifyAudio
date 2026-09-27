@@ -27,6 +27,7 @@ import {
   AudioWaveform,
   AudioLines,
   Music4,
+  Scissors,
 } from 'lucide-vue-next'
 
 const props = withDefaults(defineProps<{ section?: 'text' | 'models' | 'audio' }>(), { section: 'text' })
@@ -81,6 +82,9 @@ async function save() {
     ...config.generation,
     parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
   }
+  const split = {
+    length_target: Math.max(100, Math.min(200000, Math.trunc(Number(config.split?.length_target) || 3000))),
+  }
   try {
     const patch: Record<string, unknown> = {
       text: config.text,
@@ -91,6 +95,7 @@ async function save() {
       generation,
       ffmpeg: config.ffmpeg,
       bgm: config.bgm,
+      split,
     }
     // The API echoes bundled defaults for display. Persist prompts only when
     // edited so saving unrelated settings does not freeze today's defaults.
@@ -136,6 +141,25 @@ async function save() {
             <div v-for="t in TOGGLES" :key="t.key" class="flex items-center justify-between">
               <Label class="font-normal">{{ t.label }}</Label>
               <Switch v-model="draft.text[t.key]" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <!-- 分册（零章节兜底） -->
+      <Card v-if="active === 'text'">
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2"><Scissors class="h-5 w-5" />分册</CardTitle>
+          <CardDescription>未识别出章节时的兜底拆分参数。</CardDescription>
+        </CardHeader>
+        <CardContent class="space-y-3">
+          <div class="space-y-1.5">
+            <Label for="split-length-target">按字数分册目标字数</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input id="split-length-target" v-model.number="draft.split.length_target" type="number" min="100" max="200000" step="50" class="max-w-[120px]" />
+              <span class="text-xs text-muted-foreground">
+                未识别出章节时，按字数平均分册的每册目标字数（100~200000，默认 3000）。新启动的分册任务生效。
+              </span>
             </div>
           </div>
         </CardContent>
