@@ -1031,6 +1031,67 @@ def test_process_chunk_truncated_json_doubles_budget_on_retry(monkeypatch):
     assert calls["max_tokens"] == [100, 200]
 
 
+def test_process_chunk_alignment_off_skips_recovery(monkeypatch):
+    # check_alignment=False（用户解析页「chunk 忠实性校验」开关关）：JSON 可解析即原样
+    # 返回——大段缺失也不触发翻倍预算 / 对半切开（对照 :890 开关开时的 2 次恢复调用）。
+    missing_line = f"{LQ}那就一直走，直到看见尽头{'乙' * 110}。{RQ}她答。"
+    partial = json.dumps([
+        {"speaker": "NARRATOR", "text": "他道"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
+    ], ensure_ascii=False)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        calls["max_tokens"].append(json.loads(req.data.decode("utf-8"))["max_tokens"])
+        return _BodyResp(_chat_payload(partial, "length"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n{missing_line}"
+    result = process_chunk(
+        _Handle(),
+        LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
+        "m", chunk, 1, 1, temperature=0.6, max_tokens=100,
+        check_alignment=False,
+    )
+
+    assert [e["text"] for e in result] == ["他道", f"{LQ}这条路没有尽头。{RQ}"]
+    assert calls["n"] == 1
+    assert calls["max_tokens"] == [100]  # 不翻倍、不切开
+
+
+def test_process_chunk_alignment_off_still_retries_unparseable_json(monkeypatch):
+    # 恒执行项回归：JSON 可解析性的 max_retries 重试不受本开关影响——check_alignment=
+    # False 时首轮 JSON 被切断（不可解析）仍翻倍预算重试，与开关开时行为一致（:1004）。
+    truncated = '[{"speaker": "NARRATOR", "text": "他'
+    full = json.dumps([
+        {"speaker": "NARRATOR", "text": "他道"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
+    ], ensure_ascii=False)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        calls["max_tokens"].append(json.loads(req.data.decode("utf-8"))["max_tokens"])
+        return _BodyResp(_chat_payload(truncated, "length") if calls["n"] == 1
+                         else _chat_payload(full))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}"
+    result = process_chunk(
+        _Handle(),
+        LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
+        "m", chunk, 1, 1, temperature=0.6, max_tokens=100,
+        check_alignment=False,
+    )
+
+    assert [e["text"] for e in result] == ["他道", f"{LQ}这条路没有尽头。{RQ}"]
+    assert calls["n"] == 2
+    assert calls["max_tokens"] == [100, 200]
+
+
 def test_check_chunk_alignment_speaker_name_not_flagged_missing():
     # 纯标签删除（提示词编辑 (e)）：名字只留在 speaker 字段，「名字+说话动词」的
     # 标签缺口（6 字骨架）落在 ≤50 字忽略档，不误判为「缺失」。
@@ -2103,6 +2164,126 @@ def test_generate_file_revalidate_off_skips_stage(tmp_path, monkeypatch, workspa
     assert [(e["speaker"], e["text"]) for e in out] == [
         ("NARRATOR", f"{SQ}说道：{SQ}嗯，好。{SQ}{SQ}"),
         ("林某", f"{SQ}嗯，去吧。{SQ}"),
+    ]
+
+
+def test_generate_file_instruct_off_skips_stage(tmp_path, monkeypatch, workspace):
+    # validate_instructs=False（用户解析页「instruct 检查」开关关）：阶段整体跳过——
+    # 空 instruct 条目不触发修复 LLM 调用（开关开时会有一批一次的重判）、
+    # instruct_checked / instruct_fixed = 0、日志留一行「已关闭（配置）」。
+    source = (
+        "夜色渐深。\n"
+        f"林某说：{LQ}你去哪了？{RQ}\n"
+    )
+    parse_reply = json.dumps([
+        {"speaker": "NARRATOR", "text": "夜色渐深。", "instruct": ""},
+        {"speaker": "林某", "text": f"{LQ}你去哪了？{RQ}", "instruct": ""},
+    ], ensure_ascii=False)
+    calls = {"n": 0}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        return _BodyResp(_chat_payload(parse_reply))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    (workspace / "02_split_text").mkdir(parents=True)
+    src = workspace / "02_split_text" / "noval.txt"
+    src.write_bytes(source.encode("utf-8"))
+    handle = _LogHandle()
+    result = generate_file(
+        handle, str(src), _LLM, PromptsConfig(),
+        GenerationConfig(validate_instructs=False, spot_check_rate=0.0),
+    )
+
+    assert calls["n"] == 1  # 仅解析——instruct 阶段零 LLM 调用
+    assert result["instruct_checked"] == 0
+    assert result["instruct_fixed"] == 0
+    assert any("instruct 检查已关闭（配置）" in msg for _lv, msg in handle.logs)
+    out = json.loads((workspace / "03_parsed_json" / "noval.json").read_text("utf-8"))
+    assert [(e["speaker"], e["text"]) for e in out] == [
+        ("NARRATOR", "夜色渐深。"),
+        ("林某", f"{LQ}你去哪了？{RQ}"),
+    ]
+
+
+def test_generate_file_spot_off_skips_stage(tmp_path, monkeypatch, workspace):
+    # spot_check_enabled=False（总开关，独立于 spot_check_rate）：抽样阶段整体跳过——
+    # 即使 spot_check_rate=1.0 也零 LLM 调用、spot_* 结果字段全 0、不写
+    # spot_check_history.json、日志留一行「已关闭（配置）」。
+    source = (
+        "夜色渐深。\n"
+        f"林某说：{LQ}你终于来了。{RQ}\n"
+    )
+    parse_reply = json.dumps([
+        {"speaker": "NARRATOR", "text": "夜色渐深。", "instruct": "a"},
+        {"speaker": "林某", "text": f"{LQ}你终于来了。{RQ}", "instruct": "b"},
+    ], ensure_ascii=False)
+    calls = {"n": 0}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        return _BodyResp(_chat_payload(parse_reply))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    (workspace / "02_split_text").mkdir(parents=True)
+    src = workspace / "02_split_text" / "noval.txt"
+    src.write_bytes(source.encode("utf-8"))
+    handle = _LogHandle()
+    result = generate_file(
+        handle, str(src), _LLM, PromptsConfig(),
+        GenerationConfig(spot_check_enabled=False, spot_check_rate=1.0),
+    )
+
+    assert calls["n"] == 1  # 仅解析——rate 1.0 下抽样仍零 LLM 调用
+    assert result["spot_checked"] == 0
+    assert result["spot_fixed"] == 0
+    assert result["spot_rate"] == 0.0
+    assert result["spot_random_n"] == 0
+    assert result["spot_random_errors"] == 0
+    assert result["spot_random_rate"] is None
+    assert any("归属抽样已关闭（配置）" in msg for _lv, msg in handle.logs)
+    assert not (workspace / "config" / "spot_check_history.json").exists()
+
+
+def test_generate_file_chunk_alignment_off_keeps_partial(tmp_path, monkeypatch, workspace):
+    # check_chunk_alignment=False（用户解析页「chunk 忠实性校验」开关关）：解析阶段
+    # 的忠实性校验 + 恢复重跑跳过——大段缺失也不触发恢复调用（开关开时会翻倍预算
+    # 重跑，见 :890 系列），缺失部分原样保留并记入结果；解析阶段留一次性日志
+    # 「chunk 忠实性校验已关闭（配置）」。
+    missing = f"{LQ}那就一直走，直到看见尽头{'乙' * 110}。{RQ}她答。"
+    partial = json.dumps([
+        {"speaker": "NARRATOR", "text": "夜色渐深。", "instruct": "a"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}", "instruct": "b"},
+    ], ensure_ascii=False)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        calls["max_tokens"].append(json.loads(req.data.decode("utf-8"))["max_tokens"])
+        return _BodyResp(_chat_payload(partial, "length"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    source = f"夜色渐深。\n\n{LQ}这条路没有尽头。{RQ}\n\n{missing}"
+    (workspace / "02_split_text").mkdir(parents=True)
+    src = workspace / "02_split_text" / "noval.txt"
+    src.write_bytes(source.encode("utf-8"))
+    handle = _LogHandle()
+    result = generate_file(
+        handle, str(src), _LLM, PromptsConfig(),
+        GenerationConfig(check_chunk_alignment=False, spot_check_rate=0.0),
+    )
+
+    assert calls["n"] == 1  # 大段缺失也不恢复（开关开时同场景会重跑一次）
+    assert calls["max_tokens"] == [4096]  # 默认预算，不翻倍
+    assert any("chunk 忠实性校验已关闭（配置）" in msg for _lv, msg in handle.logs)
+    assert result["count"] == 2  # 部分结果原样保留
+    out = json.loads((workspace / "03_parsed_json" / "noval.json").read_text("utf-8"))
+    assert [(e["speaker"], e["text"]) for e in out] == [
+        ("NARRATOR", "夜色渐深。"),
+        ("A", f"{LQ}这条路没有尽头。{RQ}"),
     ]
 
 

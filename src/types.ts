@@ -486,12 +486,19 @@ export interface AppConfig {
     spot_check_adaptive: boolean
     spot_check_min_rate: number
     spot_check_max_rate: number
+    /** 归属抽样总开关（用户解析页勾选；关闭 = 跳过抽样阶段并记录日志，率被忽略）。 */
+    spot_check_enabled: boolean
     /** 断句失败校验开关（解析内阶段；关闭 = 跳过该阶段并记录日志）。 */
     revalidate_splits: boolean
     /** 纯归属标签条删除开关（解析内阶段；关闭 = 跳过该阶段并记录日志）。 */
     delete_saying_tags: boolean
     /** 角色匹配检查开关（解析内阶段，重判 chunk 边界两侧条目；关闭 = 跳过该阶段并记录日志）。 */
     check_boundary_speakers: boolean
+    /** instruct 检查开关（解析内阶段；关闭 = 跳过该阶段并记录日志）。 */
+    validate_instructs: boolean
+    /** chunk 忠实性校验开关（解析阶段：检出大段缺失时翻倍预算/对半切开重跑；
+     *  关闭 = 跳过校验与恢复，JSON 可解析性重试不受影响）。 */
+    check_chunk_alignment: boolean
     /** 解析内重判批大小（角色匹配检查 / 断句失败校验 / 归属抽样共用）；不在设置页露出。 */
     check_batch_size: number
     /** 解析内重判上下文窗口（角色匹配检查 / 断句失败校验 / 归属抽样共用）；不在设置页露出。 */
@@ -534,6 +541,23 @@ export interface AppConfig {
     /** 段落级 intensity 1/2/3 → volume 的倍率（越界/缺失按档 2；结果 clamp ≤2.0）。 */
     segment_volume_tiers: number[]
   }
+}
+
+/** 解析检查开关（用户解析页勾选，随 `POST /api/script/generate-files` 任务提交；
+ *  每个字段可选——未提供 = 沿用当前生效配置。提交值固化为该任务的配置快照。 */
+export interface ParseChecks {
+  /** chunk 忠实性校验（关闭 = 跳过校验与恢复重跑，JSON 可解析性重试不受影响）。 */
+  check_chunk_alignment?: boolean
+  /** 角色匹配检查（chunk 边界两侧条目重判）。 */
+  check_boundary_speakers?: boolean
+  /** instruct 检查（空/超长 instruct 修复）。 */
+  validate_instructs?: boolean
+  /** 断句失败校验（「…道：」标签条目重跑校验）。 */
+  revalidate_splits?: boolean
+  /** 超长段落检查（LLM 重切 + 机械分段兜底）。 */
+  check_long_paragraphs?: boolean
+  /** 归属抽样总开关（关闭 = 跳过抽样阶段，spot_check_rate 被忽略）。 */
+  spot_check_enabled?: boolean
 }
 
 /** A recursively-partial ``AppConfig`` — mirrors the backend's deep-merge ``update_config``

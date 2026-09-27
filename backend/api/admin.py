@@ -74,6 +74,16 @@ _FEATURE_CONFIG_SECTIONS = {
     "generation", "ffmpeg", "bgm", "split",
 }
 
+# 6 个解析检查开关由用户在「文本解析」页勾选并随任务参数提交（api/script.py 的
+# ParseChecks）——用户专属。不得持久化成平台功能默认：get_config() 会把
+# application.features 深合并**覆盖**工作区值，平台一旦有值就会压掉用户存进项目
+# 配置的「上次选择」。持久化时剔除这些键（已存在的旧值在下一次保存 generation
+# 段时被整段替换清掉）。
+_USER_OWNED_CHECKS = {
+    "check_chunk_alignment", "check_boundary_speakers", "validate_instructs",
+    "revalidate_splits", "check_long_paragraphs", "spot_check_enabled",
+}
+
 
 def _application_config_with_prompt_defaults() -> dict:
     """Echo bundled parsing prompts when the platform config leaves them blank."""
@@ -113,9 +123,13 @@ def update_application_settings(payload: dict, actor: User = Depends(require_csr
     if config is None:
         config = SystemConfig(key="application.features", value={})
         db.add(config)
-    config.value = {**(config.value if isinstance(config.value, dict) else {}), **{
-        key: getattr(merged, key).model_dump() for key in patch
-    }}
+    sections = {}
+    for key in patch:
+        value = getattr(merged, key).model_dump()
+        if key == "generation":
+            value = {k: v for k, v in value.items() if k not in _USER_OWNED_CHECKS}
+        sections[key] = value
+    config.value = {**(config.value if isinstance(config.value, dict) else {}), **sections}
     db.add(AuditLog(actor_user_id=actor.id, action="admin.application_features_changed", target_type="system_config", target_id="application.features", metadata_json={"sections": sorted(patch)}))
     db.commit()
     update_feature_defaults_cache(config.value)

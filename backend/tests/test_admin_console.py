@@ -369,3 +369,43 @@ def test_llm_models_listing_empty_saved_url_returns_422(client: TestClient, monk
     assert resp.status_code == 422, resp.text
     assert "地址" in resp.json()["detail"]
     assert not called
+
+
+def test_admin_application_settings_never_persist_user_owned_parse_checks(client: TestClient):
+    # 用户「文本解析」页专属的 6 个解析检查开关不落平台默认：PATCH application
+    # settings 携带它们也被剔除（顺带清掉历史残留值），返回与后续读取均为代码默认；
+    # 管理台管的 spot_check_rate 照常持久化；用户侧 GET /api/config 的 6 项不受
+    # 平台侧 False 影响（防覆盖漏洞的另一半——页面初值 / 任务快照基线不被压）。
+    csrf, _ = _create_admin(client)
+
+    check_keys = (
+        "check_chunk_alignment", "check_boundary_speakers", "validate_instructs",
+        "revalidate_splits", "check_long_paragraphs", "spot_check_enabled",
+    )
+    patched = client.patch(
+        "/api/v1/admin/settings/application",
+        headers={"X-CSRF-Token": csrf},
+        json={"generation": {
+            "spot_check_rate": 0.07,
+            **{key: False for key in check_keys},
+        }},
+    )
+    assert patched.status_code == 200, patched.text
+    gen = patched.json()["config"]["generation"]
+    for key in check_keys:
+        assert gen[key] is True  # 未落平台默认 → 回代码默认（全 True），False 未生效
+    assert gen["spot_check_rate"] == 0.07  # 管理台管的比例照常持久化
+
+    # 用户侧合并视图：注册会切换 TestClient 会话（须在管理台请求之后），6 项仍为
+    # 工作区 / 代码默认（平台侧的 False 不压工作区值）
+    user = client.post(
+        "/api/auth/register",
+        json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
+    )
+    assert user.status_code == 201, user.text
+    config = client.get("/api/config", headers={"X-CSRF-Token": user.json()["csrf_token"]})
+    assert config.status_code == 200, config.text
+    ws_gen = config.json()["generation"]
+    for key in check_keys:
+        assert ws_gen[key] is True
+    assert ws_gen["spot_check_rate"] == 0.07

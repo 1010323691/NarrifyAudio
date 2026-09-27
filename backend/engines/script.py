@@ -614,7 +614,8 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                   previous_entries=None, max_retries=2,
                   system_prompt=None, user_prompt_template=None,
                   max_tokens=4096, temperature=0.6, top_p=0.8, top_k=0, min_p=0,
-                  presence_penalty=0.0, banned_tokens=None, recover=True):
+                  presence_penalty=0.0, banned_tokens=None, recover=True,
+                  check_alignment=True):
     """Process one text chunk via the LLM and return its JSON script entries.
 
     Faithful port of the source ``process_chunk``: build the cross-chunk context
@@ -633,6 +634,9 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
       at a safe boundary (``split_chunk_balanced``) and re-run both halves once
       (少解析一段更可能完整输出).  The halves run with ``recover=False`` (no further
       escalation, so the ladder can't run away).
+    ``check_alignment=False`` skips the fidelity check and its recovery entirely
+    (a parseable reply is returned as-is) — the JSON-legibility retries above
+    still run regardless.
     Whatever can't be recovered is kept as-is (never silently dropped).
     """
     sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
@@ -777,6 +781,12 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     if not entries:
         return []
 
+    if not check_alignment:
+        # 忠实性校验 + 恢复重跑已关闭（任务参数）：JSON 可解析即返回——不跑
+        # check_chunk_alignment、不翻倍 max_tokens、不对半切开。上方 max_retries
+        # 的 JSON 可解析性重试不受本开关影响、恒执行。
+        return entries
+
     # -- Fidelity check + triaged recovery ----------------------------------------
     # A parseable reply is NOT automatically faithful: a truncated JSON (repair
     # "salvages" the head and silently drops the tail) or a drifting model (skips a
@@ -866,6 +876,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
             max_tokens=max_tokens, temperature=temperature, top_p=top_p,
             top_k=top_k, min_p=min_p, presence_penalty=presence_penalty,
             banned_tokens=banned_tokens, recover=False,
+            check_alignment=check_alignment,
         )
         right_prev = (list(previous_entries) + left_entries) if previous_entries else left_entries
         right_entries = process_chunk(
@@ -876,6 +887,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
             max_tokens=max_tokens, temperature=temperature, top_p=top_p,
             top_k=top_k, min_p=min_p, presence_penalty=presence_penalty,
             banned_tokens=banned_tokens, recover=False,
+            check_alignment=check_alignment,
         )
         return left_entries + right_entries
 
@@ -2843,6 +2855,14 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     ``llm`` / ``prompts`` / ``generation`` are the config section objects; empty
     ``prompts`` fall back to the bundled defaults.
 
+    During the parse stage, each chunk's fidelity recovery (``check_chunk_alignment``
+    — the triaged re-run ladder: budget doubling on token-cut output, split-in-half
+    re-runs on self-stopped output) is gated by
+    ``generation.check_chunk_alignment`` (default on): when off, a parseable chunk is
+    adopted as-is — the check and its recovery re-runs are skipped, one log line is
+    left before the chunk loop, and missing content stays missing. The JSON-legibility
+    ``max_retries`` retries (clean / repair / salvage) run regardless.
+
     First in the check phase, a chunk-boundary re-check (``boundary_check_speakers``,
     ``generation.check_boundary_speakers`` — default on) re-judges the n entries
     flanking each INTERNAL chunk boundary (n = ``check_context_window``) through
@@ -2875,6 +2895,8 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     remaining targets are repaired in one index-keyed LLM request with a
     ±``generation.check_context_window`` local context. The ``instruct_checked`` /
     ``instruct_fixed`` result fields record the flagged and replaced counts.
+    Gated by ``generation.validate_instructs`` (default on): when off the stage is
+    skipped with one log line and both result fields stay zero.
 
     Before the spot audit, standalone pure-attribution-tag entries are deleted
     deterministically (no LLM calls): a NARRATOR entry of ≤10 chars, quote-free,
@@ -2894,6 +2916,9 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     corrections are baked into the base file this task writes. Each book's pure-random-bucket reading is logged and
     appended to ``<workspace>/config/spot_check_history.json`` — the rate itself is
     NEVER auto-reduced (the user decides manually from the settings page).
+    The whole stage is additionally gated by ``generation.spot_check_enabled``
+    (default on): when off it is skipped with one log line, zeroed ``spot_*``
+    result fields, and no history write — the rate (admin-controlled) is ignored.
     ``rng`` (tests) injects a seeded ``random.Random`` for deterministic sampling.
     """
     # Fail fast on a misconfigured model *before* doing any work.
@@ -2943,6 +2968,9 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         sys_prompt = prompts.system_prompt or DEFAULT_SYSTEM_PROMPT
         usr_template = prompts.user_prompt or DEFAULT_USER_PROMPT
 
+        if not generation.check_chunk_alignment:
+            handle.log("chunk 忠实性校验已关闭（配置）——解析阶段跳过恢复重跑（JSON 重试仍生效）")
+
         all_entries = []
         chunk_ends = []  # 每段结束时的累计条目数——chunk 边界簿记（角色匹配检查用）
         for i, chunk in enumerate(chunks, 1):
@@ -2965,6 +2993,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 min_p=generation.min_p,
                 presence_penalty=generation.presence_penalty,
                 banned_tokens=generation.banned_tokens,
+                check_alignment=generation.check_chunk_alignment,
             )
             all_entries.extend(entries)
             chunk_ends.append(len(all_entries))
@@ -3000,10 +3029,15 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         # 可能意味着声音指导生成失败/失控；带同一上下文窗口重跑解析 LLM，多数胜出
         # 后整体替换目标条目。此阶段不依赖后续机械合并，避免合并或硬切产生的空值被
         # 错误地再次送入 LLM。
-        all_entries, instruct_checked, instruct_fixed = validate_instructs(
-            handle, llm, generation, sys_prompt, usr_template, all_entries,
-            context_window=int(generation.check_context_window or 0),
-        )
+        if generation.validate_instructs:
+            all_entries, instruct_checked, instruct_fixed = validate_instructs(
+                handle, llm, generation, sys_prompt, usr_template, all_entries,
+                context_window=int(generation.check_context_window or 0),
+            )
+        else:
+            # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
+            handle.log("instruct 检查已关闭（配置）——本任务跳过该阶段")
+            instruct_checked, instruct_fixed = 0, 0
 
         # 断句失败校验（机械旁白合并之前——拆出的旁白段随后照常合并）：外层双引号
         # 包裹、引号内含「…道：」标签的条目 = 疑似断句失败 → 带上下文窗口重跑解析
@@ -3061,15 +3095,22 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         # 改后 speaker）：按 spot_check_rate 从全部条目抽 1/3 纯随机（整书错误率仪表）
         # + 2/3 风险加权（特征数级联），用捆绑重判提示词 + 共享重判批协议重判，
         # 高置信改判在内存中生效、随本任务自己的基文件写出。
-        configured_spot_rate = float(generation.spot_check_rate or 0)
-        spot_rate = adaptive_spot_rate(generation, history_path=spot_history_path)
-        if spot_rate != configured_spot_rate:
-            handle.log(
-                f"归属抽样：历史随机桶反馈将抽样率从 {configured_spot_rate:.1%} 调整为 {spot_rate:.1%}"
+        if generation.spot_check_enabled:
+            configured_spot_rate = float(generation.spot_check_rate or 0)
+            spot_rate = adaptive_spot_rate(generation, history_path=spot_history_path)
+            if spot_rate != configured_spot_rate:
+                handle.log(
+                    f"归属抽样：历史随机桶反馈将抽样率从 {configured_spot_rate:.1%} 调整为 {spot_rate:.1%}"
+                )
+            all_entries, spot_stats = spot_check_speakers(
+                handle, llm, generation, all_entries, spot_rate, rng,
             )
-        all_entries, spot_stats = spot_check_speakers(
-            handle, llm, generation, all_entries, spot_rate, rng,
-        )
+        else:
+            # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
+            handle.log("归属抽样已关闭（配置）——本任务跳过该阶段")
+            all_entries, spot_stats = spot_check_speakers(
+                handle, llm, generation, all_entries, 0.0, rng,
+            )
 
         # 纯标点条目吸收（确定性零 LLM 成本；必须在超长机械分段**之前**——吸收把
         # 「……」拼进邻接 NARRATOR 可能把它推过上限，随后的机械分段兜底切回：
