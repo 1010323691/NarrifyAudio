@@ -1696,7 +1696,8 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
 # evenly sized segments near a target length: segment count n =
 # round(total_chars / target), so every segment is exactly total_chars / n
 # (6200 chars at target 3000 -> 3100 + 3100, never 3000 + 3000 + 200).
-# Cut-point tiers, best first — a paragraph and a sentence are NEVER cut:
+# Cut-point tiers, best first — a sentence is NEVER cut mid-way (a paragraph
+# may still be split, only between sentences):
 #   1. paragraph boundaries (``\\n\\n``);
 #   2. sentence boundaries (right after 。！？…) — tried second within the
 #      snap window, so a cut whose window holds no paragraph break (e.g. inside
