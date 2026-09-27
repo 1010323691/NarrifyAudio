@@ -112,6 +112,10 @@ def list_llm_models(base_url: str, api_key: str = "", *, timeout: float = 10.0) 
         raise LLMModelsFetchError(f"LLM 服务连接失败：{exc}") from exc
     except (http.client.InvalidURL, ValueError) as exc:
         raise LLMModelsFetchError(f"LLM 服务地址无效：{exc}") from exc
+    except http.client.HTTPException as exc:
+        # 其他协议级异常（如非 HTTP TCP 服务的 BadStatusLine）。InvalidURL 是
+        # HTTPException 子类，须由上面的子句先捕获。
+        raise LLMModelsFetchError(f"LLM 服务响应协议异常：{exc}") from exc
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
