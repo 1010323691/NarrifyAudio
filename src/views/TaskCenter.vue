@@ -43,7 +43,11 @@ const allTasks = computed(() => {
   return [...byId.values()]
     // 被新运行替换的终态行不再展示（服务端历史接口也不会再返回它们），
     // 历史页里已加载的旧条目同样要按此过滤，否则重跑后同名任务会成对出现。
-    .filter((task) => task.status !== 'cancelled' && !taskStore.supersededIds.has(task.id))
+    // 失败条目不在任务中心展示：数据行保留（各功能页的重试入口、管理台统计、
+    // one_row_per_entry 去重仍依赖它），这里只做显示层过滤。
+    .filter((task) => task.status !== 'cancelled'
+      && task.status !== 'failed'
+      && !taskStore.supersededIds.has(task.id))
     .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))
 })
 
