@@ -180,6 +180,53 @@
     }
   }
 
+  /* De-glass the panels that wrap a long scroll region. A backdrop-filter
+     element re-rasterises its entire area on every scroll frame (~+8ms → a
+     120Hz display halves to 60Hz while a glass list scrolls). These two cards
+     each contain a long list (BGM 章节匹配结果; the Voices 角色 table), so they
+     take a near-opaque card fill and drop the per-frame blur. Border + shadow
+     stay, so the glass silhouette is kept — only the re-blur cost is removed.
+     (TaskCenter's sub-window dialog de-glasses its own scoped rule instead.) */
+  .glass-panel.bgm-results-card,
+  .glass-panel.voices-speakers-card {
+    background: hsl(var(--card) / 0.95);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* OS "reduce transparency" (Win: 设置 → 辅助功能 → 显示 → 透明效果 = 关) →
+     every frosted surface flattens to a solid panel: the accessibility ask, and
+     it also removes the re-blur cost for those users. The media gate means it
+     never applies (and never costs) anything for anyone else. */
+  @media (prefers-reduced-transparency: reduce) {
+    * {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+    }
+  }
+
+  /* 角色 table: cap height + internal scroll so 800+ heavy rows stop growing the
+     page to ~58,000px (which forced a 60fps page scroll). A sticky header row
+     keeps the column labels visible while the body scrolls. */
+  .voices-speakers-scroll {
+    max-height: 34rem;
+    overflow: auto;
+  }
+
+  .voices-th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding-bottom: 8px;
+    font-weight: 500;
+    background: hsl(var(--card));
+    border-bottom: 1px solid hsl(var(--border));
+  }
+
+  .voices-th--right {
+    text-align: right;
+  }
+
   .app-shell {
     display: flex;
     min-height: 100dvh;
@@ -751,8 +798,12 @@
     border-bottom: 1px solid hsl(var(--border));
     border-radius: 9px;
     padding: 10px 12px;
-    content-visibility: auto;
-    contain-intrinsic-size: 0 150px;
+    /* content-visibility:auto used to skip offscreen rows on initial load, but on
+       fast scroll it forced each row to re-toggle its render state as it crossed
+       the containment boundary — that churn halved the frame rate (fast scroll:
+       p50 24.9ms → 8.4ms with the flag off). The 角色 table carries the same
+       800-row weight with no content-visibility and scrolls at 120fps, so we drop
+       the flag: a marginally heavier initial layout in exchange for smooth scroll. */
     transition: background-color 160ms ease;
   }
 
