@@ -669,7 +669,7 @@ watch(
       </Card>
 
       <!-- 角色 -->
-      <Card>
+      <Card class="voices-speakers-card">
         <CardHeader>
           <CardTitle class="flex items-center gap-2">
             <Users class="h-5 w-5" />角色（{{ speakers.length }}）
@@ -677,16 +677,16 @@ watch(
           <CardDescription v-if="speakers.length">已就绪 {{ readyCount }} / {{ speakers.length }} · 基础 {{ foundationDone }} / 克隆 {{ cloneDone }} / {{ nonAlias.length }}</CardDescription>
         </CardHeader>
         <CardContent class="space-y-4">
-          <div v-if="speakers.length" class="overflow-x-auto">
+          <div v-if="speakers.length" class="voices-speakers-scroll">
             <table class="w-full text-sm">
               <thead>
-                <tr class="border-b text-left text-xs text-muted-foreground">
-                  <th class="pb-2 font-medium">角色</th>
-                  <th class="pb-2 font-medium">台词数</th>
-                  <th class="pb-2 font-medium">语音推理基础</th>
-                  <th class="pb-2 font-medium">克隆音频</th>
-                  <th class="pb-2 font-medium">声音描述 / 提示词</th>
-                  <th class="pb-2 text-right font-medium">操作</th>
+                <tr class="text-left text-xs text-muted-foreground">
+                  <th class="voices-th">角色</th>
+                  <th class="voices-th">台词数</th>
+                  <th class="voices-th">语音推理基础</th>
+                  <th class="voices-th">克隆音频</th>
+                  <th class="voices-th">声音描述 / 提示词</th>
+                  <th class="voices-th voices-th--right">操作</th>
                 </tr>
               </thead>
               <tbody>
