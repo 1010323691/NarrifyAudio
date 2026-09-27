@@ -401,7 +401,7 @@ def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[st
     if not chapters:
         result["error"] = (
             f"未检测到章节（系统识别的格式：{EXPECTED_CHAPTER_FORMAT}）。"
-            "可「按字数分册」（约 3000 字/册、字数平均、不切段落、不截断句子）"
+            f"可「按字数分册」（约 {_length_target_from_payload({})} 字/册、字数平均、不切段落、不截断句子）"
             "、「不处理，按整本继续」（整本输出为单个文件），或重新上传原文。"
         )
     return result

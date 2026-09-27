@@ -818,6 +818,30 @@ def test_durable_worker_by_length_uses_admin_configured_split_target(client: Tes
         result2 = client.get(f"/api/v1/tasks/{task_id2}").json()["result"]
         assert result2["length_target"] == 3000
         assert result2["file_count"] == 2
+
+        # 零章节 book.analyze 的提示文案与 by_length 分支同一解析来源（配置值 2000）。
+        analyzed_upload = client.post(
+            "/api/files/upload",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("analyze-nochap.txt", (("甲" * 19 + "。") * 100).encode("utf-8"), "text/plain")},
+        )
+        assert analyzed_upload.status_code == 200, analyzed_upload.text
+        analyzed = client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "project_id": source["project_id"],
+                "task_type": "book.analyze",
+                "payload": {"input_file_id": analyzed_upload.json()["file_id"]},
+                "idempotency_key": f"book-analyze-nochap-{uuid.uuid4()}",
+            },
+        )
+        assert analyzed.status_code == 201, analyzed.text
+        analyzed_id = analyzed.json()["id"]
+        assert process_task_message({"payload": {"task_id": analyzed_id}}, worker_id="test-analyze-nochap-worker") == "succeeded"
+        analyze_result = client.get(f"/api/v1/tasks/{analyzed_id}").json()["result"]
+        assert analyze_result["analysis"]["chapter_count"] == 0
+        assert "约 2000 字/册" in analyze_result["analysis"]["error"]
     finally:
         # 清理功能默认行与进程内缓存（模块级共享 DB，避免影响后续测试）。
         with SessionLocal.begin() as db:
