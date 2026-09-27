@@ -830,17 +830,17 @@ def test_split_balanced_no_boundary_returns_whole():
 # process_chunk 忠实性恢复（mocked urlopen）
 # --------------------------------------------------------------------------- #
 
-def _chat_payload(content: str) -> bytes:
+def _chat_payload(content: str, finish_reason: str = "stop") -> bytes:
     return json.dumps(
-        {"choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        {"choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
          "usage": {"prompt_tokens": 3, "completion_tokens": 4}},
         ensure_ascii=False,
     ).encode("utf-8")
 
 
 def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch):
-    # 首轮回复静默丢了一条引语（模型漂移 / 尾部截断）：忠实性校验捕获 ->
-    # 阶梯第 1 步：max_tokens 临时翻倍再跑一次，其完整回复被采纳（共 2 次调用）。
+    # 首轮回复被 token 预算切断（finish_reason=length，静默丢了一条引语）：忠实性校验
+    # 捕获，分诊判「预算截断」-> max_tokens 临时翻倍再跑一次，其完整回复被采纳（共 2 次调用）。
     partial = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
         {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
@@ -857,7 +857,8 @@ def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch)
         body = json.loads(req.data.decode("utf-8"))
         calls["temps"].append(body["temperature"])
         calls["max_tokens"].append(body["max_tokens"])
-        return _BodyResp(_chat_payload(partial if calls["n"] == 1 else full))
+        return _BodyResp(_chat_payload(partial, "length") if calls["n"] == 1
+                         else _chat_payload(full))
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
 
@@ -877,8 +878,9 @@ def test_process_chunk_fidelity_double_tokens_recovers_missing_line(monkeypatch)
 
 
 def test_process_chunk_fidelity_split_in_half(monkeypatch):
-    # 原发 + 翻倍 max_tokens 重跑都丢了后半的引语 -> 阶梯第 2 步：chunk 在段落边界
-    # 对半切开，两半各再跑一次（2 + 1 + 1 = 4 次调用，阶梯到头不递归），内容全部找回。
+    # 原发 finish_reason=stop 却静默丢了后半引语（模型自己停笔）：分诊判「质量不达标」，
+    # 翻倍无意义，直接对半切开：chunk 在段落边界切开，两半各再跑一次
+    # （1 + 1 + 1 = 3 次调用，阶梯到头不递归），内容全部找回，且全程不翻倍预算。
     chunk = f"A说：{LQ}第一句话内容。{RQ}\n\nB说：{LQ}第二句话内容。{RQ}"
     left, _right = split_chunk_balanced(chunk)  # the paragraph boundary, mid-chunk
     left_json = json.dumps([
@@ -891,11 +893,13 @@ def test_process_chunk_fidelity_split_in_half(monkeypatch):
     ], ensure_ascii=False)
     full_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=chunk)
     left_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=left)
-    calls = {"n": 0}
+    calls = {"n": 0, "max_tokens": []}
 
     def urlopen(req, *a, **k):
         calls["n"] += 1
-        user = json.loads(req.data.decode("utf-8"))["messages"][1]["content"]
+        body = json.loads(req.data.decode("utf-8"))
+        calls["max_tokens"].append(body["max_tokens"])
+        user = body["messages"][1]["content"]
         content = left_json if user in (full_user, left_user) else right_json
         return _BodyResp(_chat_payload(content))
 
@@ -910,12 +914,13 @@ def test_process_chunk_fidelity_split_in_half(monkeypatch):
     assert [e["text"] for e in result] == [
         "A说", f"{LQ}第一句话内容。{RQ}", "B说", f"{LQ}第二句话内容。{RQ}",
     ]
-    assert calls["n"] == 4
+    assert calls["n"] == 3
+    assert calls["max_tokens"] == [100, 100, 100]  # stop 直达切分，无一次翻倍
 
 
 def test_process_chunk_fidelity_unrecoverable_keeps_best(monkeypatch):
-    # 原发 + 翻倍重跑都静默丢行，且 chunk 无任何安全切分边界（阶梯到头）：
-    # 优雅保留最好结果（共 2 次调用），不丢弃、不循环。
+    # 原发 stop 且静默丢行，chunk 又无任何安全切分边界（阶梯到头）：分诊判「质量不达标」
+    # 直奔切分、切分失败 -> 优雅保留最好结果（共 1 次调用，不翻倍不循环），不丢弃。
     partial = json.dumps([
         {"speaker": "NARRATOR", "text": "他道"},
     ], ensure_ascii=False)
@@ -939,9 +944,212 @@ def test_process_chunk_fidelity_unrecoverable_keeps_best(monkeypatch):
     )
 
     assert [e["text"] for e in result] == ["他道"]  # 保留最好结果，不丢弃
+    assert calls["n"] == 1
+    assert calls["temps"] == [0.6]
+    assert calls["max_tokens"] == [100]
+
+
+def test_process_chunk_truncated_json_doubles_budget_on_retry(monkeypatch):
+    # 首轮 JSON 被整体切断（无法解析，finish_reason=length）：重试循环为下一次尝试
+    # 翻倍预算；第二次返回合法 JSON（stop）-> 采纳（共 2 次调用）。
+    truncated = '[{"speaker": "NARRATOR", "text": "他'
+    full = json.dumps([
+        {"speaker": "NARRATOR", "text": "他道"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
+    ], ensure_ascii=False)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        calls["max_tokens"].append(json.loads(req.data.decode("utf-8"))["max_tokens"])
+        return _BodyResp(_chat_payload(truncated, "length") if calls["n"] == 1
+                         else _chat_payload(full))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}"
+    result = process_chunk(
+        _Handle(),
+        LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
+        "m", chunk, 1, 1, temperature=0.6, max_tokens=100,
+    )
+
+    assert [e["text"] for e in result] == ["他道", f"{LQ}这条路没有尽头。{RQ}"]
     assert calls["n"] == 2
-    assert calls["temps"] == [0.6, 0.6]
     assert calls["max_tokens"] == [100, 200]
+
+
+def test_check_chunk_alignment_speaker_name_not_flagged_missing():
+    # 纯标签删除（提示词编辑 (e)）：名字只留在 speaker 字段，「名字+说话动词」的
+    # 标签缺口（6 字，超出旧 ≤4 规则）整体豁免，不再误判为「缺失」。
+    res = check_chunk_alignment(f"东方明风笑道：{LQ}走吧。{RQ}", [
+        {"speaker": "东方明风", "text": f"{LQ}走吧。{RQ}"},
+    ])
+    assert res["ok"] is True and not res["missing"] and not res["extra"]
+
+
+def test_check_chunk_alignment_tag_grammar_exemption():
+    # 「代词+修饰+动词」（5 字，超出旧 ≤4 规则）：整个标签豁免；同长度的叙述行
+    # 缺失仍照报。
+    source = f"他继续笑道：{LQ}此事不可说。{RQ}\n\n她转身离去。"
+    kept = check_chunk_alignment(source, [
+        {"speaker": "NARRATOR", "text": f"{LQ}此事不可说。{RQ}她转身离去。"},
+    ])
+    assert kept["ok"] is True and not kept["missing"]
+    dropped = check_chunk_alignment(source, [
+        {"speaker": "NARRATOR", "text": f"{LQ}此事不可说。{RQ}"},
+    ])
+    assert dropped["ok"] is False and "她转身离去" in dropped["missing"]
+
+
+def test_reparse_vote_accepts_speech_verb_removed_variant():
+    # 提示词编辑 (e) 的第三处变体：标签含描述性动作时保留动作、只删说话动词
+    # （…衣领，吼道 → …衣领。）——骨架去尾动词簇的变体通过投票门；
+    # 多动一个词（真丢内容）仍被拒。
+    entry = {"speaker": "NARRATOR", "text": "史蒂夫猛地抓住杜尘的衣领，吼道"}
+    roster = frozenset({"NARRATOR"})
+    kept_action = _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "史蒂夫猛地抓住杜尘的衣领。"}], entry, roster)
+    assert kept_action == (("NARRATOR", "史蒂夫猛地抓住杜尘的衣领"),)
+    tag_kept = _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "史蒂夫猛地抓住杜尘的衣领，吼道"}], entry, roster)
+    assert tag_kept == (("NARRATOR", "史蒂夫猛地抓住杜尘的衣领吼道"),)
+    real_drop = _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "史蒂夫猛地抓住杜尘。"}], entry, roster)
+    assert real_drop is None
+
+
+def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch):
+    # finish_reason 未报告（None，部分 provider 不返回该字段）：保留旧版「先翻倍」
+    # 兜底顺序（只有 stop 才直达切半），翻倍后的完整回复被采纳（共 2 次调用）。
+    partial = json.dumps([
+        {"speaker": "NARRATOR", "text": "他道"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
+    ], ensure_ascii=False)
+    full = json.dumps([
+        {"speaker": "NARRATOR", "text": "他道"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
+        {"speaker": "B", "text": f"{LQ}那就一直走。{RQ}"},
+    ], ensure_ascii=False)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        calls["max_tokens"].append(json.loads(req.data.decode("utf-8"))["max_tokens"])
+        return _BodyResp(_chat_payload(partial, None) if calls["n"] == 1
+                         else _chat_payload(full))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n{LQ}那就一直走。{RQ}她答。"
+    result = process_chunk(
+        _Handle(),
+        LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
+        "m", chunk, 1, 1, temperature=0.6, max_tokens=100,
+    )
+
+    assert [e["text"] for e in result] == [
+        "他道", f"{LQ}这条路没有尽头。{RQ}", f"{LQ}那就一直走。{RQ}",
+    ]
+    assert calls["n"] == 2
+    assert calls["max_tokens"] == [100, 200]
+
+
+def test_check_chunk_alignment_zhidao_not_exempted():
+    # 「知道」的「道」不是说话动词（_NONSPEAK_BEFORE_DAO 形态守卫）：整行
+    # 「林某才知道」缺失仍照报，不因尾「道」+ 说话人名被整体豁免。
+    res = check_chunk_alignment(f"林某才知道。{LQ}走吧。{RQ}", [
+        {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
+    ])
+    assert res["ok"] is False and "林某才知道" in res["missing"]
+
+
+def test_reparse_vote_rejects_zhidao_tail_variant():
+    # 同一守卫作用于 _reparse_vote：以「…才知道」结尾的条目，「去掉尾道」变体
+    # 不在合法集合内，重判投票拒绝（对照：「…吼道」的动词变体仍放行）。
+    entry = {"speaker": "NARRATOR", "text": "林某才知道"}
+    roster = frozenset({"NARRATOR"})
+    assert _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "林某才知。"}], entry, roster) is None
+    entry2 = {"speaker": "NARRATOR", "text": "杜尘吼道"}
+    assert _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "杜尘吼道。"}], entry2, roster) == (
+        ("NARRATOR", "杜尘吼道"),)
+
+
+def test_process_chunk_doubled_budget_rejected_falls_back_to_split(monkeypatch):
+    # 严格网关拒绝翻倍预算（LLMHTTPError/4xx）：分诊阶段放弃翻倍、回落到切半
+    # 兜底，不把「可恢复的预算截断」升级为整任务 fast-fail。
+    chunk = f"A说：{LQ}第一句话内容。{RQ}\n\nB说：{LQ}第二句话内容。{RQ}"
+    left, _right = split_chunk_balanced(chunk)
+    left_json = json.dumps([
+        {"speaker": "NARRATOR", "text": "A说"},
+        {"speaker": "A", "text": f"{LQ}第一句话内容。{RQ}"},
+    ], ensure_ascii=False)
+    right_json = json.dumps([
+        {"speaker": "NARRATOR", "text": "B说"},
+        {"speaker": "B", "text": f"{LQ}第二句话内容。{RQ}"},
+    ], ensure_ascii=False)
+    full_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=chunk)
+    left_user = DEFAULT_USER_PROMPT.format(context="(Beginning of text)", chunk=left)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        body = json.loads(req.data.decode("utf-8"))
+        calls["max_tokens"].append(body["max_tokens"])
+        if calls["n"] == 2:
+            # 翻倍预算的调用被严格网关拒绝
+            raise LLMHTTPError(400, "max_tokens exceeds model limit")
+        user = body["messages"][1]["content"]
+        content = left_json if user in (full_user, left_user) else right_json
+        return _BodyResp(_chat_payload(content, "length" if calls["n"] == 1 else "stop"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    result = process_chunk(
+        _Handle(),
+        LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
+        "m", chunk, 1, 1, temperature=0.6, max_tokens=100,
+    )
+
+    assert [e["text"] for e in result] == [
+        "A说", f"{LQ}第一句话内容。{RQ}", "B说", f"{LQ}第二句话内容。{RQ}",
+    ]
+    assert calls["n"] == 4
+    assert calls["max_tokens"] == [100, 200, 100, 100]
+
+
+def test_process_chunk_retry_doubled_budget_rejected_falls_back(monkeypatch):
+    # 重试循环的翻倍调用被拒绝（4xx）：回退原预算继续重试，不 fast-fail；
+    # 第三次以原预算返回合法完整 JSON 被采纳。
+    truncated = '[{"speaker": "NARRATOR", "text": "他'
+    full = json.dumps([
+        {"speaker": "NARRATOR", "text": "他道"},
+        {"speaker": "A", "text": f"{LQ}这条路没有尽头。{RQ}"},
+    ], ensure_ascii=False)
+    calls = {"n": 0, "max_tokens": []}
+
+    def urlopen(req, *a, **k):
+        calls["n"] += 1
+        calls["max_tokens"].append(json.loads(req.data.decode("utf-8"))["max_tokens"])
+        if calls["n"] == 2:
+            raise LLMHTTPError(400, "max_tokens exceeds model limit")
+        return _BodyResp(_chat_payload(truncated, "length") if calls["n"] == 1
+                         else _chat_payload(full))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    chunk = f"他道：{LQ}这条路没有尽头。{RQ}"
+    result = process_chunk(
+        _Handle(),
+        LLMConfig(base_url="http://x/v1", api_key="k", model_name="m", stream=False),
+        "m", chunk, 1, 1, temperature=0.6, max_tokens=100,
+    )
+
+    assert [e["text"] for e in result] == ["他道", f"{LQ}这条路没有尽头。{RQ}"]
+    assert calls["n"] == 3
+    assert calls["max_tokens"] == [100, 200, 100]
 
 
 # --------------------------------------------------------------------------- #
