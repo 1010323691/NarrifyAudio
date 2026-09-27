@@ -25,6 +25,7 @@ from ..services.task_operations import RetryNotAllowedError, check_retry_eligibl
 from ..services.task_operations import cancel_task_record, requeue_task_record
 from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
+from ..engines import llm_transport
 from ..engines.script_prompts import load_default_prompts
 from ..services.admin_storage import (
     scan_project_directory,
@@ -119,6 +120,29 @@ def update_application_settings(payload: dict, actor: User = Depends(require_csr
     db.commit()
     update_feature_defaults_cache(config.value)
     return {"config": _application_config_with_prompt_defaults(), "source": "admin"}
+
+
+@router.get("/llm/models")
+def list_llm_models(base_url: str = "", api_key: str = "",
+                    _: User = Depends(require_admin)) -> dict:
+    """List the model names the LLM endpoint exposes (its ``/models`` payload).
+
+    ``base_url`` / ``api_key`` let the console probe form values that are not
+    saved yet; when ``base_url`` is empty the effective platform config is
+    probed instead (read-only, so no CSRF — same surface as the other GETs).
+    """
+    if base_url:
+        target_url, target_key = base_url, api_key
+    else:
+        llm = core_config.get_config().llm
+        target_url, target_key = llm.base_url, llm.api_key
+    if not target_url:
+        raise HTTPException(422, "请先填写 LLM 服务地址（API 地址）")
+    try:
+        models = llm_transport.list_llm_models(target_url, target_key)
+    except llm_transport.LLMModelsFetchError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"models": models}
 
 
 class QuotaAdjustment(BaseModel):
