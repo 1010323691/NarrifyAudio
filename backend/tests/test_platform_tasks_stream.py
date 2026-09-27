@@ -307,6 +307,89 @@ def test_window_exit_without_rerun_emits_no_superseded():
     asyncio.run(drive())
 
 
+def _mark_succeeded(task_id: str) -> None:
+    with SessionLocal.begin() as db:
+        task = db.get(Task, task_id)
+        task.status = "succeeded"
+        task.progress = 100
+        task.finished_at = datetime.now(timezone.utc)
+
+
+def test_window_exit_delivers_unseen_terminal_transition_once():
+    """A batch can finish past the newest-200 live window: the terminal
+    transition can land in the same poll tick the row leaves the window, so
+    no in-row ``status`` frame can carry it — the prune must deliver ONE
+    catch-up ``status`` frame instead (otherwise the client keeps the row
+    进行中 until a full reload), and must NOT repeat the terminal status for a
+    row the client already saw complete inside the window."""
+    a = _register(f"v1catchup-{uuid.uuid4().hex[:10]}@example.com")
+    uid = a["json"]["user"]["id"]
+    token = a["cookie"]
+    project_id = str(uuid.uuid4())
+    ta = _create_task(uid, project_id=project_id)
+    tb = _create_task(uid, project_id=project_id)
+    _add_event(ta, 1, "submitted", {})
+    _add_event(tb, 1, "submitted", {})
+
+    state = {"rows": [ta, tb], "disconnected": False}
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id.in_(state["rows"]))).all()
+
+    async def disconnected():
+        return state["disconnected"]
+
+    async def drive():
+        frames: list[dict] = []
+        gen = task_views.aggregate_stream(rows_fn, token, uid, disconnected)
+
+        async def take():
+            raw = await asyncio.wait_for(gen.__anext__(), 3.0)
+            frames.append(json.loads(raw[len("data: "):]))
+            return frames[-1]
+
+        snap = await take()
+        assert snap["type"] == "snapshot_all"
+        assert {t["id"] for t in snap["tasks"]} == {ta, tb}
+        # ta completes while still in the window: its status frame delivers in row
+        _mark_succeeded(ta)
+        _add_event(ta, 2, "succeeded", {})
+        ta_frame = None
+        for _ in range(30):
+            frame = await take()
+            if frame.get("type") == "status" and frame.get("task_id") == ta:
+                ta_frame = frame
+                break
+        assert ta_frame is not None, f"ta's in-window status frame never arrived: {frames}"
+        assert ta_frame["status"] == "succeeded"
+        # Both rows leave the window; tb's terminal transition lands with its
+        # exit (no in-row frame possible), ta's status is already known to the
+        # client and must not be repeated.
+        state["rows"] = []
+        _mark_succeeded(tb)
+        _add_event(tb, 2, "succeeded", {})
+        status_counts = {ta: 1, tb: 0}
+        tb_frame = None
+        for _ in range(30):
+            frame = await take()
+            if frame.get("type") == "status" and frame.get("task_id") in (ta, tb):
+                status_counts[frame["task_id"]] += 1
+                if frame["task_id"] == tb:
+                    tb_frame = frame
+        assert status_counts[ta] == 1, \
+            f"ta's already-delivered terminal status was repeated at prune: {frames}"
+        assert status_counts[tb] == 1, \
+            f"tb's unseen terminal transition was not delivered exactly once: {frames}"
+        assert tb_frame is not None and tb_frame["status"] == "succeeded"
+        assert tb_frame["task"]["status"] == "succeeded"
+        assert tb_frame["task"]["progress"] == 1.0
+        state["disconnected"] = True
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(gen.__anext__(), 3.0)
+
+    asyncio.run(drive())
+
+
 def test_user_tasks_project_filter():
     a = _register(f"v1proj-{uuid.uuid4().hex[:10]}@example.com")
     uid = a["json"]["user"]["id"]
