@@ -26,6 +26,7 @@ from backend.platform.storage import configured_storage_root, object_path, sha25
 from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _workspace_engine_lock, cancellation_requested, claim_fair_task, claim_task, complete_claim, execute_claim, fail_claim, heartbeat_claim, process_task_message, recover_database_tasks, resume_llm_unavailable_tasks
 from backend.platform.task_contracts import TaskExecutionError
 from backend.platform.task_lifecycle import ACTIVE_TASK_STATUSES
+from backend.platform.system_config import update_feature_defaults_cache
 
 
 @pytest.fixture(scope="module")
@@ -730,6 +731,90 @@ def test_durable_worker_splits_chapterless_text_by_length(client: TestClient):
     project_files = client.get(f"/api/v1/projects/{source['project_id']}/files").json()
     split_files = [item for item in project_files if item["module"] == "02_split_text"]
     assert len(split_files) == 2
+
+
+def test_durable_worker_by_length_uses_admin_configured_split_target(client: TestClient):
+    # 分册目标字数在管理员后台配置（application.features 的 split 段，100~200000）：
+    # by_length 任务未显式带 length_target 时用配置值，payload 仍可逐任务覆盖。
+    admin = _register(client, f"{uuid.uuid4()}@example.com")
+    admin_csrf = admin["csrf_token"]
+    with SessionLocal.begin() as db:
+        db.get(User, admin["user"]["id"]).role = "admin"
+
+    # 越界值被拒绝（下限 100 / 上限 200000）。
+    for bad in (50, 200_001):
+        rejected = client.patch(
+            "/api/v1/admin/settings/application",
+            headers={"X-CSRF-Token": admin_csrf},
+            json={"split": {"length_target": bad}},
+        )
+        assert rejected.status_code == 422, rejected.text
+
+    patched = client.patch(
+        "/api/v1/admin/settings/application",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"split": {"length_target": 2000}},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["config"]["split"]["length_target"] == 2000
+    try:
+        first = _register(client, f"{uuid.uuid4()}@example.com")
+        csrf = first["csrf_token"]
+        # 6200 chars：单个长段落，310 个 20 字段落句（无章节标记、无空行）。
+        body = (("甲" * 19 + "。") * 310).encode("utf-8")
+        uploaded = client.post(
+            "/api/files/upload",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("novel.txt", body, "text/plain")},
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        source = uploaded.json()
+
+        # 未显式带 length_target → 用管理员配置的 2000（6200 → 3 册、册均约 2067）。
+        submitted = client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "project_id": source["project_id"],
+                "task_type": "book.split",
+                "payload": {"input_file_id": source["file_id"], "by_length": True},
+                "idempotency_key": f"book-split-length-cfg-{uuid.uuid4()}",
+            },
+        )
+        assert submitted.status_code == 201, submitted.text
+        task_id = submitted.json()["id"]
+        assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-length-cfg-worker") == "succeeded"
+        result = client.get(f"/api/v1/tasks/{task_id}").json()["result"]
+        assert result["length_target"] == 2000
+        assert result["file_count"] == 3
+        chars = [c["chars"] for c in result["chapters"]]
+        assert sum(chars) == 6200
+        assert all(c >= 1800 for c in chars)  # 册均接近目标，无短尾章
+
+        # payload 的 length_target 仍可覆盖配置值（3000 → 2 册）。
+        submitted2 = client.post(
+            "/api/v1/tasks",
+            headers={"X-CSRF-Token": csrf},
+            json={
+                "project_id": source["project_id"],
+                "task_type": "book.split",
+                "payload": {"input_file_id": source["file_id"], "by_length": True, "length_target": 3000},
+                "idempotency_key": f"book-split-length-override-{uuid.uuid4()}",
+            },
+        )
+        assert submitted2.status_code == 201, submitted2.text
+        task_id2 = submitted2.json()["id"]
+        assert process_task_message({"payload": {"task_id": task_id2}}, worker_id="test-length-override-worker") == "succeeded"
+        result2 = client.get(f"/api/v1/tasks/{task_id2}").json()["result"]
+        assert result2["length_target"] == 3000
+        assert result2["file_count"] == 2
+    finally:
+        # 清理功能默认行与进程内缓存（模块级共享 DB，避免影响后续测试）。
+        with SessionLocal.begin() as db:
+            row = db.get(SystemConfig, "application.features")
+            if row is not None:
+                db.delete(row)
+        update_feature_defaults_cache({})
 
 
 def test_legacy_audio_packaging_route_uses_durable_worker(client: TestClient):

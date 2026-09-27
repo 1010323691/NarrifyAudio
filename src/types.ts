@@ -440,6 +440,10 @@ export type TaskControl = 'cancel' | 'retry'
 export interface AppConfig {
   paths: { working_dir: string }
   text: TextToggles
+  /** 分册：零章节按字数分册的每册目标字数（管理员后台配置，用户侧只读展示）。 */
+  split: {
+    length_target: number
+  }
   ffmpeg: {
     ffmpeg_path: string
     ffprobe_path: string

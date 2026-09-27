@@ -46,7 +46,11 @@ def put_config(patch: dict) -> dict:
     _common.require_workspace()
     # BGM audio parameters are admin-managed; a stale client patching the
     # section must not persist (the engine forces defaults on load regardless).
+    # ``split`` (the by-length per-volume target) is likewise admin-managed —
+    # the GET above still exposes the effective merged value so the workbench
+    # can display it, but user-side writes never persist.
     patch.pop("bgm", None)
+    patch.pop("split", None)
     try:
         cfg = core_config.update_config(patch)
     except core_config.WorkspaceNotSetError:

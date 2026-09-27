@@ -18,10 +18,12 @@ from backend.core.config import (
     AppConfig,
     BGMConfig,
     GenerationConfig,
+    SplitConfig,
     TTSConfig,
     UIConfig,
     _deep_update,
 )
+from pydantic import ValidationError
 
 
 # --------------------------------------------------------------------------- #
@@ -433,6 +435,54 @@ def test_bgm_config_partial_round_trip():
     cfg = AppConfig.model_validate(data)
     assert cfg.bgm.volume == 0.5
     assert cfg.bgm.fade_in == 1.5  # 其余字段未被波及
+
+
+# --------------------------------------------------------------------------- #
+# SplitConfig（零章节按字数分册目标字数：管理员统一配置，bgm 同款处理）
+# --------------------------------------------------------------------------- #
+
+def test_split_config_default_and_bounds():
+    assert SplitConfig().length_target == 3000
+    with pytest.raises(ValidationError):
+        SplitConfig(length_target=99)
+    with pytest.raises(ValidationError):
+        SplitConfig(length_target=200_001)
+
+
+def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeypatch):
+    # 分册目标字数由管理员统一配置：工作空间文件里的 split 段读取不生效
+    # （强制代码默认值；平台默认值由 get_config 的 platform provider 覆盖）。
+    ws = sandbox / "MyBook"
+    core_config.init_workspace_config(ws)
+    old = _read(ws / "config" / "app.json")
+    old["split"]["length_target"] = 12345
+    (ws / "config" / "app.json").write_text(json.dumps(old), encoding="utf-8")
+    core_config.set_workspace_pointer(str(ws))
+    core_config.reset_config_cache()
+
+    assert core_config.get_config().split == SplitConfig()
+
+    # 平台 provider 覆盖生效（管理员把目标字数改成 5000）。
+    monkeypatch.setattr(core_config, "_platform_defaults_provider", lambda: {"split": {"length_target": 5000}})
+    assert core_config.get_config().split.length_target == 5000
+
+    # 用户侧保存（哪怕携带 split 段）落盘的始终是代码默认值，历史旧值随保存被清出。
+    cfg = core_config.update_config({"log": {"level": "DEBUG"}, "split": {"length_target": 777}})
+    assert cfg.split == SplitConfig()
+    assert cfg.log.level == "DEBUG"
+    saved = _read(ws / "config" / "app.json")
+    assert saved["log"]["level"] == "DEBUG"
+    assert saved["split"]["length_target"] == SplitConfig().length_target
+
+
+def test_app_config_missing_split_section_falls_back_to_defaults():
+    # 旧工作空间配置缺整个 split 段 → Pydantic 默认值填充，读取链不报错。
+    data = AppConfig().model_dump()
+    del data["split"]
+    assert AppConfig.model_validate(data).split == SplitConfig()
+    data2 = AppConfig().model_dump()
+    del data2["split"]["length_target"]
+    assert AppConfig.model_validate(data2).split.length_target == 3000
 
 
 def test_legacy_batch_constraints_are_ignored_and_removed_on_save():

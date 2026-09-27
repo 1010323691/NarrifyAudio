@@ -717,14 +717,23 @@ def _execute_book_analyze(claim: TaskClaim) -> TaskOutcome:
 
 
 def _length_target_from_payload(payload: dict[str, Any]) -> int:
-    """``length_target`` for the by_length branch (invalid/absent -> default)."""
+    """Effective by-length target for the by_length branch: an explicit valid
+    ``payload["length_target"]`` overrides the admin-configured platform
+    default (``split.length_target``); otherwise that configured value (3000
+    when unset/invalid)."""
     raw = payload.get("length_target")
-    if isinstance(raw, bool):
-        return DEFAULT_LENGTH_TARGET_CHARS
+    if not isinstance(raw, bool):
+        try:
+            target = int(raw)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if target > 0:
+                return target
     try:
-        target = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_LENGTH_TARGET_CHARS
+        target = core_config.get_config().split.length_target
+    except Exception:  # noqa: BLE001 — a config read failure falls back to the code default
+        target = 0
     return target if target > 0 else DEFAULT_LENGTH_TARGET_CHARS
 
 
