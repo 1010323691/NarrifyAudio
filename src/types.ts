@@ -410,15 +410,6 @@ export interface TaskSnapshot extends TaskCenterItem {
   logs: TaskLog[]
   /** Raw LLM stream (「流式反馈」 panel); populated by `llm_chunk` events / snapshots. */
   llm_stream?: string
-  /** Live LLM generation rate (chars/s) for the 文本解析 per-window gauge; 0 when idle / queued. */
-  llm_cps?: number
-  /** 10-second-window average of the LLM generation rate (chars/s) for the 文本解析 吞吐量 card;
-   *  backend-computed as (chars over the last 10 s) / 10 s from the real streamed text; 0 when idle. */
-  llm_cps_10s?: number
-  /** Cumulative original-text chars processed (per completed chunk) — 处理速度 numerator. */
-  llm_chars?: number
-  /** Cumulative processing seconds up to the last completed chunk — 处理速度 denominator. */
-  llm_secs?: number
   /** 已合成段数 (音频合成 进度指标, cumulative: pre-run done + this run's); 0 when the task
    *  doesn't report segments (only 音频合成 tasks do). */
   seg_done?: number

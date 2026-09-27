@@ -47,7 +47,7 @@ TERMINAL = {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED, TaskStatus.FAILED}
 
 class TaskHandle:
     """Handed to engine code so it can report progress, log, and honour cancel
-    requests cooperatively. Display-only LLM metrics are no-ops (the tests
+    requests cooperatively. Display-only LLM callbacks are no-ops (the tests
     never read them back)."""
 
     def __init__(self, task: "Task"):
@@ -69,12 +69,6 @@ class TaskHandle:
         self._t.logs.append({"level": level, "msg": msg, "t": time.time()})
 
     def llm_chunk(self, text: str) -> None:
-        pass
-
-    def llm_rate(self, chars: int, cps: float) -> None:
-        pass
-
-    def llm_chars(self, chars: int, secs: float) -> None:
         pass
 
     def segment_stats(self, done: int, total: int, chars_done: int, chars_total: int) -> None:

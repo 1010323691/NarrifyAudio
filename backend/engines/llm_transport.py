@@ -304,16 +304,9 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
     finish_reason = None
     usage = None
     last_flush = time.monotonic()
-    # Real-time generation rate (chars/s) for the 文本解析 吞吐量 / per-window gauge —
-    # measured from the actual streamed text (content + reasoning) as it arrives, never
-    # estimated. ``usage`` is still read per frame only for the per-chunk token log line
-    # and the return value; the rate itself uses the real chars, so it stays live on any
-    # endpoint (token counts are only reported by some servers, usually just in the final
-    # frame — and not at all by others).
-    cps = 0.0
 
     def flush(force: bool = False) -> None:
-        nonlocal last_flush, cps
+        nonlocal last_flush
         if not pending:
             return
         chars = sum(len(p) for p in pending)
@@ -321,17 +314,12 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
                 or time.monotonic() - last_flush >= FLUSH_INTERVAL
                 or chars >= FLUSH_SIZE):
             return
-        now = time.monotonic()
-        dt = now - last_flush
-        if dt > 1e-3:  # chars/s over the window since the previous flush (skip ~0 window)
-            cps = chars / dt
-        last_flush = now
+        last_flush = time.monotonic()
         content_slice = "".join(content_buf)
         if content_slice:
             emitted.append(content_slice)
         if handle is not None:
             handle.llm_chunk("".join(pending))
-            handle.llm_rate(chars, cps)
         content_buf.clear()
         pending.clear()
 
@@ -388,8 +376,6 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
         raise LLMUnavailableError(f"LLM 服务连接失败：{e}") from e
 
     flush(force=True)  # push any trailing buffer so the panel shows the full output
-    if handle is not None and cps:
-        handle.llm_rate(0, cps)  # final rate (resting value is already 0; skip a no-op)
 
     return "".join(emitted).strip(), finish_reason, usage
 

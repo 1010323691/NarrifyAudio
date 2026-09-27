@@ -41,26 +41,6 @@ def test_persistent_handle_distinguishes_fraction_and_percent(monkeypatch):
     assert observed == [(25, "engine"), (5, "adapter")]
 
 
-def test_engine_context_reports_a_real_ten_second_llm_rate(monkeypatch):
-    now = [1.1]
-    events = []
-    monkeypatch.setattr(task_context.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(
-        task_context, "_append_claim_event",
-        lambda _claim, event_type, payload: events.append((event_type, payload)),
-    )
-    handle = task_context.EngineExecutionContext(SimpleNamespace(task_id="task", attempt_id="attempt"))
-
-    handle.llm_rate(100, 50.0)
-    now[0] = 3.1
-    handle.llm_rate(100, 40.0)
-    now[0] = 13.1
-    handle.llm_rate(50, 20.0)
-
-    assert [name for name, _payload in events] == ["llm_rate"] * 3
-    assert events[-1][1] == {"cps": 20.0, "cps10": 5.0}
-
-
 def test_parallel_llm_operations_keep_context_and_distinct_charge_keys(monkeypatch):
     charged = []
     monkeypatch.setattr(quota, "require_quota", lambda *_args: None)
@@ -94,8 +74,7 @@ def test_reconnected_snapshot_uses_latest_events_and_preserves_phase():
         db.add_all([
             TaskEvent(task_id=task_id, sequence=1, event_type="phase", payload={"phase": "rendering"}),
             TaskEvent(task_id=task_id, sequence=2, event_type="progress", payload={"current": "part 1"}),
-            TaskEvent(task_id=task_id, sequence=3, event_type="llm_chars", payload={"chars": 50, "secs": 2.5}),
-            TaskEvent(task_id=task_id, sequence=4, event_type="segments", payload={"done": 2, "total": 4, "chars_done": 10, "chars_total": 20}),
+            TaskEvent(task_id=task_id, sequence=3, event_type="segments", payload={"done": 2, "total": 4, "chars_done": 10, "chars_total": 20}),
             *(TaskEvent(task_id=task_id, sequence=i, event_type="log", payload={"msg": str(i)}) for i in range(5, 1005)),
         ])
         db.commit()
@@ -110,7 +89,6 @@ def test_reconnected_snapshot_uses_latest_events_and_preserves_phase():
     assert snapshot["current"] == "part 1"
     assert snapshot["logs"][-1]["msg"] == "1004"
     assert len(snapshot["logs"]) == 1000
-    assert snapshot["llm_chars"] == 50
     assert snapshot["seg_done"] == 2
 
 

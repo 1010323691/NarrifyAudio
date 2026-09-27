@@ -133,7 +133,7 @@ const jobRows = computed<JobRow[]>(() =>
 const jobRowByName = computed(() => new Map(jobRows.value.map((r) => [r.name, r])))
 
 /** 选择区渲染行 = 磁盘文件 + 本批进度行（若在该批中）。文件行即进度行：
- *  批次内文件直接在此显示状态 / 速度 / 进度条 / 取消·重试。 */
+ *  批次内文件直接在此显示状态 / 进度条 / 取消·重试。 */
 const fileRows = computed(() =>
   files.value.map((f) => ({ file: f, job: jobRowByName.value.get(f.name) })),
 )
@@ -152,55 +152,14 @@ function progressIndicator(row: JobRow): string {
 const busy = computed(() => jobRows.value.some((r) => r.active))
 
 // 解析日志区显隐（设置页「解析日志显示」，默认关）：开 = 显示「解析进度」Card
-// （每文件实时日志 + 流式反馈，指标在 Card 内）；关 = 整个 Card 隐藏、指标移到
-// 「开始处理」按钮下方。保存设置后立即生效（settings.config 是响应式的）。
+// （每文件实时日志 + 流式反馈）；关 = 整个 Card 隐藏。保存设置后立即生效
+// （settings.config 是响应式的）。
 const showParseLogs = computed(() => settings.config?.ui.show_parse_logs ?? false)
-
-// ---- LLM 性能指标：吞吐量 / 处理速度 --------------------------------------------
-// 吞吐量 (字/s): 各运行中窗口「近 10 秒平均」生成速率之和。每个任务的 10 秒窗口速率
-// (task.llm_cps_10s) 由后端按真实流式字符算出（近 10 秒生成字符 ÷ 对应秒数）并经 SSE 实时推送；
-// 前端只把它们相加（同一时间窗口的速率可加：各运行窗口之和 = 总体近 10 秒平均）。用 computed
-// 跟随 SSE 事件重算，无需定时器；无运行中窗口时自然为 0，段间 / 排队窗口随时间在后端衰减。
-const totalTps = computed(() => {
-  let sum = 0
-  for (const r of jobRows.value) if (r.task?.status === 'running') sum += r.task.llm_cps_10s ?? 0
-  return sum
-})
 
 // 一批解析结束后自动刷新文件列表：把刚生成 JSON 的文件标记为「已完成」（既有勾选保留）。
 watch(busy, (b, was) => {
   if (was && !b) loadFiles()
 })
-
-// 处理速度 (字/s): Σ(已完成各段原始字符数) ÷ Σ(到各段为止的累计处理耗时)。
-//   分子 / 分母都由后端在每段完成后一并上报（llm_chars / llm_secs）——耗时冻结于"该段完成"
-//   的时刻而非实时时钟。因此本指标只在"某段刚完成"时更新一次，段与段之间保持恒定，
-//   不会像用实时时钟做分母那样在等待下一段时持续走低。真实字符，非 token。
-// A computed, so it recomputes exactly when a chunk-completion event lands (never on a
-// timer) — per-segment updates with no decay in between.
-const speedCps = computed(() => {
-  let chars = 0
-  let secs = 0
-  for (const r of jobRows.value) {
-    chars += r.task?.llm_chars ?? 0  // 各任务已完成各段的累计原始字符数
-    secs += r.task?.llm_secs ?? 0    // 各任务到已完成各段为止的累计处理耗时
-  }
-  return secs > 0 ? chars / secs : 0
-})
-
-// 指标的统一数据源（日志区开 = 「解析进度」Card 顶部；关 = 「开始处理」按钮下方紧凑卡）。
-const metrics = computed(() => [
-  {
-    label: '吞吐量（字/s）',
-    value: String(Math.round(totalTps.value)),
-    title: '近 10 秒平均：各运行中窗口「近 10 秒生成字符 ÷ 对应秒数」之和（后端按真实流式字符计算，平滑不抖动）',
-  },
-  {
-    label: '处理速度（字/s）',
-    value: String(Math.round(speedCps.value)),
-    title: '累计平均：Σ已完成源字符 ÷ Σ累计处理耗时（自批次开始；每完成一段刷新、段间恒定）',
-  },
-])
 
 // 刷新恢复：页面重载后 fileJobs 为空，但后端任务仍在跑（store 的 refresh 已拉回全量任务）。
 // 按 module + label 重新挂接非终态解析任务——label 形如「文本解析（{文件名}）」（全角括号，
@@ -352,7 +311,7 @@ async function cancelAll() {
           v-else-if="files.length"
           class="max-h-80 space-y-1 overflow-y-auto rounded-md border p-2"
         >
-          <!-- 文件行 = 进度行：本批文件直接在此显示 状态（含排队位置）/ 速度 / 进度条 /
+          <!-- 文件行 = 进度行：本批文件直接在此显示 状态（含排队位置）/ 进度条 /
                取消·重试（行内按钮不包在 <label> 里，避免点按钮连带切换勾选）。 -->
           <div
             v-for="row in fileRows"
@@ -372,11 +331,6 @@ async function cancelAll() {
               </label>
               <template v-if="row.job">
                 <Badge :variant="row.job.state.variant" class="shrink-0">{{ row.job.stateText }}</Badge>
-                <span
-                  class="shrink-0 text-xs tabular-nums"
-                  :class="row.job.state.label === '解析中' ? 'text-primary' : 'text-muted-foreground'"
-                  title="近 10 秒平均速度"
-                >{{ row.job.state.label === '解析中' ? `${Math.round(row.job.task?.llm_cps_10s ?? 0)} 字/s` : '—' }}</span>
                 <Progress
                   :value="row.job.progress"
                   :indicator-class="progressIndicator(row.job)"
@@ -446,18 +400,6 @@ async function cancelAll() {
             <XCircle class="h-4 w-4" />取消全部
           </Button>
         </div>
-
-        <!-- 性能指标（日志区关闭时显示在按钮下方；开启时在「解析进度」Card 内） -->
-        <div v-if="!showParseLogs && fileJobs.length" class="flex flex-wrap gap-3">
-          <div
-            v-for="m in metrics"
-            :key="m.label"
-            class="min-w-[7rem] flex-1 rounded-md border bg-muted/30 px-3 py-2"
-          >
-            <div class="text-xs text-muted-foreground" :title="m.title">{{ m.label }}</div>
-            <div class="mt-0.5 text-lg font-semibold tabular-nums">{{ m.value }}</div>
-          </div>
-        </div>
       </CardContent>
       <CardFooter>
         <span class="text-xs text-muted-foreground">
@@ -467,7 +409,7 @@ async function cancelAll() {
     </Card>
 
     <!-- 解析进度（每文件一行）：仅「解析日志显示」开启时渲染整个 Card
-         （实时日志 + 流式反馈 + 指标）；关闭时由上方按钮下的紧凑指标卡替代。 -->
+         （实时日志 + 流式反馈）。 -->
     <Card v-if="fileJobs.length && showParseLogs">
       <CardHeader>
         <CardTitle class="flex items-center gap-2"><ScanText class="h-5 w-5" />解析进度</CardTitle>
@@ -476,27 +418,10 @@ async function cancelAll() {
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
-        <!-- 性能指标：吞吐量（各运行中窗口近 10 秒字/s 之和）/ 处理速度（累计已处理字÷累计处理耗时） -->
-        <div class="grid gap-3 sm:grid-cols-3">
-          <div
-            v-for="m in metrics"
-            :key="m.label"
-            class="rounded-md border bg-muted/30 px-3 py-2"
-          >
-            <div class="text-xs text-muted-foreground" :title="m.title">{{ m.label }}</div>
-            <div class="mt-0.5 text-lg font-semibold tabular-nums">{{ m.value }}</div>
-          </div>
-        </div>
-
         <div v-for="row in jobRows" :key="row.taskId" class="space-y-2 rounded-md border p-3">
           <div class="flex items-center gap-3">
             <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="row.name">{{ row.name }}</span>
             <Badge :variant="row.state.variant">{{ row.stateText }}</Badge>
-            <span
-              class="shrink-0 text-xs tabular-nums"
-              :class="row.state.label === '解析中' ? 'text-primary' : 'text-muted-foreground'"
-              title="近 10 秒平均速度"
-            >{{ row.state.label === '解析中' ? `${Math.round(row.task?.llm_cps_10s ?? 0)} 字/s` : '—' }}</span>
             <span class="shrink-0 w-10 text-right text-xs text-muted-foreground">
               {{ Math.round(row.progress * 100) }}%
             </span>

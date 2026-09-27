@@ -1491,7 +1491,6 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
 
     def one_vote(attempt: int, no_vote_note: str = "，本轮无票") -> None:
         handle.check()  # cooperative cancel / pause between validation calls
-        handle.llm_rate(0, 0.0)  # reset the 吞吐 gauge for this call
         try:
             reply = _llm_call(llm, generation, messages, handle)
         except TaskCancelled:
@@ -1765,7 +1764,6 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
             )},
             {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_words)},
         ]
-        handle.llm_rate(0, 0.0)
         try:
             reply = _llm_call(llm, generation, messages, handle)
         except TaskCancelled:
@@ -2526,8 +2524,6 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
     result = [dict(e) for e in original]
     fixed = 0
     unwrapped = 0
-    proc_start = time.monotonic()
-    window_chars = 0
 
     for seq, grp in enumerate(groups, 1):
         handle.check()  # cooperative cancel / pause before the group
@@ -2543,7 +2539,6 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": _batch_user_prompt(usr_template, context, len(grp), n, roster)},
         ]
-        handle.llm_rate(0, 0.0)  # reset the 吞吐 gauge for this call
         handle.log(f"{stage}第 {seq}/{len(groups)} 组（{len(grp)} 条目标）…")
 
         # -- First pass: re-judge the whole group in one call -------------------
@@ -2559,7 +2554,6 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
         first_map = {i: sp for i, (sp, _tx) in full_map.items()}
         # The reply's optional "text" keys: applied only after strict validation below.
         text_sigs: dict = {i: tx for i, (_sp, tx) in full_map.items() if tx}
-        window_chars += len(context)
 
         if on_first_map is not None:
             on_first_map(first_map, grp)
@@ -2581,7 +2575,6 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                 strict majority. Optional ``text`` keys fold into ``text_sigs`` (first
                 wins)."""
                 handle.check()
-                handle.llm_rate(0, 0.0)
                 try:
                     full = parse_speaker_map_full(_llm_call(llm, generation, messages, handle), grp)
                 except TaskCancelled:
@@ -2601,15 +2594,12 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
 
             handle.log(f"  重试第 1 次（3 样本：原值 + 首判 + 重试结果）…")
             still = retry_once(1, discrepant)
-            window_chars += len(context)
             if still:
                 handle.log(f"  {len(still)} 条 1:1 无共识 → 重试第 2 次…")
                 still = retry_once(2, still)
-                window_chars += len(context)
                 if still:
                     handle.log(f"  {len(still)} 条仍无共识 → 重试第 3 次（末次）…")
                     still = retry_once(3, still)
-                    window_chars += len(context)
                     if still:
                         handle.log(f"  {len(still)} 条重试 3 次仍无共识，保留原 speaker")
 
@@ -2645,8 +2635,6 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                 result[t]["text"] = expected
                 unwrapped += 1
                 handle.log(f"  {t + 1}: 台词已去除外层引号")
-
-        handle.llm_chars(window_chars, time.monotonic() - proc_start)
 
     checked = sum(len(g) for g in groups)
     return (result if (fixed or unwrapped) else entries), {
@@ -2957,8 +2945,6 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
 
         all_entries = []
         chunk_ends = []  # 每段结束时的累计条目数——chunk 边界簿记（角色匹配检查用）
-        processed_chars = 0  # 累计已处理原始字符数（处理速度 的分子），每完成一段累加
-        proc_start = time.monotonic()  # 本文件开始逐段处理的时刻（处理速度分母冻结于每段完成）
         for i, chunk in enumerate(chunks, 1):
             handle.check()  # cooperative cancel / pause between chunks
             handle.log(f"处理第 {i}/{total} 段（{len(chunk)} 字）…")
@@ -2966,7 +2952,6 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # reserved for the (slot-free) mechanical check stages, so a running
             # task never reads as 100% before it is actually done.
             handle.progress(0.9 * (i - 1) / total, f"处理第 {i}/{total} 段")
-            handle.llm_rate(0, 0.0)  # reset the 字/s gauge per chunk (0 until the stream reports)
             previous = all_entries if all_entries else None
             entries = process_chunk(
                 handle, llm, llm.model_name, chunk, i, total,
@@ -2984,11 +2969,6 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             all_entries.extend(entries)
             chunk_ends.append(len(all_entries))
             handle.log(f"  得到 {len(entries)} 条")
-            # 每段完成后上报"累计原始字符数 + 到本段为止的处理耗时"，让处理速度（Σ字÷Σ耗时）
-            # 按段刷新、段间保持不变（耗时冻结于本段完成时刻，而非实时时钟，故不会持续衰减）。
-            # len(chunk) 是该段的真实源文字符数（字符，而非 token）。
-            processed_chars += len(chunk)
-            handle.llm_chars(processed_chars, time.monotonic() - proc_start)
 
         if not all_entries:
             raise RuntimeError("未生成任何脚本条目。")
@@ -3214,8 +3194,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             "spot_random_errors": spot_stats["random_errors"],
             "spot_random_rate": spot_stats["random_rate"],
             # Original (decoded, stripped, mojibake-fixed) input length in chars — kept in
-            # the result for reference. The live 处理速度 gauge uses the per-chunk llm_chars
-            # instead (chars, never tokens).
+            # the result for reference.
             "input_chars": len(body),
         }
     finally:

@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import secrets
 import shutil
-import threading
 import time
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,33 +30,11 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _cps10(samples: deque[tuple[float, int]], total: int, now: float) -> float:
-    """Average chars/s over the retained (≤10 s) span of rate samples.
-
-    ``samples`` holds (monotonic_ts, cumulative_chars) oldest-first; the cumulative total is
-    monotonic, so (total - first_total) is exactly the chars generated within the span and
-    (total - first_total) / (now - first_ts) is the true average rate over it — no bias from
-    how the flushes are spaced. Empty window or a near-zero span yields 0.
-    """
-    if not samples:
-        return 0.0
-    first_time, first_total = samples[0]
-    span = now - first_time
-    if span <= 0.001:
-        return 0.0
-    return max(0.0, (total - first_total) / span)
-
-
-
 class EngineExecutionContext:
     """Adapter from the legacy engine callback contract to durable task events."""
 
     def __init__(self, claim: TaskClaim):
         self.claim = claim
-        self._rate_lock = threading.Lock()
-        self._rate_total = 0
-        self._rate_samples: deque[tuple[float, int]] = deque()
-        self._last_rate_event = 0.0
         self._publication_journal: PublicationJournal | None = None
         self._shared_publication_journal: PublicationJournal | None = None
         self._staged_workspace_paths: set[Path] = set()
@@ -86,22 +62,6 @@ class EngineExecutionContext:
         # Raw model output is intentionally not persisted in TaskEvent history.
         # The durable result is the published JSON artifact.
         return
-
-    def llm_rate(self, chars: int, cps: float) -> None:
-        now = time.monotonic()
-        with self._rate_lock:
-            self._rate_total += max(0, int(chars))
-            self._rate_samples.append((now, self._rate_total))
-            while self._rate_samples and self._rate_samples[0][0] < now - 10:
-                self._rate_samples.popleft()
-            cps10 = _cps10(self._rate_samples, self._rate_total, now)
-            if cps > 0 and now - self._last_rate_event < 1.0:
-                return
-            self._last_rate_event = now
-        _append_claim_event(self.claim, "llm_rate", {"cps": max(0.0, float(cps)), "cps10": cps10})
-
-    def llm_chars(self, chars: int, secs: float) -> None:
-        _append_claim_event(self.claim, "llm_chars", {"chars": max(0, int(chars)), "secs": max(0.0, float(secs))})
 
     def segment_stats(self, done: int, total: int, chars_done: int, chars_total: int) -> None:
         _append_claim_event(self.claim, "segments", {

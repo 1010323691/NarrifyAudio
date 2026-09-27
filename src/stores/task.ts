@@ -147,22 +147,6 @@ export const useTaskStore = defineStore('task', () => {
         t.llm_stream = buf.length > LLM_STREAM_CLIENT_CAP ? buf.slice(-LLM_STREAM_CLIENT_CAP) : buf
         break
       }
-      case 'llm_rate':
-        // Live LLM generation rate: ``cps`` is the instantaneous per-window rate (per-row 字/s
-        // gauge) and ``cps10`` is the 10-second-window average (吞吐量 card). The backend
-        // computes both from the actual streamed text. A later snapshot / terminal event
-        // replaces the whole task (carrying both), so this self-corrects.
-        t.llm_cps = typeof e.cps === 'number' ? e.cps : 0
-        t.llm_cps_10s = typeof e.cps10 === 'number' ? e.cps10 : 0
-        break
-      case 'llm_chars':
-        // Cumulative original-text chars (处理速度 numerator) + cumulative processing
-        // seconds up to this chunk's completion (denominator). Both step together per
-        // chunk, so the gauge updates per segment and stays stable in between (the time
-        // base is frozen at this chunk's completion, reported by the backend).
-        t.llm_chars = typeof e.chars === 'number' ? e.chars : 0
-        t.llm_secs = typeof e.secs === 'number' ? e.secs : 0
-        break
       case 'segments':
         // 音频合成 进度指标 (已合成/总段数 · 已合成/总字数, the button-below card): the
         // backend re-sends the FULL cumulative counters on each (throttled) event, so a
