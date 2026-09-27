@@ -242,7 +242,11 @@ def _new_frames(rows_fn, seen: dict[str, int], delivered: dict[str, str]) -> lis
     terminal transition still differs from it gets ONE catch-up ``status``
     frame — its completion can land in the same poll tick it leaves the
     newest-200 window (a batch finishing past the window), and without the
-    frame the client keeps showing it as running forever."""
+    frame the client keeps showing it as running forever. The catch-up cost is
+    bounded per row: pruning happens once per window exit (a single ``db.get``,
+    plus one full snapshot only when the status actually differs), so even a
+    bulk exit — e.g. trashing a project drops up to its 200 visible rows in
+    one 0.5 s tick — costs at most one lookup per row."""
     emitted: list[dict] = []
     with SessionLocal() as db:
         rows = rows_fn(db)
