@@ -12,6 +12,7 @@ two paths cannot drift — tests/test_llm_transport.py diff-covers that.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -94,11 +95,14 @@ def list_llm_models(base_url: str, api_key: str = "", *, timeout: float = 10.0) 
     comes back.
     """
     url = base_url.rstrip("/") + "/models"
-    request = urllib.request.Request(
-        url, method="GET",
-        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-    )
     try:
+        # Request construction can reject malformed URLs (bad port, spaces,
+        # schemeless hosts) before any socket is touched — keep that inside the
+        # error contract too, so callers always see LLMModelsFetchError.
+        request = urllib.request.Request(
+            url, method="GET",
+            headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+        )
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
@@ -106,6 +110,8 @@ def list_llm_models(base_url: str, api_key: str = "", *, timeout: float = 10.0) 
         raise LLMModelsFetchError(f"LLM 服务返回 HTTP {exc.code}：{detail}") from exc
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
         raise LLMModelsFetchError(f"LLM 服务连接失败：{exc}") from exc
+    except (http.client.InvalidURL, ValueError) as exc:
+        raise LLMModelsFetchError(f"LLM 服务地址无效：{exc}") from exc
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:

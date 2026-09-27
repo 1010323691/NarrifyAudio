@@ -141,6 +141,10 @@ async function fetchModels() {
   try {
     const result = await listLlmModels({ base_url: baseUrl, api_key: draft.value.llm.api_key })
     fetchedModels.value = result.models
+    // 当前模型名若在新列表里，回填下拉选中项（watch 不 immediate，须手动同步）。
+    if (result.models.length && result.models.includes(draft.value.llm.model_name)) {
+      pickedModel.value = draft.value.llm.model_name
+    }
     if (result.models.length) {
       toast({ title: `已获取 ${result.models.length} 个模型`, variant: 'success' })
     } else {
@@ -161,11 +165,12 @@ function onPickModel(value: string | number) {
   draft.value.llm.model_name = name
 }
 
-// 手动输入的模型名若恰在拉取结果里，保持下拉同步。
+// 手动输入与下拉保持一致：名字在列表里则选中；不在列表里则清空选中（避免残留旧值）。
 watch(
   () => draft.value?.llm.model_name,
   (name) => {
     if (name && fetchedModels.value.includes(name)) pickedModel.value = name
+    else if (fetchedModels.value.length) pickedModel.value = ''
   },
 )
 </script>
@@ -243,6 +248,7 @@ watch(
                 </Button>
               </div>
               <Select v-if="fetchedModels.length" :modelValue="pickedModel" class="mt-2" @update:modelValue="onPickModel">
+                <option value="" disabled hidden></option>
                 <option v-for="m in fetchedModels" :key="m" :value="m">{{ m }}</option>
               </Select>
               <p v-else-if="modelsTried" class="mt-1 text-xs text-muted-foreground">该服务没有返回任何模型。</p>

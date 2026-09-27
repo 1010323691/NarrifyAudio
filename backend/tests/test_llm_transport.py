@@ -276,3 +276,11 @@ def test_list_models_raises_with_user_facing_message(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", conn_refused)
     with pytest.raises(LLMModelsFetchError, match="connection refused"):
         list_llm_models("http://x/v1")
+
+
+def test_list_models_malformed_url_raises_fetch_error():
+    # 畸形地址（非数字端口 / URL 含空格 / 无效 IPv6）必须落在中文错误契约内，
+    # 不能把裸 ValueError/InvalidURL 漏到端点层变成 500。
+    for bad in ("http://x:12ab/v1", "http://x/v1 bad", "http://[::1:9/v1"):
+        with pytest.raises(LLMModelsFetchError, match="地址无效"):
+            list_llm_models(bad, "")

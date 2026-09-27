@@ -318,3 +318,54 @@ def test_llm_models_listing_maps_upstream_errors_to_502(client: TestClient, monk
     refused = client.get("/api/v1/admin/llm/models?base_url=http://x/v1&api_key=k")
     assert refused.status_code == 502, refused.text
     assert "连接失败" in refused.json()["detail"]
+
+
+def test_llm_models_listing_falls_back_to_saved_config(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    # 省略 base_url 参数时用已保存平台配置探测（get_config 回退分支）。
+    import urllib.request
+    from types import SimpleNamespace
+
+    import backend.core.config as core_config_mod
+
+    _create_admin(client)
+    captured: list = []
+
+    def fake_urlopen(request, *a, **k):
+        captured.append(request)
+        return _FakeModelsResp(b'{"data": ["saved-model"]}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        core_config_mod, "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(base_url="http://saved-host:9999/v1", api_key="saved-key")),
+    )
+    ok = client.get("/api/v1/admin/llm/models")
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"models": ["saved-model"]}
+    assert captured[0].full_url == "http://saved-host:9999/v1/models"
+    assert captured[0].get_header("Authorization") == "Bearer saved-key"
+
+
+def test_llm_models_listing_empty_saved_url_returns_422(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    # 已保存配置无地址且未传参数 → 422，不发上游请求。
+    import urllib.request
+    from types import SimpleNamespace
+
+    import backend.core.config as core_config_mod
+
+    _create_admin(client)
+    called: list = []
+
+    def fail_if_called(request, *a, **k):
+        called.append(1)
+        return _FakeModelsResp(b"{}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_if_called)
+    monkeypatch.setattr(
+        core_config_mod, "get_config",
+        lambda: SimpleNamespace(llm=SimpleNamespace(base_url="", api_key="")),
+    )
+    resp = client.get("/api/v1/admin/llm/models")
+    assert resp.status_code == 422, resp.text
+    assert "地址" in resp.json()["detail"]
+    assert not called

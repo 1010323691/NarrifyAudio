@@ -123,8 +123,8 @@ def update_application_settings(payload: dict, actor: User = Depends(require_csr
 
 
 @router.get("/llm/models")
-def list_llm_models(base_url: str = "", api_key: str = "",
-                    _: User = Depends(require_admin)) -> dict:
+def get_llm_models(base_url: str = "", api_key: str = "",
+                   _: User = Depends(require_admin)) -> dict:
     """List the model names the LLM endpoint exposes (its ``/models`` payload).
 
     ``base_url`` / ``api_key`` let the console probe form values that are not
