@@ -69,12 +69,12 @@ npm.cmd run test:state-isolation # 前端状态隔离回归（node:test 沙箱�
 - **配置项**：项目配置随工程存 DB（`/api/config` 读写活动工作区配置，永不写根模板）；LLM 凭据等由管理控制台管（`api/admin.py` + `platform/system_config.py` 的 `SystemConfig`）；`core/config.py` 的功能默认值由 `platform.system_config` 注册的 provider 供给（分层契约要求 core 不反向 import platform）。
 - **额度/计费**：`platform/quota.py`（按操作 `QuotaHold`）。
 - **DB 结构变更**：`backend/migrations/` 加 Alembic 迁移（链从 0001 起，head 须与 `platform/models.py` 一致；不可逆变更先备份）。
-- **并发/并行度**：`core/concurrency.py` 的 resize 表面（`set_concurrency` / `set_merge_concurrency`）已删（0 生产调用），`gate()` / `merge_gate()` 恒 limit=1——LLM/BGM/合并分析实际串行。真正确定并行度的是引擎侧的 acquire 点（`engines/bgm.py`、`merge.py`、`music.py`、`script.py`），改并行度从那里入手，concurrency 文件里已没有可调的旋钮。
+- **并发/并行度**：`core/concurrency.py` 的 `set_merge_concurrency` 已删、`merge_gate()` 恒 limit=1——BGM/合并分析串行；LLM gate 由 Worker 的 parse 协调器每轮按管理端 `parse_worker_concurrency` 配置经 `set_concurrency` 动态调整（默认 4、上限 32，parse worker 池随并发伸缩、上限 64 槽），LLM 解析可并行至 32，并非串行。其余引擎工作的并行度真正确定的是引擎侧的 acquire 点（`engines/bgm.py`、`merge.py`、`music.py`、`script.py`），改并行度从那里入手。
 - **工作区路径/文件产物**：布局在 `core/paths.py`，存储对象与安全文件名在 `platform/storage.py`（`safe_display_name` 规则与 `tts_manifest` 内联副本**不等价**——截断与兜底行为不同，合并会改变现网路径，不要顺手统一）。
 
 ## TTS 子进程隔离
 
-TTS 引擎（`tts-engine/tts_worker.py`，约 2500 行）是 one-shot 子进程，FastAPI 进程永不 import torch/模型代码。通信为 CLI 参数 + 磁盘 JSON + stdout 行协议；退出码 124 = 看门狗超时（`engines/tts.py:run_tts_subprocess` 将其映射为可降批重试信号，而不是整任务失败）。`AUDIOTTS_WORKER` 环境变量可覆盖 worker 脚本路径。FFmpeg 需在 PATH。
+TTS 引擎（`tts-engine/tts_worker.py`，约 2300 行）是 one-shot 子进程，FastAPI 进程永不 import torch/模型代码。通信为 CLI 参数 + 磁盘 JSON + stdout 行协议；退出码 124 = 看门狗超时（`engines/tts.py:run_tts_subprocess` 将其映射为可降批重试信号，而不是整任务失败）。`AUDIOTTS_WORKER` 环境变量可覆盖 worker 脚本路径。FFmpeg 需在 PATH。
 
 ## 前端架构
 
