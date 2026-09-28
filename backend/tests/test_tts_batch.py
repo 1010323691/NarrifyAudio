@@ -2456,3 +2456,130 @@ def test_safe_package_name_snapshot():
         audio_merge = Path("/ws/06_audio_merge")
 
     assert [p.name for p in merged_output_paths(_Layout(), 'a/b:c')] == ["a_b_c.mp3", "a_b_c.wav"]
+
+
+# ---------------------------------------------------------------------------
+# 整章预览 render_preview（暂存区渲染，绝不触碰正式 05 / manifest / 03）
+# ---------------------------------------------------------------------------
+
+def _fake_preview_worker(captured):
+    """A preview-mode child stand-in: writes the ACTUAL produced file (the worker's
+    real behaviour) before emitting its ``[segment] ok`` line with the real path."""
+
+    def run_worker(cmd, handle, on_line, *, temp_files=(), fail_prefix="TTS 引擎", **kw):
+        captured["cmd"] = cmd
+        with open(cmd[cmd.index("--segments-file") + 1], encoding="utf-8") as f:
+            segs = json.load(f)
+        captured["segments"] = segs
+        out_dir = cmd[cmd.index("--out-dir") + 1]
+        for s in segs:
+            ext = captured.get("ext", ".mp3")
+            path = os.path.join(out_dir, str(s["index"] + 1).zfill(4) + ext)
+            with open(path, "wb") as f:
+                f.write(b"0" * 16)
+            on_line(f"[segment] {s['index']} ok {path}")
+        return deque()
+
+    return run_worker
+
+
+def test_render_preview_writes_staging_only_and_records_state(workspace, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", _fake_preview_worker(captured))
+
+    before_script = (workspace / "03_parsed_json" / "s.json").read_bytes()
+    before_chunk = sorted(p.relative_to(workspace).as_posix() for p in workspace.rglob("*"))
+
+    handle = _Handle()
+    result = tts_batch.render_preview(
+        handle, "s.json",
+        [{"index": 0, "text": "你好啊", "speaker": "B", "instruct": "愤怒地"}],
+    )
+
+    # 产物在暂存区，文件名 1-based（worker 口径 file_index + 1）
+    staging = workspace / "00_temp" / "chapter_preview" / "s"
+    assert (staging / "0001.mp3").is_file()
+    # state.json 记录实际产物名 + 覆盖后的三元组
+    state = json.loads((staging / "state.json").read_text("utf-8"))
+    line = state["lines"]["0"]
+    assert line["ok"] is True
+    assert line["file"] == "0001.mp3"
+    assert line["text"] == "你好啊"
+    assert line["speaker"] == "B"
+    assert line["instruct"] == "愤怒地"
+    assert line["fingerprint"] and line["rendered_at"]
+    # worker 收到的段 = 覆盖后的值（含 1-based 无关的段表 index）
+    seg = captured["segments"][0]
+    assert (seg["index"], seg["text"], seg["speaker"], seg["instruct"]) == (0, "你好啊", "B", "愤怒地")
+    # 单句运行：批内并发恒 1，宽度 = 全章行数口径（3 行 → 4）
+    assert _cmd_flag(captured["cmd"], "--concurrency") == "1"
+    assert _cmd_flag(captured["cmd"], "--width") == "4"
+    assert _cmd_flag(captured["cmd"], "--out-dir") == str(staging)
+    # 正式状态零改动：05 包内无任何文件（layout prepare 只建空目录）、03 字节一致
+    assert not any((workspace / "05_audio_chunk").rglob("*"))
+    assert (workspace / "03_parsed_json" / "s.json").read_bytes() == before_script
+    after_chunk = sorted(p.relative_to(workspace).as_posix() for p in workspace.rglob("*"))
+    new_paths = [p for p in after_chunk if p.startswith("05_audio_chunk/") and p not in before_chunk]
+    assert not new_paths
+    assert result["completed"] == 1 and result["failed"] == []
+
+
+def test_render_preview_wav_fallback_records_actual_extension(workspace, monkeypatch):
+    # MP3 编码失败时 worker 保留 WAV——state.json 的 file 必须记录实际扩展名（门禁/试听以此为据）
+    captured = {"ext": ".wav"}
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", _fake_preview_worker(captured))
+
+    tts_batch.render_preview(_Handle(), "s.json", [{"index": 1, "instruct": "轻声"}])
+
+    staging = workspace / "00_temp" / "chapter_preview" / "s"
+    assert (staging / "0002.wav").is_file()
+    state = json.loads((staging / "state.json").read_text("utf-8"))
+    line = state["lines"]["1"]
+    assert line["ok"] is True
+    assert line["file"] == "0002.wav"
+    # 未提供的字段不进入 render 条目（partial 三元组）
+    assert captured["segments"] == [{"index": 1, "speaker": "B", "text": "world", "instruct": "轻声", "pause_after": None}]
+
+
+def test_render_preview_watchdog_two_strikes_isolates_line_without_crashing(workspace, monkeypatch):
+    # exit-124 两击 → 该行记 ok=false（超时已隔离），任务正常终态（不 raise）
+    calls = {"n": 0}
+
+    def run_worker(cmd, handle, on_line, *, temp_files=(), fail_prefix="TTS 引擎", **kw):
+        calls["n"] += 1
+        raise WorkerWatchdogTimeout("看门狗超时")
+
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
+
+    result = tts_batch.render_preview(_Handle(), "s.json", [{"index": 0}])
+
+    assert calls["n"] == 2
+    staging = workspace / "00_temp" / "chapter_preview" / "s"
+    state = json.loads((staging / "state.json").read_text("utf-8"))
+    line = state["lines"]["0"]
+    assert line["ok"] is False
+    assert line["reason"] == "超时（已隔离）"
+    assert line["file"] == ""
+    assert result["completed"] == 0
+    assert result["failed"] == [{"index": 0, "speaker": "A", "reason": "超时（已隔离）"}]
+
+
+def test_render_preview_rejects_out_of_range_and_empty_render(workspace):
+    with pytest.raises(RuntimeError):
+        tts_batch.render_preview(_Handle(), "s.json", [{"index": 99}])
+    with pytest.raises(RuntimeError):
+        tts_batch.render_preview(_Handle(), "s.json", [])
+    # 第 3 行（空文本行）被覆盖为空文本 → 明确报错
+    with pytest.raises(RuntimeError):
+        tts_batch.render_preview(_Handle(), "s.json", [{"index": 2, "text": "   "}])
+
+
+def test_preview_lock_path_and_staging_dir_are_stable(workspace):
+    layout = core_paths.get_or_prepare_layout()
+    lock = tts_batch.preview_lock_path(layout, "s")
+    staging = tts_batch.preview_staging_dir(layout, "s")
+    assert lock == layout.temp / "locks" / "chapter_preview" / "s.lock"
+    assert staging == layout.temp / "chapter_preview" / "s"

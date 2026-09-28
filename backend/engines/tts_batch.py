@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core import pathio
 from ..core.config import get_config
 from ..core.paths import get_or_prepare_layout, resolve_parsed_json
 from ..core.task_control import TaskCancelled
@@ -948,6 +949,220 @@ def synthesize(handle, indices=None, script=None, concurrency=None, seed=None,
     """Single-file entry (the legacy ``POST /api/tts/batch`` path and the tests): delegates
     verbatim to :func:`_synthesize_one`. Signature kept identical so positional callers work."""
     return _synthesize_one(handle, indices, script, concurrency, seed, auto_concurrency)
+
+
+# ---------------------------------------------------------------------------
+# 整章预览：单句重渲染（产物落暂存区，绝不触碰正式 05 / manifest / 03）
+# ---------------------------------------------------------------------------
+
+def preview_lock_path(layout, package: str) -> Path:
+    """章节级跨进程锁文件：预览保存（``/apply``）与 ``tts.merge`` 执行期共用同一把锁。
+
+    防止合并读到保存过程中新旧混合的 05 文件。锁等待超时（``TimeoutError``）由 Worker 统一转
+    ``worker_error(retryable=True)`` 退避重试——apply 持锁仅秒级，实际几乎总是等待后取到。
+    """
+    return layout.temp / "locks" / "chapter_preview" / f"{package}.lock"
+
+
+def preview_staging_dir(layout, package: str) -> Path:
+    """预览产物暂存区（``00_temp/chapter_preview/<pkg>/``）：重渲染音频 + ``state.json``。"""
+    return layout.temp / "chapter_preview" / package
+
+
+def _preview_state_path(layout, package: str) -> Path:
+    return preview_staging_dir(layout, package) / "state.json"
+
+
+def _preview_state_read(layout, package: str) -> dict:
+    """The chapter's preview state, degraded to an empty shape when absent / corrupt."""
+    p = _preview_state_path(layout, package)
+    if not p.exists():
+        return {"script": "", "updated_at": 0.0, "lines": {}}
+    try:
+        data = json.loads(p.read_text("utf-8"))
+    except Exception:  # noqa: BLE001 — 损坏的暂存状态 = 无暂存（重渲染会整体覆盖该行）
+        return {"script": "", "updated_at": 0.0, "lines": {}}
+    if not isinstance(data, dict):
+        return {"script": "", "updated_at": 0.0, "lines": {}}
+    if not isinstance(data.get("lines"), dict):
+        data["lines"] = {}
+    data.setdefault("script", "")
+    data.setdefault("updated_at", 0.0)
+    return data
+
+
+def _preview_fingerprint(text: str, speaker: str, instruct: str) -> str:
+    """Stable hash of the rendered triple (the line's re-render gate key)."""
+    raw = json.dumps({"text": text, "speaker": speaker, "instruct": instruct},
+                     ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def render_preview(handle, script, render, concurrency=None, seed=None) -> dict:
+    """Task worker (``tts.preview_render``): re-render preview lines into the STAGING area.
+
+    ``render`` is an array of ``{index, text?, speaker?, instruct?}`` (entries carry only the
+    fields the caller changed; the JSON task payload never drifts key types). The fields are
+    overridden on an IN-MEMORY copy of the script (``type`` / ``pause_after`` and any other
+    per-line fields are preserved), the target lines go through the same one-shot TTS worker
+    (``build_segments`` + ``run_tts_subprocess``), and the worker writes its audio into
+    ``00_temp/chapter_preview/<pkg>/`` itself — file number ``file_index + 1`` (1-based,
+    zfill'd), and the ``[segment] ok <path>`` line reports the ACTUAL produced file (an MP3,
+    or the kept WAV when the MP3 encode failed). That reported name is what gets recorded in
+    ``state.json`` (``file``) and is what the save gate / audition use.
+
+    Line-level failures (a watchdog two-strike, a worker error line) are recorded in
+    ``state.json`` as ``ok=false, reason`` and the task STILL ends in its normal success
+    terminal — deliberately different from :func:`_synthesize_one`, whose all-failed
+    ``raise`` would turn a line failure into a retryable task crash. A FATAL engine error
+    (a non-watchdog non-zero exit) fails the task as usual.
+
+    Nothing in this function touches ``05_audio_chunk``, the package manifest, or the script
+    on disk — the save endpoint (``/apply``) is the only writer of those, under the chapter
+    lock and with backup/rollback. Quota is billed like formal synthesis (operation name
+    ``"tts.batch"``; the ContextVar is bound by the Worker, and a caller without one — the
+    unit tests — is a no-op).
+
+    ``concurrency`` is accepted for executor-signature symmetry and ignored: a preview run
+    renders one line per task, so the per-batch ceiling is always 1.
+    """
+    src = resolve_parsed_json(script)
+    lines = _load_script(src)
+    total = len(lines)
+
+    indices: list[int] = []
+    for item in render or []:
+        index = int(item["index"])
+        if index >= total:
+            raise RuntimeError(f"第 {index + 1} 句越界（本章共 {total} 行）。")
+        if index not in indices:
+            indices.append(index)
+    indices.sort()
+    if not indices:
+        raise RuntimeError("没有要渲染的句子。")
+    for item in render:
+        row = lines[int(item["index"])]
+        for key in ("text", "speaker", "instruct"):
+            if item.get(key) is not None:
+                row[key] = item[key]
+    for index in indices:
+        if not (lines[index].get("text") or "").strip():
+            raise RuntimeError(f"第 {index + 1} 句文本为空，无法渲染。")
+
+    layout = get_or_prepare_layout()
+    ws = layout.workspace
+    pkg = package_for(src)
+    staging = preview_staging_dir(layout, pkg)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    if not (layout.voice_profiles / "voice_config.json").exists():
+        handle.log("警告：未找到 voice_config.json——请先在「角色配音」页生成角色声音，否则所有段都会失败。", "WARNING")
+
+    segments = build_segments(lines, indices)
+    from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+    if not reserve_tts_quota(sum(len(segment["text"]) for segment in segments), "tts.batch"):
+        raise QuotaInsufficientError("TTS 输入字数超过可用额度")
+
+    cfg = get_config()
+    t = cfg.tts
+    seed = seed if seed is not None else t.batch_seed
+    try:
+        seed = int(seed)
+    except (TypeError, ValueError):
+        seed = -1
+    # Width is a function of the chapter's FULL line count (same rule as the batch run) so
+    # the staging files match the formal package's digit count.
+    width = filename_width(total)
+
+    seg_file = layout.temp / f"preview_segments_{uuid.uuid4().hex[:12]}.json"
+    python, worker = resolve_engine()
+    handle.log(f"整章预览渲染：{len(segments)} 句（{pkg}）→ 暂存 {staging.name}")
+    handle.progress(0.05, "启动引擎")
+
+    seg_results: dict = {}  # index -> {ok, path, reason}
+    by_index = {s["index"]: s for s in segments}
+
+    def on_line(line: str) -> None:
+        if line.startswith("[segment]"):
+            outcome = _handle_segment(line, by_index, len(segments), seg_results, handle)
+            if outcome and outcome.get("ok"):
+                from ..platform.quota import consume_tts_input
+                consume_tts_input(len(by_index[outcome["index"]]["text"]), "tts.batch",
+                                  str(outcome["index"]))
+        else:
+            handle.log(line)
+
+    # Watchdog: the per-batch ceiling is 1, so an exit-124 is a strike on this line — one
+    # strike restarts the engine once, two strikes record the line failed（"超时（已隔离）"）
+    # and the task still ends normally (the frontend shows the line failed + a retry).
+    MAX_STRIKES = 2
+    strikes = 0
+    while True:
+        seg_file.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+        cmd = _build_cmd(
+            python, worker, seg_file, layout.voice_profiles / "voice_config.json", staging,
+            language=t.language, device=t.device,
+            model=t.model, base_model=t.base_model, design_model=t.design_model,
+            ffmpeg_path=cfg.ffmpeg.ffmpeg_path, concurrency=1, seed=seed,
+            workspace=ws, width=width,
+        )
+        try:
+            run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
+                               fail_prefix="整章预览渲染引擎", watchdog_code=124)
+            break  # a clean exit (0): every line reported via its [segment] line
+        except WorkerWatchdogTimeout:
+            strikes += 1
+            handle.log(f"预览渲染看门狗触发（超时，第 {strikes}/{MAX_STRIKES} 次）", "WARNING")
+            if strikes >= MAX_STRIKES:
+                for index in by_index:
+                    if not (seg_results.get(index) or {}).get("ok"):
+                        seg_results[index] = {"ok": False, "path": "", "reason": "超时（已隔离）"}
+                handle.log("连续两次超时 → 该句记为失败（可重试）。", "WARNING")
+                break
+            handle.log("重启引擎重试", "WARNING")
+    try:
+        seg_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    # 结果落盘：按行并入 state.json（同章节多句各自独立累积；原子写）
+    state = _preview_state_read(layout, pkg)
+    state["script"] = script
+    state["updated_at"] = time.time()
+    lines_state = state["lines"]
+    for seg in segments:
+        index = seg["index"]
+        r = seg_results.get(index) or {"ok": False, "path": "", "reason": "（引擎未返回结果）"}
+        ok = bool(r.get("ok"))
+        lines_state[str(index)] = {
+            "ok": ok,
+            "reason": "" if ok else str(r.get("reason") or "未知原因"),
+            # The worker-reported ACTUAL produced file (an .mp3, or the kept .wav fallback) —
+            # the save gate and the audition both key off it, never an assumed extension.
+            "file": Path(r.get("path") or "").name if ok else "",
+            "text": seg["text"],
+            "speaker": seg["speaker"],
+            "instruct": seg["instruct"],
+            "rendered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "fingerprint": _preview_fingerprint(seg["text"], seg["speaker"], seg["instruct"]),
+        }
+    pathio.rewrite_json_file(_preview_state_path(layout, pkg), state)
+
+    completed = sum(1 for s in segments if (seg_results.get(s["index"]) or {}).get("ok"))
+    handle.log(f"整章预览渲染结束：成功 {completed} / 共 {len(segments)} 句。")
+    handle.progress(1.0, "完成")
+    return {
+        "script": script,
+        "package": pkg,
+        "total": len(segments),
+        "completed": completed,
+        "failed": [
+            {"index": s["index"], "speaker": s["speaker"],
+             "reason": (seg_results.get(s["index"]) or {}).get("reason", "")}
+            for s in segments if not (seg_results.get(s["index"]) or {}).get("ok")
+        ],
+        "state_path": str(_preview_state_path(layout, pkg)),
+    }
 
 
 def synthesize_multi(handle, scripts, concurrency=None, seed=None,

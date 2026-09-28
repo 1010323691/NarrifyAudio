@@ -31,6 +31,28 @@ def _safe_name_list(payload: dict, key: str, *, required: bool = False) -> bool:
     )
 
 
+def _preview_render_items_ok(render: object) -> bool:
+    """Shape of ``render``: ``[{index: non-negative int, text?/speaker?/instruct? str}]``.
+
+    The ``render`` entries deliberately avoid a ``{index: {…}}`` dict form — a task payload
+    persists as JSON, where integer keys would drift to strings and re-parse differently
+    on the Worker. Each entry carries only the fields the caller actually changed.
+    """
+    if not isinstance(render, list) or not render:
+        return False
+    for item in render:
+        if not isinstance(item, dict):
+            return False
+        index = item.get("index")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            return False
+        for key in ("text", "speaker", "instruct"):
+            value = item.get(key)
+            if value is not None and not isinstance(value, str):
+                return False
+    return True
+
+
 def legacy_task_payload_error(task_type: str, payload: object) -> str | None:
     """Validate client-controlled path components used by legacy task engines."""
     if not isinstance(payload, dict):
@@ -60,6 +82,11 @@ def legacy_task_payload_error(task_type: str, payload: object) -> str | None:
         package = payload.get("package")
         if package not in (None, "") and not is_safe_path_component(package):
             return "音频包名称无效"
+    elif task_type == "tts.preview_render":
+        if not is_safe_path_component(payload.get("script")):
+            return "剧本文件名无效"
+        if not _preview_render_items_ok(payload.get("render")):
+            return "预览渲染行参数无效"
     elif task_type == "music.suggest_tags":
         if not is_safe_path_component(payload.get("name")):
             return "音乐文件名无效"

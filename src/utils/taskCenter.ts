@@ -3,6 +3,7 @@ export const TASK_CENTER_CATEGORIES = [
   { id: 'voices-foundation', label: '角色配音－生成语音推理基础', description: '为角色生成语音推理基础' },
   { id: 'voices-clone', label: '角色配音－制作克隆音频', description: '制作角色克隆音频' },
   { id: 'tts', label: '音频合成', description: '将脚本批量合成为语音' },
+  { id: 'preview', label: '整章预览', description: '预览章节最终合成并逐句微调' },
   { id: 'merge', label: '音频合并', description: '合并章节音频' },
   { id: 'bgm', label: '背景音乐混音', description: '处理背景音乐并完成混音' },
 ] as const
@@ -14,6 +15,7 @@ export function taskCenterCategoryOf(taskType: string): TaskCenterCategoryId | u
   if (taskType === 'voices.foundation') return 'voices-foundation'
   if (taskType === 'voices.clone') return 'voices-clone'
   if (taskType === 'tts.batch') return 'tts'
+  if (taskType === 'tts.preview_render') return 'preview'
   if (taskType === 'tts.merge') return 'merge'
   if (['bgm.analysis', 'bgm.segment', 'bgm.match', 'bgm.mix', 'bgm.package'].includes(taskType)) return 'bgm'
   return undefined
