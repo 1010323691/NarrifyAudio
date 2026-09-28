@@ -245,3 +245,56 @@ test('a create response from a signed-out account cannot select its project', as
   assert.equal(selections, 0)
   assert.equal(project.current, null)
 })
+
+test('preview line state: previewReady keys off the draft, never the disk line', () => {
+  // previewReady 的口径 = staged 内容 == 页内草稿（绝不与磁盘 03 比——磁盘正是修改前旧值）。
+  const load = harness()
+  const { isPreviewReady, isDirty, restoreDraft, lineStatus, saveState, buildEdits } =
+    load('@/utils/previewLineState')
+  // 沙箱（vm 领域）里构造的对象原型与测试文件不同 realm——JSON 往返归一化后再比。
+  const realm = (value) => JSON.parse(JSON.stringify(value))
+  const disk = { text: '原台词', speaker: 'A', instruct: '' }
+  const draft = { text: '新台词', speaker: 'B', instruct: '愤怒地' }
+  const staged = { ...draft, ok: true, reason: '', rendered_at: 'r1', fingerprint: 'fp', file: '0001.mp3' }
+  assert.equal(isDirty(draft, disk), true)
+  assert.equal(isPreviewReady(staged, draft), true)
+  // 与磁盘不一致 ≠ 未就绪——与磁盘比会永远卡在「不可保存」。
+  assert.equal(isPreviewReady(staged, disk), false)
+  // 渲染后又改了草稿 → 旧产物，按 dirty 处理（不是 failed）。
+  const reedited = { ...draft, text: '再改' }
+  assert.equal(isPreviewReady(staged, reedited), false)
+  assert.equal(lineStatus({ disk, draft: reedited, staged, rendering: false, renderFailed: false }), 'dirty')
+  // 无暂存 / 暂存失败 → 不是 previewReady；失败句 → failed。
+  assert.equal(isPreviewReady(null, draft), false)
+  assert.equal(lineStatus({ disk, draft, staged: { ...staged, ok: false, reason: '超时（已隔离）' }, rendering: false, renderFailed: false }), 'failed')
+  // 优先级：rendering > failed > previewReady > dirty > normal。
+  assert.equal(lineStatus({ disk, draft, staged, rendering: true, renderFailed: false }), 'rendering')
+  assert.equal(lineStatus({ disk, draft, staged: null, rendering: false, renderFailed: true }), 'failed')
+  assert.equal(lineStatus({ disk, draft, staged, rendering: false, renderFailed: false }), 'previewReady')
+  assert.equal(lineStatus({ disk, draft: disk, staged: null, rendering: false, renderFailed: false }), 'normal')
+  // F5 恢复：staged.ok 且 ≠ 磁盘 → 以 staged 为草稿；staged == 磁盘或失败 → 磁盘行。
+  assert.deepEqual(realm(restoreDraft(staged, disk)), draft)
+  assert.deepEqual(realm(restoreDraft({ ...staged, ok: true, ...disk }, disk)), disk)
+  assert.deepEqual(realm(restoreDraft(null, disk)), disk)
+  assert.deepEqual(realm(restoreDraft({ ...staged, ok: false }, disk)), disk)
+  // 保存门禁：无修改 → 不可保存；修改句全部 previewReady → 可保存；有 pending → 不可。
+  const rows = [
+    { index: 0, disk, draft, staged, rendering: false },
+    { index: 1, disk: { ...disk }, draft: { ...disk }, staged: null, rendering: false },
+  ]
+  assert.deepEqual(realm(saveState(rows.map(({ disk: d, draft: f, staged: s, rendering: r }) => ({ disk: d, draft: f, staged: s, rendering: r })))), { ready: true, dirtyCount: 1, pending: 0 })
+  const pendingRow = rows.map((r) => (r.index === 0 ? { ...r, staged: null } : r))
+  const pendingGate = saveState(pendingRow.map(({ disk: d, draft: f, staged: s, rendering: r }) => ({ disk: d, draft: f, staged: s, rendering: r })))
+  assert.equal(pendingGate.ready, false)
+  assert.equal(pendingGate.pending, 1)
+  const renderingGate = saveState(pendingRow.map((r) => ({ disk: r.disk, draft: r.draft, staged: r.staged, rendering: true })))
+  assert.equal(renderingGate.ready, false)
+  // edits：partial triple（只带被改字段，strip 口径）；全同句不产生 edit。
+  assert.deepEqual(realm(buildEdits(rows)), [
+    { index: 0, text: '新台词', speaker: 'B', instruct: '愤怒地' },
+  ])
+  assert.deepEqual(realm(buildEdits([{ index: 3, disk, draft: { ...disk, text: '  新台词 ' } }])), [
+    { index: 3, text: '新台词' },
+  ])
+  assert.deepEqual(realm(buildEdits([{ index: 9, disk, draft: disk }])), [])
+})

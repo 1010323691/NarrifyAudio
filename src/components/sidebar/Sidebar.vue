@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon, ListTodo, Trash2,
+  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon, ListTodo, Trash2, Eye,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -38,6 +38,7 @@ const PROJECT_STAGES = [
   { to: '/script', label: '文本解析', icon: ScanText },
   { to: '/voices', label: '角色配音', icon: Users },
   { to: '/batch', label: '音频合成', icon: Layers },
+  { to: '/preview', label: '整章预览', icon: Eye },
   { to: '/merge', label: '音频合并', icon: Combine },
   { to: '/audio', label: '音频分集', icon: AudioLines, optional: true },
   { to: '/bgm', label: '背景音乐', icon: Music4 },

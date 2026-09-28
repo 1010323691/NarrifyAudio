@@ -30,6 +30,7 @@ const STAGE_DEFS = [
   { key: 'voices', label: '角色配音', path: '/voices', dir: '04_voice_profiles', icon: AudioLines, taskTypes: modulePrefixes('voices') },
   // tts 模块含 tts.reset（重置流），合成阶段只盯在途的 tts.batch
   { key: 'batch', label: '音频合成', path: '/batch', dir: '05_audio_chunk', icon: FileAudio2, taskTypes: ['tts.batch'] },
+  { key: 'preview', label: '整章预览', path: '/preview', dir: '05_audio_chunk', icon: FileAudio2, taskTypes: ['tts.preview_render'] },
   { key: 'merge', label: '音频合并', path: '/merge', dir: '06_audio_merge', icon: FileAudio2, taskTypes: modulePrefixes('merge') },
   { key: 'audio', label: '音频分集', path: '/audio', dir: '07_output', icon: AudioLines, taskTypes: modulePrefixes('audio'), optional: true },
   { key: 'bgm', label: '背景音乐', path: '/bgm', dir: '08_bgm', icon: AudioLines, taskTypes: modulePrefixes('bgm') },

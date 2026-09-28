@@ -15,19 +15,31 @@ import { useAudioBus, type AudioPlayer } from '@/composables/useAudioBus'
  * one metadata request per row on the ~6 shared same-origin connections — starving
  * SSE/API traffic and piling up media pipelines for rows nobody previews. The time
  * readout shows 0:00 until first play; the fetch itself is unchanged, it just starts
- * when the user asks for it.
+ * when the user asks for it. A resource that 404s / fails to decode shows an explicit
+ * red「加载失败，重试」state instead of a silent dead 0:00/0:00.
  */
-const props = defineProps<{ src: string }>()
+const props = withDefaults(defineProps<{
+  src: string
+  /** 已知时长（秒，如后端 ffprobe）：未播放前先显示真实时长而不是 0:00；
+   *  loadedmetadata 后以真实值为准。缺省 = 未知（显示 --:--）。 */
+  knownDuration?: number | null
+}>(), { knownDuration: null })
 
 const { claim, release } = useAudioBus()
 
 const audioEl = ref<HTMLAudioElement | null>(null)
 const audioReady = ref(false)
 const playing = ref(false)
+const loadError = ref(false)
 const current = ref(0)
 const duration = ref(0)
 
 const progress = computed(() => (duration.value > 0 ? current.value / duration.value : 0))
+/** 展示用总时长：实测值优先，其次已知的 ffprobe 值；都没有 = 未知（显示 --:--，不冒充 0:00）。 */
+const shownDuration = computed(() => {
+  if (duration.value > 0) return duration.value
+  return (props.knownDuration && Number.isFinite(props.knownDuration) ? props.knownDuration : 0)
+})
 
 function stop(): void {
   audioEl.value?.pause()
@@ -45,8 +57,14 @@ async function toggle(): Promise<void> {
   }
   const el = audioEl.value
   if (!el) return
+  loadError.value = false
   claim(self)
-  void el.play().catch(() => release(self))
+  void el.play().catch(() => {
+    release(self)
+    // play() 拒绝多为 AbortError（被别的播放器抢占）/ NotAllowedError（自动播放策略），
+    // 资源本身有问题才会带 mediaError —— 只有它才是「加载失败」。
+    if (audioEl.value?.error) onError()
+  })
 }
 
 function fmt(t: number): string {
@@ -68,11 +86,19 @@ function onEnded(): void {
   current.value = 0
   release(self)
 }
+/** 资源加载/解码失败：给出可重试的失败态，而不是停留在 0:00/0:00 让用户以为播放器坏了。 */
+function onError(): void {
+  audioEl.value?.pause()
+  playing.value = false
+  loadError.value = true
+  release(self)
+}
 function onTimeUpdate(): void {
   if (audioEl.value) current.value = audioEl.value.currentTime
 }
 function onMeta(): void {
   if (audioEl.value) duration.value = audioEl.value.duration || 0
+  loadError.value = false
 }
 
 function seek(e: MouseEvent): void {
@@ -93,6 +119,7 @@ watch(
     playing.value = false
     current.value = 0
     duration.value = 0
+    loadError.value = false
     release(self)
   },
 )
@@ -117,14 +144,16 @@ onBeforeUnmount(() => {
       @timeupdate="onTimeUpdate"
       @loadedmetadata="onMeta"
       @durationchange="onMeta"
+      @error="onError"
     />
     <button
       type="button"
       :class="cn(
         'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-input bg-white/70 shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring dark:bg-card/60',
         playing && 'border-primary/40 bg-primary/10 text-primary',
+        loadError && 'border-destructive/40 bg-destructive/10 text-destructive',
       )"
-      :title="playing ? '暂停' : '播放'"
+      :title="playing ? '暂停' : loadError ? '音频加载失败，点击重试' : '播放'"
       @click="toggle"
     >
       <Pause v-if="playing" class="h-3.5 w-3.5" />
@@ -141,7 +170,8 @@ onBeforeUnmount(() => {
       />
     </div>
     <span class="w-20 shrink-0 whitespace-nowrap text-right text-[11px] tabular-nums text-muted-foreground">
-      {{ fmt(current) }} / {{ fmt(duration) }}
+      <template v-if="loadError"><span class="text-destructive">加载失败，重试</span></template>
+      <template v-else>{{ fmt(current) }} / {{ shownDuration > 0 ? fmt(shownDuration) : '--:--' }}</template>
     </span>
   </div>
 </template>

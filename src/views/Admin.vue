@@ -70,7 +70,7 @@ function aggregateTypes(prefixes: string[]) {
 // 服务归类（模块 → 前缀，单源见 utils/taskTypes.ts）：tts.merge 按 ffmpeg 口径计入 ffmpeg
 const serviceTaskMetrics = computed(() => ({
   llm: aggregateTypes(modulePrefixes('script', 'music')),
-  tts: aggregateTypes(modulePrefixes('tts', 'voices')),
+  tts: aggregateTypes(modulePrefixes('tts', 'voices', 'preview')),
   ffmpeg: aggregateTypes(modulePrefixes('audio', 'merge')),
   bgm: aggregateTypes(modulePrefixes('bgm')),
 }))

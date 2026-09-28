@@ -32,6 +32,7 @@ const router = createRouter({
         { path: 'script', name: 'script', component: () => import('@/views/ScriptParse.vue'), meta: { title: '文本解析', projectStage: true } },
         { path: 'voices', name: 'voices', component: () => import('@/views/Voices.vue'), meta: { title: '角色配音', projectStage: true } },
         { path: 'batch', name: 'batch', component: () => import('@/views/BatchTTS.vue'), meta: { title: '音频合成', projectStage: true } },
+        { path: 'preview', name: 'preview', component: () => import('@/views/ChapterPreview.vue'), meta: { title: '整章预览', projectStage: true, fullBleed: true } },
         { path: 'merge', name: 'merge', component: () => import('@/views/Merge.vue'), meta: { title: '音频合并', projectStage: true } },
         { path: 'audio', name: 'audio', component: () => import('@/views/AudioSplit.vue'), meta: { title: '音频分集', projectStage: true } },
         { path: 'bgm', name: 'bgm', component: () => import('@/views/BGM.vue'), meta: { title: '背景音乐', projectStage: true } },

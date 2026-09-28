@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import Sidebar from '@/components/sidebar/Sidebar.vue'
 import { useProjectStore } from '@/stores/project'
 import { useAuthStore } from '@/stores/auth'
 
 const project = useProjectStore()
 const auth = useAuthStore()
+const route = useRoute()
+// 工作台型页面（整章预览）请求全宽容器：内容撑满 app-main，不再受 1440px 居中约束。
+const fullBleed = computed(() => route.meta.fullBleed === true)
 const projectScope = computed(() => `${auth.user?.id || 'guest'}:${project.activeProjectId}`)
 
 // 跨标签页失鲜自愈：另一标签可能已切换/删除活动项目（PR 评审 #1），本标签回到
@@ -28,7 +32,7 @@ onBeforeUnmount(() => document.removeEventListener('visibilitychange', onVisibil
   <div class="app-shell">
     <Sidebar />
     <main id="main-content" class="app-main">
-      <div class="app-content">
+      <div class="app-content" :class="fullBleed && 'app-content--full'">
         <!-- keep-alive: each module's inputs/toggles/preview survive navigation -->
         <router-view v-slot="{ Component }">
           <keep-alive :key="projectScope">

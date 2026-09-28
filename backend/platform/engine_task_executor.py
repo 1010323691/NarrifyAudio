@@ -79,6 +79,17 @@ def _run_tts_merge(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     )
 
 
+def _run_tts_preview_render(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    from ..engines import tts_batch
+    return tts_batch.render_preview(
+        handle,
+        str(payload.get("script") or ""),
+        payload.get("render") or [],
+        payload.get("concurrency"),
+        payload.get("seed"),
+    )
+
+
 def _run_bgm_segment(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import bgm as bgm_engine
     cfg = core_config.get_config()
@@ -262,12 +273,13 @@ def _run_tts_reset(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     return {"engine": "tts.reset", "ok": True, "removed": removed}
 
 
-# S1：12 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
+# S1：13 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
 ENGINE_BRANCHES: dict[str, Callable] = {
     "voices.foundation": _run_voices_foundation,
     "voices.clone": _run_voices_clone,
     "tts.batch": _run_tts_batch,
     "tts.merge": _run_tts_merge,
+    "tts.preview_render": _run_tts_preview_render,
     "bgm.segment": _run_bgm_segment,
     "bgm.mix": _run_bgm_mix,
     "music.suggest_tags": _run_music_suggest_tags,
@@ -292,6 +304,8 @@ def _shadow_engine_kind(task_type: str) -> str:
         return "_run_tts_batch"
     if task_type == "tts.merge":
         return "_run_tts_merge"
+    if task_type == "tts.preview_render":
+        return "_run_tts_preview_render"
     if task_type == "bgm.segment":
         return "_run_bgm_segment"
     if task_type == "bgm.mix":

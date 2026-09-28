@@ -364,6 +364,67 @@ export interface MergeStatusPackages {
   packages: MergePackageStatus[]
 }
 
+// ------------------------------ tts: 整章预览 ------------------------------
+/** state.json 行 → 逐句暂存重渲染状态（`GET /api/tts/preview/chapter` 的 ``staged`` 字段；
+ *  响应中无 preview_ready——前端按页内草稿推导，见 utils/previewLineState.ts）。 */
+export interface PreviewStagedLine {
+  ok: boolean
+  reason: string
+  text: string
+  speaker: string
+  instruct: string
+  rendered_at: string
+  fingerprint: string
+  /** worker 报告的 [segment] ok 实际产物文件名（.mp3 或 .wav 回退）——试听 URL 与保存门禁以它为准。 */
+  file: string
+}
+export interface PreviewLine {
+  index: number
+  speaker: string
+  text: string
+  instruct: string
+  /** 正式音频的 workspace 相对路径（如 05_audio_chunk/<pkg>/0001.mp3）；无可播正式音频时 ''。 */
+  audio: string
+  audio_mtime_ns: number | null
+  /** 正式单句音频（05）真实时长（秒，ffprobe，3 位小数）；null = 无正式音频或探测失败。 */
+  duration: number | null
+  ok: boolean
+  reason: string
+  staged: PreviewStagedLine | null
+  /** 本句在章节合并音频（06/08 同时间轴）中的近似起点（秒）：按 merge 同口径
+   * （现存 05 顺序拼接 + 句间 gap）累加。06 不存在、或本句无正式音频时为 null。
+   * 05 被改动且未重新合并时会与 06 漂移——仅供试听定位，非精确时间轴。 */
+  start_offset: number | null
+}
+export interface ChapterPreviewDetail {
+  name: string
+  package: string
+  lines: PreviewLine[]
+  chapter_audio: { path: string; duration: number | null } | null
+  timeline_exists: boolean
+  downstream: { merged: boolean; mixed: boolean; timeline: boolean; segment_stale: boolean }
+}
+/** 保存/重渲染的 partial triple：只携带被改字段（index 必为行在章内的下标，0-based）。 */
+export interface PreviewEditInput {
+  index: number
+  text?: string
+  speaker?: string
+  instruct?: string
+}
+export interface PreviewDownstreamFailure {
+  stage: string
+  artifact: string
+  error: string
+}
+export interface ApplyPreviewResult {
+  ok: boolean
+  edited: number[]
+  invalidated: string[]
+  failures: PreviewDownstreamFailure[]
+  /** true = ②③④ 已成立但下游删除失败（旧产物不可再视为有效，用 purge-stale 重试）。 */
+  downstream_dirty: boolean
+}
+
 // ------------------------------ script (LLM -> JSON) ------------------------------
 /** Response of ``POST /api/script/generate-files``: one independent task per file. */
 export interface GenerateFilesResult {

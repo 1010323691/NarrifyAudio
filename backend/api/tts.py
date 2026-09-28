@@ -13,24 +13,38 @@ down (requirement #7).
 from __future__ import annotations
 
 import json
+import math
 import os
+import shutil
 import threading
+import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..core import pathio
 from ..core.config import get_config
+from ..core.file_lock import exclusive_file_lock
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all
+from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
+from ..engines.audio import probe_duration
+from ..engines.merge import boundary_gap_ms
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.engine_task_submission import active_durable_targets, has_active_durable_tasks, submit_legacy_engine_task
+from ..platform.engine_task_submission import (
+    active_durable_payloads,
+    active_durable_targets,
+    has_active_durable_tasks,
+    submit_legacy_engine_task,
+)
+from ..platform.file_response import file_response
 from . import _common
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
@@ -898,6 +912,12 @@ def run_merge(
     for p in pkgs:
         if not p or p != Path(p).name:
             raise HTTPException(400, f"非法包名：{p}")
+    layout = resolve_layout()
+    for p in pkgs:
+        # 章节锁探测（提前拒绝；TOCTOU 可接受——真正的互斥由 tts.merge 执行期持锁保证，
+        # 见 merge_audio_package 与「整章预览」保存共用的章节级跨进程锁）。
+        if _chapter_preview_lock_held(layout, p):
+            raise HTTPException(409, f"章节 {p} 有保存操作进行中，请稍后再合并。")
     active_packages = active_durable_targets(
         task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
     )
@@ -986,3 +1006,670 @@ def merge_status(packages: Annotated[list[str] | None, Query()] = None) -> dict:
             for p in names
         ]}
     return {"packages": [_package_merge_status(p, layout) for p in names]}
+
+
+# ---------------------------------------------------------------------------
+# 整章预览：章节最终合成的逐句检视与单句微调（暂存重渲染 → /apply 提交）
+# ---------------------------------------------------------------------------
+
+def _is_safe_script_name(name: str) -> bool:
+    """A bare filename component (the /merge-style check, minus the empty case)."""
+    return bool(name) and name == Path(name).name and name not in {".", ".."}
+
+
+def _chapter_preview_lock_held(layout, package: str) -> bool:
+    """Non-blocking probe of the chapter lock (held during a preview save or merge execution)."""
+    if layout.temp is None:
+        return False
+    try:
+        with exclusive_file_lock(Batch.preview_lock_path(layout, package), timeout=0.1):
+            return False
+    except TimeoutError:
+        return True
+
+
+def _preview_staged_view(state: dict) -> dict:
+    """state.json → the per-line response shape (str-keyed; the worker-reported ``file`` included —
+    the audition URL and the save gate both key off the ACTUAL produced file)."""
+    lines: dict[str, dict] = {}
+    for key, value in (state.get("lines") or {}).items():
+        if not isinstance(value, dict):
+            continue
+        lines[str(key)] = {
+            "ok": bool(value.get("ok")),
+            "reason": value.get("reason") or "",
+            "text": value.get("text") or "",
+            "speaker": value.get("speaker") or "",
+            "instruct": value.get("instruct") or "",
+            "rendered_at": value.get("rendered_at") or "",
+            "fingerprint": value.get("fingerprint") or "",
+            "file": value.get("file") or "",
+        }
+    return lines
+
+
+def _preview_inflight_conflicts(script: str, pkg: str, ctx: AuthContext, db: Session) -> str | None:
+    """The in-flight guard shared by line-rerender / apply (bgm._durable_audio_conflicts pattern):
+    409 reason when any hits, else ``None``. Guards the state.json race and a merge reading an
+    in-flight chapter."""
+    for payload in active_durable_payloads(task_type="tts.batch", ctx=ctx, db=db):
+        targets = payload.get("scripts")
+        if not isinstance(targets, list) or not targets:
+            targets = [payload.get("script")] if payload.get("script") else []
+        if script in {str(value) for value in targets}:
+            return "该章节有合成任务进行中，请待其结束后再操作。"
+    if script in active_durable_targets(
+        task_type="tts.preview_render", payload_key="script", ctx=ctx, db=db,
+    ):
+        return "该章节有其它句子仍在重渲染，请待其结束后再操作。"
+    if pkg in active_durable_targets(
+        task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
+    ):
+        return "该章节有合并任务进行中，请待其结束后再操作。"
+    return None
+
+
+# 单句/章节音频时长的进程级 LRU 缓存：detail 是事件驱动（打开/保存/刷新/任务终态），
+# 批量重渲染会随任务逐个终态多次重拉——文件未变即命中，避免重复起 ffprobe 子进程。
+# key 含 mtime_ns 以支持同路径覆盖；失败值（None）也缓存（字节身份决定时长，修好 mtime 必变；
+# 边界：装好 ffprobe 后对未动过的文件需重启 API 才生效）。放本模块而非包装
+# engines/audio.probe_duration：后者被 music/bgm/task_worker 各命名空间引用且被大量测试
+# monkeypatch，全局包装会污染它们；_cached_probe 以**裸名**调 probe_duration 以保测试可 patch。
+_DURATION_CACHE: OrderedDict = OrderedDict()
+_DURATION_CACHE_LOCK = threading.Lock()
+_DURATION_CACHE_MAX = 512
+_DURATION_MISSING = object()
+
+
+def _cached_probe(path: Path, ffprobe_path: str, mtime_ns: int | None) -> float | None:
+    """ffprobe 时长（秒，round 3；失败/缺失 → None）。线程安全 + cache-aside：
+
+    单个锁包住所有 dict 操作（查/挪位/写/超限弹出是复合操作，不能只靠 GIL）；
+    ffprobe 子进程在**锁外**执行，临界区仅微秒级 dict 操作；两线程同时 miss 同一文件
+    会重复 probe 一次，结果相同、无害。
+    """
+    key = (str(path), mtime_ns)
+    with _DURATION_CACHE_LOCK:
+        hit = _DURATION_CACHE.get(key, _DURATION_MISSING)
+        if hit is not _DURATION_MISSING:
+            _DURATION_CACHE.move_to_end(key)
+            return hit
+    duration, _err = probe_duration(path, ffprobe_path)  # 锁外：起子进程
+    value: float | None = None if math.isnan(duration) else round(duration, 3)
+    with _DURATION_CACHE_LOCK:
+        _DURATION_CACHE[key] = value
+        _DURATION_CACHE.move_to_end(key)
+        if len(_DURATION_CACHE) > _DURATION_CACHE_MAX:
+            _DURATION_CACHE.popitem(last=False)
+    return value
+
+
+@router.get("/preview/chapter/{name}")
+def preview_chapter(name: str) -> dict:
+    """One chapter's preview detail: per-line script + formal 05 audio + staged re-render state
+    + downstream artifact status (06 merge / 08 mix / 08 timeline / segment-analysis stale).
+
+    The backend does NOT compute a ``preview_ready`` field (it does not know the frontend
+    draft, and a comparison against the on-disk 03 is backwards — the disk 03 is precisely
+    the pre-edit value). It returns only the staged fields; the frontend derives previewReady
+    against its own draft, and ``/apply`` is the sole authoritative server-side gate.
+    F5 restore: for lines whose staged.ok content differs from the disk 03, the frontend
+    restores its draft from staged (no re-render needed before saving).
+    """
+    if not _is_safe_script_name(name):
+        raise HTTPException(400, f"非法脚本名：{name}")
+    layout = resolve_layout()
+    if layout.parsed_json is None:  # read-only: degrade like /batch-status
+        return {"name": name, "package": "", "lines": [], "chapter_audio": None,
+                "timeline_exists": False,
+                "downstream": {"merged": False, "mixed": False, "timeline": False,
+                               "segment_stale": False}}
+    src = layout.parsed_json / name
+    if not src.exists():
+        raise HTTPException(404, f"剧本不存在：{name}")
+    try:
+        data = json.loads(src.read_text("utf-8"))
+    except Exception:
+        raise HTTPException(400, f"剧本无法解析：{name}")
+    if not isinstance(data, list) or not data:
+        raise HTTPException(400, f"剧本为空：{name}")
+    pkg = Batch.package_for(src)
+    manifest = Batch.read_manifest(layout.audio_chunk / pkg)
+    staged = _preview_staged_view(Batch._preview_state_read(layout, pkg))
+    cfg = get_config()
+
+    # 章节级音频（06 存在则 ffprobe；path 为 workspace 相对形式，前端走 files/download 播放）
+    chapter_audio = None
+    for candidate in Batch.merged_output_paths(layout, pkg):
+        if candidate.is_file():
+            try:
+                _mtime = candidate.stat().st_mtime_ns
+            except OSError:
+                continue
+            chapter_audio = {
+                "path": f"06_audio_merge/{candidate.name}",
+                "duration": _cached_probe(candidate, cfg.ffmpeg.ffprobe_path, _mtime),
+            }
+            break
+
+    # 句级近似起点（章节试听从选中句开播）：时间轴口径与 merge 完全一致——
+    # 按 03 顺序拼接「存在 05 文件」的句子 + 句间 boundary gap（pause_after 覆盖 >
+    # 同人 same_ms > 换人 pause_ms），缺失文件跳过且不贡献间隔。05 被改动后未重新
+    # 合并时偏移按当前 05 计算、与 06 存在漂移——试听级近似，不是精确时间轴。
+    ffprobe_path = cfg.ffmpeg.ffprobe_path
+    pause_ms = cfg.tts.pause_between_speakers_ms or 500
+    same_ms = cfg.tts.pause_same_speaker_ms or 250
+    lines_out = []
+    offset = 0.0
+    prev_speaker: str | None = None
+    prev_pause_after: object = None
+    for i, row in enumerate(data):
+        entry = manifest.get(i) or {}
+        ok = bool(entry.get("ok"))
+        audio = ""
+        audio_mtime_ns = None
+        line_file: Path | None = None
+        if ok:
+            p = entry.get("path") or ""
+            if p:
+                candidate = Path(p)
+                if not candidate.is_absolute():
+                    candidate = (layout.workspace / p) if layout.workspace else Path(p)
+                try:
+                    if candidate.is_file():
+                        audio = p
+                        audio_mtime_ns = candidate.stat().st_mtime_ns
+                        line_file = candidate
+                    else:
+                        ok = False
+                except OSError:
+                    ok = False
+            else:
+                ok = False
+        start_offset = None
+        # 单句真实时长（与 chapter_audio 解耦：未合并也算，供列表行/Inspector 显示；
+        # 同时供下方 start_offset 累加）。走 mtime 缓存，批量重渲染多次重拉只首次 probe。
+        duration_out: float | None = None
+        if ok and line_file is not None:
+            duration_out = _cached_probe(line_file, ffprobe_path, audio_mtime_ns)
+        if chapter_audio is not None and ok and line_file is not None:
+            speaker = (entry.get("speaker") or row.get("speaker") or row.get("type") or "").strip()
+            if prev_speaker is not None:
+                offset += boundary_gap_ms(prev_pause_after, prev_speaker, speaker, pause_ms, same_ms) / 1000.0
+            start_offset = round(offset, 3)
+        lines_out.append({
+            "index": i,
+            "speaker": (row.get("speaker") or row.get("type") or "").strip(),
+            "text": (row.get("text") or "").strip(),
+            "instruct": (row.get("instruct") or "").strip(),
+            "audio": audio,
+            "audio_mtime_ns": audio_mtime_ns,
+            "duration": duration_out,
+            "ok": ok,
+            "reason": "" if ok else str(entry.get("reason") or ""),
+            "staged": staged.get(str(i)),
+            "start_offset": start_offset,
+        })
+        if start_offset is not None:
+            offset += 0.0 if duration_out is None else duration_out
+            prev_speaker = speaker
+            prev_pause_after = row.get("pause_after")
+
+    from ..engines.tts_manifest import _safe_package_name
+    safe = _safe_package_name(pkg)
+    timeline_exists = bool(layout.bgm and (layout.bgm / "timelines" / f"{safe}.json").is_file())
+    seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
+    sa = seg_data.get(pkg)
+    segment_stale = False
+    if isinstance(sa, dict) and (sa.get("blocks") or sa.get("entries")):
+        try:
+            segment_stale = (sa.get("fingerprint")
+                             != Bgm.segment_fingerprint(Bgm._load_parsed_entries(layout, pkg)))
+        except Exception:  # noqa: BLE001 — 03 缺失/损坏 = 分析已不可用
+            segment_stale = True
+    downstream = {
+        "merged": chapter_audio is not None,
+        "mixed": bool(layout.bgm and (layout.bgm / f"{safe}.mp3").is_file()),
+        "timeline": timeline_exists,
+        "segment_stale": segment_stale,
+    }
+    return {
+        "name": name,
+        "package": pkg,
+        "lines": lines_out,
+        "chapter_audio": chapter_audio,
+        "timeline_exists": timeline_exists,
+        "downstream": downstream,
+    }
+
+
+class PreviewLineRerenderRequest(BaseModel):
+    script: str
+    index: int
+    text: str | None = None
+    speaker: str | None = None
+    instruct: str | None = None
+
+    @field_validator("index")
+    @classmethod
+    def _check_index(cls, v):
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise ValueError("index 须为非负整数")
+        return v
+
+
+@router.post("/preview/line-rerender")
+def preview_line_rerender(
+    req: PreviewLineRerenderRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Submit a single-line re-render task (``tts.preview_render``) — the artifact lands in the
+    staging area only; the formal 05 / manifest / 03 stay untouched until ``/apply``."""
+    _common.require_workspace()
+    if not _is_safe_script_name(req.script):
+        raise HTTPException(400, f"非法脚本名：{req.script}")
+    layout = get_or_prepare_layout()
+    src = layout.parsed_json / req.script
+    if not src.exists():
+        raise HTTPException(404, f"剧本不存在：{req.script}")
+    try:
+        data = json.loads(src.read_text("utf-8"))
+    except Exception:
+        raise HTTPException(400, f"剧本无法解析：{req.script}")
+    if not isinstance(data, list) or not data:
+        raise HTTPException(400, f"剧本为空：{req.script}")
+    if req.index >= len(data):
+        raise HTTPException(400, f"第 {req.index + 1} 句越界（本章共 {len(data)} 行）")
+    if req.text is not None and not req.text.strip():
+        raise HTTPException(400, "台词文本不能为空")
+
+    conflict = _preview_inflight_conflicts(req.script, Batch.package_for(src), ctx, db)
+    if conflict:
+        raise HTTPException(409, conflict)
+    render_item = {"index": req.index}
+    for key in ("text", "speaker", "instruct"):
+        value = getattr(req, key)
+        if value is not None:
+            render_item[key] = value
+    task = submit_legacy_engine_task(
+        task_type="tts.preview_render",
+        label=f"整章预览·单句重渲染：{req.script}·第{req.index + 1}句",
+        payload={
+            "script": req.script,
+            "index": req.index,
+            "render": [render_item],
+            "config": get_config().model_dump(mode="json"),
+        },
+        ctx=ctx,
+        db=db,
+        idempotency_prefix="tts-preview",
+    )
+    return {"task_id": task["id"]}
+
+
+@router.get("/preview/audio/{name:path}")
+def preview_audio(name: str, request: Request):
+    """Stream a staged preview audio (``00_temp/chapter_preview/`` is not addressable via the
+    files API). ``name`` must resolve inside that root with a ``.mp3`` / ``.wav`` extension."""
+    layout = resolve_layout()
+    if layout.temp is None:
+        raise HTTPException(404, "尚未设置工作空间")
+    root = layout.temp / "chapter_preview"
+    if not name or ".." in Path(name).parts:
+        raise HTTPException(400, "非法路径")
+    p = (root / name).resolve()
+    if not p.is_relative_to(root.resolve()):
+        raise HTTPException(400, "非法路径")
+    if not p.is_file():
+        raise HTTPException(404, "文件不存在")
+    if p.suffix.lower() not in {".mp3", ".wav"}:
+        raise HTTPException(400, "预览音频仅支持 .mp3 / .wav")
+    media_type = "audio/mpeg" if p.suffix.lower() == ".mp3" else "audio/wav"
+    return file_response(request, p, media_type=media_type, filename=p.name)
+
+
+class PreviewEdit(BaseModel):
+    index: int
+    text: str | None = None
+    speaker: str | None = None
+    instruct: str | None = None
+
+    @field_validator("index")
+    @classmethod
+    def _check_index(cls, v):
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise ValueError("index 须为非负整数")
+        return v
+
+
+class PreviewApplyRequest(BaseModel):
+    script: str
+    # Partial triples: each edit carries only the changed fields.
+    edits: list[PreviewEdit] = []
+
+
+def _preview_effective_triple(row: dict, edit: PreviewEdit) -> tuple[str, str, str]:
+    """The line's post-edit (text, speaker, instruct) — the disk 03 line with this edit's
+    fields overridden, in the worker's own (stripped, type-fallback) shape, so the comparison
+    against the staged state is apples-to-apples (state.json records build_segments' output)."""
+    text = edit.text if edit.text is not None else (row.get("text") or "")
+    speaker = edit.speaker if edit.speaker is not None else (row.get("speaker") or row.get("type") or "")
+    instruct = edit.instruct if edit.instruct is not None else (row.get("instruct") or "")
+    return text.strip(), speaker.strip(), instruct.strip()
+
+
+def _preview_downstream_deletions(layout, pkg: str, failures: list[dict]) -> list[str]:
+    """Delete this chapter's downstream artifacts (06 merge / 08 mix / 08 timeline). Each
+    failure is recorded, never raised — the caller surfaces it as ``downstream_dirty``."""
+    from ..engines.tts_manifest import _safe_package_name
+    safe = _safe_package_name(pkg)
+    targets = [
+        ("merged", p) for p in Batch.merged_output_paths(layout, pkg)
+    ]
+    targets += [
+        ("mixed", layout.bgm / f"{safe}.mp3"),
+        ("timeline", layout.bgm / "timelines" / f"{safe}.json"),
+    ]
+    invalidated = []
+    for artifact, path in targets:
+        try:
+            if path.is_file():
+                path.unlink()
+                invalidated.append(artifact)
+        except OSError as e:
+            failures.append({"stage": "downstream", "artifact": artifact, "error": str(e)})
+    return invalidated
+
+
+def _cleanup_backup_parent(backup_root: Path) -> None:
+    """Remove the shared backup parent once it is empty (after a save's subdir went away) —
+    only when empty: a concurrent save of another chapter may still hold a subdir there."""
+    parent = backup_root.parent
+    try:
+        if not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
+
+def _preview_apply_commit(layout, src, lines, edits_by_index, pkg) -> tuple[bool, dict]:
+    """The locked save body: backup → 05 replace → manifest update → 03 update → (success:
+    drop backup + delete downstream) or (failure: byte-level restore + 500 shape).
+
+    Returns ``(ok, result)``: ``ok=True`` carries the 200 response body (possibly with
+    ``downstream_dirty``); ``ok=False`` carries the 500 body (the formal three-piece set is
+    byte-identical to pre-save after the restore).
+    """
+    total = len(lines)
+    staging = Batch.preview_staging_dir(layout, pkg)
+    state = Batch._preview_state_read(layout, pkg)
+    staged_lines = state.get("lines") or {}
+    out_dir = layout.audio_chunk / pkg
+    manifest_path = out_dir / "manifest.json"
+    width = Batch.filename_width(total)
+
+    failures: list[dict] = []
+    backup_root = layout.temp / "preview_apply_backup" / f"{pkg}_{uuid.uuid4().hex[:12]}"
+
+    # The replace plan (per edited line): the staged artifact, the formal target name (the line's
+    # ORIGINAL 1-based number, width-stable, with the artifact's ACTUAL extension — a .wav
+    # fallback lands as a .wav), and the manifest entry's pre-save path (removed when it
+    # differs, so a .mp3→.wav switch never leaves a stale file behind).
+    plan: dict[int, dict] = {}
+    entries_before = Batch.read_manifest(out_dir)
+    for index in sorted(edits_by_index):
+        st = staged_lines.get(str(index)) or {}
+        file_name = st.get("file") or ""
+        dst = out_dir / f"{index + 1:0{width}}{Path(file_name).suffix}"
+        old = entries_before.get(index) or {}
+        old_path = old.get("path") or ""
+        old_abs = None
+        if old_path:
+            candidate = Path(old_path)
+            if not candidate.is_absolute():
+                candidate = (layout.workspace / old_path) if layout.workspace else candidate
+            if candidate.is_file():
+                old_abs = candidate
+        plan[index] = {
+            "staged_file": staging / file_name,
+            "dst": dst,
+            "old_abs": old_abs,
+        }
+
+    # 1. Backup: the whole package dir (manifest + 05 files) + the script, same-disk copies.
+    #    Restoring these two directories is byte-exact and covers every replace permutation.
+    backup_root.mkdir(parents=True, exist_ok=True)
+    if out_dir.exists():
+        shutil.copytree(out_dir, backup_root / "audio_chunk_pkg", dirs_exist_ok=False)
+    (backup_root / "script.json").write_bytes(src.read_bytes())
+
+    # 2. 05 替换
+    def _step_replace() -> None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for index, item in plan.items():
+            staged_file, dst, old_abs = item["staged_file"], item["dst"], item["old_abs"]
+            if not staged_file.is_file():
+                raise RuntimeError(f"暂存产物缺失：{item['staged_file'].name}")
+            shutil.copy2(staged_file, dst)
+            if old_abs is not None and old_abs.resolve() != dst.resolve():
+                try:
+                    old_abs.unlink()
+                except OSError as e:
+                    raise RuntimeError(f"旧音频删除失败：{old_abs.name}（{e}）")
+
+    # 3. manifest 更新（只动被改行；voice_versions / pause_after 等未变字段保留）
+    def _step_manifest() -> None:
+        entries = Batch.read_manifest(out_dir)
+        vc_path = layout.voice_profiles / "voice_config.json"
+        voice_config = {}
+        vc_exists = False
+        if vc_path.exists():
+            try:
+                loaded = json.loads(vc_path.read_text("utf-8"))
+                if isinstance(loaded, dict):
+                    voice_config = loaded
+                    vc_exists = True
+            except Exception:  # noqa: BLE001
+                voice_config = {}
+        for index in sorted(edits_by_index):
+            st = staged_lines.get(str(index)) or {}
+            old = entries.get(index) or {}
+            entry = {
+                "index": index,
+                "speaker": st.get("speaker") or "",
+                "text": st.get("text") or "",
+                "pause_after": old.get("pause_after", lines[index].get("pause_after")),
+                "path": f"05_audio_chunk/{pkg}/{plan[index]['dst'].name}",
+                "ok": True,
+                "reason": "",
+            }
+            if vc_exists:
+                entry["voice_used"] = Batch.voice_params(entry["speaker"], voice_config)
+                entry["voice_signature"] = Batch.voice_signature(entry["speaker"], voice_config)
+            else:
+                for key in ("voice_used", "voice_signature"):
+                    if key in old:
+                        entry[key] = old[key]
+            if isinstance(old.get("voice_versions"), list):
+                entry["voice_versions"] = old["voice_versions"]
+            entries[index] = entry
+        ordered = [entries[i] for i in sorted(entries)]
+        Batch.write_manifest_file(manifest_path, ordered)
+
+    # 4. 03 剧本（字段级就地改，其余字段原样保留；写 strip 后的值与 staged 口径一致）
+    def _step_script() -> None:
+        for index, edit in sorted(edits_by_index.items()):
+            row = lines[index]
+            if edit.text is not None:
+                row["text"] = edit.text.strip()
+            if edit.speaker is not None:
+                row["speaker"] = edit.speaker.strip()
+            if edit.instruct is not None:
+                row["instruct"] = edit.instruct.strip()
+        pathio.rewrite_json_file(src, lines)
+
+    steps = (
+        ("replace_05", _step_replace),
+        ("update_manifest", _step_manifest),
+        ("update_script", _step_script),
+    )
+    for stage, step in steps:
+        try:
+            step()
+        except Exception as e:  # noqa: BLE001 — 任一步失败 → 字节级还原 → 500
+            _restore = []
+            try:
+                shutil.rmtree(out_dir, ignore_errors=True)
+                if (backup_root / "audio_chunk_pkg").exists():
+                    shutil.copytree(backup_root / "audio_chunk_pkg", out_dir)
+            except Exception as re_:  # noqa: BLE001
+                _restore.append(f"05 包还原失败：{re_}")
+            try:
+                src.write_bytes((backup_root / "script.json").read_bytes())
+            except Exception as re_:  # noqa: BLE001
+                _restore.append(f"剧本还原失败：{re_}")
+            shutil.rmtree(backup_root, ignore_errors=True)
+            _cleanup_backup_parent(backup_root)
+            return False, {
+                "ok": False,
+                "stage": stage,
+                "error": str(e),
+                "restore_failures": _restore,
+                "message": ("保存失败，正式状态已还原（与保存前一致），可重试保存。"
+                            if not _restore else
+                            "保存失败，且还原不完整——状态可能不一致，需人工核对。"),
+            }
+
+    # ②③④ 全部成功 → 删备份 → 下游失效（失败只记录，不回滚 ②③④——此时保存已成立）
+    shutil.rmtree(backup_root, ignore_errors=True)
+    _cleanup_backup_parent(backup_root)
+    invalidated = _preview_downstream_deletions(layout, pkg, failures)
+    downstream_dirty = bool(failures)
+    if not downstream_dirty:
+        shutil.rmtree(staging, ignore_errors=True)  # 暂存清理（部分失败时保留供排查/重试）
+    return True, {
+        "ok": True,
+        "edited": sorted(edits_by_index),
+        "invalidated": invalidated,
+        "failures": failures,
+        "downstream_dirty": downstream_dirty,
+    }
+
+
+@router.post("/preview/apply")
+def apply_preview_edits(
+    req: PreviewApplyRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Save the edits (the sole authoritative gate): per-line staged state must match the
+    effective triple (disk 03 line + this edit's fields), the staged ``file`` must exist in
+    the staging dir — else 409. Then, under the chapter lock (mutually exclusive with
+    tts.merge): backup → 05 replace → manifest → 03, with byte-level restore + 500 on any
+    failure, followed by this chapter's downstream invalidation (06 / 08 mix / 08 timeline).
+    """
+    _common.require_workspace()
+    if not _is_safe_script_name(req.script):
+        raise HTTPException(400, f"非法脚本名：{req.script}")
+    layout = get_or_prepare_layout()
+    src = layout.parsed_json / req.script
+    if not src.exists():
+        raise HTTPException(404, f"剧本不存在：{req.script}")
+    try:
+        lines = json.loads(src.read_text("utf-8"))
+    except Exception:
+        raise HTTPException(400, f"剧本无法解析：{req.script}")
+    if not isinstance(lines, list) or not lines:
+        raise HTTPException(400, f"剧本为空：{req.script}")
+    total = len(lines)
+
+    edits_by_index: dict[int, PreviewEdit] = {}
+    for edit in req.edits:
+        if edit.index >= total:
+            raise HTTPException(400, f"第 {edit.index + 1} 句越界（本章共 {total} 行）")
+        if edit.text is not None and not edit.text.strip():
+            raise HTTPException(400, f"第 {edit.index + 1} 句台词不能为空")
+        edits_by_index[edit.index] = edit
+    if not edits_by_index:
+        raise HTTPException(400, "没有要保存的修改。")
+
+    pkg = Batch.package_for(src)
+    conflict = _preview_inflight_conflicts(req.script, pkg, ctx, db)
+    if conflict:
+        raise HTTPException(409, conflict)
+
+    # 逐句门禁：staged（ok + file 存在 + 三元组 == 有效三元组）——唯一权威
+    staging = Batch.preview_staging_dir(layout, pkg)
+    state = Batch._preview_state_read(layout, pkg)
+    staged_lines = state.get("lines") or {}
+    gate_errors = []
+    for index in sorted(edits_by_index):
+        st = staged_lines.get(str(index))
+        effective = _preview_effective_triple(lines[index], edits_by_index[index])
+        file_exists = (
+            isinstance(st, dict) and bool(st.get("file")) and (staging / st["file"]).is_file()
+        )
+        if (
+            not isinstance(st, dict) or st.get("ok") is not True or not file_exists
+            or st.get("text") != effective[0]
+            or st.get("speaker") != effective[1]
+            or st.get("instruct") != effective[2]
+        ):
+            gate_errors.append(f"第 {index + 1} 句修改后尚未完成重渲染")
+    if gate_errors:
+        raise HTTPException(409, "；".join(gate_errors))
+
+    # 章节锁（apply 取不到 → 409；tts.merge 执行期持同一把锁，超时由 Worker 重试）
+    lock = exclusive_file_lock(Batch.preview_lock_path(layout, pkg), timeout=5.0)
+    try:
+        lock.__enter__()
+    except TimeoutError:
+        raise HTTPException(409, "该章节有保存或合并操作进行中，请稍后再试。")
+    try:
+        ok, result = _preview_apply_commit(layout, src, lines, edits_by_index, pkg)
+    finally:
+        lock.__exit__(None, None, None)
+    if not ok:
+        raise HTTPException(500, result)
+    return result
+
+
+class PreviewPurgeRequest(BaseModel):
+    script: str
+
+
+@router.post("/preview/purge-stale")
+def purge_preview_stale(
+    req: PreviewPurgeRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Retry the downstream invalidation after a partial save failure (``downstream_dirty``) —
+    the same deletions, under the chapter lock."""
+    _common.require_workspace()
+    if not _is_safe_script_name(req.script):
+        raise HTTPException(400, f"非法脚本名：{req.script}")
+    layout = get_or_prepare_layout()
+    if not (layout.parsed_json / req.script).exists():
+        raise HTTPException(404, f"剧本不存在：{req.script}")
+    pkg = Batch.package_for(layout.parsed_json / req.script)
+    conflict = _preview_inflight_conflicts(req.script, pkg, ctx, db)
+    if conflict:
+        raise HTTPException(409, conflict)
+    failures: list[dict] = []
+    lock = exclusive_file_lock(Batch.preview_lock_path(layout, pkg), timeout=5.0)
+    try:
+        lock.__enter__()
+    except TimeoutError:
+        raise HTTPException(409, "该章节有保存或合并操作进行中，请稍后再试。")
+    try:
+        invalidated = _preview_downstream_deletions(layout, pkg, failures)
+    finally:
+        lock.__exit__(None, None, None)
+    return {
+        "ok": True,
+        "invalidated": invalidated,
+        "failures": failures,
+        "downstream_dirty": bool(failures),
+    }

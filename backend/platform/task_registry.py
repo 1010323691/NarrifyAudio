@@ -1,4 +1,4 @@
-"""The unified registry of the 18 durable task types (plan S1).
+"""The unified registry of the 19 durable task types (plan S1).
 
 One explicit declaration per type: name, executor binding, billing, permission.
 Both dispatchers (``task_worker.execute_claim`` and
@@ -50,7 +50,7 @@ _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("audio.silences", "_execute_audio_silences",
                  entry_identity=("source_name",)),
     TaskTypeSpec("audio.cut", "_execute_audio_cut", entry_identity=("source_name",)),
-    # legacy 引擎（12）：engine_task_executor.ENGINE_BRANCHES
+    # legacy 引擎（13）：engine_task_executor.ENGINE_BRANCHES
     TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True,
                  entry_identity=("speakers", "script")),
     TaskTypeSpec("voices.clone", "_run_voices_clone", billable=True, legacy_engine=True,
@@ -58,6 +58,8 @@ _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("tts.batch", "_run_tts_batch", billable=True, legacy_engine=True,
                  entry_identity=("scripts", "indices")),
     TaskTypeSpec("tts.merge", "_run_tts_merge", legacy_engine=True, entry_identity=("package",)),
+    TaskTypeSpec("tts.preview_render", "_run_tts_preview_render", billable=True, legacy_engine=True,
+                 entry_identity=("script", "index")),
     TaskTypeSpec("bgm.segment", "_run_bgm_segment", billable=True, legacy_engine=True,
                  entry_identity=("stem",)),
     TaskTypeSpec("bgm.mix", "_run_bgm_mix", legacy_engine=True, entry_identity=("stem",)),

@@ -26,6 +26,7 @@ from pathlib import Path
 from ..core import pathio
 from ..core.config import get_config
 from ..core.concurrency import merge_gate
+from ..core.file_lock import exclusive_file_lock
 from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
 from .tts import resolve_engine, run_tts_subprocess
@@ -192,8 +193,20 @@ def merge_audio_package(handle, package: str | None = None) -> dict:
     top-level manifest for older projects).
     """
     layout = get_or_prepare_layout()
-    ws = layout.workspace
     manifest_path = _find_manifest(layout, package)
+    # 章节级跨进程锁（与「整章预览」保存 /apply、purge-stale 互斥——杜绝合并读到保存
+    # 过程中新旧混合的 05 文件）：精确位置在包名解析之后、读 manifest 内容之前
+    # （函数最前取不到：包名可能是「最新包」需先定位）。等待超时（TimeoutError）由
+    # Worker 统一转 worker_error(retryable=True) 退避重试——apply 持锁仅秒级，实际
+    # 几乎总是等待后取到。现有 merge_gate（合并槽位）在快速失败校验之后，不受影响。
+    with exclusive_file_lock(
+        Batch.preview_lock_path(layout, manifest_path.parent.name), timeout=30.0,
+    ):
+        return _merge_audio_package_locked(handle, package, layout, manifest_path)
+
+
+def _merge_audio_package_locked(handle, package, layout, manifest_path) -> dict:
+    ws = layout.workspace
     if not manifest_path.exists():
         raise RuntimeError("未找到合成结果清单（05_audio_chunk/<包>/manifest.json）——请先运行「音频合成」。")
     try:

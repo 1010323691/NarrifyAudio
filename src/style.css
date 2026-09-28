@@ -678,6 +678,15 @@
     padding-top: 28px;
   }
 
+  /* 工作台型页面（整章预览）：撑满 app-main 宽度与高度，紧凑 padding。
+     页面内部自己管理三栏高度与滚动（.app-main 不再产生页面级滚动条）。 */
+  .app-content--full {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    padding: 18px 20px 20px;
+  }
+
   .page-header {
     margin-bottom: 28px;
   }
