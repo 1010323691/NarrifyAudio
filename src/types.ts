@@ -402,6 +402,7 @@ export interface ChapterPreviewDetail {
   lines: PreviewLine[]
   chapter_audio: { path: string; duration: number | null } | null
   timeline_exists: boolean
+  // segment_stale：BGM 段落分析是否已失效（03 变更、指纹不匹配）。整章预览页暂不消费，预留供将来展示（BGM 页有独立分析态）。
   downstream: { merged: boolean; mixed: boolean; timeline: boolean; segment_stale: boolean }
 }
 /** 保存/重渲染的 partial triple：只携带被改字段（index 必为行在章内的下标，0-based）。 */

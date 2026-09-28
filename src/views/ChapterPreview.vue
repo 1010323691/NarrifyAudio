@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
@@ -467,6 +467,20 @@ function restoreOriginal(v: ViewLine) {
   drafts.value[v.index] = { ...v.disk }
 }
 
+/** 后端 500 的 detail 是 dict（ok/stage/error/…/message）；client.ts 会把 dict detail
+ *  JSON.stringify 成错误消息 → e.message 是 JSON 字符串。这里从中取出面向用户的 message 字段；
+ *  解析失败（如 409 的 detail 本就是纯字符串）则原样返回。 */
+function saveErrorMessage(e: any): string {
+  const raw: string = typeof e?.message === 'string' ? e.message : ''
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && typeof parsed.message === 'string') return parsed.message
+  } catch {
+    /* not JSON */
+  }
+  return raw
+}
+
 /** 保存修改：服务端是唯一权威门禁（staged==有效三元组 + 章节锁 + 备份回滚）。 */
 async function doSave() {
   if (!gate.value.ready || !detail.value || saving.value) return
@@ -492,7 +506,7 @@ async function doSave() {
     await loadDetail({ resetDrafts: true })
     await refreshList()
   } catch (e: any) {
-    toast({ title: '保存失败', variant: 'destructive', description: e?.message || '未知错误' })
+    toast({ title: '保存失败', variant: 'destructive', description: saveErrorMessage(e) || '未知错误' })
     // 500 = 已字节级回滚，磁盘与保存前一致 → 静默重同步详情（草稿保留）
     await loadDetail({ silent: true })
   } finally {
@@ -578,14 +592,20 @@ watch(
 )
 
 // keep-alive 缓存页：重新进入时刷新左栏（磁盘口径）。
+// Escape 监听挂在 window 级，必须随 keep-alive 的激活态摘除/恢复——否则切走页面后
+// 监听器常驻，在其他页按 Esc 会误触发本页 close()（可能弹「丢弃未保存修改」确认）。
 onMounted(() => {
   if (!settings.loaded) void settings.load()
   void refreshList()
-  window.addEventListener('keydown', onKeydown)
 })
 onActivated(() => {
   if (settings.loaded) void refreshList()
+  window.addEventListener('keydown', onKeydown)
 })
+onDeactivated(() => {
+  window.removeEventListener('keydown', onKeydown)
+})
+// 兜底：非 keep-alive 路径（切项目/退出登录触发 unmount）确保监听被摘除（幂等）。
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
 })

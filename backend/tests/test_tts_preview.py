@@ -115,7 +115,7 @@ def _no_conflicts(monkeypatch):
 def test_preview_chapter_detail_fields(workspace, monkeypatch):
     _seed(workspace, manifest=_default_manifest(), audio=("0001.mp3", "0002.mp3", "0003.mp3"),
           merged=True, mixed=True, timeline=True)
-    monkeypatch.setattr(api_tts, "probe_duration", lambda path, ffprobe_path="": (74.3, ""))
+    monkeypatch.setattr(api_tts, "probe_duration", lambda path, ffprobe_path="", timeout=120.0: (74.3, ""))
 
     detail = api_tts.preview_chapter("s.json")
 
@@ -153,7 +153,7 @@ def test_preview_chapter_duration_cached_by_mtime(workspace, monkeypatch):
           audio=("0001.mp3", "0002.mp3", "0003.mp3"), merged=True)
     calls = []
 
-    def fake(path, ffprobe_path=""):
+    def fake(path, ffprobe_path="", timeout=120.0):
         calls.append(str(path))
         return (10.0, "")
 
@@ -180,7 +180,7 @@ def test_preview_chapter_duration_cached_by_mtime(workspace, monkeypatch):
 def test_preview_chapter_line_without_audio_is_not_ok(workspace, monkeypatch):
     _seed(workspace, manifest=_default_manifest(), audio=("0001.mp3", "0002.mp3"))
     # 未合并（无 06）仍要 ffprobe 单句时长——必须 stub，避免测试起真实子进程依赖本机 ffprobe。
-    monkeypatch.setattr(api_tts, "probe_duration", lambda path, ffprobe_path="": (2.5, ""))
+    monkeypatch.setattr(api_tts, "probe_duration", lambda path, ffprobe_path="", timeout=120.0: (2.5, ""))
 
     detail = api_tts.preview_chapter("s.json")
 
@@ -203,7 +203,7 @@ def test_preview_chapter_start_offset_skips_missing_and_respects_pause_after(wor
     lines[0]["pause_after"] = 1000  # line0(A) 的句尾停顿覆盖 line0→line2 的间隔
     (workspace / "03_parsed_json" / "s.json").write_text(
         json.dumps(lines, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(api_tts, "probe_duration", lambda path, ffprobe_path="": (10.0, ""))
+    monkeypatch.setattr(api_tts, "probe_duration", lambda path, ffprobe_path="", timeout=120.0: (10.0, ""))
 
     detail = api_tts.preview_chapter("s.json")
 

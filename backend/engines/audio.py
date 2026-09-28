@@ -246,15 +246,16 @@ def parse_silence_log(lines, total_duration: float) -> list:
 
 # ============================ Native FFmpeg ops ============================
 
-def probe_duration(path, ffprobe_path: str = ""):
+def probe_duration(path, ffprobe_path: str = "", timeout: float = 120.0):
     """Duration in seconds via ``ffprobe`` (replaces the browser <audio>/Web-Audio path).
-    Returns ``(duration, error)`` — ``nan`` on failure."""
+    Returns ``(duration, error)`` — ``nan`` on failure. ``timeout`` bounds the ffprobe
+    subprocess (default 120s); callers on a hot synchronous path may pass a shorter cap."""
     ffprobe = ffprobe_path or "ffprobe"
     cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=120)
+                              timeout=timeout)
     except FileNotFoundError:
         return float("nan"), f"找不到 ffprobe（{ffprobe}）。请安装 FFmpeg 或在设置中指定路径。"
     except subprocess.TimeoutExpired:

@@ -1081,12 +1081,13 @@ _DURATION_CACHE_MAX = 512
 _DURATION_MISSING = object()
 
 
-def _cached_probe(path: Path, ffprobe_path: str, mtime_ns: int | None) -> float | None:
+def _cached_probe(path: Path, ffprobe_path: str, mtime_ns: int | None,
+                  timeout: float = 120.0) -> float | None:
     """ffprobe 时长（秒，round 3；失败/缺失 → None）。线程安全 + cache-aside：
 
     单个锁包住所有 dict 操作（查/挪位/写/超限弹出是复合操作，不能只靠 GIL）；
     ffprobe 子进程在**锁外**执行，临界区仅微秒级 dict 操作；两线程同时 miss 同一文件
-    会重复 probe 一次，结果相同、无害。
+    会重复 probe 一次，结果相同、无害。``timeout`` 透传给 probe_duration 子进程上限。
     """
     key = (str(path), mtime_ns)
     with _DURATION_CACHE_LOCK:
@@ -1094,7 +1095,7 @@ def _cached_probe(path: Path, ffprobe_path: str, mtime_ns: int | None) -> float 
         if hit is not _DURATION_MISSING:
             _DURATION_CACHE.move_to_end(key)
             return hit
-    duration, _err = probe_duration(path, ffprobe_path)  # 锁外：起子进程
+    duration, _err = probe_duration(path, ffprobe_path, timeout=timeout)  # 锁外：起子进程
     value: float | None = None if math.isnan(duration) else round(duration, 3)
     with _DURATION_CACHE_LOCK:
         _DURATION_CACHE[key] = value
@@ -1148,7 +1149,7 @@ def preview_chapter(name: str) -> dict:
                 continue
             chapter_audio = {
                 "path": f"06_audio_merge/{candidate.name}",
-                "duration": _cached_probe(candidate, cfg.ffmpeg.ffprobe_path, _mtime),
+                "duration": _cached_probe(candidate, cfg.ffmpeg.ffprobe_path, _mtime, timeout=10.0),
             }
             break
 
@@ -1191,7 +1192,9 @@ def preview_chapter(name: str) -> dict:
         # 同时供下方 start_offset 累加）。走 mtime 缓存，批量重渲染多次重拉只首次 probe。
         duration_out: float | None = None
         if ok and line_file is not None:
-            duration_out = _cached_probe(line_file, ffprobe_path, audio_mtime_ns)
+            # 详情是用户直接等待的同步接口：单文件 ffprobe 卡死时把上限压到 10s，
+            # 避免一个坏文件拖住整章（默认 120s 只用于后台/引擎路径）。
+            duration_out = _cached_probe(line_file, ffprobe_path, audio_mtime_ns, timeout=10.0)
         if chapter_audio is not None and ok and line_file is not None:
             speaker = (entry.get("speaker") or row.get("speaker") or row.get("type") or "").strip()
             if prev_speaker is not None:
@@ -1227,6 +1230,8 @@ def preview_chapter(name: str) -> dict:
                              != Bgm.segment_fingerprint(Bgm._load_parsed_entries(layout, pkg)))
         except Exception:  # noqa: BLE001 — 03 缺失/损坏 = 分析已不可用
             segment_stale = True
+    # segment_stale：BGM 段落分析是否已失效（03 变更 → 分析指纹不再匹配）。
+    # 本页暂不消费（BGM 页有独立分析态入口），预留供将来「BGM 段落分析已过期」提示。
     downstream = {
         "merged": chapter_audio is not None,
         "mixed": bool(layout.bgm and (layout.bgm / f"{safe}.mp3").is_file()),
@@ -1547,7 +1552,12 @@ def _preview_apply_commit(layout, src, lines, edits_by_index, pkg) -> tuple[bool
     invalidated = _preview_downstream_deletions(layout, pkg, failures)
     downstream_dirty = bool(failures)
     if not downstream_dirty:
-        shutil.rmtree(staging, ignore_errors=True)  # 暂存清理（部分失败时保留供排查/重试）
+        # 暂存清理：保存成功后删除整章暂存目录（state.json + 全部行暂存文件）。前端保存总
+        # 覆盖所有 dirty 句，正常路径无丢失；整目录删除比逐句修剪更简单（规避 state.json/
+        # 文件一致性边缘）。已知局限：「重渲染 A 句 → 撤销 A 句 → 保存其他句」场景下，A 句
+        # 暂存音频（已花 TTS 成本）随目录删除——损失对象是暂存产物（正式 05 不动），后续
+        # 需要时重新渲染即可。（部分下游失败时保留目录供排查/重试。）
+        shutil.rmtree(staging, ignore_errors=True)
     return True, {
         "ok": True,
         "edited": sorted(edits_by_index),
