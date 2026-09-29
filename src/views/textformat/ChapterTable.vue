@@ -7,6 +7,7 @@ import TableHeader from '@/components/ui/TableHeader.vue'
 import TableRow from '@/components/ui/TableRow.vue'
 import Badge from '@/components/ui/Badge.vue'
 import { formatNumber } from '@/utils/format'
+import { padChapterNum } from '@/utils/bookLabels'
 import type { WorkbenchChapter } from '@/api/textFormat'
 
 const props = withDefaults(defineProps<{
@@ -14,22 +15,28 @@ const props = withDefaults(defineProps<{
   selectedKey: string | null
   /** 缺省（如 HMR 过渡期父组件未升级）时降级为 —，避免渲染崩溃。 */
   reasonBriefs?: Record<string, string>
-}>(), { reasonBriefs: () => ({}) })
+  /** 章节号补齐位数（= 最大章节号位数）；缺省按 3 位显示。 */
+  numPad?: number
+}>(), { reasonBriefs: () => ({}) , numPad: 3 })
 const emit = defineEmits<{
   (e: 'select', key: string): void
 }>()
 
 const reasonBrief = (chapter: WorkbenchChapter) => props.reasonBriefs[chapter.key ?? ''] ?? '—'
+const chapterLabel = (chapter: WorkbenchChapter) =>
+  padChapterNum(chapter.numStr || chapter.seq, props.numPad)
+/** 章节列宽随编号位数增宽（第001章 比 第1章 更宽），避免定宽不够换行。 */
+const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad - 1, 3)] ?? 'w-32'
 </script>
 
 <template>
   <Table class="wb-chapter-table">
     <TableHeader>
       <TableRow>
-        <TableHead class="w-20">章节</TableHead>
+        <TableHead class="whitespace-nowrap" :class="chapterColClass">章节</TableHead>
         <TableHead class="w-[260px]">标题</TableHead>
         <TableHead class="w-16 text-right">字数</TableHead>
-        <TableHead class="w-20">处理结果</TableHead>
+        <TableHead class="w-28 whitespace-nowrap">处理结果</TableHead>
         <TableHead>核对原因</TableHead>
       </TableRow>
     </TableHeader>
@@ -41,7 +48,7 @@ const reasonBrief = (chapter: WorkbenchChapter) => props.reasonBriefs[chapter.ke
         :data-state="chapter.key === props.selectedKey ? 'selected' : undefined"
         @click="chapter.key && emit('select', chapter.key)"
       >
-        <TableCell class="font-medium tabular-nums">第{{ chapter.numStr || String(chapter.seq).padStart(3, '0') }}章</TableCell>
+        <TableCell class="whitespace-nowrap font-medium tabular-nums">第{{ chapterLabel(chapter) }}章</TableCell>
         <TableCell>
           <span class="block truncate" :title="chapter.title">{{ chapter.title || '—' }}</span>
         </TableCell>

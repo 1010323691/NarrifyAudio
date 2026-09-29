@@ -7,7 +7,7 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
-import { stageLabel, modeLabel, chapterBriefLabel } from '@/utils/bookLabels'
+import { stageLabel, modeLabel, chapterBriefLabel, chapterNumWidth } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -246,6 +246,9 @@ const canReadVersion = computed(() => version.value?.version_status === 'current
 const adjustedCount = computed(() => version.value?.chapters.filter((c) => c.adjusted).length ?? 0)
 const chooseLabel = computed(() => (sourceFile.value ? '更换文件' : '选择 TXT'))
 
+// 章节号补齐位数：以最大章节号位数为标准（339 章 → 第001章）
+const chapterNumPad = computed(() => chapterNumWidth(version.value?.chapters ?? []))
+
 // 「核对原因」列：key → 简要标签（编号重复类附同原编号章节数）
 const chapterBriefs = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
@@ -443,6 +446,7 @@ onBeforeUnmount(() => {
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"
                 :reason-briefs="chapterBriefs"
+                :num-pad="chapterNumPad"
                 @select="onChapterSelect"
               />
             </div>
@@ -465,6 +469,7 @@ onBeforeUnmount(() => {
               :marked="isMarked(selectedKey)"
               :marks-busy="!!marksBusy"
               :can-read="canReadVersion"
+              :num-pad="chapterNumPad"
               :has-prev="detailHasPrev"
               :has-next="detailHasNext"
               @prev="moveSelection(-1)"
@@ -546,6 +551,7 @@ onBeforeUnmount(() => {
               :marked="isMarked(selectedKey)"
               :marks-busy="!!marksBusy"
               :can-read="canReadVersion"
+              :num-pad="chapterNumPad"
               :has-prev="detailHasPrev"
               :has-next="detailHasNext"
               @prev="moveSelection(-1)"

@@ -68,6 +68,18 @@ export function chapterBriefLabel(reasons: string[], dupCount = 0): string {
     : base
 }
 
+/** 章节号零补齐：位数以最大章节号位数为标准（如最多 339 章 → 第001章）。 */
+export function padChapterNum(value: number | string | null | undefined, width: number): string {
+  const s = value == null || value === '' ? '' : String(value)
+  return s.length >= width ? s : s.padStart(width, '0')
+}
+
+/** 由章节列表推导编号位数（取最大章节号的位数，至少 1 位）。 */
+export function chapterNumWidth(chapters: Array<{ num: number | null; seq: number }>): number {
+  const maxNum = chapters.reduce((m, c) => Math.max(m, c.num ?? c.seq), 1)
+  return String(maxNum).length
+}
+
 export function reasonLabel(code: string): string {
   return REASON_LABELS[code] ?? code
 }

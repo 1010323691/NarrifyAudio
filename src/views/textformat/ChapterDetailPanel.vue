@@ -4,11 +4,11 @@ import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
 import { AlertTriangle, Check, Info, Loader2, RotateCcw } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
-import { confidenceClass, confidenceLabel, reasonLabel } from '@/utils/bookLabels'
+import { confidenceClass, confidenceLabel, padChapterNum, reasonLabel } from '@/utils/bookLabels'
 import type { WorkbenchChapter, WorkbenchMatter } from '@/api/textFormat'
 import type { PreviewState } from '@/composables/useTextFormatWorkbench'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   chapter: WorkbenchChapter | null
   matters: WorkbenchMatter[]
   fileName: string | null
@@ -18,7 +18,9 @@ const props = defineProps<{
   canRead: boolean
   hasPrev: boolean
   hasNext: boolean
-}>()
+  /** 章节号补齐位数（= 最大章节号位数），与章节表一致；缺省按 3 位。 */
+  numPad?: number
+}>(), { numPad: 3 })
 const emit = defineEmits<{
   (e: 'prev'): void
   (e: 'next'): void
@@ -41,7 +43,7 @@ const emit = defineEmits<{
       <div class="shrink-0 px-5 pb-2.5 pt-4">
         <div class="flex flex-wrap items-center gap-2">
           <h3 class="text-lg font-semibold leading-tight">
-            第{{ props.chapter.numStr || String(props.chapter.seq).padStart(3, '0') }}章
+            第{{ padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad) }}章
             {{ props.chapter.title || '（无标题）' }}
           </h3>
           <Badge v-if="props.chapter.pending && !props.marked" variant="warning">待核对</Badge>
@@ -91,7 +93,7 @@ const emit = defineEmits<{
           <div class="font-medium">处理说明</div>
           <div class="flex flex-wrap items-center gap-1.5">
             <span v-if="props.chapter.orig_numStr" class="text-muted-foreground">
-              原第{{ props.chapter.orig_numStr }}章 → 第{{ String(props.chapter.final_num ?? '').padStart(3, '0') }}章
+              原第{{ padChapterNum(props.chapter.orig_numStr, props.numPad) }}章 → 第{{ padChapterNum(props.chapter.final_num, props.numPad) }}章
             </span>
             <span
               class="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
