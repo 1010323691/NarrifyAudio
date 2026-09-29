@@ -27,7 +27,7 @@ import TableCell from '@/components/ui/TableCell.vue'
 import TableHead from '@/components/ui/TableHead.vue'
 import TableHeader from '@/components/ui/TableHeader.vue'
 import TableRow from '@/components/ui/TableRow.vue'
-import { AlertTriangle, ArrowRight, Download, FileText, Loader2, RefreshCw, Settings2, X } from 'lucide-vue-next'
+import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Search, Settings2, X } from 'lucide-vue-next'
 
 import ChapterTable from '@/views/textformat/ChapterTable.vue'
 import ChapterDetailPanel from '@/views/textformat/ChapterDetailPanel.vue'
@@ -300,6 +300,8 @@ const detailHasNext = computed(() => {
   return idx >= 0 && idx < filteredChapters.value.length - 1
 })
 const canReadVersion = computed(() => version.value?.version_status === 'current')
+const adjustedCount = computed(() => version.value?.chapters.filter((c) => c.adjusted).length ?? 0)
+const chooseLabel = computed(() => (sourceFile.value ? '更换文件' : '选择 TXT'))
 
 // --- lifecycle --------------------------------------------------------------------
 onMounted(() => {
@@ -327,26 +329,27 @@ onBeforeUnmount(() => {
 
     <!-- 文件栏 -->
     <div class="wb-filebar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
-      <FileText class="h-4 w-4 shrink-0 text-muted-foreground" />
-      <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">
-        选择 TXT
-      </Button>
-      <span v-if="sourceFile" class="max-w-[320px] truncate text-sm font-medium" :title="sourceFile.name">
-        {{ sourceFile.name }}
-        <span class="text-xs font-normal text-muted-foreground">
-          · {{ sourceFile.size ? formatNumber(Math.round(sourceFile.size / 1024)) + ' KB' : '' }}
-        </span>
-      </span>
-      <span v-else class="text-sm text-muted-foreground">尚未选择文件</span>
-      <div class="ml-auto flex items-center gap-2">
+      <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <FileText class="h-5 w-5" />
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="truncate text-sm font-semibold" :title="sourceFile?.name">
+          {{ sourceFile?.name ?? '尚未选择文件' }}
+        </p>
+        <p class="truncate text-xs text-muted-foreground">
+          <template v-if="sourceFile">
+            TXT<template v-if="sourceFile.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
+          </template>
+          <template v-else>点击右侧「选择 TXT」上传原稿</template>
+        </p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">
+          {{ chooseLabel }}
+        </Button>
         <Button variant="outline" size="sm" @click="settingsOpen = true">
           <Settings2 class="h-4 w-4" />
           处理设置
-        </Button>
-        <Button size="sm" :disabled="startDisabled" @click="start(phase !== 'empty')">
-          <Loader2 v-if="phase === 'processing'" class="h-4 w-4 animate-spin" />
-          <RefreshCw v-else class="h-4 w-4" />
-          {{ phase === 'processing' ? '处理中…' : startLabel }}
         </Button>
       </div>
     </div>
@@ -382,23 +385,36 @@ onBeforeUnmount(() => {
 
     <!-- 结果摘要 -->
     <div v-if="phase === 'ready' && version" class="glass-panel p-4">
-      <div class="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <div class="flex flex-wrap gap-6">
+      <div class="flex flex-wrap items-center gap-x-8 gap-y-3">
+        <!-- 状态块 -->
+        <div class="flex shrink-0 items-center gap-3">
+          <div class="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
+            <CheckCircle2 class="h-5 w-5" />
+          </div>
           <div>
+            <p class="text-sm font-semibold text-emerald-700 dark:text-emerald-400">
+              {{ version.version_status === 'stale' ? '版本已被覆盖' : '处理完成' }}
+            </p>
+            <p class="text-xs text-muted-foreground">{{ version.version_status === 'stale' ? '仅可核对，正文不可读' : '已保存到项目' }}</p>
+          </div>
+        </div>
+        <!-- 统计 -->
+        <div class="flex flex-wrap items-center gap-y-2">
+          <div class="px-6">
             <div class="text-2xl font-bold tabular-nums">{{ formatNumber(version.total_chars) }}</div>
             <div class="text-xs text-muted-foreground">总字数</div>
           </div>
-          <div>
+          <div class="border-l px-6">
             <div class="text-2xl font-bold tabular-nums">{{ version.chapters.length }}</div>
-            <div class="text-xs text-muted-foreground">章节</div>
+            <div class="text-xs text-muted-foreground">最终章节</div>
           </div>
-          <div>
+          <div class="border-l px-6">
             <div class="text-2xl font-bold tabular-nums" :class="{ 'text-amber-600 dark:text-amber-400': pendingCount > 0 }">
               {{ pendingCount }}
             </div>
             <div class="text-xs text-muted-foreground">待核对</div>
           </div>
-          <div>
+          <div class="border-l px-6">
             <div class="text-2xl font-bold tabular-nums">{{ markedCount }}</div>
             <div class="text-xs text-muted-foreground">已核对</div>
           </div>
@@ -430,8 +446,11 @@ onBeforeUnmount(() => {
       <Alert v-if="pendingCount > 0" variant="warning">
         <AlertTriangle class="h-4 w-4 shrink-0" />
         <div class="flex flex-wrap items-center gap-2">
-          <p><b>{{ pendingCount }} 章待人工核对</b>——核对不会阻断进入解析，可逐章查看后标记。</p>
-          <Button size="sm" variant="outline" class="ml-auto shrink-0" @click="gotoFirstPending()">去核对</Button>
+          <p><b>{{ pendingCount }} 章</b>建议人工核对——核对不会阻断进入解析，可逐章查看后标记。</p>
+          <Button variant="ghost" size="sm" class="ml-auto shrink-0 gap-1 px-2 text-primary" @click="gotoFirstPending()">
+            查看待核对章节
+            <ArrowRight class="h-3.5 w-3.5" />
+          </Button>
         </div>
       </Alert>
     </template>
@@ -462,35 +481,34 @@ onBeforeUnmount(() => {
         <div v-show="tab === 'chapters'" class="wb-grid h-full">
           <div class="wb-main flex min-h-0 flex-col">
             <div class="filter-seg flex flex-wrap items-center gap-2 border-b px-3 py-2">
-              <div class="flex rounded-md border" role="group" aria-label="章节筛选">
-                <button
-                  v-for="f in [['all', '全部'], ['pending', '待核对'], ['adjusted', '已调整']] as const"
-                  :key="f[0]"
-                  type="button"
-                  class="filter-btn"
-                  :class="{ 'filter-btn-active': filter === f[0] }"
-                  @click="filter = f[0]"
-                >
-                  {{ f[1] }}
-                  <span v-if="f[0] === 'pending' && pendingCount > 0" class="tabular-nums">({{ pendingCount }})</span>
-                </button>
+              <div class="relative">
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  v-model="query"
+                  type="search"
+                  placeholder="搜索章节号或标题"
+                  class="h-8 w-56 rounded-md border bg-background pl-8 pr-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  aria-label="搜索章节"
+                />
               </div>
-              <input
-                v-model="query"
-                type="search"
-                placeholder="按标题或序号搜索"
-                class="h-8 w-48 rounded-md border bg-background px-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                aria-label="搜索章节"
-              />
-              <span class="ml-auto text-xs text-muted-foreground">
-                {{ filteredChapters.length }} / {{ version.chapters.length }} 章
-              </span>
+              <button
+                v-for="f in [['all', '全部'], ['pending', '待核对'], ['adjusted', '已调整']] as const"
+                :key="f[0]"
+                type="button"
+                class="filter-pill tabular-nums"
+                :class="{ 'filter-pill-active': filter === f[0] }"
+                @click="filter = f[0]"
+              >
+                {{ f[1] }}
+                <span class="ml-1">
+                  {{ f[0] === 'all' ? version.chapters.length : f[0] === 'pending' ? pendingCount : adjustedCount }}
+                </span>
+              </button>
             </div>
             <div class="min-h-0 flex-1 overflow-y-auto">
               <ChapterTable
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"
-                :marks="version.review_marks"
                 :can-read="canReadVersion"
                 :marks-busy-key="marksBusy"
                 @select="onChapterSelect"
@@ -512,6 +530,7 @@ onBeforeUnmount(() => {
               :chapter="currentChapter"
               :matters="detailMatters"
               :file-name="detailFileName"
+              :preview="preview"
               :marked="isMarked(selectedKey)"
               :marks-busy="!!marksBusy"
               :can-read="canReadVersion"
@@ -520,7 +539,7 @@ onBeforeUnmount(() => {
               @prev="moveSelection(-1)"
               @next="moveSelection(1)"
               @mark="() => toggleMark(selectedKey)"
-              @download="() => currentChapter && downloadChapter(currentChapter)"
+              @download-all="downloadZip"
             />
           </aside>
         </div>
@@ -630,27 +649,39 @@ onBeforeUnmount(() => {
 
     <!-- 空态提示 -->
     <div v-if="phase === 'empty'" class="glass-panel p-8 text-center text-sm text-muted-foreground">
-      选择 TXT 文件后点击「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。
+      选择 TXT 文件后点击底部「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。
     </div>
 
     <!-- 底栏 -->
-    <div v-if="phase !== 'empty'" class="bottom-bar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
-      <span v-if="phase === 'ready' && version" class="text-xs text-muted-foreground">
-        共 {{ version.chapters.length }} 章 · 待核对 {{ pendingCount }} · 已核对 {{ markedCount }}
+    <div class="bottom-bar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
+      <span v-if="phase === 'ready' && version" class="flex items-center gap-2 text-xs">
+        <span class="h-2 w-2 rounded-full bg-emerald-500" />
+        <span class="font-medium">结果已保存</span>
+        <span class="text-muted-foreground">
+          {{ pendingCount > 0 ? `仍有 ${pendingCount} 项建议核对` : '全部章节已核对完成' }}
+        </span>
+      </span>
+      <span v-else-if="phase === 'processing'" class="flex items-center gap-2 text-xs">
+        <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
+        <span>处理中，可离开页面，回来自动继续</span>
+      </span>
+      <span v-else-if="phase === 'failed'" class="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
+        <span class="h-2 w-2 rounded-full bg-red-500" />
+        <span>处理失败，请重试或重新处理</span>
       </span>
       <span v-else class="text-xs text-muted-foreground">
-        {{ phase === 'processing' ? '处理中，完成后可下载与进入解析' : '处理失败，请重试或重新处理' }}
+        选择 TXT 文件后点击「开始处理」
       </span>
       <div class="ml-auto flex items-center gap-2">
         <Button
-          variant="outline"
           size="sm"
-          :disabled="!canEnterParse"
-          :title="version ? '下载全部章节（完整 ZIP）' : '完成分册后可用'"
-          @click="downloadZip"
+          :variant="phase === 'empty' ? 'default' : 'outline'"
+          :disabled="startDisabled"
+          @click="start(phase !== 'empty')"
         >
-          <Download class="h-4 w-4" />
-          下载全部
+          <Loader2 v-if="phase === 'processing'" class="h-4 w-4 animate-spin" />
+          <RefreshCw v-else class="h-4 w-4" />
+          {{ phase === 'processing' ? '处理中…' : startLabel }}
         </Button>
         <Button size="sm" :disabled="!canEnterParse" :title="enterParseReason" @click="goNext">
           进入文本解析
@@ -682,6 +713,7 @@ onBeforeUnmount(() => {
               :chapter="currentChapter"
               :matters="detailMatters"
               :file-name="detailFileName"
+              :preview="preview"
               :marked="isMarked(selectedKey)"
               :marks-busy="!!marksBusy"
               :can-read="canReadVersion"
@@ -690,7 +722,7 @@ onBeforeUnmount(() => {
               @prev="moveSelection(-1)"
               @next="moveSelection(1)"
               @mark="() => toggleMark(selectedKey)"
-              @download="() => currentChapter && downloadChapter(currentChapter)"
+              @download-all="downloadZip"
             />
           </div>
         </section>
@@ -730,18 +762,23 @@ onBeforeUnmount(() => {
   color: var(--foreground);
   border-bottom-color: hsl(var(--primary));
 }
-.filter-btn {
-  padding: 0.25rem 0.625rem;
+.filter-pill {
+  padding: 0.3rem 0.75rem;
   font-size: 0.75rem;
   color: var(--muted-foreground);
-  border-right-width: 1px;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: var(--background);
 }
-.filter-btn:last-child {
-  border-right-width: 0;
+.filter-pill:hover {
+  color: var(--foreground);
+  border-color: hsl(var(--primary) / 0.4);
 }
-.filter-btn-active {
+.filter-pill-active {
   color: hsl(var(--primary));
+  font-weight: 600;
   background: hsl(var(--primary) / 0.1);
+  border-color: hsl(var(--primary) / 0.35);
 }
 /* 桌面：左章节表 + 右常驻详情 */
 .wb-grid {

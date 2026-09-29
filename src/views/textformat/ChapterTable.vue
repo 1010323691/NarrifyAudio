@@ -9,13 +9,11 @@ import Button from '@/components/ui/Button.vue'
 import Badge from '@/components/ui/Badge.vue'
 import { Download, Eye } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
-import { confidenceLabel } from '@/utils/bookLabels'
 import type { WorkbenchChapter } from '@/api/textFormat'
 
 const props = defineProps<{
   chapters: WorkbenchChapter[]
   selectedKey: string | null
-  marks: string[]
   canRead: boolean
   marksBusyKey: string | null
 }>()
@@ -29,10 +27,10 @@ const emit = defineEmits<{
   <Table>
     <TableHeader>
       <TableRow>
-        <TableHead class="w-12">序号</TableHead>
+        <TableHead class="w-24">章节</TableHead>
         <TableHead>标题</TableHead>
         <TableHead class="w-20 text-right">字数</TableHead>
-        <TableHead class="w-36">状态</TableHead>
+        <TableHead class="w-28">处理结果</TableHead>
         <TableHead class="w-24 text-right">操作</TableHead>
       </TableRow>
     </TableHeader>
@@ -44,24 +42,15 @@ const emit = defineEmits<{
         :data-state="chapter.key === props.selectedKey ? 'selected' : undefined"
         @click="chapter.key && emit('select', chapter.key)"
       >
-        <TableCell class="text-muted-foreground tabular-nums">{{ chapter.seq }}</TableCell>
+        <TableCell class="font-medium tabular-nums">第{{ chapter.numStr || String(chapter.seq).padStart(3, '0') }}章</TableCell>
         <TableCell class="max-w-[320px]">
           <span class="block truncate" :title="chapter.title">{{ chapter.title || '—' }}</span>
         </TableCell>
         <TableCell class="text-right tabular-nums">{{ formatNumber(chapter.chars) }}</TableCell>
         <TableCell>
-          <div class="flex flex-wrap items-center gap-1">
-            <Badge v-if="chapter.pending" variant="warning">待核对</Badge>
-            <Badge v-else-if="chapter.adjusted" variant="outline">已调整</Badge>
-            <Badge v-else variant="success">正常</Badge>
-            <Badge v-if="props.marks.includes(chapter.key ?? '')" variant="secondary">已核对</Badge>
-            <span
-              v-if="chapter.confidence && chapter.confidence !== 'high' && chapter.reasons.some((r) => r !== 'kept')"
-              class="text-[11px] text-muted-foreground"
-            >
-              置信{{ confidenceLabel(chapter.confidence) }}
-            </span>
-          </div>
+          <Badge v-if="chapter.pending" variant="warning">待核对</Badge>
+          <Badge v-else-if="chapter.adjusted" variant="success">已调整</Badge>
+          <Badge v-else variant="outline">正常</Badge>
         </TableCell>
         <TableCell class="text-right">
           <div class="flex items-center justify-end gap-1" @click.stop>
