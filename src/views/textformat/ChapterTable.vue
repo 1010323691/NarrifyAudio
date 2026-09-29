@@ -38,7 +38,7 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
         <TableHead class="whitespace-nowrap" :class="chapterColClass">章节</TableHead>
         <TableHead>标题</TableHead>
         <TableHead class="w-16 text-right">字数</TableHead>
-        <TableHead class="w-28 whitespace-nowrap">核对状态</TableHead>
+        <TableHead class="wb-col-status w-28 whitespace-nowrap">核对状态</TableHead>
         <TableHead class="w-48 whitespace-nowrap">核对原因</TableHead>
       </TableRow>
     </TableHeader>
@@ -55,7 +55,7 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
           <span class="block truncate" :title="chapter.title">{{ chapter.title || '—' }}</span>
         </TableCell>
         <TableCell class="text-right tabular-nums">{{ formatNumber(chapter.chars) }}</TableCell>
-        <TableCell>
+        <TableCell class="wb-col-status">
           <Badge v-if="chapter.key && props.markedKeys.has(chapter.key)" variant="success">已核对</Badge>
           <Badge v-else-if="chapter.pending" variant="warning">待核对</Badge>
           <Badge v-else-if="chapter.adjusted" variant="success">已调整</Badge>
@@ -90,6 +90,11 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
   padding-right: 1rem;
   padding-top: 0.5rem;
   padding-bottom: 0.5rem;
+}
+/* 核对状态列内容整体右移一点点，拉开与字数列的间距（20px > 基线 16px）。 */
+.wb-chapter-table :deep(th.wb-col-status),
+.wb-chapter-table :deep(td.wb-col-status) {
+  padding-left: 1.25rem;
 }
 /* 固定布局：章节/字数/处理结果/核对原因列宽写死，标题列吃掉剩余宽度——
    右侧列组贴住表格右缘，不留大片右侧空白。 */
