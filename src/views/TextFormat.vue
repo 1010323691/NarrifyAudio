@@ -492,7 +492,7 @@ onBeforeUnmount(() => {
         <span class="h-2 w-2 rounded-full bg-emerald-500" />
         <span class="font-medium">结果已保存</span>
         <span class="text-muted-foreground">
-          {{ pendingCount > 0 ? `仍有 ${pendingCount} 项建议核对` : '全部章节已核对完成' }}
+          {{ pendingCount > 0 ? `还有 ${pendingCount} 章待核对` : '全部章节已核对' }}
         </span>
       </span>
       <span v-else-if="phase === 'processing'" class="flex items-center gap-2 text-xs">
@@ -613,10 +613,10 @@ onBeforeUnmount(() => {
   background: hsl(var(--primary) / 0.1);
   border-color: hsl(var(--primary) / 0.35);
 }
-/* 桌面：左章节表 + 右常驻详情 */
+/* 桌面：左章节表 + 右常驻详情（40%）：预览正文与核对说明更好读，左侧标题列相应收窄。 */
 .wb-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
+  grid-template-columns: minmax(0, 1fr) 40%;
   gap: 0;
 }
 .bottom-bar {

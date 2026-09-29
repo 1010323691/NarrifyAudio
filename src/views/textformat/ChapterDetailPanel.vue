@@ -50,9 +50,7 @@ const emit = defineEmits<{
           <Badge v-if="props.marked" variant="success">已核对</Badge>
           <Badge v-if="props.chapter.adjusted" variant="outline">已调整</Badge>
         </div>
-        <p class="mt-1 text-xs text-muted-foreground">
-          {{ formatNumber(props.chapter.chars) }} 字<template v-if="props.fileName"> · {{ props.fileName }}</template>
-        </p>
+        <p class="mt-1 text-xs text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</p>
       </div>
 
       <div class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
@@ -88,27 +86,30 @@ const emit = defineEmits<{
           加载正文中…
         </div>
 
-        <!-- 处理说明（仅被调整过的章节） -->
-        <div v-if="props.chapter.adjusted" class="space-y-1.5 rounded-md border p-3 text-xs">
+        <!-- 处理说明：被调整章节展示调整明细；未调整章节保留结论与文件名入口。 -->
+        <div class="space-y-1.5 rounded-md border p-3 text-xs">
           <div class="font-medium">处理说明</div>
-          <div class="flex flex-wrap items-center gap-1.5">
-            <span v-if="props.chapter.orig_numStr" class="text-muted-foreground">
-              原第{{ padChapterNum(props.chapter.orig_numStr, props.numPad) }}章 → 第{{ padChapterNum(props.chapter.final_num, props.numPad) }}章
-            </span>
-            <span
-              class="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
-              :class="confidenceClass(props.chapter.confidence)"
-            >
-              置信{{ confidenceLabel(props.chapter.confidence) }}
-            </span>
-          </div>
-          <ul v-if="props.chapter.reasons.length" class="list-disc space-y-0.5 pl-4 text-muted-foreground">
-            <li v-for="(reason, i) in props.chapter.reasons" :key="i">{{ reasonLabel(reason) }}</li>
-          </ul>
+          <template v-if="props.chapter.adjusted">
+            <div class="flex flex-wrap items-center gap-1.5">
+              <span v-if="props.chapter.orig_numStr" class="text-muted-foreground">
+                原第{{ padChapterNum(props.chapter.orig_numStr, props.numPad) }}章 → 第{{ padChapterNum(props.chapter.final_num, props.numPad) }}章
+              </span>
+              <span
+                class="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
+                :class="confidenceClass(props.chapter.confidence)"
+              >
+                置信{{ confidenceLabel(props.chapter.confidence) }}
+              </span>
+            </div>
+            <ul v-if="props.chapter.reasons.length" class="list-disc space-y-0.5 pl-4 text-muted-foreground">
+              <li v-for="(reason, i) in props.chapter.reasons" :key="i">{{ reasonLabel(reason) }}</li>
+            </ul>
+          </template>
+          <p v-else class="text-muted-foreground">该章节未触发调整，按原结构直接保留。</p>
+          <p v-if="props.fileName" class="truncate text-muted-foreground" :title="props.fileName">
+            输出文件：{{ props.fileName }}
+          </p>
         </div>
-        <p v-else class="text-xs text-muted-foreground">
-          该章节未触发调整，按原结构直接保留。
-        </p>
       </div>
 
       <!-- 操作行：上一章 / 标记已核对 / 下一章 -->

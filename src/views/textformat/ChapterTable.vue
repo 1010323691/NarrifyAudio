@@ -36,7 +36,7 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
         <TableHead class="whitespace-nowrap" :class="chapterColClass">章节</TableHead>
         <TableHead>标题</TableHead>
         <TableHead class="w-16 text-right">字数</TableHead>
-        <TableHead class="w-28 whitespace-nowrap">处理结果</TableHead>
+        <TableHead class="w-28 whitespace-nowrap">核对状态</TableHead>
         <TableHead class="w-48 whitespace-nowrap">核对原因</TableHead>
       </TableRow>
     </TableHeader>
@@ -56,7 +56,8 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
         <TableCell>
           <Badge v-if="chapter.pending" variant="warning">待核对</Badge>
           <Badge v-else-if="chapter.adjusted" variant="success">已调整</Badge>
-          <Badge v-else variant="outline">正常</Badge>
+          <!-- 正常章节低强调：只有真正需要检查的行才着色。 -->
+          <span v-else class="text-xs text-muted-foreground/70">正常</span>
         </TableCell>
         <TableCell class="text-muted-foreground">
           <span class="block truncate" :title="reasonBrief(chapter)">{{ reasonBrief(chapter) }}</span>
