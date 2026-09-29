@@ -26,7 +26,7 @@ $singleQuote = [char]39
 if (-not (Test-Path $envFile)) {
     Write-Warning "未找到 .env——数据库/Redis 凭据缺失，后端大概率起不来"
 } else {
-    foreach ($line in (Get-Content $envFile)) {
+    foreach ($line in (Get-Content $envFile -Encoding UTF8)) {
         $line = $line.Trim()
         if (-not $line -or $line.StartsWith('#') -or -not $line.Contains('=')) { continue }
         $idx = $line.IndexOf('=')
@@ -47,17 +47,24 @@ if (-not (Test-Path $envFile)) {
     }
 }
 
-# --- 端口探测 ---
+# --- 端口探测（双栈）：本机 Vite 默认 bind `localhost`，Node 17+ 下实际落在 IPv6 `::1`，
+#     只探 127.0.0.1 会把「Vite 正在 5173 运行」误判为空闲。
+#     注意必须用显式 AddressFamily 构造 TcpClient：PS 5.1（.NET Framework）下
+#     自动选地址的 Connect 遇到 '::1' 会因本机主机名枚举不到 IPv6 地址而抛 WSAEAFNAMES ---
 function Test-PortOpen([int]$port) {
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $client.Connect('127.0.0.1', $port)
-        return $client.Connected
-    } catch {
-        return $false
-    } finally {
-        $client.Close()
+    $targets = @(
+        @{ Ip = [System.Net.IPAddress]::Parse('127.0.0.1'); Family = [System.Net.Sockets.AddressFamily]::InterNetwork },
+        @{ Ip = [System.Net.IPAddress]::Parse('::1'); Family = [System.Net.Sockets.AddressFamily]::InterNetworkV6 }
+    )
+    foreach ($t in $targets) {
+        $client = New-Object System.Net.Sockets.TcpClient($t.Family)
+        try {
+            $client.Connect($t.Ip, $port)
+            if ($client.Connected) { return $true }
+        } catch { }
+        finally { $client.Close() }
     }
+    return $false
 }
 
 # --- 数据服务探测（只警告，不阻塞）---
@@ -75,14 +82,18 @@ $apiPidFile = Join-Path $logDir 'api.pid'
 # --- 启动互斥锁：防止冷启动窗口内重复 Play 双拉 FastAPI/Worker。
 #     锁只覆盖「启动阶段」（探测 + 拉起 + 等健康），进入 Vite 前台前释放；
 #     FileStream 句柄随进程退出由 OS 自动释放，无 stale lock。
-#     被阻塞的第二个实例等锁释放后走正常流程——端口/pidfile 探测会自然命中「复用」，
-#     最后再被「5173 已占用」检查接住并优雅退出 ---
+#     被阻塞的第二个实例等锁释放后走正常流程——端口/pidfile 探测自然命中「复用」；
+#     因第一个实例的 Vite 此时通常尚未 bind，先轮询 5173 数秒，仍被占用则走下方
+#     「已占用 → 优雅退出」分支；若极端等到轮询结束仍未 bind，双 npm 抢跑、
+#     后起者按 vite strictPort 响亮报错退出（无双后端、无双 Vite）---
 $lockPath = Join-Path $logDir 'dev-all.lock'
 $lockStream = $null
+$waitedForLock = $false
 try {
     $lockStream = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
     Write-Host '[dev-all] 另一个 Play 正在启动后端，等待其完成（最长 45s）...'
+    $waitedForLock = $true
     $deadline = (Get-Date).AddSeconds(45)
     while ((Get-Date) -lt $deadline) {
         try {
@@ -91,7 +102,9 @@ try {
         } catch { Start-Sleep -Milliseconds 500 }
     }
     if (-not $lockStream) {
-        Write-Warning '启动锁等待超时（另一个 Play 可能仍在启动后端）——继续本次流程；若后端处于半启动态，Stop 后重新 Play'
+        # 超时后继续流程会与仍在启动的实例双拉后端——宁可本次 Play 失败，让用户稍后重按
+        Write-Warning '启动锁等待超时（另一个 Play 仍在启动后端）——为避免双拉后端，本实例退出，请稍后重新 Play'
+        exit 1
     }
 }
 
@@ -161,6 +174,15 @@ if (-not $healthOk) {
 
 # --- 启动阶段结束：释放互斥锁（后续 Vite 前台进程不再持锁）---
 if ($lockStream) { $lockStream.Dispose() }
+
+# --- 走过锁等待的第二个实例：第一个实例的 Vite 通常还没 bind 5173，给它几秒完成 bind，
+#     好让下面走「已占用 → 优雅退出」，而不是双 npm 抢跑 ---
+if ($waitedForLock) {
+    for ($i = 0; $i -lt 12; $i++) {
+        if (Test-PortOpen 5173) { break }
+        Start-Sleep -Milliseconds 500
+    }
+}
 
 # --- Vite 前台（预览面板跟踪此进程）；5173 已被占用（前一个 Play 实例仍活着）时
 #     不重复起 Vite（vite strictPort 会直接报错），优雅退出本进程 ---
