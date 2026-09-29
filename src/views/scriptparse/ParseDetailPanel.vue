@@ -78,9 +78,12 @@ const emptyHint = computed(() => {
          页头本身不画分割线，分割只由 tab 行的下划线行提供。 -->
     <header class="flex h-11 shrink-0 items-center gap-3 px-4">
       <div class="flex min-w-0 flex-1 items-baseline gap-1.5">
+        <!-- 未选择态用小号灰字（与排版页详情面板一致），选中态用大号章号。 -->
         <span
-          class="shrink-0 text-[22px] font-bold leading-none tracking-tight"
-          :class="{ 'text-muted-foreground/40': !row }"
+          class="shrink-0 leading-none tracking-tight"
+          :class="row
+            ? 'text-[22px] font-bold'
+            : 'font-normal text-sm text-muted-foreground/60'"
         >
           <template v-if="row">第{{ chapterLabel }}章</template>
           <template v-else>未选择</template>
@@ -124,7 +127,8 @@ const emptyHint = computed(() => {
 
     <div class="min-h-0 flex-1 overflow-y-auto">
       <!-- 解析结果 -->
-      <div v-if="tab === 'result'" :key="row?.chapter.name ?? 'none'" class="panel-enter p-5">
+      <!-- 未选择时容器占满滚动区高度（h-full 需父级有确定高度，滚动容器才有），空态才能垂直居中。 -->
+      <div v-if="tab === 'result'" :key="row?.chapter.name ?? 'none'" class="panel-enter p-5" :class="{ 'h-full': !row }">
         <div v-if="!row" class="flex h-full items-center justify-center text-sm text-muted-foreground">
           <ScanText class="mr-2 h-4 w-4" />
           点击左侧章节，查看解析结果与原文。
@@ -194,7 +198,7 @@ const emptyHint = computed(() => {
            保真约束：pre 原样渲染 sourcePreview.text——段落、标点、空行、
            「第01章」等原文字样一律不动；空行不压缩（压缩属独立的阅读排版选项）。
            边距：左右 24px / 顶部 20px / 底部 32px；字号 16px 常规字重，行距 1.8。 -->
-      <div v-else :key="row?.chapter.name ?? 'none'" class="panel-enter px-6 pt-5 pb-8">
+      <div v-else :key="row?.chapter.name ?? 'none'" class="panel-enter px-6 pt-5 pb-8" :class="{ 'h-full': !row }">
         <div v-if="!row" class="flex h-full items-center justify-center text-sm text-muted-foreground">
           点击左侧章节，查看分册原文。
         </div>
