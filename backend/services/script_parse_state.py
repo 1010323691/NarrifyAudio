@@ -467,10 +467,13 @@ def submit_run(
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise ScriptParseError(404, "项目不存在")
-    # 项目行锁：同项目两个 submit_run 串行化——后者的在途检查（READ COMMITTED
-    # 下逐语句新快照）能看到前者已提交的活跃任务 → 409，关闭并发双解析的窗口。
-    # sqlite（测试环境）不支持 FOR UPDATE，跳过；循环内首个 submit_task_record
-    # 提交即释放行锁，剩余毫秒级窗口只浪费 LLM 成本，无产物损坏（评审 [P4]）。
+    # 项目行锁：同项目并发 submit_run 的「检查 + 首个提交」阶段串行化——并发方
+    # 须等我们首个 submit_task_record 提交后才能拿到锁，届时它的在途检查（仅做
+    # 一次）能看到我们已提交的活跃任务 → 409，关闭双解析主窗口。入口锁随首个
+    # 提交释放；循环内逐文件 submit_task_record 会重新取项目行锁再提交
+    # （task_submission.with_for_update），迭代间隙并发方仍可能通过检查而对我们
+    # 尚未提交的章节双提交：仅浪费 LLM 成本、无产物损坏（评审 [P4]/[P8]）。
+    # sqlite（测试环境）不支持 FOR UPDATE，跳过。
     if db.get_bind().dialect.name == "postgresql":
         db.execute(select(Project.id).where(Project.id == project.id).with_for_update())
     if _text_format_busy(db, user.id, project.id):
