@@ -457,7 +457,7 @@ onBeforeUnmount(() => {
 
     <!-- 工作区 -->
     <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[480px] flex-col overflow-hidden">
-      <div class="flex items-center gap-1 border-b px-2" role="tablist" aria-label="工作区标签">
+      <div class="flex items-center gap-1 border-b px-4" role="tablist" aria-label="工作区标签">
         <button
           v-for="t in [['chapters', '章节结果'], ['preview', '文本预览'], ['records', '处理记录']] as const"
           :key="t[0]"
@@ -480,7 +480,7 @@ onBeforeUnmount(() => {
         <!-- 章节结果 -->
         <div v-show="tab === 'chapters'" class="wb-grid h-full">
           <div class="wb-main flex min-h-0 flex-col">
-            <div class="filter-seg flex flex-wrap items-center gap-2 border-b px-3 py-2">
+            <div class="filter-seg flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
               <div class="relative">
                 <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                 <input
@@ -516,7 +516,7 @@ onBeforeUnmount(() => {
               />
             </div>
             <Pager
-              class="border-t px-3 py-2"
+              class="border-t px-4 py-2.5"
               :page="page"
               :page-count="pageCount"
               :total="filteredChapters.length"
@@ -545,7 +545,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 文本预览 -->
-        <div v-show="tab === 'preview'" class="flex h-full gap-4 p-4">
+        <div v-show="tab === 'preview'" class="flex h-full gap-4 px-5 py-4">
           <nav v-if="currentChapter" class="w-56 shrink-0" aria-label="章节跳转">
             <p class="mb-2 text-xs font-medium text-muted-foreground">章节跳转</p>
             <ScrollArea class="h-[calc(100%-24px)] rounded-md border">
@@ -584,7 +584,7 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 处理记录 -->
-        <div v-show="tab === 'records'" class="h-full space-y-5 overflow-y-auto p-4">
+        <div v-show="tab === 'records'" class="h-full space-y-5 overflow-y-auto px-5 py-4">
           <section>
             <h3 class="mb-2 text-sm font-medium">流水线任务</h3>
             <Table>

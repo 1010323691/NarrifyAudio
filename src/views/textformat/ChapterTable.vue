@@ -24,7 +24,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <Table>
+  <Table class="wb-chapter-table">
     <TableHeader>
       <TableRow>
         <TableHead class="w-20">章节</TableHead>
@@ -85,3 +85,15 @@ const emit = defineEmits<{
     </TableBody>
   </Table>
 </template>
+
+<style scoped>
+/* 模块内边距：表头/单元格左右 16px，与筛选行、分页器对齐。 */
+.wb-chapter-table :deep(th) {
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+.wb-chapter-table :deep(td) {
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+</style>

@@ -34,7 +34,7 @@ const panelTab = ref<'body' | 'notes'>('body')
 <template>
   <div class="flex h-full min-h-0 flex-col">
     <!-- 面板头：章节详情 + 下载全部 -->
-    <div class="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-2.5">
+    <div class="flex shrink-0 items-center justify-between gap-2 border-b px-5 py-3">
       <span class="text-sm font-medium">章节详情</span>
       <Button
         variant="outline"
@@ -54,7 +54,7 @@ const panelTab = ref<'body' | 'notes'>('body')
     </div>
     <template v-else>
       <!-- 标题区 -->
-      <div class="shrink-0 px-4 pb-2 pt-3">
+      <div class="shrink-0 px-5 pb-2.5 pt-4">
         <div class="flex flex-wrap items-center gap-2">
           <h3 class="text-lg font-semibold leading-tight">
             第{{ props.chapter.numStr || String(props.chapter.seq).padStart(3, '0') }}章
@@ -69,7 +69,7 @@ const panelTab = ref<'body' | 'notes'>('body')
         </p>
       </div>
 
-      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto pb-4">
+      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
         <!-- 核对事项（常驻，advisory 在前） -->
         <template v-if="props.matters.length">
           <Alert v-for="matter in props.matters" :key="matter.id" :variant="matter.advisory ? 'warning' : 'default'" class="text-xs">
@@ -153,7 +153,7 @@ const panelTab = ref<'body' | 'notes'>('body')
       </div>
 
       <!-- 操作行：上一章 / 标记已核对 / 下一章 -->
-      <div class="flex shrink-0 items-center gap-2 border-t px-4 py-3">
+      <div class="flex shrink-0 items-center gap-2 border-t px-5 py-3">
         <Button variant="outline" size="sm" class="shrink-0" :disabled="!props.hasPrev" @click="emit('prev')">
           上一章
         </Button>
