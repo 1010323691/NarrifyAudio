@@ -658,6 +658,10 @@ onBeforeUnmount(() => {
   margin-bottom: -64px;
   height: calc(100vh - clamp(28px, 4vw, 52px) - 8px);
 }
+/* 标题区底部留白从全局 28px 收紧：摘要行与章节列表整体上移，多留可视行数（同 .bgm-page 先例）。 */
+.wb-page .page-header {
+  margin-bottom: 8px;
+}
 .wb-filebar {
   border-radius: 0.75rem;
   flex-shrink: 0;
