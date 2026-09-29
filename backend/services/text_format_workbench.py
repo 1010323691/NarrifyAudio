@@ -59,6 +59,7 @@ def _flow_dict(flow: TextFormatFlow) -> dict:
     return {
         "id": flow.id, "source_file_id": flow.source_file_id,
         "config_snapshot": flow.config_snapshot or {}, "whole_book": flow.whole_book,
+        "force_by_length": flow.force_by_length,
         "format_task_id": flow.format_task_id, "analyze_task_id": flow.analyze_task_id,
         "split_task_id": flow.split_task_id, "split_mode": flow.split_mode,
         "status": flow.status, "error": flow.error,
@@ -236,7 +237,7 @@ def _chapter_matter_text(label: str, ch: dict, group: list[dict]) -> tuple[str, 
     return (f"引擎标记了该章（{label}），建议人工核对", "处置方式：请对照原文核对该章，无误后标记已核对。")
 
 
-def build_review_matters(split_result: dict, mode: str | None) -> tuple[list[dict], list[dict]]:
+def build_review_matters(split_result: dict, mode: str | None, forced_length: bool = False) -> tuple[list[dict], list[dict]]:
     """Return (chapters with derived fields, version-level matters)."""
     report = split_result.get("report") or {}
     warnings = report.get("warnings") or []
@@ -301,8 +302,10 @@ def build_review_matters(split_result: dict, mode: str | None) -> tuple[list[dic
     if mode == "by_length":
         count = len(split_result.get("files") or [])
         target = split_result.get("length_target")
+        # 用户显式选择「按字数分册」时章节可能已被识别，措辞不能写「未识别到章节」。
+        prefix = "按字数分册：" if forced_length else "未识别到章节，"
         add_matter("version", "length_fallback",
-                  f"未识别到章节，已按约 {target or 3000} 字/册将全文拆分为 {count} 册；切点落在段落/句子边界。",
+                  f"{prefix}已按约 {target or 3000} 字/册将全文拆分为 {count} 册；切点落在段落/句子边界。",
                   advisory=False)
     elif mode == "whole_book":
         add_matter("version", "whole_book", "按整本继续：未做章节拆分，整本书作为单一文件输出。", advisory=False)
@@ -318,7 +321,7 @@ def _version_from_flow(db: Session, user: User, project: Project, flow: TextForm
         return None
     result = task.result.result or {}
     mode = flow.split_mode
-    chapters, matters = build_review_matters(result, mode)
+    chapters, matters = build_review_matters(result, mode, forced_length=bool(flow.force_by_length))
     if mode == "whole_book" and not chapters:
         chapters = [{
             "key": "whole", "seq": 1, "num": None, "numStr": "", "title": "整本",
@@ -416,6 +419,9 @@ def _advance(db: Session, user: User, project: Project, flow: TextFormatFlow) ->
         base = {"input_file_id": fmt_file_id}
         if flow.whole_book:
             mode, payload = "whole_book", {**base, "whole_book": True}
+        elif flow.force_by_length:
+            # 用户显式选择「按字数分册」：即使识别到章节也按目标字数拆。
+            mode, payload = "by_length", {**base, "by_length": True}
         elif chapter_count > 0:
             mode, payload = "smart", {**base, "smart": True}
         else:
@@ -446,7 +452,8 @@ def _advance(db: Session, user: User, project: Project, flow: TextFormatFlow) ->
 def start_or_continue_flow(
     db: Session, user: User, project_id: str, *,
     source_file_id: str | None = None, config: dict | None = None,
-    whole_book: bool = False, restart: bool = False,
+    whole_book: bool = False, force_by_length: bool = False,
+    restart: bool = False,
 ) -> dict:
     project = owned_project(db, user.id, project_id)
     if project is None:
@@ -475,7 +482,8 @@ def start_or_continue_flow(
             raise WorkbenchError(409, "有排版分册任务正在进行，暂时无法开始处理")
         flow = TextFormatFlow(
             project_id=project.id, owner_id=user.id, source_file_id=source_file_id,
-            config_snapshot=config or {}, whole_book=bool(whole_book), status="running",
+            config_snapshot=config or {}, whole_book=bool(whole_book),
+            force_by_length=bool(force_by_length and not whole_book), status="running",
         )
         db.add(flow)
         db.flush()

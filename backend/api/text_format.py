@@ -35,6 +35,7 @@ class FlowRequest(BaseModel):
     source_file_id: str | None = None
     config: dict = Field(default_factory=dict)
     whole_book: bool = False
+    force_by_length: bool = False
     restart: bool = False
 
 
@@ -72,7 +73,8 @@ def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depen
         return start_or_continue_flow(
             db, user, item.id,
             source_file_id=body.source_file_id, config=body.config,
-            whole_book=body.whole_book, restart=body.restart,
+            whole_book=body.whole_book, force_by_length=body.force_by_length,
+            restart=body.restart,
         )
     except WorkbenchError as error:
         _raise(error)

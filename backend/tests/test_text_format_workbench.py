@@ -181,6 +181,43 @@ def test_whole_book_mode_normalizes_to_single_entry(client: TestClient):
     assert any(m["reason"] == "whole_book" for m in version["matters"])
 
 
+def test_force_by_length_chaptered_input_splits_by_length(client: TestClient):
+    """用户显式选「按字数分册」：即使文本能识别出章节，也按目标字数拆，不走智能分册。"""
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "force-length.txt", CHAPTERED_BODY)
+    state = _drive_to_ready(
+        client, csrf, project_id,
+        {"source_file_id": uploaded["file_id"], "force_by_length": True},
+    )
+    flow = state["flow"]
+    version = state["version"]
+    assert flow["force_by_length"] is True
+    assert flow["split_mode"] == "by_length"
+    assert version["mode"] == "by_length"
+    assert all(c["reasons"] == ["length_split"] for c in version["chapters"])
+    # 版本级说明事项仍给出，但文案不再谎称「未识别到章节」（章节其实识别到了）。
+    length_notes = [m for m in version["matters"] if m["reason"] == "length_fallback"]
+    assert length_notes and length_notes[0]["scope"] == "version"
+    assert "未识别到章节" not in length_notes[0]["text"]
+
+
+def test_force_by_length_defers_to_whole_book(client: TestClient):
+    """whole_book 与 force_by_length 同时为真时整本输出优先（UI 两者互斥，
+    该组合只可能来自外部直调 API）。"""
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "both-flags.txt", CHAPTERED_BODY)
+    state = _drive_to_ready(
+        client, csrf, project_id,
+        {"source_file_id": uploaded["file_id"], "whole_book": True, "force_by_length": True},
+    )
+    assert state["flow"]["force_by_length"] is False
+    assert state["version"]["mode"] == "whole_book"
+
+
 def test_review_marks_are_version_scoped_and_idempotent(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.test")
     csrf = first["csrf_token"]

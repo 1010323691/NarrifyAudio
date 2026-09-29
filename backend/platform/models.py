@@ -198,6 +198,9 @@ class TextFormatFlow(TimestampMixin, Base):
     source_file_id: Mapped[str] = mapped_column(String(36), nullable=False)
     config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     whole_book: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 强制按字数分册（即使文本能识别出章节）。whole_book 与 force_by_length 同时为真时
+    # whole_book 优先（_advance 的分册分支顺序决定）；前端弹窗两者互斥，该组合只可能来自 API 直调。
+    force_by_length: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     format_task_id: Mapped[str | None] = mapped_column(String(36))
     analyze_task_id: Mapped[str | None] = mapped_column(String(36))
     split_task_id: Mapped[str | None] = mapped_column(String(36))

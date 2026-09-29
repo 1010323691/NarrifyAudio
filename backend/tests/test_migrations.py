@@ -43,6 +43,7 @@ def test_upgrade_from_empty_database_to_head(tmp_path, preexisting_hold_table):
         assert "uq_quota_hold_attempt_operation" in {index["name"] for index in inspector.get_indexes("quota_holds")}
         assert {"text_format_flows", "chapter_review_marks"} <= set(inspector.get_table_names())
         assert "manifest" in {column["name"] for column in inspector.get_columns("text_format_flows")}
+        assert "force_by_length" in {column["name"] for column in inspector.get_columns("text_format_flows")}
         assert "uq_review_marks_task_chapter" in {index["name"] for index in inspector.get_indexes("chapter_review_marks")}
     finally:
         engine.dispose()
