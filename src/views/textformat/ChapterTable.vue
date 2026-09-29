@@ -27,10 +27,10 @@ const reasonBrief = (chapter: WorkbenchChapter) => props.reasonBriefs[chapter.ke
     <TableHeader>
       <TableRow>
         <TableHead class="w-20">章节</TableHead>
-        <TableHead>标题</TableHead>
-        <TableHead class="w-20 text-right">字数</TableHead>
-        <TableHead class="w-24">处理结果</TableHead>
-        <TableHead class="w-28">核对原因</TableHead>
+        <TableHead class="w-[260px]">标题</TableHead>
+        <TableHead class="w-16 text-right">字数</TableHead>
+        <TableHead class="w-20">处理结果</TableHead>
+        <TableHead>核对原因</TableHead>
       </TableRow>
     </TableHeader>
     <TableBody>
@@ -65,16 +65,23 @@ const reasonBrief = (chapter: WorkbenchChapter) => props.reasonBriefs[chapter.ke
 </template>
 
 <style scoped>
-/* 模块内边距：表头/单元格左右 16px，与筛选行、分页器对齐。 */
+/* 模块内边距：表头/单元格左右 16px，与筛选行、分页器对齐；上下收窄让一行更矮，
+   默认视口下可不滚动显示更多行。 */
 .wb-chapter-table :deep(th) {
   padding-left: 1rem;
   padding-right: 1rem;
+  padding-top: 0.375rem;
+  padding-bottom: 0.375rem;
+  height: auto;
 }
 .wb-chapter-table :deep(td) {
   padding-left: 1rem;
   padding-right: 1rem;
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
 }
-/* 固定布局：章节/字数/处理结果列宽写死，标题列吃掉全部剩余宽度，不留右侧空白。 */
+/* 固定布局：章节/标题/字数/处理结果列宽写死，「核对原因」列吃掉全部剩余宽度——
+   标题短时不再在中间留大片空白，原因文本也获得更多显示空间。 */
 .wb-chapter-table :deep(table) {
   table-layout: fixed;
 }
