@@ -28,6 +28,7 @@ import {
   type WorkbenchVersion,
 } from '@/api/textFormat'
 import type { TextToggles } from '@/types'
+import { chapterNumWidth, padChapterNum } from '@/utils/bookLabels'
 
 export interface PreviewState {
   key: string | null
@@ -120,7 +121,16 @@ export function useTextFormatWorkbench() {
       if (reasonFilter.value) list = list.filter((c) => (c.reasons ?? []).includes(reasonFilter.value))
     }
     const q = query.value.trim().toLowerCase()
-    if (q) list = list.filter((c) => (c.title ?? '').toLowerCase().includes(q) || String(c.seq).includes(q))
+    if (q) {
+      // 同时匹配界面显示的补零章节号（如「001」）——只比原始 seq 时用户照界面输入搜不到。
+      const pad = chapterNumWidth(chapters.value)
+      list = list.filter(
+        (c) =>
+          (c.title ?? '').toLowerCase().includes(q) ||
+          String(c.seq).includes(q) ||
+          padChapterNum(c.numStr || c.seq, pad).includes(q),
+      )
+    }
     return list
   })
   /** 可筛选原因：本版本出现过的非「保留」原因，按首次出现顺序。 */
