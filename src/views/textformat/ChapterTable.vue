@@ -37,7 +37,7 @@ const emit = defineEmits<{
         @click="chapter.key && emit('select', chapter.key)"
       >
         <TableCell class="font-medium tabular-nums">第{{ chapter.numStr || String(chapter.seq).padStart(3, '0') }}章</TableCell>
-        <TableCell class="max-w-[280px]">
+        <TableCell>
           <span class="block truncate" :title="chapter.title">{{ chapter.title || '—' }}</span>
         </TableCell>
         <TableCell class="text-right tabular-nums">{{ formatNumber(chapter.chars) }}</TableCell>
@@ -65,5 +65,9 @@ const emit = defineEmits<{
 .wb-chapter-table :deep(td) {
   padding-left: 1rem;
   padding-right: 1rem;
+}
+/* 固定布局：章节/字数/处理结果列宽写死，标题列吃掉全部剩余宽度，不留右侧空白。 */
+.wb-chapter-table :deep(table) {
+  table-layout: fixed;
 }
 </style>
