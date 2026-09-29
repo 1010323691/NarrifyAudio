@@ -53,9 +53,10 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <!-- 面板头：py-4 使其 53px，与左列筛选行等高——内容区上下边界与表格滚动区严格对齐 -->
-    <div class="shrink-0 border-b px-5 py-4">
-      <span class="text-sm font-medium">章节详情</span>
+    <!-- 面板头：py-2.5 + 32px 行，复刻左列筛选行的构造（10+32+10+1 边框 = 53px），
+         避免 py-4+行高舍入多出 1px——内容区上下边界与表格滚动区严格对齐 -->
+    <div class="flex shrink-0 items-center border-b px-5 py-2.5">
+      <span class="flex h-8 items-center text-sm font-medium">章节详情</span>
     </div>
 
     <div v-if="!props.chapter" class="flex flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
