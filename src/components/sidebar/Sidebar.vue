@@ -113,8 +113,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
         <ShieldCheck v-else class="h-5 w-5" />
       </div>
       <div class="app-brand__copy">
-        <div class="app-brand__title">{{ isAdminArea ? '管理控制台' : '有声书工作台' }}</div>
-        <div class="app-brand__subtitle">{{ isAdminArea ? 'ADMIN CONSOLE' : 'NARRIFY AUDIO WORKSPACE' }}</div>
+        <!-- 用户工作台只留单行粗体英文标识，避免两行品牌字块过于臃肿；管理控制台保留双行。 -->
+        <div class="app-brand__title">{{ isAdminArea ? '管理控制台' : 'NARRIFY AUDIO' }}</div>
+        <div v-if="isAdminArea" class="app-brand__subtitle">ADMIN CONSOLE</div>
       </div>
     </RouterLink>
 
