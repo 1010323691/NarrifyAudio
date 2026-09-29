@@ -149,20 +149,11 @@ def _manifest_consistent(db: Session, user: User, project: Project, flow: TextFo
 # into user-facing matters; the frontend renders them without its own rule set.
 # ---------------------------------------------------------------------------
 
-_ADVISORY_REASON_TEXT = {
-    "duplicate_number": "章节号重复——原编号重复，已按原文顺序重新编号，正文已保留。",
-    "duplicate_split": "疑似正文重复——重复内容已拆分保留，请核对是否误判。",
-    "duplicate_kept": "章节重复或疑似内容重复，请核对。",
-    "inferred": "推断拆分——章节边界由引擎推断，建议对照原文核对。",
-    "mechanical": "机械拆分——按结构线索拆分，建议对照原文核对。",
-    "truncated": "已截除重复正文——仅保留首次出现，请核对删除范围。",
-    "range_mid": "范围标题补齐——部分切点落在段落中间，请人工核对。",
-}
-_INFO_REASON_TEXT = {
-    "renumbered": "已规范编号",
-    "gap_absorbed": "原文跳号，已并入连续编号",
-    "range": "范围标题已按段落边界补齐",
-    "length_split": "按字数分册",
+# Advisory labels: their presence marks the chapter 待核对; the rest only
+# produce informational 「已调整」 notes. Unknown labels stay informational.
+_ADVISORY_LABELS = {
+    "duplicate_number", "duplicate_split", "duplicate_kept",
+    "inferred", "mechanical", "truncated", "range_mid",
 }
 _ACTION_TO_REASON = {
     "duplicate_kept": "duplicate_kept",
@@ -183,6 +174,66 @@ def _chapter_reasons(chapter: dict) -> list[str]:
         return [str(r) for r in reasons]
     actions = chapter.get("actions") or []
     return [_ACTION_TO_REASON.get(str(a), str(a)) for a in actions] or ["kept"]
+
+
+def _chapter_matter_text(label: str, ch: dict, group: list[dict]) -> tuple[str, str | None]:
+    """Concrete matter text + handling note for one chapter-level label.
+
+    ``group`` is the set of chapters sharing the same original number (in
+    physical order): the duplicate-family texts need that context (occurrence
+    count, which final numbers) no generic sentence can carry.
+    """
+    final = ch.get("final_num") or ch.get("seq") or "?"
+    orig = ch.get("orig_numStr") or ch.get("numStr") or str(final)
+    if label == "duplicate_split":
+        finals = "、".join(str(c.get("final_num") or c.get("seq") or "?") for c in group)
+        return (
+            f"原第 {orig} 章正文内出现重复章节头，已拆分为第 {finals} 章（共 {len(group)} 章），内容全部保留",
+            "处置方式：请逐段核对拆分边界；若某段实为误标标题的正文，请在源 TXT 中修正后点击「重新处理」。",
+        )
+    if label in ("duplicate_number", "duplicate_kept") and len(group) >= 2:
+        idx = next(i for i, c in enumerate(group) if c is ch) + 1
+        return (
+            f"原第 {orig} 章的编号在原文中出现 {len(group)} 次，本章为第 {idx} 处，已按原文顺序编为第 {final} 章",
+            "处置方式：各章正文均原样保留。若其中一章确属重复内容，请在源 TXT 中删去多余章节后点击「重新处理」；"
+            "若只是原文编号笔误或内容重复误判，核对无误后标记已核对即可。",
+        )
+    if label == "duplicate_kept":
+        return (
+            "引擎将该章标记为疑似重复内容，已保留",
+            "处置方式：请对照前文确认是否重复；若确属重复，在源 TXT 清理后点击「重新处理」；误报则直接标记已核对。",
+        )
+    if label == "inferred":
+        return (
+            f"第 {final} 章的边界由引擎推断生成（原文此处缺少可识别的章节头）",
+            "处置方式：对照原文确认起止位置；如需调整，在源 TXT 中补写章节标题后点击「重新处理」。",
+        )
+    if label == "mechanical":
+        return (
+            f"第 {final} 章由引擎按结构线索机械拆分而来",
+            "处置方式：对照原文确认起止位置；如需调整，在源 TXT 中补写章节标题后点击「重新处理」。",
+        )
+    if label == "truncated":
+        return (
+            f"第 {final} 章（原第 {orig} 章）中重复出现的后段正文已被截除，仅保留首次出现的内容",
+            "处置方式：请核对该章结尾是否完整；若截除的是误判内容，请在源 TXT 中修正后点击「重新处理」。",
+        )
+    if label == "range_mid":
+        return (
+            f"第 {final} 章的切点原落在段落中间，已自动按段落边界对齐",
+            "处置方式：请查看本章开头内容是否完整；若仍不完整，调整源 TXT 中范围标题的位置后点击「重新处理」。",
+        )
+    if label == "renumbered":
+        return (f"原第 {orig} 章 → 第 {final} 章（编号已规范化）", "正文未改动，仅统一编号。")
+    if label == "gap_absorbed":
+        return (f"原文编号不连续，原第 {orig} 章已并入连续编号，现编为第 {final} 章", "正文未删改。")
+    if label == "range":
+        return ("范围标题已按段落边界补齐", None)
+    if label == "length_split":
+        return ("本册按字数目标拆分生成", None)
+    if label == "whole_book":
+        return ("按整本继续，未做章节拆分", None)
+    return (f"引擎标记了该章（{label}），建议人工核对", "处置方式：请对照原文核对该章，无误后标记已核对。")
 
 
 def build_review_matters(split_result: dict, mode: str | None) -> tuple[list[dict], list[dict]]:
@@ -206,30 +257,28 @@ def build_review_matters(split_result: dict, mode: str | None) -> tuple[list[dic
         matters.append(matter)
         return matter
 
+    # Siblings sharing an original number (physical order): the specific data
+    # behind duplicate-family matters (count, partner final numbers).
+    by_orig: dict[object, list[dict]] = {}
+    for ch in split_result.get("chapters") or []:
+        by_orig.setdefault(ch.get("orig_num"), []).append(ch)
+
     chapters: list[dict] = []
     for ch in split_result.get("chapters") or []:
         final_num = ch.get("final_num")
         key = f"c{final_num}" if final_num is not None else None
         reasons = _chapter_reasons(ch)
+        group = by_orig.get(ch.get("orig_num"), [ch])
         chapter_matter_ids: list[str] = []
         pending = False
         for reason in reasons:
             if reason == "kept":
                 continue
-            if reason == "range" and mid_paragraph:
-                label = "range_mid"
-            elif reason in _INFO_REASON_TEXT:
-                label = reason
-            elif reason in _ADVISORY_REASON_TEXT:
-                label = reason
-            else:
-                # Unknown engine reason: surface it, ask for review (fail open).
-                label = reason
-            if label in _ADVISORY_REASON_TEXT:
-                chapter_matter_ids.append(add_matter("chapter", label, _ADVISORY_REASON_TEXT[label], advisory=True, chapter_key=key)["id"])
-                pending = True
-            else:
-                chapter_matter_ids.append(add_matter("chapter", label, _INFO_REASON_TEXT.get(label, label), advisory=False, chapter_key=key)["id"])
+            label = "range_mid" if (reason == "range" and mid_paragraph) else reason
+            advisory = label in _ADVISORY_LABELS
+            text, detail = _chapter_matter_text(label, ch, group)
+            chapter_matter_ids.append(add_matter("chapter", label, text, advisory=advisory, chapter_key=key, detail=detail)["id"])
+            pending = pending or advisory
         chapters.append({
             **ch, "key": key, "reasons": reasons, "pending": pending,
             "adjusted": any(r != "kept" for r in reasons),

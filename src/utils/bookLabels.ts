@@ -22,6 +22,27 @@ export function modeLabel(mode: string | null | undefined): string {
   return mode ? (MODE_LABELS[mode] ?? mode) : '未分册'
 }
 
+/** reason 代码 → 中文标签：处理说明里的原因列表用；未收录的代码原样展示。 */
+export const REASON_LABELS: Record<string, string> = {
+  duplicate_number: '编号重复',
+  duplicate_split: '正文重复拆分',
+  duplicate_kept: '重复章节保留',
+  truncated: '截除重复正文',
+  renumbered: '编号规范化',
+  gap_absorbed: '跳号合并',
+  range: '范围标题补齐',
+  range_mid: '段落切点补齐',
+  inferred: '推断拆分',
+  mechanical: '机械拆分',
+  length_split: '按字数分册',
+  whole_book: '整本处理',
+  kept: '保留原样',
+}
+
+export function reasonLabel(code: string): string {
+  return REASON_LABELS[code] ?? code
+}
+
 export function confidenceLabel(c: string): string {
   return c === 'high' ? '高' : c === 'medium' ? '中' : c === 'low' ? '低' : c
 }

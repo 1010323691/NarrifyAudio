@@ -5,7 +5,7 @@ import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
 import { AlertTriangle, Check, Download, Info, Loader2, RotateCcw } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
-import { confidenceClass, confidenceLabel } from '@/utils/bookLabels'
+import { confidenceClass, confidenceLabel, reasonLabel } from '@/utils/bookLabels'
 import type { WorkbenchChapter, WorkbenchMatter } from '@/api/textFormat'
 import type { PreviewState } from '@/composables/useTextFormatWorkbench'
 
@@ -143,7 +143,7 @@ const panelTab = ref<'body' | 'notes'>('body')
               </span>
             </div>
             <ul v-if="props.chapter.reasons.length" class="list-disc space-y-0.5 pl-4 text-muted-foreground">
-              <li v-for="(reason, i) in props.chapter.reasons" :key="i">{{ reason }}</li>
+              <li v-for="(reason, i) in props.chapter.reasons" :key="i">{{ reasonLabel(reason) }}</li>
             </ul>
           </div>
           <p v-else class="text-xs text-muted-foreground">
