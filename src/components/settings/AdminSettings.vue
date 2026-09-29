@@ -52,17 +52,17 @@ watch(() => props.section, (value) => {
   active.value = value
 })
 
+// detect_chapters 已并入章节核对工作台的「分册方式」（服务端落快照时恒开）、
+// live 的自动重跑语义已移除——两者不再受平台默认控制，故不提供开关。
 const TOGGLES: { key: keyof TextToggles; label: string }[] = [
   { key: 'sentence_break', label: '断句换段' },
   { key: 'dialogue_separate', label: '对话独立成段' },
-  { key: 'detect_chapters', label: '识别章节标题' },
   { key: 'keep_single_space', label: '保留单个空格' },
   { key: 'punct_ellipsis', label: '省略号统一' },
   { key: 'punct_repeated', label: '合并重复标点' },
   { key: 'punct_quotes', label: '引号成对' },
   { key: 'punct_lone_ascii', label: '半角标点转全角' },
   { key: 'punct_dash', label: '破折号统一' },
-  { key: 'live', label: '实时预览' },
 ]
 
 // 解析内 6 个检查开关是用户「文本解析」页的专属设置（随任务提交、固化进任务配置快照）：
