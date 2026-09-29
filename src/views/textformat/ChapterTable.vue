@@ -9,11 +9,12 @@ import Badge from '@/components/ui/Badge.vue'
 import { formatNumber } from '@/utils/format'
 import type { WorkbenchChapter } from '@/api/textFormat'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   chapters: WorkbenchChapter[]
   selectedKey: string | null
-  reasonBriefs: Record<string, string>
-}>()
+  /** 缺省（如 HMR 过渡期父组件未升级）时降级为 —，避免渲染崩溃。 */
+  reasonBriefs?: Record<string, string>
+}>(), { reasonBriefs: () => ({}) })
 const emit = defineEmits<{
   (e: 'select', key: string): void
 }>()
