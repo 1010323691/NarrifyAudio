@@ -183,6 +183,56 @@ class TaskResult(Base):
     task: Mapped[Task] = relationship(back_populates="result")
 
 
+class TextFormatFlow(TimestampMixin, Base):
+    """Server-side orchestration record for the layout/split pipeline
+    (text.format -> book.analyze -> book.split). The stage task ids plus the
+    idempotency-key prefix ``tflow:{id}:{stage}`` make every resume
+    idempotent; the manifest captured at split success is the version
+    anchor for review marks and versioned reads/exports."""
+
+    __tablename__ = "text_format_flows"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(index=True, nullable=False)
+    owner_id: Mapped[str] = mapped_column(index=True, nullable=False)
+    source_file_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    whole_book: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    format_task_id: Mapped[str | None] = mapped_column(String(36))
+    analyze_task_id: Mapped[str | None] = mapped_column(String(36))
+    split_task_id: Mapped[str | None] = mapped_column(String(36))
+    split_mode: Mapped[str | None] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    manifest: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["project_id", "owner_id"], ["projects.id", "projects.owner_id"], name="fk_text_format_flows_project_owner"),
+        Index("ix_text_format_flows_project_updated", "project_id", "updated_at"),
+        CheckConstraint("status in ('running','ready','failed')", name="ck_text_format_flows_status"),
+        CheckConstraint("split_mode in ('smart','by_length','whole_book') or split_mode is null", name="ck_text_format_flows_split_mode"),
+    )
+
+
+class ChapterReviewMark(TimestampMixin, Base):
+    """Human review mark bound to one split task (version) and one chapter
+    key; marks never carry over across versions."""
+
+    __tablename__ = "chapter_review_marks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(index=True, nullable=False)
+    owner_id: Mapped[str] = mapped_column(index=True, nullable=False)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    chapter_key: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(["project_id", "owner_id"], ["projects.id", "projects.owner_id"], name="fk_chapter_review_marks_project_owner"),
+        UniqueConstraint("task_id", "chapter_key", name="uq_review_marks_task_chapter"),
+        Index("ix_review_marks_project_task", "project_id", "task_id"),
+    )
+
+
 class UserQuotaAccount(Base):
     __tablename__ = "user_quota_accounts"
 
