@@ -577,15 +577,16 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 页面定高撑满视口（扣除 .app-content 上下 padding）：工作区 flex-1 吃掉底部空隙，底栏贴底；
+/* 页面定高撑满视口（扣除 .app-content 上下 padding）：工作区 flex-1 吃掉底部空隙；
+   底栏不贴死窗口下缘，底部留 8px——与 .wb-page space-y-2 的模块间距一致。
    小视口下工作区内部滚动兜底。用 vh 而非 dvh：宿主窗口容器高度等价 100vh，
    dvh 在此环境比容器矮，会残留底部空隙。 */
 .wb-page {
   display: flex;
   flex-direction: column;
-  /* 抵消 .app-content 的 64px 底 padding，让底栏贴到窗口下缘、工作区多占这段高度。 */
+  /* 抵消 .app-content 的 64px 底 padding，避免底栏下方再叠出一段可滚动留白。 */
   margin-bottom: -64px;
-  height: calc(100vh - clamp(28px, 4vw, 52px));
+  height: calc(100vh - clamp(28px, 4vw, 52px) - 8px);
 }
 .wb-filebar {
   border-radius: 0.75rem;
