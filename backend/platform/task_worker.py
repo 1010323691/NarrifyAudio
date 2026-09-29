@@ -772,6 +772,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
                 "orig_numStr": "",
                 "final_num": s["seq"],
                 "actions": ["length_split"],
+                "reasons": ["length_split"],
                 "confidence": "high",
             }
             for s in segments
@@ -820,6 +821,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
                 "orig_numStr": chapter.get("repair", {}).get("orig_numStr", chapter.get("numStr", "")),
                 "final_num": chapter.get("final_num", index),
                 "actions": chapter.get("repair", {}).get("actions", ["kept"]),
+                "reasons": chapter.get("repair", {}).get("reasons") or chapter.get("repair", {}).get("actions", ["kept"]),
                 "confidence": chapter.get("repair", {}).get("confidence", "high"),
             }
             for index, chapter in enumerate(repaired, 1)

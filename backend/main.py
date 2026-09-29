@@ -28,6 +28,7 @@ from .api import project_resources as api_project_resources
 from .api import projects as api_projects
 from .api import quota as api_quota
 from .api import script as api_script
+from .api import text_format as api_text_format
 from .api import tts as api_tts
 from .core import config as core_config
 from .core import logging_setup
@@ -54,6 +55,7 @@ PLATFORM_ROUTERS = [
     api_project_resources.router,
     api_quota.router,
     api_platform_tasks.router,
+    api_text_format.router,
     api_admin.router,
     api_admin_resources.router,
 ]
