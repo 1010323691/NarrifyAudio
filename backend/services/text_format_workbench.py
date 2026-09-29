@@ -408,8 +408,9 @@ def start_or_continue_flow(
     if restart:
         if active:
             raise WorkbenchError(409, "有排版分册任务正在进行，暂时不能重新处理")
-        if flow is not None and flow.status == "ready" and flow.source_file_id == source_file_id:
-            # 重新处理：同一文件的旧 ready flow 保留为历史版本，新建 flow。
+        if flow is not None and flow.source_file_id == source_file_id and flow.status != "running":
+            # 重新处理：旧版本（成功或失败）保留为历史，新建 flow 重跑。
+            # running 的 flow 必有活跃任务，已被上面的 409 拦住。
             flow = None
     if flow is None or flow.status == "ready":
         if not restart and flow is not None:

@@ -384,6 +384,40 @@ def test_failed_stage_reports_and_retries_without_new_tasks(client: TestClient):
     assert len(rows) == 1 and rows[0]["id"] == format_task_id
 
 
+def test_restart_after_failure_creates_a_new_version(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "restart-fail.txt", CHAPTERED_BODY)
+
+    started = _post_flow(client, csrf, project_id, {"source_file_id": uploaded["file_id"]})
+    assert started.status_code == 200
+    old_flow_id = started.json()["flow"]["id"]
+    with SessionLocal() as db:
+        task = db.get(Task, started.json()["next_task"]["task_id"])
+        task.status = "failed"
+        task.error_code = "test_error"
+        task.error_message = "排版失败（测试注入）"
+        db.commit()
+
+    # A plain continue keeps the failed flow (retry path is separate)…
+    continued = _post_flow(client, csrf, project_id, {"source_file_id": uploaded["file_id"]})
+    assert continued.json()["flow"]["id"] == old_flow_id
+    assert continued.json()["flow"]["status"] == "failed"
+    # …while an explicit restart starts a NEW version, keeping the old one as history.
+    restarted = _post_flow(client, csrf, project_id, {"source_file_id": uploaded["file_id"], "restart": True})
+    assert restarted.status_code == 200, restarted.text
+    new_flow = restarted.json()["flow"]
+    assert new_flow["id"] != old_flow_id and new_flow["status"] == "running"
+
+    # The fresh flow then continues as usual (no restart: its own in-flight
+    # tasks would trip the concurrency guard otherwise).
+    state = _drive_to_ready(client, csrf, project_id, {"source_file_id": uploaded["file_id"]})
+    assert state["flow"]["id"] == new_flow["id"]
+    assert state["flow"]["status"] == "ready"
+    assert state["version"]["task_id"] != started.json()["next_task"]["task_id"]
+
+
 def test_flow_requires_csrf_and_valid_source(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.test")
     project_id = client.get("/api/v1/projects/active").json()["project_id"]
