@@ -263,6 +263,21 @@ test('settingsDirty compares the flow config snapshot against the current config
   assert.equal(wb.settingsDirty.value, true) // 缺键也判脏
 })
 
+test('an empty config snapshot (adopted legacy flow) is never dirty', async () => {
+  const { wb, load } = setupWorkbench({
+    getState: async () => ({
+      flow: { id: 'flow-adopt', status: 'ready', config_snapshot: {} },
+      version: readyVersion(makeChapters(1)),
+      next_task: null,
+      active_tasks: [],
+    }),
+  })
+  await wb.resume()
+  const settings = load('@/stores/settings').useSettingsStore()
+  settings.config = { text: { sentence_break: true, x: 1 } }
+  assert.equal(wb.settingsDirty.value, false) // 无快照基准 → 不显示「设置已修改」
+})
+
 test('reason filter, same-number group and dupInfo drive the reason card', async () => {
   const chapters = [
     { key: 'c1', seq: 1, title: 'A', chars: 10, pending: true, adjusted: true, reasons: ['duplicate_number'], matters: [], orig_num: 5 },
