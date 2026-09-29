@@ -34,10 +34,10 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
     <TableHeader>
       <TableRow>
         <TableHead class="whitespace-nowrap" :class="chapterColClass">章节</TableHead>
-        <TableHead class="w-[260px]">标题</TableHead>
+        <TableHead>标题</TableHead>
         <TableHead class="w-16 text-right">字数</TableHead>
         <TableHead class="w-28 whitespace-nowrap">处理结果</TableHead>
-        <TableHead>核对原因</TableHead>
+        <TableHead class="w-48 whitespace-nowrap">核对原因</TableHead>
       </TableRow>
     </TableHeader>
     <TableBody>
@@ -87,8 +87,8 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
   padding-top: 0.5rem;
   padding-bottom: 0.5rem;
 }
-/* 固定布局：章节/标题/字数/处理结果列宽写死，「核对原因」列吃掉全部剩余宽度——
-   标题短时不再在中间留大片空白，原因文本也获得更多显示空间。 */
+/* 固定布局：章节/字数/处理结果/核对原因列宽写死，标题列吃掉剩余宽度——
+   右侧列组贴住表格右缘，不留大片右侧空白。 */
 .wb-chapter-table :deep(table) {
   table-layout: fixed;
 }
