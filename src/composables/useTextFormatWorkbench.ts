@@ -256,6 +256,8 @@ export function useTextFormatWorkbench() {
     sourceFile: { file_id: string; name: string }
     config: TextToggles
     wholeBook?: boolean
+    /** 强制按字数分册（处理设置弹窗两选一中的「按字数分册」）。 */
+    forceByLength?: boolean
     restart?: boolean
   }): Promise<boolean> {
     const projectId = project.activeProjectId
@@ -269,6 +271,7 @@ export function useTextFormatWorkbench() {
         source_file_id: opts.sourceFile.file_id,
         config: { ...opts.config },
         whole_book: opts.wholeBook ?? false,
+        force_by_length: opts.forceByLength ?? false,
         restart: opts.restart ?? false,
       })
       applyState(state)

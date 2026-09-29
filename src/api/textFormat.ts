@@ -34,6 +34,10 @@ export interface WorkbenchChapter {
   matters: string[]
 }
 
+/** 分册方式两选一（处理设置弹窗）：智能分册 / 按字数分册。
+ *  后端保留 whole_book 通道（历史数据兼容），UI 不提供该选项。 */
+export type SplitMode = 'smart' | 'by_length'
+
 export interface WorkbenchVersion {
   flow_id: string
   task_id: string
@@ -62,6 +66,8 @@ export interface WorkbenchFlow {
   source_file_name?: string | null
   config_snapshot: Record<string, unknown>
   whole_book: boolean
+  /** 强制按字数分册（处理设置弹窗两选一选了「按字数分册」；历史 flow 的 whole_book 优先于它）。 */
+  force_by_length: boolean
   format_task_id: string | null
   analyze_task_id: string | null
   split_task_id: string | null
@@ -105,6 +111,7 @@ export interface FlowRequest {
   source_file_id?: string | null
   config?: Record<string, unknown>
   whole_book?: boolean
+  force_by_length?: boolean
   restart?: boolean
 }
 

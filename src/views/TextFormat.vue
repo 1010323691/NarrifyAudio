@@ -9,6 +9,7 @@ import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
 import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
+import type { SplitMode } from '@/api/textFormat'
 
 import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
@@ -40,7 +41,8 @@ const {
 
 // --- file selection --------------------------------------------------------
 const sourceFile = ref<PickedFile | null>(null)
-const wholeBook = ref(false)
+/** 分册方式：处理设置弹窗的两选一（刷新后回填最近一次运行的选择）。 */
+const splitMode = ref<SplitMode>('smart')
 const settingsOpen = ref(false)
 
 const DEFAULT_TOGGLES: TextToggles = {
@@ -58,10 +60,10 @@ const DEFAULT_TOGGLES: TextToggles = {
 const currentConfig = computed<TextToggles>(() => settings.config?.text ?? DEFAULT_TOGGLES)
 const lengthTarget = computed(() => settings.config?.split?.length_target ?? 3000)
 
-// Keep the dialog's 整本处理 switch in sync with the last run's choice.
+// Keep the dialog's 分册方式 choice in sync with the last run's flow.
 watch(flow, (f) => {
   if (!f) return
-  wholeBook.value = f.whole_book
+  splitMode.value = f.force_by_length ? 'by_length' : 'smart'
   // 刷新恢复：文件栏回填流程的源文件（「重新处理」无需重新选择文件）。
   if (!sourceFile.value?.file_id && f.source_file_id) {
     sourceFile.value = { path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name ?? '已选择的 TXT 文件' }
@@ -83,7 +85,7 @@ async function start(restart: boolean) {
   const ok = await startFlow({
     sourceFile: { file_id: sourceFile.value.file_id, name: sourceFile.value.name },
     config: currentConfig.value,
-    wholeBook: wholeBook.value,
+    forceByLength: splitMode.value === 'by_length',
     restart,
   })
   if (ok && restart) {
@@ -119,7 +121,15 @@ async function onSettingsSave(draft: TextToggles) {
   if (ok) settingsOpen.value = false
 }
 
-function onSettingsReprocess(draft: TextToggles, whole: boolean) {
+async function onSettingsReprocess(draft: TextToggles, mode: SplitMode) {
+  // 「保存并重新处理」：先落盘设置再按新设置重跑——否则项目配置与流程快照分叉，
+  // 摘要行的「设置已修改，重新处理后生效」徽标会常驻。保存失败不启动处理。
+  const ok = await settings.save({ text: draft })
+  if (!ok) {
+    toast({ title: '保存设置失败，请重试', variant: 'destructive', description: '请稍后重试' })
+    return
+  }
+  splitMode.value = mode
   settingsOpen.value = false
   if (!sourceFile.value?.file_id) {
     toast({ title: '请先选择要处理的 TXT 文件', variant: 'destructive' })
@@ -128,7 +138,7 @@ function onSettingsReprocess(draft: TextToggles, whole: boolean) {
   void startFlow({
     sourceFile: { file_id: sourceFile.value.file_id, name: sourceFile.value.name },
     config: draft,
-    wholeBook: whole,
+    forceByLength: mode === 'by_length',
     restart: true,
   })
 }
@@ -638,7 +648,7 @@ onBeforeUnmount(() => {
       :initial="settings.config?.text ?? null"
       :length-target="lengthTarget"
       :busy="phase === 'processing' || activeTasks.length > 0"
-      :whole-book="wholeBook"
+      :split-mode="splitMode"
       @close="settingsOpen = false"
       @save="onSettingsSave"
       @reprocess="onSettingsReprocess"
