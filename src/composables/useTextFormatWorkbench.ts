@@ -94,7 +94,11 @@ export function useTextFormatWorkbench() {
     const snapshot = (flow.value?.config_snapshot ?? null) as TextToggles | null
     const current = settings.config?.text
     if (!flow.value || !snapshot || !current) return false
-    const norm = (t: Record<string, unknown>) => JSON.stringify(Object.fromEntries(Object.keys(t).sort().map((k) => [k, t[k]])))
+    // live（自动重跑语义已移除）与 detect_chapters（并入分册方式、服务端恒开）
+    // 不受用户开关控制，不参与「设置已修改」比较。
+    const norm = (t: Record<string, unknown>) => JSON.stringify(Object.fromEntries(
+      Object.keys(t).sort().filter((k) => k !== 'live' && k !== 'detect_chapters').map((k) => [k, t[k]]),
+    ))
     return norm(snapshot as unknown as Record<string, unknown>) !== norm(current as unknown as Record<string, unknown>)
   })
 
