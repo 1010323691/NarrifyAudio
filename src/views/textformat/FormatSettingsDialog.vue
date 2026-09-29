@@ -255,9 +255,12 @@ onBeforeUnmount(() => {
       </div>
 
       <footer class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t px-5 py-3">
-        <span class="text-xs text-muted-foreground">仅对本项目生效。</span>
-        <span class="text-xs text-muted-foreground">保存仅更新设置，当前结果不会改变；若要立即应用，请选择「保存并重新处理」。</span>
-        <div class="ml-auto flex items-center gap-2">
+        <!-- 说明文字在「；」后固定换行成两行，只占左侧剩余空间；按钮区 shrink-0 恒宽，长文案不挤压按钮。 -->
+        <p class="min-w-0 flex-1 text-xs text-muted-foreground">
+          仅对本项目生效。保存仅更新设置，当前结果不会改变；<br />
+          若要立即应用，请选择「保存并重新处理」。
+        </p>
+        <div class="ml-auto flex shrink-0 items-center gap-2">
           <Button variant="ghost" size="sm" @click="emit('close')">取消</Button>
           <Button variant="outline" size="sm" class="text-primary" :disabled="props.busy" @click="saveAndReprocess">
             {{ props.busy ? '处理中，暂时不能重新处理' : '保存并重新处理' }}
