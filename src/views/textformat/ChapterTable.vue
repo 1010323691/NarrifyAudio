@@ -27,11 +27,11 @@ const emit = defineEmits<{
   <Table>
     <TableHeader>
       <TableRow>
-        <TableHead class="w-24">章节</TableHead>
+        <TableHead class="w-20">章节</TableHead>
         <TableHead>标题</TableHead>
         <TableHead class="w-20 text-right">字数</TableHead>
-        <TableHead class="w-28">处理结果</TableHead>
-        <TableHead class="w-24 text-right">操作</TableHead>
+        <TableHead class="w-24">处理结果</TableHead>
+        <TableHead class="w-20 text-right">操作</TableHead>
       </TableRow>
     </TableHeader>
     <TableBody>
@@ -43,7 +43,7 @@ const emit = defineEmits<{
         @click="chapter.key && emit('select', chapter.key)"
       >
         <TableCell class="font-medium tabular-nums">第{{ chapter.numStr || String(chapter.seq).padStart(3, '0') }}章</TableCell>
-        <TableCell class="max-w-[320px]">
+        <TableCell class="max-w-[280px]">
           <span class="block truncate" :title="chapter.title">{{ chapter.title || '—' }}</span>
         </TableCell>
         <TableCell class="text-right tabular-nums">{{ formatNumber(chapter.chars) }}</TableCell>

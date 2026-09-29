@@ -525,7 +525,7 @@ onBeforeUnmount(() => {
               @update:page-size="(s: number) => { pageSize = s; page = 1 }"
             />
           </div>
-          <aside v-if="!isNarrow" class="wb-detail min-h-0" aria-label="章节详情">
+          <aside v-if="!isNarrow" class="wb-detail min-h-0 border-l-2 bg-muted/20" aria-label="章节详情">
             <ChapterDetailPanel
               :chapter="currentChapter"
               :matters="detailMatters"
@@ -785,9 +785,6 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
   gap: 0;
-}
-.wb-detail {
-  border-left: 1px solid var(--border);
 }
 .bottom-bar {
   border-radius: 0.75rem;
