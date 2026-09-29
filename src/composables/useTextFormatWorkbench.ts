@@ -12,7 +12,7 @@ import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
 import { ApiError } from '@/api/client'
-import { listProjectDurableTasks, retryDurableTask, type DurableTask } from '@/api/durableTasks'
+import { retryDurableTask } from '@/api/durableTasks'
 import {
   deleteReviewMark,
   getWorkbenchState,
@@ -28,8 +28,6 @@ import {
   type WorkbenchVersion,
 } from '@/api/textFormat'
 import type { TextToggles } from '@/types'
-
-const FLOW_TASK_TYPES = new Set(['text.format', 'book.analyze', 'book.split'])
 
 export interface PreviewState {
   key: string | null
@@ -51,12 +49,10 @@ export function useTextFormatWorkbench() {
   const version = ref<WorkbenchVersion | null>(null)
   const nextTask = ref<WorkbenchNextTask | null>(null)
   const activeTasks = ref<WorkbenchState['active_tasks']>([])
-  const records = ref<DurableTask[]>([])
   const loading = ref(false)
 
   // --- workbench UI state -------------------------------------------------
   const selectedKey = ref<string | null>(null)
-  const tab = ref<'chapters' | 'preview' | 'records'>('chapters')
   const filter = ref<'all' | 'pending' | 'adjusted'>('all')
   const query = ref('')
   const page = ref(1)
@@ -359,18 +355,6 @@ export function useTextFormatWorkbench() {
     void loadPreview(chapters.value.find((c) => c.key === key) ?? null)
   })
 
-  // --- 处理记录 tab ----------------------------------------------------------
-  async function loadRecords(): Promise<void> {
-    const projectId = project.activeProjectId
-    if (!projectId) return
-    try {
-      const all = await listProjectDurableTasks(projectId)
-      records.value = all.filter((t) => FLOW_TASK_TYPES.has(t.task_type))
-    } catch {
-      // Records are supplementary; state is the source of truth.
-    }
-  }
-
   function resetWorkbench() {
     loadToken += 1
     previewToken += 1
@@ -379,7 +363,6 @@ export function useTextFormatWorkbench() {
     version.value = null
     nextTask.value = null
     activeTasks.value = []
-    records.value = []
     selectedKey.value = null
     preview.value = { key: null, status: 'idle', text: '', error: '' }
     page.value = 1
@@ -409,14 +392,14 @@ export function useTextFormatWorkbench() {
 
   return {
     // state
-    phase, flow, version, nextTask, activeTasks, records, loading,
+    phase, flow, version, nextTask, activeTasks, loading,
     chapters, filteredChapters, pagedChapters, pageCount, page, pageSize,
-    tab, filter, query, selectedKey, marksBusy, preview,
+    filter, query, selectedKey, marksBusy, preview,
     // derived
     pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
     isMarked, currentChapter, chapterMatters, chapterFile, versionMatters,
     // actions
-    resume, startFlow, retryFailedStage, toggleMark, loadPreview, loadRecords,
+    resume, startFlow, retryFailedStage, toggleMark, loadPreview,
     selectChapter: (key: string | null) => { selectedKey.value = key },
   }
 }

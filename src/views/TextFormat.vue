@@ -7,7 +7,6 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
-import { retryDurableTask, type DurableTask } from '@/api/durableTasks'
 import { stageLabel, modeLabel, chapterBriefLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
 
@@ -15,15 +14,7 @@ import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Progress from '@/components/ui/Progress.vue'
-import ScrollArea from '@/components/ui/ScrollArea.vue'
-import StatusPill from '@/components/ui/StatusPill.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
-import Table from '@/components/ui/Table.vue'
-import TableBody from '@/components/ui/TableBody.vue'
-import TableCell from '@/components/ui/TableCell.vue'
-import TableHead from '@/components/ui/TableHead.vue'
-import TableHeader from '@/components/ui/TableHeader.vue'
-import TableRow from '@/components/ui/TableRow.vue'
 import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Search, Settings2, X } from 'lucide-vue-next'
 
 import ChapterTable from '@/views/textformat/ChapterTable.vue'
@@ -38,12 +29,12 @@ const { push: toast } = useToast()
 
 // Top-level bindings: template refs must be unwrapped at the setup level.
 const {
-  phase, flow, version, nextTask, activeTasks, records, loading,
+  phase, flow, version, nextTask, activeTasks, loading,
   filteredChapters, pagedChapters, pageCount, page, pageSize,
-  tab, filter, query, selectedKey, marksBusy, preview,
+  filter, query, selectedKey, marksBusy, preview,
   pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
   isMarked, currentChapter, chapterMatters, chapterFile, versionMatters,
-  resume, retryFailedStage, toggleMark, selectChapter, loadRecords, startFlow,
+  retryFailedStage, toggleMark, selectChapter, startFlow,
 } = useTextFormatWorkbench()
 
 // --- file selection --------------------------------------------------------
@@ -147,19 +138,6 @@ function goNext() {
   router.push('/script')
 }
 
-// --- 处理记录 tab --------------------------------------------------------------
-watch(tab, (t) => {
-  if (t === 'records') void loadRecords()
-})
-async function retryRecord(task: DurableTask) {
-  try {
-    await retryDurableTask(task.id)
-    await resume()
-  } catch {
-    toast({ title: '重试请求失败', variant: 'destructive' })
-  }
-}
-
 // --- selection / drawer (narrow layout) ---------------------------------------
 const isNarrow = ref(false)
 const drawerOpen = ref(false)
@@ -251,15 +229,6 @@ function onDrawerKeydown(event: KeyboardEvent) {
 }
 
 // --- derived display bits -------------------------------------------------------
-type RecordTone = 'positive' | 'warning' | 'negative' | 'neutral'
-function recordStatus(task: DurableTask): { label: string; tone: RecordTone } {
-  if (task.status === 'succeeded') return { label: '已完成', tone: 'positive' }
-  if (task.status === 'failed' || task.status === 'timeout') return { label: '失败', tone: 'negative' }
-  if (task.status === 'cancelled') return { label: '已取消', tone: 'neutral' }
-  if (task.status === 'paused') return { label: '已暂停', tone: 'neutral' }
-  return { label: '进行中', tone: 'warning' }
-}
-
 const detailMatters = computed(() =>
   currentChapter.value ? chapterMatters(currentChapter.value) : [],
 )
@@ -305,8 +274,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <header class="page-header mb-5">
+  <div class="wb-page space-y-4">
+    <header class="page-header mb-5 shrink-0">
       <div>
         <p class="eyebrow">Pipeline · Text</p>
         <h1 class="page-title">排版与分册</h1>
@@ -373,7 +342,7 @@ onBeforeUnmount(() => {
     </Alert>
 
     <!-- 结果摘要 -->
-    <div v-if="phase === 'ready' && version" class="glass-panel p-4">
+    <div v-if="phase === 'ready' && version" class="glass-panel p-4 shrink-0">
       <div class="flex flex-wrap items-center gap-x-8 gap-y-3">
         <!-- 状态块 -->
         <div class="flex shrink-0 items-center gap-3">
@@ -435,29 +404,14 @@ onBeforeUnmount(() => {
     </template>
 
     <!-- 工作区 -->
-    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[440px] flex-col overflow-hidden">
-      <div class="flex items-center gap-1 border-b px-4" role="tablist" aria-label="工作区标签">
-        <button
-          v-for="t in [['chapters', '章节结果'], ['preview', '文本预览'], ['records', '处理记录']] as const"
-          :key="t[0]"
-          type="button"
-          role="tab"
-          class="wb-tab"
-          :aria-selected="tab === t[0]"
-          :class="{ 'wb-tab-active': tab === t[0] }"
-          @click="tab = t[0]"
-        >
-          {{ t[1] }}
-        </button>
-      </div>
-
+    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[440px] flex-1 flex-col overflow-hidden">
       <div
         class="min-h-0 flex-1"
         :inert="drawerOpen || undefined"
-        @keydown="tab === 'chapters' && onKeyNav($event)"
+        @keydown="onKeyNav($event)"
       >
         <!-- 章节结果 -->
-        <div v-show="tab === 'chapters'" class="wb-grid h-full">
+        <div class="wb-grid h-full">
           <div class="wb-main flex min-h-0 flex-col">
             <div class="filter-seg flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
               <div class="relative">
@@ -519,107 +473,6 @@ onBeforeUnmount(() => {
             />
           </aside>
         </div>
-
-        <!-- 文本预览 -->
-        <div v-show="tab === 'preview'" class="flex h-full gap-4 px-5 py-4">
-          <nav v-if="currentChapter" class="w-56 shrink-0" aria-label="章节跳转">
-            <p class="mb-2 text-xs font-medium text-muted-foreground">章节跳转</p>
-            <ScrollArea class="h-[calc(100%-24px)] rounded-md border">
-              <button
-                v-for="c in filteredChapters"
-                :key="c.key ?? c.seq"
-                type="button"
-                class="block w-full truncate px-2 py-1 text-left text-xs hover:bg-accent"
-                :class="{ 'bg-accent font-medium': c.key === selectedKey }"
-                @click="c.key && onChapterSelect(c.key)"
-              >
-                {{ c.seq }}. {{ c.title || '无标题' }}
-              </button>
-            </ScrollArea>
-          </nav>
-          <div class="preview-body min-w-0 flex-1">
-            <div v-if="!currentChapter" class="flex h-full items-center justify-center text-sm text-muted-foreground">
-              在左侧选择章节查看正文
-            </div>
-            <template v-else>
-              <div v-if="preview.status === 'loading'" class="flex h-40 items-center justify-center gap-2 text-sm text-muted-foreground">
-                <Loader2 class="h-4 w-4 animate-spin" />
-                加载正文中…
-              </div>
-              <Alert v-else-if="preview.status === 'error'" variant="destructive">
-                <AlertTriangle class="h-4 w-4 shrink-0" />
-                <p>{{ preview.error }}</p>
-              </Alert>
-              <pre v-else-if="preview.status === 'ready'" class="max-w-[800px] whitespace-pre-wrap rounded-md border bg-background p-4 text-sm leading-7">
-{{ preview.text }}</pre>
-              <div v-else class="flex h-40 items-center justify-center text-sm text-muted-foreground">
-                加载正文中…
-              </div>
-            </template>
-          </div>
-        </div>
-
-        <!-- 处理记录 -->
-        <div v-show="tab === 'records'" class="h-full space-y-5 overflow-y-auto px-5 py-4">
-          <section>
-            <h3 class="mb-2 text-sm font-medium">流水线任务</h3>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead class="w-24">阶段</TableHead>
-                  <TableHead class="w-24">状态</TableHead>
-                  <TableHead class="w-28">进度</TableHead>
-                  <TableHead>说明</TableHead>
-                  <TableHead class="w-24 text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow v-for="task in records" :key="task.id">
-                  <TableCell class="text-sm">{{ stageLabel(task.task_type.split('.')[1]) }}</TableCell>
-                  <TableCell>
-                    <StatusPill :label="recordStatus(task).label" :tone="recordStatus(task).tone" />
-                  </TableCell>
-                  <TableCell class="text-xs tabular-nums text-muted-foreground">
-                    {{ Math.round((task.progress ?? 0) * 100) }}%
-                  </TableCell>
-                  <TableCell class="max-w-[320px] truncate text-xs text-muted-foreground" :title="task.error_message">
-                    {{ task.error_message || '—' }}
-                  </TableCell>
-                  <TableCell class="text-right">
-                    <Button
-                      v-if="task.status === 'failed' || task.status === 'timeout'"
-                      variant="outline"
-                      size="sm"
-                      class="h-7 px-2"
-                      @click="retryRecord(task)"
-                    >
-                      重试
-                    </Button>
-                    <span v-else class="text-xs text-muted-foreground">—</span>
-                  </TableCell>
-                </TableRow>
-                <TableRow v-if="!records.length">
-                  <TableCell colspan="5" class="h-16 text-center text-sm text-muted-foreground">暂无记录</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </section>
-          <section v-if="version.report.removed.length">
-            <h3 class="mb-2 text-sm font-medium">已删除的重复章节（{{ version.report.removed.length }}）</h3>
-            <ul class="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
-              <li v-for="(r, i) in version.report.removed" :key="i">
-                第{{ r.numStr }}章 {{ r.title || '（无标题）' }}
-                <span>（{{ r.kind === 'truncated' ? '正文与前一章完全相同，已截除重复部分' : '重复章节，未写出' }}）</span>
-              </li>
-            </ul>
-          </section>
-          <section v-if="version.report.warnings.length">
-            <h3 class="mb-2 text-sm font-medium">引擎提示（{{ version.report.warnings.length }}）</h3>
-            <ul class="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
-              <li v-for="(w, i) in version.report.warnings" :key="i">{{ w.detail || w.type }}</li>
-            </ul>
-          </section>
-        </div>
       </div>
     </div>
 
@@ -629,7 +482,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 底栏 -->
-    <div class="bottom-bar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
+    <div class="bottom-bar glass-panel flex flex-wrap items-center gap-3 px-4 py-3 shrink-0">
       <span v-if="phase === 'ready' && version" class="flex items-center gap-2 text-xs">
         <span class="h-2 w-2 rounded-full bg-emerald-500" />
         <span class="font-medium">结果已保存</span>
@@ -718,29 +571,22 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 页面定高撑满视口（扣除 .app-content 上下 padding）：工作区 flex-1 吃掉底部空隙，底栏贴底；
+   小视口下工作区内部滚动兜底。用 vh 而非 dvh：宿主窗口容器高度等价 100vh，
+   dvh 在此环境比容器矮，会残留底部空隙。 */
+.wb-page {
+  display: flex;
+  flex-direction: column;
+  /* 抵消 .app-content 的 64px 底 padding，让底栏贴到窗口下缘、工作区多占这段高度。 */
+  margin-bottom: -64px;
+  height: calc(100vh - clamp(28px, 4vw, 52px));
+}
 .wb-filebar {
   border-radius: 0.75rem;
+  flex-shrink: 0;
 }
 .wb-workspace {
   border-radius: 0.75rem;
-  /* 固定显示区域：按视口高度约束，长正文/长表格在内部滚动，不再把页面撑开。
-     476px ≈ 上栈（页头+文件栏+摘要）350 + 间距 16 + 底栏 62 + 内容底 padding 44 + 余量；
-     min-h 兜底小视口。 */
-  height: calc(100vh - 476px);
-  height: calc(100dvh - 476px);
-}
-.wb-tab {
-  padding: 0.5rem 0.875rem;
-  font-size: 0.875rem;
-  color: var(--muted-foreground);
-  border-bottom: 2px solid transparent;
-}
-.wb-tab:hover {
-  color: var(--foreground);
-}
-.wb-tab-active {
-  color: var(--foreground);
-  border-bottom-color: hsl(var(--primary));
 }
 .filter-pill {
   padding: 0.3rem 0.75rem;
@@ -768,8 +614,5 @@ onBeforeUnmount(() => {
 }
 .bottom-bar {
   border-radius: 0.75rem;
-  position: sticky;
-  bottom: 0.75rem;
-  z-index: 10;
 }
 </style>
