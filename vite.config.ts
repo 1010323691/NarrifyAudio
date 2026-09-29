@@ -13,7 +13,9 @@ export default defineConfig({
   },
   clearScreen: false,
   server: {
-    port: 5173,
+    // Respect a PORT env override (sandboxed previews assign a port this way);
+    // defaults to 5173 exactly as before.
+    port: process.env.PORT ? Number(process.env.PORT) : 5173,
     strictPort: true,
     proxy: {
       '/api': {

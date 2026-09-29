@@ -1590,12 +1590,36 @@ def smart_repair(text: str, chapters: list[dict]) -> dict:
             acts.append("gap_absorbed")
         if not acts:
             acts.append("kept")
+        # Fine-grained reasons (workbench review matters): the action list
+        # collapses several distinct causes into one label (e.g. duplicate_kept
+        # comes both from repeated numbers and from internal duplicate-title
+        # splits); reasons keep them apart so the UI can explain each accurately.
+        reasons: list[str] = []
+        if c.get("_split_kind") == "range_split":
+            reasons.append("range")
+        elif c.get("_split_kind") == "inferred_split":
+            reasons.append("inferred")
+        elif c.get("_split_kind") == "mechanical_split":
+            reasons.append("mechanical")
+        elif c.get("_split_kind") == "duplicate_split":
+            reasons.append("duplicate_split")
+        if c.get("_truncated"):
+            reasons.append("truncated")
+        if c["num"] in dup_nums:
+            reasons.append("duplicate_number")
+        if c["num"] is not None and c["num"] != c["final_num"]:
+            reasons.append("renumbered")
+        if is_inferred_seg or c.get("_gap_before"):
+            reasons.append("gap_absorbed")
+        if not reasons:
+            reasons.append("kept")
         conf = min(levels, key=_conf_rank.get)  # lowest confidence level wins
         c["repair"] = {
             "orig_num": c["num"],
             "orig_numStr": c["numStr"],
             "final_num": c["final_num"],
             "actions": acts,
+            "reasons": reasons,
             "confidence": conf,
         }
         actions.append(
@@ -1606,6 +1630,7 @@ def smart_repair(text: str, chapters: list[dict]) -> dict:
                 "orig_title": c["title"],
                 "final_num": c["final_num"],
                 "actions": acts,
+                "reasons": reasons,
                 "confidence": conf,
             }
         )

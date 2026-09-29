@@ -41,6 +41,32 @@ def test_upgrade_from_empty_database_to_head(tmp_path, preexisting_hold_table):
         assert "next_attempt_at" in {column["name"] for column in inspector.get_columns("tasks")}
         assert {"directory_key", "last_selected_at"} <= {column["name"] for column in inspector.get_columns("projects")}
         assert "uq_quota_hold_attempt_operation" in {index["name"] for index in inspector.get_indexes("quota_holds")}
+        assert {"text_format_flows", "chapter_review_marks"} <= set(inspector.get_table_names())
+        assert "manifest" in {column["name"] for column in inspector.get_columns("text_format_flows")}
+        assert "force_by_length" in {column["name"] for column in inspector.get_columns("text_format_flows")}
+        assert "uq_review_marks_task_chapter" in {index["name"] for index in inspector.get_indexes("chapter_review_marks")}
+    finally:
+        engine.dispose()
+
+
+def test_upgrade_downgrade_upgrade_chapter_review_marks(tmp_path):
+    """0017 must roundtrip: downgrade removes both workbench tables, upgrade restores them."""
+    database = tmp_path / "workbench-roundtrip.db"
+    env = {**os.environ, "NARRIFY_DATABASE_URL": f"sqlite:///{database.as_posix()}", "NARRIFY_AUTO_CREATE_SCHEMA": "false"}
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "downgrade", "0016_unique_active_project_names")
+    engine = sa.create_engine(env["NARRIFY_DATABASE_URL"])
+    try:
+        inspector = sa.inspect(engine)
+        assert "text_format_flows" not in inspector.get_table_names()
+        assert "chapter_review_marks" not in inspector.get_table_names()
+    finally:
+        engine.dispose()
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
+    engine = sa.create_engine(env["NARRIFY_DATABASE_URL"])
+    try:
+        inspector = sa.inspect(engine)
+        assert {"text_format_flows", "chapter_review_marks"} <= set(inspector.get_table_names())
     finally:
         engine.dispose()
 

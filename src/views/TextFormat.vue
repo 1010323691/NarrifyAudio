@@ -1,48 +1,51 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
-import { submitDurableTask } from '@/api/durableTasks'
-import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
-import { downloadFile, pickFile } from '@/utils/fileops'
+import { useProjectGate } from '@/composables/useProjectGate'
+import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
+import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
-import type {
-  BookAnalyzeResult,
-  BookChapter,
-  BookSmartSplitResult,
-  BookSplitResult,
-  SmartConfidence,
-  TextFormatResult,
-  TextToggles,
-} from '@/types'
+import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
+import type { TextToggles } from '@/types'
+import type { SplitMode } from '@/api/textFormat'
 
 import Button from '@/components/ui/Button.vue'
-import Card from '@/components/ui/Card.vue'
-import CardHeader from '@/components/ui/CardHeader.vue'
-import CardTitle from '@/components/ui/CardTitle.vue'
-import CardContent from '@/components/ui/CardContent.vue'
-import CardFooter from '@/components/ui/CardFooter.vue'
 import Alert from '@/components/ui/Alert.vue'
-import ScrollArea from '@/components/ui/ScrollArea.vue'
+import Badge from '@/components/ui/Badge.vue'
+import Progress from '@/components/ui/Progress.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
-import Table from '@/components/ui/Table.vue'
-import TableHeader from '@/components/ui/TableHeader.vue'
-import TableBody from '@/components/ui/TableBody.vue'
-import TableRow from '@/components/ui/TableRow.vue'
-import TableHead from '@/components/ui/TableHead.vue'
-import TableCell from '@/components/ui/TableCell.vue'
-import { useProjectGate } from '@/composables/useProjectGate'
-import { FileText, ArrowRight, RefreshCw, Download, Scissors, AlertTriangle, Sparkles } from 'lucide-vue-next'
+import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Search, Settings2, X } from 'lucide-vue-next'
+
+import ChapterTable from '@/views/textformat/ChapterTable.vue'
+import ChapterDetailPanel from '@/views/textformat/ChapterDetailPanel.vue'
+import Pager from '@/views/textformat/Pager.vue'
+import FormatSettingsDialog from '@/views/textformat/FormatSettingsDialog.vue'
 
 const router = useRouter()
 const settings = useSettingsStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
-const waitForTask = useDurableTaskWait()
 
-const file = ref<{ path: string; name: string; size?: number; file_id?: string; project_id?: string } | null>(null)
-const toggles = reactive<TextToggles>({
+// Top-level bindings: template refs must be unwrapped at the setup level.
+const {
+  phase, flow, version, nextTask, activeTasks, loading,
+  filteredChapters, pagedChapters, pageCount, page, pageSize,
+  filter, query, reasonFilter, sameOrigNum, reasonOptions,
+  selectedKey, marksBusy, preview,
+  pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
+  isMarked, currentChapter, chapterMatters, chapterFile, versionMatters, dupInfo,
+  retryFailedStage, toggleMark, selectChapter, startFlow,
+} = useTextFormatWorkbench()
+
+// --- file selection --------------------------------------------------------
+const sourceFile = ref<PickedFile | null>(null)
+/** 分册方式：处理设置弹窗的两选一（刷新后回填最近一次运行的选择）。 */
+const splitMode = ref<SplitMode>('smart')
+const settingsOpen = ref(false)
+
+const DEFAULT_TOGGLES: TextToggles = {
   keep_single_space: false,
   sentence_break: true,
   dialogue_separate: true,
@@ -52,773 +55,657 @@ const toggles = reactive<TextToggles>({
   punct_lone_ascii: false,
   punct_quotes: false,
   punct_dash: false,
-  live: true,
-})
-
-const busyFormat = ref(false)
-const formatResult = ref<TextFormatResult | null>(null)
-const busyAnalyze = ref(false)
-const analysis = ref<BookAnalyzeResult | null>(null)
-const busySplit = ref(false)
-const splitResult = ref<BookSplitResult | null>(null)
-const busySmart = ref(false)
-const smartResult = ref<BookSmartSplitResult | null>(null)
-// 章节序号警告（缺号/重号/乱序）被「不处理，继续」关闭（非阻断，仅为提示）。
-const seqWarningDismissed = ref(false)
-// 智能识别覆盖分析前，原始排版识别到的章节数（章节分析卡「已覆盖」注记用）。
-const smartOriginalCount = ref<number | null>(null)
-const error = ref('')
-
-const zeroChapters = computed(() => !!analysis.value && analysis.value.chapter_count === 0)
-// 记录 splitResult 由哪条路径产出（零章节提示条的切换依据）。
-const splitVia = ref<'whole' | 'length' | 'smart' | null>(null)
-// 零章节整本分册已完成（提示条从「选择」切换为「已按整本处理」注记）。
-const wholeBookDone = computed(() => zeroChapters.value && !!splitResult.value && splitVia.value === 'whole')
-// 零章节按字数分册已完成。
-const lengthSplitDone = computed(() => zeroChapters.value && !!splitResult.value && splitVia.value === 'length')
-// 按字数分册完成注记：实际册均字数（边界不足降册数时会大于目标，不用固定文案）。
-const lengthPerVolumeChars = computed(() => {
-  const files = splitResult.value?.files ?? []
-  if (!files.length) return null
-  const total = files.reduce((sum, f) => sum + (f.chars || 0), 0)
-  return Math.round(total / files.length)
-})
-// 按字数分册的引擎警告（降册数 / 整本降级）——完成注记里展示，降级事实可见。
-const lengthWarnings = ref<string[]>([])
-// 按字数分册目标字数：管理员后台可配的平台功能默认值（默认 3000）——提示文案展示用。
-const lengthTargetChars = computed(() => settings.config?.split?.length_target ?? 3000)
-const showSeqWarning = computed(
-  () => !!analysis.value && !zeroChapters.value && analysis.value.sequence.hasIssues && !seqWarningDismissed.value,
-)
-// 分册 = 按智能识别结果（智能识别完成后才可分册）。
-const splitEnabled = computed(
-  () =>
-    !!formatResult.value &&
-    !!smartResult.value &&
-    !!analysis.value &&
-    analysis.value.chapter_count > 0 &&
-    !busySplit.value &&
-    projectSet.value,
-)
-// 智能识别：需要排版产物 + 至少一个章节；任何环节忙碌时禁用。
-const smartEnabled = computed(
-  () =>
-    !!formatResult.value &&
-    !!analysis.value &&
-    !zeroChapters.value &&
-    projectSet.value &&
-    !busyFormat.value &&
-    !busyAnalyze.value &&
-    !busySplit.value &&
-    !busySmart.value,
-)
-// 序号体检有问题时高亮「智能识别」按钮（提示而非自动执行）。
-const seqHasIssues = computed(() => !!analysis.value && analysis.value.sequence.hasIssues)
-
-onMounted(async () => {
-  if (!settings.loaded) await settings.load()
-  if (settings.config) Object.assign(toggles, settings.config.text)
-})
-
-// 清掉排版之后的所有状态（分析 / 分册 / 选择标记）——重新排版或换文件后
-// 一切结果必须重新推导，绝不让旧状态存活。
-function resetDownstream() {
-  formatResult.value = null
-  analysis.value = null
-  splitResult.value = null
-  smartResult.value = null
-  splitVia.value = null
-  lengthWarnings.value = []
-  error.value = ''
-  seqWarningDismissed.value = false
-  smartOriginalCount.value = null
+  live: false,
 }
+const currentConfig = computed<TextToggles>(() => settings.config?.text ?? DEFAULT_TOGGLES)
+const lengthTarget = computed(() => settings.config?.split?.length_target ?? 3000)
 
-// 「重新上传原文」：整页回到选文件状态（排版开关保留——它们是持久配置）。
-function resetPage() {
-  file.value = null
-  resetDownstream()
-}
+// Keep the dialog's 分册方式 choice in sync with the last run's flow.
+watch(flow, (f) => {
+  if (!f) return
+  splitMode.value = f.force_by_length ? 'by_length' : 'smart'
+  // 刷新恢复：文件栏回填流程的源文件（「重新处理」无需重新选择文件）。
+  // 源文件已不存在（老数据 adopt 的哨兵 ID 等）时不回填假文件名——那样
+  // 「重新处理」只会 404；留空让用户重新选择真实文件即可。
+  if (!sourceFile.value?.file_id && f.source_file_id && f.source_file_name) {
+    sourceFile.value = { path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name }
+  }
+})
 
+// --- actions ----------------------------------------------------------------
 async function choose() {
   const picked = await pickFile([{ name: '文本文件', extensions: ['txt'] }])
-  if (picked) {
-    file.value = { path: picked.path, name: picked.name, size: picked.size, file_id: picked.file_id || picked.id, project_id: picked.project_id }
-    resetDownstream()
-  }
+  if (picked) sourceFile.value = picked
 }
 
-// 排版 → 自动章节分析（对排版输出分析；排版失败则不分析）。
-async function run(auto = false) {
-  if (!file.value || busyFormat.value || busyAnalyze.value) return
-  busyFormat.value = true
-  resetDownstream()
-  try {
-    if (!file.value.file_id || !file.value.project_id) {
-      throw new Error('上传文件未建立项目归属，请重新选择文件。')
-    }
-    const submitted = await submitDurableTask({
-      project_id: file.value.project_id,
-      task_type: 'text.format',
-      payload: {
-        input_file_id: file.value.file_id,
-        config: { ...toggles },
-        publish_module: '01_input',
-        output_name: `${file.value.name.replace(/\.[^.]+$/, '')}_排版.txt`,
-      },
-      idempotency_key: `text-format:${file.value.file_id}:${crypto.randomUUID()}`,
-    })
-    const task = await waitForTask.wait(submitted.id)
-    if (task.status !== 'succeeded' || !task.result) {
-      throw new Error(task.error_message || '持久化排版任务失败')
-    }
-    const result = task.result
-    formatResult.value = {
-      source: file.value.path,
-      encoding: 'UTF-8',
-      output_path: result.path || result.name || '',
-      stats: result.stats as TextFormatResult['stats'],
-      preview: String(result.preview || ''),
-      full_length: Number(result.full_length || 0),
-      file_id: result.file_id,
-      project_id: file.value.project_id,
-    }
-    if (!auto) toast({ title: '排版完成', variant: 'success', description: formatResult.value.output_path })
-    await analyzeAfterFormat()
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    error.value = e?.message || '排版失败'
-    if (!auto) toast({ title: '排版失败', variant: 'destructive', description: error.value })
-  } finally {
-    busyFormat.value = false
-  }
-}
-
-async function analyzeAfterFormat() {
-  if (!formatResult.value?.file_id || !formatResult.value.project_id) {
-    error.value = '排版产物未建立项目归属，无法提交章节分析。'
+async function start(restart: boolean) {
+  if (!sourceFile.value?.file_id) {
+    toast({ title: '请先选择要处理的 TXT 文件', variant: 'destructive' })
     return
   }
-  busyAnalyze.value = true
-  try {
-    const submitted = await submitDurableTask({
-      project_id: formatResult.value.project_id,
-      task_type: 'book.analyze',
-      payload: {
-        input_file_id: formatResult.value.file_id,
-      },
-      idempotency_key: `book-analyze:${formatResult.value.file_id}:${crypto.randomUUID()}`,
-    })
-    const task = await waitForTask.wait(submitted.id)
-    if (task.status !== 'succeeded' || !task.result?.analysis) {
-      throw new Error(task.error_message || '持久化章节分析任务失败')
-    }
-    analysis.value = task.result.analysis as BookAnalyzeResult
-    if (analysis.value.raw_chapter_count !== undefined) {
-      smartOriginalCount.value = analysis.value.raw_chapter_count
-    }
-    // 零章节的 error 是「提示」而非失败——由整本/重传提示条承接，不进 error。
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    error.value = e?.message || '章节分析失败'
-    toast({ title: '章节分析失败', variant: 'destructive', description: error.value })
-  } finally {
-    busyAnalyze.value = false
-  }
-}
-
-// Live: reformat (and re-analyze) automatically when a toggle flips and a
-// result already exists.
-watch(
-  () => Object.values(toggles).join('|'),
-  () => {
-    if (toggles.live && file.value && formatResult.value) run(true)
-  },
-)
-
-function proceedAnyway() {
-  seqWarningDismissed.value = true
-}
-
-function applyFinalAnalysis(chapters: BookChapter[], filenames: string[]) {
-  if (!analysis.value) return
-  analysis.value = {
-    ...analysis.value,
-    chapters,
-    chapter_count: chapters.length,
-    filenames,
-    sequence: {
-      count: chapters.length,
-      parseable: chapters.length,
-      unparseable: 0,
-      first: chapters[0]?.num ?? null,
-      last: chapters[chapters.length - 1]?.num ?? null,
-      gaps: [],
-      duplicates: [],
-      disorder: [],
-      hasIssues: false,
-    },
-    error: null,
-  }
-}
-
-// 分册 = 按智能识别结果拆分：后端重跑确定性修复（同输入 → 同结果），写出与
-// 智能识别完全相同的「第 NNN 章 标题.txt」文件（不产生第二套命名）。
-async function split() {
-  if (!splitEnabled.value || !formatResult.value) return
-  busySplit.value = true
-  error.value = ''
-  try {
-    const result = await runSplitTask({ smart: true })
-    const r = toBookSplitResult(result)
-    splitVia.value = 'smart'
-    splitResult.value = r
-    if (r.chapters?.length) applyFinalAnalysis(r.chapters, r.files.map((f) => f.name))
-    toast({ title: '分册完成', variant: 'success', description: `已按智能识别结果生成 ${r.file_count} 个分册文件` })
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    error.value = e?.message || '分册失败'
-    toast({ title: '分册失败', variant: 'destructive', description: error.value })
-  } finally {
-    busySplit.value = false
-  }
-}
-
-// 零章节「不处理，按整本继续」：直接写单个 `<base> 全书.txt`（唯一不经智能识别的分册路径）。
-async function runWholeBook() {
-  if (!formatResult.value || !analysis.value || !projectSet.value || busySplit.value) return
-  busySplit.value = true
-  error.value = ''
-  try {
-    const r = toBookSplitResult(await runSplitTask({ whole_book: true }))
-    splitVia.value = 'whole'
-    splitResult.value = r
-    toast({ title: '整本分册完成', variant: 'success', description: `已生成整本文件 ${r.files[0]?.name ?? ''}` })
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    error.value = e?.message || '整本分册失败'
-    toast({ title: '整本分册失败', variant: 'destructive', description: error.value })
-  } finally {
-    busySplit.value = false
-  }
-}
-
-// 零章节默认路径「按字数分册」：未识别出章节结构时按平台配置的目标字数
-//（默认 3000 字/册，管理员后台可调）平均拆分（6200 字 → 3100+3100，不出现
-// 短尾章），切点只落段落/句子边界，不切段落、不截断句子；边界不足时自动降册数。
-async function runByLength() {
-  if (!formatResult.value || !projectSet.value || busySplit.value) return
-  busySplit.value = true
-  error.value = ''
-  try {
-    const raw = await runSplitTask({ by_length: true })
-    const r = toBookSplitResult(raw)
-    const report = raw.report as Record<string, unknown> | undefined
-    const rawWarnings = Array.isArray(report?.warnings) ? (report as Record<string, unknown>).warnings : []
-    lengthWarnings.value = (rawWarnings as Array<Record<string, unknown>>)
-      .map((w) => String(w.detail ?? w.type ?? ''))
-      .filter(Boolean)
-    const perVolume = r.files.length ? Math.round(r.files.reduce((s, f) => s + f.chars, 0) / r.files.length) : null
-    splitVia.value = 'length'
-    splitResult.value = r
-    toast({
-      title: '按字数分册完成',
-      variant: 'success',
-      description: perVolume
-        ? `已拆分为 ${r.file_count} 册（册均约 ${perVolume} 字，不切段落、不截断句子）`
-        : `已拆分为 ${r.file_count} 册`,
-    })
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    error.value = e?.message || '按字数分册失败'
-    toast({ title: '按字数分册失败', variant: 'destructive', description: error.value })
-  } finally {
-    busySplit.value = false
-  }
-}
-
-// 智能识别：机械修复章节结构（重编号 1..N、拆分异常长章、删除重复章），
-// 输出「第 NNN 章 标题.txt」+ 修复报告。与分册同落 02_split_text/。
-async function runSmart() {
-  if (!smartEnabled.value || !formatResult.value || !analysis.value) return
-  busySmart.value = true
-  error.value = ''
-  try {
-    const result = await runSplitTask({ smart: true })
-    const r = toBookSmartSplitResult(result)
-    smartResult.value = r
-    // 用修复结果覆盖原始排版识别：此后「章节分析」卡展示修复后的 1..N 结构
-    //（缺号/重号/乱序警告随之消失），「开始分册」也按这份结果拆分文件。
-    smartOriginalCount.value = analysis.value.raw_chapter_count ?? analysis.value.chapter_count
-    applyFinalAnalysis(r.chapters.map((c, i) => ({
-        seq: i + 1,
-        num: c.final_num,
-        numStr: String(c.final_num),
-        title: c.title,
-        chars: c.chars,
-      })), r.files.map((f) => f.name))
-    seqWarningDismissed.value = false
-    const removedN = r.report.removed.length
-    toast({
-      title: r.status === 'clean' ? '智能识别完成：未检测到异常' : '智能识别完成',
-      variant: 'success',
-      description: removedN
-        ? `生成 ${r.file_count} 个文件，删除 ${removedN} 个重复章节（详见报告）`
-        : `生成 ${r.file_count} 个文件`,
-    })
-  } catch (e: any) {
-    if (e?.name === 'AbortError') return
-    error.value = e?.message || '智能识别失败'
-    toast({ title: '智能识别失败', variant: 'destructive', description: error.value })
-  } finally {
-    busySmart.value = false
-  }
-}
-
-async function formatAndRecognize() {
-  await run()
-  if (!formatResult.value || !analysis.value) return
-  if (zeroChapters.value) {
-    // 未识别出章节结构：默认走「按字数分册」（约 3000 字/册、字数平均）。
-    await runByLength()
-    return
-  }
-  await runSmart()
-}
-
-async function runSplitTask(payload: { smart?: boolean; whole_book?: boolean; by_length?: boolean }) {
-  if (!formatResult.value?.file_id || !formatResult.value.project_id) {
-    throw new Error('排版产物未建立项目归属，无法提交分册任务。')
-  }
-  const submitted = await submitDurableTask({
-    project_id: formatResult.value.project_id,
-    task_type: 'book.split',
-    payload: {
-      input_file_id: formatResult.value.file_id,
-      ...payload,
-    },
-    idempotency_key: `book-split:${formatResult.value.file_id}:${payload.by_length ? 'length' : payload.smart ? 'smart' : 'whole'}:${crypto.randomUUID()}`,
+  if (!settings.loaded) await settings.load()
+  const ok = await startFlow({
+    sourceFile: { file_id: sourceFile.value.file_id, name: sourceFile.value.name },
+    config: currentConfig.value,
+    forceByLength: splitMode.value === 'by_length',
+    restart,
   })
-  const task = await waitForTask.wait(submitted.id)
-  if (task.status !== 'succeeded' || !task.result) {
-    throw new Error(task.error_message || '持久化分册任务失败')
-  }
-  return task.result
-}
-
-function toBookSplitResult(result: Record<string, unknown>): BookSplitResult {
-  const files = Array.isArray(result.files) ? result.files : []
-  return {
-    output_dir: String(result.output_dir || ''),
-    file_count: Number(result.file_count || files.length),
-    files: files.map((item) => {
-      const file = item as Record<string, unknown>
-      return { name: String(file.name || ''), path: String(file.path || ''), chars: Number(file.chars || 0) }
-    }),
-    chapters: Array.isArray(result.chapters) ? result.chapters as BookChapter[] : [],
+  if (ok && restart) {
+    toast({ title: '已重新开始处理', variant: 'success', description: '若本次处理失败，可「重试该阶段」或再次重新处理' })
   }
 }
 
-function toBookSmartSplitResult(result: Record<string, unknown>): BookSmartSplitResult {
-  const files = Array.isArray(result.files) ? result.files : []
-  return {
-    status: result.status === 'clean' ? 'clean' : 'ok',
-    output_dir: String(result.output_dir || ''),
-    file_count: Number(result.file_count || files.length),
-    files: files.map((item) => {
-      const file = item as Record<string, unknown>
-      return { name: String(file.name || ''), path: String(file.path || ''), chars: Number(file.chars || 0) }
-    }),
-    chapters: Array.isArray(result.chapters) ? result.chapters as BookSmartSplitResult['chapters'] : [],
-    report: (result.report || { actions: [], warnings: [], removed: [] }) as BookSmartSplitResult['report'],
-    baseline_chars: typeof result.baseline_chars === 'number' ? result.baseline_chars : null,
-    original_count: Number(result.original_count || 0),
-    expected_format: String(result.expected_format || ''),
-  }
+// 「选择 TXT」只受 无项目/处理中/有活跃任务/加载 限制——不能要求已选文件，否则永远点不开。
+const chooseDisabled = computed(
+  () =>
+    !projectSet.value ||
+    phase.value === 'processing' ||
+    activeTasks.value.length > 0 ||
+    loading.value,
+)
+const startDisabled = computed(
+  () =>
+    !projectSet.value ||
+    !sourceFile.value?.file_id ||
+    phase.value === 'processing' ||
+    activeTasks.value.length > 0 ||
+    loading.value,
+)
+const startLabel = computed(() => (phase.value === 'empty' ? '开始处理' : '重新处理'))
+
+async function onSettingsSave(draft: TextToggles) {
+  const ok = await settings.save({ text: draft })
+  toast({
+    title: ok ? '设置已保存' : '保存失败',
+    variant: ok ? 'success' : 'destructive',
+    description: ok ? '将在下一次重新处理时生效' : '请稍后重试',
+  })
+  if (ok) settingsOpen.value = false
 }
 
+async function onSettingsReprocess(draft: TextToggles, mode: SplitMode) {
+  // 「保存并重新处理」：先落盘设置再按新设置重跑——否则项目配置与流程快照分叉，
+  // 摘要行的「设置已修改，重新处理后生效」徽标会常驻。保存失败不启动处理。
+  const ok = await settings.save({ text: draft })
+  if (!ok) {
+    toast({ title: '保存设置失败，请重试', variant: 'destructive', description: '请稍后重试' })
+    return
+  }
+  splitMode.value = mode
+  settingsOpen.value = false
+  if (!sourceFile.value?.file_id) {
+    toast({ title: '请先选择要处理的 TXT 文件', variant: 'destructive' })
+    return
+  }
+  void startFlow({
+    sourceFile: { file_id: sourceFile.value.file_id, name: sourceFile.value.name },
+    config: draft,
+    forceByLength: mode === 'by_length',
+    restart: true,
+  })
+}
+
+// --- navigation -----------------------------------------------------------------
 function goNext() {
-  if (splitResult.value?.files.length || smartResult.value?.files.length) router.push('/script')
-  else toast({ title: '请先完成分册或智能识别', variant: 'destructive' })
+  if (!canEnterParse.value) return
+  router.push('/script')
 }
 
-// 修复动作 / 置信度的展示文案。
-const ACTION_LABELS: Record<string, string> = {
-  range_split: '范围标题补齐',
-  inferred_split: '推断拆分',
-  duplicate_kept: '保留重复章',
-  duplicate_truncated: '截除重复章',
-  renumbered: '重编号',
-  gap_absorbed: '吸收跳号',
-  kept: '保留',
-  length_split: '按字数拆分',
-}
-const CONFIDENCE_LABELS: Record<SmartConfidence, string> = { high: '高', medium: '中', low: '低' }
-function actionLabels(actions: string[]) {
-  return actions.map((a) => ACTION_LABELS[a] ?? a).join('、')
-}
-function confidenceClass(c: SmartConfidence) {
-  return c === 'high'
-    ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
-    : c === 'medium'
-      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
-      : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+// --- selection / drawer (narrow layout) ---------------------------------------
+const isNarrow = ref(false)
+const drawerOpen = ref(false)
+const drawerPanel = ref<HTMLElement | null>(null)
+let drawerReturnFocus: HTMLElement | null = null
+let mediaMql: MediaQueryList | null = null
+const mediaHandler = (e: MediaQueryListEvent) => {
+  isNarrow.value = e.matches
+  if (!e.matches) drawerOpen.value = false
 }
 
-function download(p: string) {
-  downloadFile('01_input', p)
+function onChapterSelect(key: string) {
+  selectChapter(key)
+  if (isNarrow.value) {
+    drawerReturnFocus = document.activeElement as HTMLElement | null
+    drawerOpen.value = true
+  }
 }
+
+watch(drawerOpen, (open) => {
+  if (open) {
+    document.body.style.overflow = 'hidden'
+    void nextTick().then(() => {
+      drawerPanel.value?.querySelector<HTMLElement>('button:not([disabled])')?.focus()
+    })
+  } else {
+    document.body.style.overflow = ''
+    drawerReturnFocus?.focus()
+    drawerReturnFocus = null
+  }
+})
+
+function ensurePageFor(key: string) {
+  const idx = filteredChapters.value.findIndex((c) => c.key === key)
+  if (idx >= 0) page.value = Math.floor(idx / pageSize.value) + 1
+}
+
+// 列表与详情同步定位：选中变化（上/下一章、键盘、核对后自动跳过）时，
+// 章节表翻页（既有逻辑）之外再把选中行滚入可视区并高亮，避免左右脱节。
+const tableScrollEl = ref<HTMLElement | null>(null)
+async function scrollSelectedRow() {
+  await nextTick()
+  tableScrollEl.value?.querySelector<HTMLElement>('[data-state="selected"]')
+    ?.scrollIntoView({ block: 'nearest' })
+}
+watch(selectedKey, (key) => {
+  if (key) void scrollSelectedRow()
+})
+
+/** 「查看同号章节」：表格只展示该原编号组便于集中比较，选中行保持在视图内。 */
+function onShowSameNumber(origNum: number) {
+  sameOrigNum.value = origNum
+  if (selectedKey.value) {
+    ensurePageFor(selectedKey.value)
+    void scrollSelectedRow()
+  }
+}
+const sameGroupCount = computed(() => {
+  if (sameOrigNum.value == null) return 0
+  return (version.value?.chapters ?? []).filter((c) => c.orig_num === sameOrigNum.value).length
+})
+
+function moveSelection(delta: number) {
+  const list = filteredChapters.value
+  if (!list.length) return
+  const idx = list.findIndex((c) => c.key === selectedKey.value)
+  const next = list[(idx + delta + list.length) % list.length]
+  if (next) {
+    ensurePageFor(next.key ?? '')
+    selectChapter(next.key ?? null)
+  }
+}
+
+function onKeyNav(event: KeyboardEvent) {
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    moveSelection(-1)
+  } else if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    moveSelection(1)
+  }
+}
+
+function onDrawerKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    drawerOpen.value = false
+    return
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    moveSelection(-1)
+    return
+  }
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    moveSelection(1)
+    return
+  }
+  if (event.key !== 'Tab' || !drawerPanel.value) return
+  const focusable = [...drawerPanel.value.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled])',
+  )]
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+// --- derived display bits -------------------------------------------------------
+const detailMatters = computed(() =>
+  currentChapter.value ? chapterMatters(currentChapter.value) : [],
+)
+const detailFileName = computed(() => (currentChapter.value ? chapterFile(currentChapter.value)?.name ?? null : null))
+
+const detailHasPrev = computed(() => {
+  const idx = filteredChapters.value.findIndex((c) => c.key === selectedKey.value)
+  return idx > 0
+})
+const detailHasNext = computed(() => {
+  const idx = filteredChapters.value.findIndex((c) => c.key === selectedKey.value)
+  return idx >= 0 && idx < filteredChapters.value.length - 1
+})
+const canReadVersion = computed(() => version.value?.version_status === 'current')
+const adjustedCount = computed(() => version.value?.chapters.filter((c) => c.adjusted).length ?? 0)
+const chooseLabel = computed(() => (sourceFile.value ? '更换文件' : '选择 TXT'))
+
+// 章节号补齐位数：以最大章节号位数为标准（339 章 → 第001章）
+const chapterNumPad = computed(() => chapterNumWidth(version.value?.chapters ?? []))
+
+// 已核对 key 集合：表格「核对状态」徽标随标记实时变化（pending 是后端静态字段）。
+const markedKeySet = computed(() => new Set(version.value?.review_marks ?? []))
+
+// 「核对原因」列：key → 简要标签（编号重复类附同原编号章节数）
+const chapterBriefs = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  const v = version.value
+  if (!v) return map
+  const byOrig = new Map<number | null, number>()
+  for (const c of v.chapters) {
+    if (c.orig_num != null) byOrig.set(c.orig_num, (byOrig.get(c.orig_num) ?? 0) + 1)
+  }
+  for (const c of v.chapters) {
+    if (c.key) map[c.key] = chapterBriefLabel(c.reasons, byOrig.get(c.orig_num) ?? 0)
+  }
+  return map
+})
+
+// --- lifecycle --------------------------------------------------------------------
+onMounted(() => {
+  mediaMql = window.matchMedia('(max-width: 1100px)')
+  isNarrow.value = mediaMql.matches
+  mediaMql.addEventListener('change', mediaHandler)
+})
+onBeforeUnmount(() => {
+  mediaMql?.removeEventListener('change', mediaHandler)
+  if (drawerOpen.value) document.body.style.overflow = ''
+})
 </script>
 
 <template>
-  <div class="space-y-4">
-    <header class="page-header mb-5">
+  <div class="wb-page space-y-2">
+    <header class="page-header shrink-0">
       <div>
         <p class="eyebrow">Pipeline · Text</p>
         <h1 class="page-title">排版与分册</h1>
-        <p class="page-description">整理原文、识别章节并拆分为分册文本。</p>
+        <p class="page-description">整理原文、拆分分册并逐章核对；可离开页面，稍后回来自动继续。</p>
       </div>
     </header>
 
     <ProjectGateAlert />
 
-    <!-- 选择文件 -->
-    <Card>
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2">
-          <FileText class="h-5 w-5" />选择文件
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="flex items-center gap-3">
-        <Button @click="choose" :disabled="busyFormat || busyAnalyze || busySplit || busySmart">选择 TXT 文件</Button>
-        <template v-if="file">
-          <span class="text-sm font-medium">{{ file.name }}</span>
-        </template>
-        <span v-else class="text-sm text-muted-foreground">尚未选择文件</span>
-      </CardContent>
-    </Card>
-
-    <!-- 操作 -->
-    <div class="flex flex-wrap items-center gap-x-5 gap-y-3">
-      <Button
-        @click="formatAndRecognize"
-        :disabled="busyFormat || busyAnalyze || busySmart || busySplit || !file || !projectSet"
-        :class="seqHasIssues && !smartResult ? 'ring-2 ring-amber-400/80' : ''"
-        :title="seqHasIssues ? '章节号存在问题（缺号/重号/乱序），点击按物理顺序修复' : ''"
-      >
-        <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': busyFormat || busyAnalyze || busySmart }" />
-        {{ busyFormat ? '排版中…' : busyAnalyze ? '章节分析中…' : busySmart ? '智能识别中…' : '排版识别' }}
-      </Button>
-      <Button @click="split" :disabled="!splitEnabled">
-        <Scissors class="h-4 w-4" />
-        {{ busySplit ? '分册中…' : '分册（智能识别结果）' }}
-      </Button>
-      <Button
-        variant="outline"
-        @click="goNext"
-        :disabled="!(splitResult || smartResult)"
-      >
-        前往下一步<ArrowRight class="h-4 w-4" />
-      </Button>
+    <!-- 文件栏：ready 阶段并入结果摘要行，独立行只在其余阶段展示，省出的高度留给章节列表 -->
+    <div v-if="!(phase === 'ready' && version)" class="wb-filebar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
+      <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <FileText class="h-5 w-5" />
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="truncate text-sm font-semibold" :title="sourceFile?.name">
+          {{ sourceFile?.name ?? '尚未选择文件' }}
+        </p>
+        <p class="truncate text-xs text-muted-foreground">
+          <template v-if="sourceFile">
+            TXT<template v-if="sourceFile.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
+          </template>
+          <template v-else>点击右侧「选择 TXT」上传原稿</template>
+        </p>
+      </div>
+      <div class="flex shrink-0 items-center gap-2">
+        <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">
+          {{ chooseLabel }}
+        </Button>
+        <Button variant="outline" size="sm" @click="settingsOpen = true">
+          <Settings2 class="h-4 w-4" />
+          处理设置
+        </Button>
+      </div>
     </div>
 
-    <Alert v-if="error" variant="destructive">{{ error }}</Alert>
-
-    <!-- 零章节：按字数分册（默认）/ 整本继续 / 重新上传（完成任一分册后切换为注记） -->
-    <Alert v-else-if="zeroChapters && !wholeBookDone && !lengthSplitDone" variant="warning">
-      <AlertTriangle class="h-4 w-4 shrink-0" />
-      <div class="space-y-2">
-        <p>{{ analysis?.error }}</p>
-        <div class="flex gap-2">
-          <Button size="sm" :disabled="busySplit || !formatResult || !projectSet" @click="runByLength">
-            {{ busySplit ? '分册中…' : `按字数分册（约 ${lengthTargetChars} 字/册）` }}
-          </Button>
-          <Button size="sm" variant="outline" :disabled="busySplit || !formatResult || !projectSet" @click="runWholeBook">
-            不处理，按整本继续
-          </Button>
-          <Button size="sm" variant="outline" @click="resetPage">重新上传原文</Button>
+    <!-- 处理中 -->
+    <div v-if="phase === 'processing' && flow" class="glass-panel space-y-3 p-5">
+      <div class="flex items-center gap-3">
+        <Loader2 class="h-5 w-5 shrink-0 animate-spin" />
+        <div class="min-w-0 flex-1">
+          <p class="text-sm font-medium">正在{{ stageLabel(nextTask?.stage) }}…</p>
+          <p class="text-xs text-muted-foreground">
+            排版 → 章节分析 → 分册 自动推进，可离开本页面，稍后回来会继续（不会重复处理）。
+          </p>
         </div>
-      </div>
-    </Alert>
-    <Alert v-else-if="lengthSplitDone" variant="info">
-      <div class="flex flex-wrap items-center gap-2">
-        <span>
-          已按字数分册完成：共 {{ splitResult?.file_count }} 册
-          <template v-if="lengthPerVolumeChars != null">（册均约 {{ lengthPerVolumeChars }} 字，未切段落、未截断句子）</template>。
+        <span v-if="nextTask" class="shrink-0 text-xs tabular-nums text-muted-foreground">
+          {{ Math.round((nextTask.progress ?? 0) * 100) }}%
         </span>
-        <Button size="sm" variant="outline" :disabled="busySplit" @click="runWholeBook">改按整本处理</Button>
       </div>
-      <p v-for="w in lengthWarnings" :key="w" class="mt-1 text-xs text-amber-600 dark:text-amber-400">{{ w }}</p>
-    </Alert>
-    <Alert v-else-if="wholeBookDone" variant="info">
-      已按整本处理：全部文本已写为单个文件 <code class="text-xs">{{ splitResult?.files[0]?.name }}</code>。
+      <Progress :value="nextTask?.progress ?? 0" aria-label="流水线进度" />
+    </div>
+
+    <!-- 失败 -->
+    <Alert v-if="phase === 'failed'" variant="destructive">
+      <AlertTriangle class="h-4 w-4 shrink-0" />
+      <div>
+        <p class="font-medium">流程失败：{{ flow?.error || '未知原因' }}</p>
+        <div class="mt-2 flex gap-2">
+          <Button size="sm" :disabled="loading" @click="retryFailedStage()">重试该阶段</Button>
+          <Button size="sm" variant="outline" :disabled="startDisabled" @click="start(true)">重新处理</Button>
+        </div>
+      </div>
     </Alert>
 
-    <!-- 排版结果 -->
-    <Card v-if="formatResult">
-      <CardHeader>
-        <CardTitle>排版结果</CardTitle>
-        <p class="text-xs text-muted-foreground">编码 {{ formatResult.encoding }} · 输出 {{ formatResult.output_path }}</p>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <div class="flex flex-wrap gap-6">
-          <div>
-            <div class="text-2xl font-bold">{{ formatNumber(formatResult.stats.chars) }}</div>
-            <div class="text-xs text-muted-foreground">字数</div>
+    <!-- 结果摘要 -->
+    <div v-if="phase === 'ready' && version" class="glass-panel p-4 shrink-0">
+      <div class="flex flex-wrap items-center gap-x-8 gap-y-3">
+        <!-- 状态块 -->
+        <div class="flex shrink-0 items-center gap-3">
+          <div class="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
+            <CheckCircle2 class="h-5 w-5" />
           </div>
           <div>
-            <div class="text-2xl font-bold">{{ formatNumber(formatResult.stats.paras) }}</div>
-            <div class="text-xs text-muted-foreground">段落</div>
-          </div>
-          <div>
-            <div class="text-2xl font-bold">{{ formatNumber(formatResult.stats.chapters) }}</div>
-            <div class="text-xs text-muted-foreground">章节标题</div>
-          </div>
-        </div>
-        <div>
-          <div class="mb-1 text-xs text-muted-foreground">预览（前 2000 字）</div>
-          <ScrollArea class="h-64 rounded-md border">
-            <pre class="whitespace-pre-wrap p-3 text-sm">{{ formatResult.preview }}</pre>
-          </ScrollArea>
-        </div>
-      </CardContent>
-      <CardFooter>
-        <Button variant="outline" size="sm" @click="download(formatResult.output_path)">
-          <Download class="h-4 w-4" />下载
-        </Button>
-      </CardFooter>
-    </Card>
-
-    <!-- 章节分析 -->
-    <Card v-if="analysis && !zeroChapters">
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2"><Scissors class="h-5 w-5" />章节分析</CardTitle>
-        <div class="flex flex-wrap gap-4 pt-1 text-sm">
-          <span>总字数 <b>{{ formatNumber(analysis.total_chars) }}</b></span>
-          <span>章节 <b>{{ analysis.chapter_count }}</b></span>
-          <span>编码 <b>{{ analysis.encoding }}</b></span>
-        </div>
-        <p v-if="analysis.repair_status && analysis.raw_chapter_count !== undefined && analysis.raw_chapter_count !== analysis.chapter_count" class="pt-1 text-xs text-emerald-600 dark:text-emerald-400">
-          已按智能识别修复结果覆盖（原 {{ smartOriginalCount }} 章 → {{ analysis.chapter_count }} 章），分册将按此结果拆分
-        </p>
-      </CardHeader>
-      <CardContent class="space-y-5">
-        <!-- 章节序号警告（非阻断）：列出具体缺号/重号/乱序 + 预期格式 + 两个选择 -->
-        <Alert v-if="showSeqWarning" variant="warning">
-          <AlertTriangle class="h-4 w-4 shrink-0" />
-          <div class="space-y-1">
-            <p class="font-medium">检测到章节号问题（不影响分册，可继续）</p>
-            <ul class="list-disc pl-5 space-y-0.5">
-              <li v-for="(g, gi) in analysis.sequence.gaps" :key="'g' + gi">
-                缺号：第{{ g.after }}章之后缺少 {{ g.missing.map((n) => `第${n}章`).join('、') }}
-              </li>
-              <li v-for="(d, di) in analysis.sequence.duplicates" :key="'d' + di">
-                重号：第{{ d.num }}章重复出现（第{{ d.seq }}个章节）
-              </li>
-              <li v-for="(d, di) in analysis.sequence.disorder" :key="'o' + di">
-                乱序：第{{ d.num }}章出现在第{{ d.prevNum }}章之后
-              </li>
-            </ul>
-            <p class="text-muted-foreground">
-              系统识别的章节格式：{{ analysis.expected_format }}。每章切一个文件，分册编号为顺序号，缺号不影响分册。
+            <p class="text-sm font-semibold text-emerald-700 dark:text-emerald-400">
+              {{ version.version_status === 'stale' ? '版本已被覆盖' : '处理完成' }}
             </p>
-            <div class="flex gap-2 pt-1">
-              <Button size="sm" @click="proceedAnyway">不处理，继续</Button>
-              <Button size="sm" variant="outline" @click="resetPage">重新上传原文</Button>
+            <p class="text-xs text-muted-foreground">{{ version.version_status === 'stale' ? '仅可核对，正文不可读' : '已保存到项目' }}</p>
+          </div>
+        </div>
+        <!-- 统计 -->
+        <div class="flex flex-wrap items-center gap-y-2">
+          <div class="px-6">
+            <div class="text-2xl font-bold tabular-nums">{{ formatNumber(version.total_chars) }}</div>
+            <div class="text-xs text-muted-foreground">总字数</div>
+          </div>
+          <div class="border-l px-6">
+            <div class="text-2xl font-bold tabular-nums">{{ version.chapters.length }}</div>
+            <div class="text-xs text-muted-foreground">最终章节</div>
+          </div>
+          <div class="border-l px-6">
+            <div class="text-2xl font-bold tabular-nums" :class="{ 'text-amber-600 dark:text-amber-400': pendingCount > 0 }">
+              {{ pendingCount }}
+            </div>
+            <div class="text-xs text-muted-foreground">待核对</div>
+          </div>
+          <div class="border-l px-6">
+            <div class="text-2xl font-bold tabular-nums">{{ markedCount }}</div>
+            <div class="text-xs text-muted-foreground">已核对</div>
+          </div>
+        </div>
+        <div class="ml-auto flex shrink-0 flex-wrap items-center gap-4 text-xs">
+          <Badge v-if="version.version_status === 'stale'" variant="destructive">已被新版本覆盖</Badge>
+          <Badge v-if="settingsDirty" variant="warning">设置已修改，重新处理后生效</Badge>
+          <!-- 文件信息并入摘要行（原独立文件栏）：加竖向分隔与更宽的间距，避免贴住统计数字显得拥挤 -->
+          <div class="h-8 w-px shrink-0 bg-border" aria-hidden="true" />
+          <div class="flex min-w-0 items-center gap-3">
+            <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <FileText class="h-5 w-5" />
+            </div>
+            <div class="min-w-0">
+              <p class="max-w-[22rem] truncate text-sm font-medium" :title="sourceFile?.name">{{ sourceFile?.name ?? '尚未选择文件' }}</p>
+              <p class="text-muted-foreground">
+                TXT<template v-if="sourceFile?.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
+              </p>
             </div>
           </div>
-        </Alert>
-
-        <!-- 章节列表（含分册文件名预览） -->
-        <div v-if="analysis.chapters.length">
-          <div class="mb-2 text-sm font-medium">章节列表（{{ analysis.chapter_count }}）</div>
-          <ScrollArea class="h-72 rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead class="w-14">#</TableHead>
-                  <TableHead class="w-24">编号</TableHead>
-                  <TableHead>标题</TableHead>
-                  <TableHead class="w-24 text-right">字数</TableHead>
-                  <TableHead>分册文件</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow v-for="c in analysis.chapters" :key="c.seq">
-                  <TableCell class="text-muted-foreground">{{ c.seq }}</TableCell>
-                  <TableCell>第{{ c.numStr }}章</TableCell>
-                  <TableCell class="max-w-[240px] truncate" :title="c.title">{{ c.title || '—' }}</TableCell>
-                  <TableCell class="text-right">{{ formatNumber(c.chars) }}</TableCell>
-                  <TableCell class="max-w-[320px] truncate" :title="analysis.filenames[c.seq - 1]">
-                    {{ analysis.filenames[c.seq - 1] }}
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </ScrollArea>
-        </div>
-      </CardContent>
-    </Card>
-
-    <!-- 零章节：将输出的单个文件 -->
-    <Card v-else-if="analysis && zeroChapters">
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2"><Scissors class="h-5 w-5" />章节分析</CardTitle>
-        <div class="flex flex-wrap gap-4 pt-1 text-sm">
-          <span>总字数 <b>{{ formatNumber(analysis.total_chars) }}</b></span>
-          <span>章节 <b>0</b></span>
-          <span>编码 <b>{{ analysis.encoding }}</b></span>
-        </div>
-      </CardHeader>
-      <CardContent>
-        <p class="text-sm text-muted-foreground">
-          未检测到任何章节（系统识别的格式：{{ analysis.expected_format }}）。可「按字数分册」（约 {{ lengthTargetChars }} 字/册、字数平均、不切段落、不截断句子），或「不处理，按整本继续」、重新上传原文。
-        </p>
-      </CardContent>
-    </Card>
-
-    <!-- 分册结果 -->
-    <Card v-if="splitResult">
-      <CardHeader>
-        <CardTitle>分册结果</CardTitle>
-        <p class="text-xs text-muted-foreground">
-          共 {{ splitResult.file_count }} 个文件 · 输出目录 {{ splitResult.output_dir }}
-        </p>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>文件名</TableHead>
-              <TableHead class="w-24 text-right">字数</TableHead>
-              <TableHead class="w-40"></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableRow v-for="f in splitResult.files" :key="f.path">
-              <TableCell class="max-w-[420px] truncate">{{ f.name }}</TableCell>
-              <TableCell class="text-right">{{ formatNumber(f.chars) }}</TableCell>
-              <TableCell class="text-right">
-                <div class="flex items-center justify-end gap-1">
-                  <Button variant="ghost" size="sm" @click="downloadFile('02_split_text', f.path)">
-                    <Download class="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </CardContent>
-      <CardFooter>
-        <Button size="sm" @click="goNext">前往下一步（文本解析）<ArrowRight class="h-4 w-4" /></Button>
-      </CardFooter>
-    </Card>
-
-    <!-- 智能识别结果 -->
-    <Card v-if="smartResult">
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2"><Sparkles class="h-5 w-5" />智能识别</CardTitle>
-        <div class="flex flex-wrap gap-4 pt-1 text-sm">
-          <span>状态 <b>{{ smartResult.status === 'clean' ? '未检测到异常' : '已修复' }}</b></span>
-          <span>原章节 <b>{{ smartResult.original_count }}</b></span>
-          <span>最终章节 <b>{{ smartResult.chapters.length }}</b></span>
-          <span v-if="smartResult.baseline_chars != null">
-            章节长度基线 <b>{{ formatNumber(Math.round(smartResult.baseline_chars)) }}</b> 字
-          </span>
-        </div>
-      </CardHeader>
-      <CardContent class="space-y-5">
-        <!-- 警告（推断拆分 / 无法处理的异常长章 / 重复章后的跳号 等） -->
-        <div v-if="smartResult.report.warnings.length" class="space-y-2">
-          <Alert v-for="(w, wi) in smartResult.report.warnings" :key="wi" variant="warning">
-            <AlertTriangle class="h-4 w-4 shrink-0" />
-            {{ w.detail }}
-          </Alert>
-        </div>
-
-        <!-- 被删除的重复章 -->
-        <Alert v-if="smartResult.report.removed.length" variant="info">
-          <div class="space-y-1">
-            <p class="font-medium">已删除的重复章节（{{ smartResult.report.removed.length }}）</p>
-            <ul class="list-disc pl-5 space-y-0.5">
-              <li v-for="(r, ri) in smartResult.report.removed" :key="ri">
-                第{{ r.numStr }}章 {{ r.title || '' }}
-                <span class="text-muted-foreground">
-                  （{{ r.kind === 'truncated' ? '正文与前一章完全相同，已截除重复部分' : '重复章节，未写出' }}）
-                </span>
-              </li>
-            </ul>
+          <div class="flex shrink-0 items-center gap-3">
+            <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
+            <Button variant="outline" size="sm" @click="settingsOpen = true">
+              <Settings2 class="h-4 w-4" />
+              处理设置
+            </Button>
           </div>
-        </Alert>
-
-        <!-- 修复记录 -->
-        <div>
-          <div class="mb-2 text-sm font-medium">修复记录（原号 → 新号）</div>
-          <ScrollArea class="h-64 rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead class="w-14">#</TableHead>
-                  <TableHead class="w-24">原号</TableHead>
-                  <TableHead class="w-24">新号</TableHead>
-                  <TableHead>标题</TableHead>
-                  <TableHead>操作</TableHead>
-                  <TableHead class="w-20">置信</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow v-for="a in smartResult.report.actions" :key="a.seq">
-                  <TableCell class="text-muted-foreground">{{ a.seq }}</TableCell>
-                  <TableCell>第{{ a.orig_numStr }}章</TableCell>
-                  <TableCell>第{{ String(a.final_num).padStart(3, '0') }}章</TableCell>
-                  <TableCell class="max-w-[200px] truncate" :title="a.orig_title">{{ a.orig_title || '—' }}</TableCell>
-                  <TableCell class="max-w-[260px] truncate" :title="actionLabels(a.actions)">{{ actionLabels(a.actions) }}</TableCell>
-                  <TableCell>
-                    <span
-                      class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium"
-                      :class="confidenceClass(a.confidence)"
-                    >{{ CONFIDENCE_LABELS[a.confidence] }}</span>
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </ScrollArea>
         </div>
+      </div>
+    </div>
 
-        <!-- 输出文件 -->
-        <div>
-          <div class="mb-2 text-sm font-medium">输出文件（{{ smartResult.file_count }}）</div>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>文件名</TableHead>
-                <TableHead class="w-24 text-right">字数</TableHead>
-                <TableHead class="w-40"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <TableRow v-for="f in smartResult.files" :key="f.path">
-                <TableCell class="max-w-[420px] truncate">{{ f.name }}</TableCell>
-                <TableCell class="text-right">{{ formatNumber(f.chars) }}</TableCell>
-                <TableCell class="text-right">
-                  <div class="flex items-center justify-end gap-1">
-                    <Button variant="ghost" size="sm" @click="downloadFile('02_split_text', f.path)">
-                      <Download class="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
+    <!-- 版本级事项 -->
+    <template v-if="phase === 'ready' && version">
+      <Alert v-if="version.version_status === 'stale'" variant="destructive">
+        <AlertTriangle class="h-4 w-4 shrink-0" />
+        <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
+      </Alert>
+      <Alert
+        v-for="matter in versionMatters"
+        :key="matter.id"
+        :variant="matter.advisory ? 'warning' : 'info'"
+        class="text-xs"
+      >
+        <AlertTriangle v-if="matter.advisory" class="h-4 w-4 shrink-0" />
+        <p>{{ matter.text }}</p>
+      </Alert>
+    </template>
+
+    <!-- 工作区 -->
+    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[440px] flex-1 flex-col overflow-hidden">
+      <div
+        class="min-h-0 flex-1"
+        :inert="drawerOpen || undefined"
+        @keydown="onKeyNav($event)"
+      >
+        <!-- 章节结果 -->
+        <div class="wb-grid h-full">
+          <div class="wb-main flex min-h-0 flex-col">
+            <div class="filter-seg flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
+              <div class="relative">
+                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  v-model="query"
+                  type="search"
+                  placeholder="搜索章节号或标题"
+                  class="h-8 w-56 rounded-md border bg-background pl-8 pr-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  aria-label="搜索章节"
+                />
+              </div>
+              <button
+                v-for="f in [['all', '全部'], ['pending', '待核对'], ['adjusted', '已调整']] as const"
+                :key="f[0]"
+                type="button"
+                class="filter-pill tabular-nums"
+                :class="{ 'filter-pill-active': filter === f[0] && sameOrigNum == null }"
+                @click="filter = f[0]"
+              >
+                {{ f[1] }}
+                <span class="ml-1">
+                  {{ f[0] === 'all' ? version.chapters.length : f[0] === 'pending' ? pendingCount : adjustedCount }}
+                </span>
+              </button>
+              <select
+                v-model="reasonFilter"
+                class="h-8 rounded-md border bg-background px-1.5 text-xs"
+                aria-label="按核对原因筛选"
+              >
+                <option value="">全部原因</option>
+                <option v-for="r in reasonOptions" :key="r" :value="r">{{ reasonLabel(r) }}</option>
+              </select>
+              <button
+                v-if="sameOrigNum != null"
+                type="button"
+                class="filter-pill filter-pill-active flex items-center gap-1.5"
+                title="点击退出同号章节比较"
+                @click="sameOrigNum = null"
+              >
+                原第{{ sameOrigNum }}章 · {{ sameGroupCount }} 章
+                <X class="h-3 w-3" />
+              </button>
+            </div>
+            <div ref="tableScrollEl" class="min-h-0 flex-1 overflow-y-auto">
+              <ChapterTable
+                :chapters="pagedChapters"
+                :selected-key="selectedKey"
+                :reason-briefs="chapterBriefs"
+                :num-pad="chapterNumPad"
+                :marked-keys="markedKeySet"
+                @select="onChapterSelect"
+              />
+            </div>
+            <Pager
+              class="border-t px-4 py-2"
+              :page="page"
+              :page-count="pageCount"
+              :total="filteredChapters.length"
+              :page-size="pageSize"
+              @update:page="(p: number) => (page = p)"
+              @update:page-size="(s: number) => { pageSize = s; page = 1 }"
+            />
+          </div>
+          <aside v-if="!isNarrow" class="wb-detail min-h-0 border-l-2 bg-muted/20" aria-label="章节详情">
+            <ChapterDetailPanel
+              :chapter="currentChapter"
+              :matters="detailMatters"
+              :file-name="detailFileName"
+              :preview="preview"
+              :marked="isMarked(selectedKey)"
+              :marks-busy="!!marksBusy"
+              :can-read="canReadVersion"
+              :num-pad="chapterNumPad"
+              :dup-info="dupInfo"
+              :has-prev="detailHasPrev"
+              :has-next="detailHasNext"
+              @prev="moveSelection(-1)"
+              @next="moveSelection(1)"
+              @mark="() => toggleMark(selectedKey)"
+              @show-same-number="onShowSameNumber"
+            />
+          </aside>
         </div>
+      </div>
+    </div>
 
-        <p class="text-xs text-muted-foreground">
-          低置信拆分或删除的章节请对照上方报告核对。
-        </p>
-      </CardContent>
-      <CardFooter>
-        <Button size="sm" @click="goNext">前往下一步（文本解析）<ArrowRight class="h-4 w-4" /></Button>
-      </CardFooter>
-    </Card>
+    <!-- 空态提示 -->
+    <div v-if="phase === 'empty'" class="glass-panel p-8 text-center text-sm text-muted-foreground">
+      选择 TXT 文件后点击底部「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。
+    </div>
+
+    <!-- 底栏 -->
+    <div class="bottom-bar glass-panel flex flex-wrap items-center gap-3 px-4 py-3 shrink-0">
+      <span v-if="phase === 'ready' && version" class="flex items-center gap-2 text-xs">
+        <span class="h-2 w-2 rounded-full bg-emerald-500" />
+        <span class="font-medium">结果已保存</span>
+        <span class="text-muted-foreground">
+          {{ pendingCount > 0 ? `还有 ${pendingCount} 章待核对` : '全部章节已核对' }}
+        </span>
+      </span>
+      <span v-else-if="phase === 'processing'" class="flex items-center gap-2 text-xs">
+        <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
+        <span>处理中，可离开页面，回来自动继续</span>
+      </span>
+      <span v-else-if="phase === 'failed'" class="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
+        <span class="h-2 w-2 rounded-full bg-red-500" />
+        <span>处理失败，请重试或重新处理</span>
+      </span>
+      <span v-else class="text-xs text-muted-foreground">
+        选择 TXT 文件后点击「开始处理」
+      </span>
+      <div class="ml-auto flex items-center gap-2">
+        <Button
+          size="sm"
+          :variant="phase === 'empty' ? 'default' : 'outline'"
+          :disabled="startDisabled"
+          @click="start(phase !== 'empty')"
+        >
+          <Loader2 v-if="phase === 'processing'" class="h-4 w-4 animate-spin" />
+          <RefreshCw v-else class="h-4 w-4" />
+          {{ phase === 'processing' ? '处理中…' : startLabel }}
+        </Button>
+        <Button size="sm" :disabled="!canEnterParse" :title="enterParseReason" @click="goNext">
+          进入文本解析
+          <ArrowRight class="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+
+    <!-- 窄屏详情抽屉 -->
+    <Teleport to="body">
+      <div v-if="drawerOpen && isNarrow" class="fixed inset-0 z-40">
+        <div class="absolute inset-0 bg-black/40" @click="drawerOpen = false" />
+        <section
+          ref="drawerPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="章节详情"
+          class="absolute right-0 top-0 flex h-full w-[85vw] max-w-[380px] flex-col border-l bg-background shadow-xl"
+          @keydown="onDrawerKeydown"
+        >
+          <header class="flex items-center justify-between border-b px-4 py-3">
+            <span class="text-sm font-semibold">章节详情</span>
+            <Button variant="ghost" size="icon" class="h-7 w-7" aria-label="关闭详情" @click="drawerOpen = false">
+              <X class="h-4 w-4" />
+            </Button>
+          </header>
+          <div class="min-h-0 flex-1">
+            <ChapterDetailPanel
+              :chapter="currentChapter"
+              :matters="detailMatters"
+              :file-name="detailFileName"
+              :preview="preview"
+              :marked="isMarked(selectedKey)"
+              :marks-busy="!!marksBusy"
+              :can-read="canReadVersion"
+              :num-pad="chapterNumPad"
+              :dup-info="dupInfo"
+              :has-prev="detailHasPrev"
+              :has-next="detailHasNext"
+              @prev="moveSelection(-1)"
+              @next="moveSelection(1)"
+              @mark="() => toggleMark(selectedKey)"
+              @show-same-number="onShowSameNumber"
+            />
+          </div>
+        </section>
+      </div>
+    </Teleport>
+
+    <FormatSettingsDialog
+      :open="settingsOpen"
+      :initial="settings.config?.text ?? null"
+      :length-target="lengthTarget"
+      :busy="phase === 'processing' || activeTasks.length > 0"
+      :split-mode="splitMode"
+      @close="settingsOpen = false"
+      @save="onSettingsSave"
+      @reprocess="onSettingsReprocess"
+    />
   </div>
 </template>
+
+<style scoped>
+/* 页面定高撑满视口（扣除 .app-content 上下 padding）：工作区 flex-1 吃掉底部空隙；
+   底栏不贴死窗口下缘，底部留 8px——与 .wb-page space-y-2 的模块间距一致。
+   小视口下工作区内部滚动兜底。用 vh 而非 dvh：宿主窗口容器高度等价 100vh，
+   dvh 在此环境比容器矮，会残留底部空隙。 */
+.wb-page {
+  display: flex;
+  flex-direction: column;
+  /* 抵消 .app-content 的 64px 底 padding，避免底栏下方再叠出一段可滚动留白。 */
+  margin-bottom: -64px;
+  height: calc(100vh - clamp(28px, 4vw, 52px) - 8px);
+}
+/* 标题区底部留白从全局 28px 收紧：摘要行与章节列表整体上移，多留可视行数（同 .bgm-page 先例）。 */
+.wb-page .page-header {
+  margin-bottom: 8px;
+}
+.wb-filebar {
+  border-radius: 0.75rem;
+  flex-shrink: 0;
+}
+.wb-workspace {
+  border-radius: 0.75rem;
+}
+.filter-pill {
+  padding: 0.3rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: var(--background);
+}
+.filter-pill:hover {
+  color: var(--foreground);
+  border-color: hsl(var(--primary) / 0.4);
+}
+.filter-pill-active {
+  color: hsl(var(--primary));
+  font-weight: 600;
+  background: hsl(var(--primary) / 0.1);
+  border-color: hsl(var(--primary) / 0.35);
+}
+/* 桌面：左章节表 + 右常驻详情（40%）：预览正文与核对说明更好读，左侧标题列相应收窄。 */
+.wb-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40%;
+  gap: 0;
+}
+.bottom-bar {
+  border-radius: 0.75rem;
+}
+</style>

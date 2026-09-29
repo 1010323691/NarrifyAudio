@@ -138,7 +138,7 @@ def test_blank_separated_lines_not_affected_by_sentence_break():
 
 def test_chapter_isolation():
     assert (format_text("夜色沉沉。\n第一章 雪夜\n他推开了门。\n", CFG)["text"]
-            == "夜色沉沉。\n\n第一章雪夜\n\n他推开了门。")
+            == "夜色沉沉。\n\n第一章 雪夜\n\n他推开了门。")
 
 
 def test_chapter_header_spacing_survives_when_detection_disabled():
@@ -161,6 +161,21 @@ def test_chapter_title_negative():
         assert not is_chapter_title(s), s
 
 
+def test_chapter_number_title_space():
+    # 章节号与章节名紧贴 → 中间补一个空格
+    assert format_text("第十九章神秘分阁主", CFG)["text"] == "第十九章 神秘分阁主"
+    assert format_text("第19节 开场", CFG)["text"] == "第19节 开场"
+    assert format_text("【第68章】标题", CFG)["text"] == "【第68章】 标题"
+    # 已有空格/分隔符 → 保持原样，不叠加
+    assert format_text("第十九章 神秘分阁主", CFG)["text"] == "第十九章 神秘分阁主"
+    assert format_text("第十九章：神秘分阁主", CFG)["text"] == "第十九章：神秘分阁主"
+    # 无章节名 → 不产生尾随空格
+    assert format_text("第十九章", CFG)["text"] == "第十九章"
+    # 幂等：再过一遍不变
+    once = format_text("第十九章神秘分阁主", CFG)["text"]
+    assert format_text(once, CFG)["text"] == once
+
+
 # --------------------------------------------------------------------------- #
 # Config variants
 # --------------------------------------------------------------------------- #
@@ -173,7 +188,7 @@ def test_config_variants():
     assert format_text('"你来了。"\n"嗯。"', c)["text"] == '"你来了。""嗯。"'
 
     c = CFG.model_copy(update={"detect_chapters": False})
-    assert format_text("第一章 雪夜\n他推门。", c)["text"] == "第一章雪夜他推门。"
+    assert format_text("第一章 雪夜\n他推门。", c)["text"] == "第一章 雪夜他推门。"
 
     c = CFG.model_copy(update={"punct_lone_ascii": True})
     assert format_text("你好,世界!对吧?", c)["text"] == "你好，世界！对吧？"
@@ -209,9 +224,9 @@ def test_idempotency():
 
 def test_sample_end_to_end():
     r = format_text(SAMPLE, CFG)["text"]
-    assert r.startswith("第一章雪夜\n\n")
+    assert r.startswith("第一章 雪夜\n\n")
     for bad in ("...", "。。", "，，", "??", "!!", "  ", "\t"):
         assert bad not in r, (bad, r)
     assert not re.search(r"^( )", r, re.MULTILINE)
-    assert "第二章重审" in r and "第一章雪夜" in r
+    assert "第二章 重审" in r and "第一章 雪夜" in r
     assert content_of(SAMPLE, CFG) == re.sub(r"\s", "", r)

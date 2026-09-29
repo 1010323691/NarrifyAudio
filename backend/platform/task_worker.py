@@ -458,6 +458,9 @@ def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
     metadata.pop("output_path", None)
     metadata["engine"] = "script.parse"
     metadata["source_file_id"] = item.id
+    # 输入内容指纹：解析页据此判断「同名文件被重新分册覆盖后，旧解析结果已过期」。
+    # 取引擎实际读到的字节（source_path），而不是 DB 行快照。
+    metadata["source_sha256"] = sha256_file(source_path)
     metadata["output_name"] = output_name
     return TaskOutcome(
         temp_path=output_path,
@@ -772,6 +775,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
                 "orig_numStr": "",
                 "final_num": s["seq"],
                 "actions": ["length_split"],
+                "reasons": ["length_split"],
                 "confidence": "high",
             }
             for s in segments
@@ -820,6 +824,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
                 "orig_numStr": chapter.get("repair", {}).get("orig_numStr", chapter.get("numStr", "")),
                 "final_num": chapter.get("final_num", index),
                 "actions": chapter.get("repair", {}).get("actions", ["kept"]),
+                "reasons": chapter.get("repair", {}).get("reasons") or chapter.get("repair", {}).get("actions", ["kept"]),
                 "confidence": chapter.get("repair", {}).get("confidence", "high"),
             }
             for index, chapter in enumerate(repaired, 1)

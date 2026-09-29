@@ -41,7 +41,7 @@ def same_entry_predicate(newer) -> ColumnElement:
     terms = []
     for spec in TASK_TYPES.values():
         keys = spec.entry_identity
-        term = [Task.task_type == spec.name]
+        term = [Task.task_type == spec.name, newer.task_type == spec.name]
         if keys:
             term.append(or_(*[identity_value(Task, key) != NO_IDENTITY for key in keys]))
             term.extend(identity_value(newer, key) == identity_value(Task, key) for key in keys)

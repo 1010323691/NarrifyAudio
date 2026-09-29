@@ -59,7 +59,11 @@ def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> lis
 
 
 @router.get("")
-def list_tasks(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_tasks(project_id: str | None = None, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+    if project_id:
+        # Project-scoped listing (workbench 处理记录 / 恢复): active tasks plus
+        # the recent window, with the same supersede semantics as the global list.
+        return [_task_json(row) for row in _user_tasks(db, user.id, project_id)]
     trashed_project = select(Project.id).where(
         Project.id == Task.project_id,
         Project.owner_id == user.id,

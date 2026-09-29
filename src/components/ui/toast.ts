@@ -6,6 +6,8 @@ export interface ToastItem {
   description?: string
   variant?: 'default' | 'destructive' | 'success'
   duration: number
+  /** Optional one-click action (e.g. 撤销 a just-performed mark). */
+  action?: { label: string; onClick: () => void }
 }
 
 // A module-level reactive list: any component can push; the single <Toaster>
@@ -19,6 +21,7 @@ export function useToast() {
     description?: string
     variant?: ToastItem['variant']
     duration?: number
+    action?: ToastItem['action']
   }) {
     const id = ++seq
     toasts.push({ id, duration: 3200, variant: 'default', ...t })
@@ -30,3 +33,4 @@ export function useToast() {
   }
   return { push, dismiss }
 }
+

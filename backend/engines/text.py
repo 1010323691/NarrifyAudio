@@ -2,7 +2,10 @@
 
 Source: ``TextFormatter/index.html``, the block between the ``__ENGINE_BEGIN__``
 / ``__ENGINE_END__`` markers. The deterministic rules (whitespace / paragraph /
-punctuation / chapter) are reproduced 1:1. The invariant test suite (content
+punctuation / chapter) are reproduced 1:1. One rule added after the port:
+``ensure_title_space`` puts a single space between a chapter number and its
+title when they are attached (第十九章神秘分阁主 → 第十九章 神秘分阁主).
+The invariant test suite (content
 preservation + idempotency) is ported to ``tests/test_text.py`` as the safety net.
 
 ``cfg`` is duck-typed: any object exposing the toggles (see
@@ -112,6 +115,24 @@ def is_chapter_title(line: str) -> bool:
     return bool(CHAPTER_RE.match(line))
 
 
+# Chapter-number → title boundary: when the name is attached directly to the
+# ``第<num><unit>`` marker (no space or punctuation between), insert one space
+# so number and name read separately: 第十九章神秘分阁主 → 第十九章 神秘分阁主.
+# The lookahead leaves already-separated lines (space/：/、/·/-…) untouched,
+# which also makes the insertion idempotent.
+_NUM_TITLE_RE = re.compile(
+    r"^(?:[【〖〔（(「『《<\[［])?[ \t　]*第[ \t　]*"
+    r"[0-9０-９〇零一二三四五六七八九十百千万亿两廿卅]+[ \t　]*"
+    r"(?:章|节|回|卷|集|部|篇|幕|场|折)(?:[】〗〕）)」』》>\]］])?"
+    r"(?=[^\s:：、·\-—])"
+)
+
+
+def ensure_title_space(line: str) -> str:
+    """One space between a chapter number and its title (see ``_NUM_TITLE_RE``)."""
+    return _NUM_TITLE_RE.sub(lambda m: m.group(0) + " ", line, count=1)
+
+
 _SENT_END = re.compile(r"[。！？…“”」』）]")
 
 
@@ -160,6 +181,9 @@ def format_text(text: str, cfg: Any) -> dict:
             ),
             cfg,
         )
+        if chapter_like:
+            # 章节号与章节名的分界补一个空格（第十九章神秘分阁主 → 第十九章 神秘分阁主）
+            norm = ensure_title_space(norm)
         lines.append((norm, is_chapter))
 
     paragraphs: list[str] = []

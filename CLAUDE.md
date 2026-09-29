@@ -34,6 +34,7 @@ npm.cmd run build                # 类型检查 + 生产构建（dist/）
 npm.cmd run build:all            # 前端构建 + 后端 compileall + 分层门禁（lint-imports）
 npm.cmd run lint:imports         # 分层门禁单独运行
 npm.cmd run test:state-isolation # 前端状态隔离回归（node:test 沙箱跑 Pinia store）
+npm.cmd run test:workbench       # 章节核对工作台组合回归（node:test 沙箱跑 useTextFormatWorkbench 恢复/派生/分页逻辑）
 .\.venv\Scripts\python.exe -m pytest backend/tests -n 4 --dist loadscope  # 后端全量测试（4 进程并行，见下方说明）
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py  # 单个文件
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py -k 名称片段  # 单个用例
@@ -80,7 +81,7 @@ TTS 引擎（`tts-engine/tts_worker.py`，约 2300 行）是 one-shot 子进程�
 
 - 哈希路由，两个互不链接的门面：用户工作台（`/`，`MainLayout`，`requiresUser`）与管理控制台（`/admin`，`AdminLayout`，`requiresAdmin`），各有独立登录页与角色守卫（`src/router.ts`）。`meta.projectStage` 视图在无活跃项目时重定向到 dashboard。
 - `src/api/client.ts` 是唯一 HTTP 入口：cookie session + 从 `narrify_csrf` cookie 取 `X-CSRF-Token`。开发走 Vite `/api` 代理；生产默认同源 `/api`（FastAPI 托管 `dist/`，GET catch-all 回 SPA shell，未知 `/api/*` 保持诚实 404）。分域部署在**构建时**设 `VITE_API_BASE` / `VITE_CSRF_COOKIE_NAME`，改完需重新构建。
-- Pinia stores（`src/stores/`）带竞态保护：reset 必须使在途请求失效（旧账号的配置/创建结果不得复活）。这些场景由 `scripts/test-state-isolation.mjs`（`npm run test:state-isolation`，node:test + vm 沙箱加载真实 store 代码）钉住——改 store 行为时该文件是回归门禁。
+- Pinia stores（`src/stores/`）带竞态保护：reset 必须使在途请求失效（旧账号的配置/创建结果不得复活）。这些场景由 `scripts/test-state-isolation.mjs`（`npm run test:state-isolation`，node:test + vm 沙箱加载真实 store 代码）钉住——改 store 行为时该文件是回归门禁。章节核对工作台的组合逻辑（`src/composables/useTextFormatWorkbench.ts` 的恢复泵 / canEnterParse / 过滤分页 / 竞态丢弃）由 `scripts/test-textformat-workbench.mjs`（`npm run test:workbench`，同款沙箱）钉住。
 - `dist/` 是构建产物，不手改。
 
 ## 运行时数据与配置

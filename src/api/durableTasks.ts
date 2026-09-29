@@ -53,8 +53,17 @@ export function listDurableTasks(): Promise<DurableTask[]> {
   return http.get('/api/v1/tasks')
 }
 
+/** Project-scoped listing (active tasks + recent window) for page-local records. */
+export function listProjectDurableTasks(projectId: string): Promise<DurableTask[]> {
+  return http.get(`/api/v1/tasks?project_id=${encodeURIComponent(projectId)}`)
+}
+
 export function cancelDurableTask(taskId: string): Promise<DurableTask> {
   return http.post(`/api/v1/tasks/${taskId}/cancel`, {})
+}
+
+export function retryDurableTask(taskId: string): Promise<DurableTask> {
+  return http.post(`/api/v1/tasks/${taskId}/retry`, {})
 }
 
 const TERMINAL_DURABLE_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'timeout'])
