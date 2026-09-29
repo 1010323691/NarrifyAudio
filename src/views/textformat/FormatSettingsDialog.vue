@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import Button from '@/components/ui/Button.vue'
 import Switch from '@/components/ui/Switch.vue'
-import { ChevronRight, Info, Settings2, X } from 'lucide-vue-next'
+import { Info, Settings2, X } from 'lucide-vue-next'
 import type { SplitMode } from '@/api/textFormat'
 import type { TextToggles } from '@/types'
 
@@ -72,7 +72,6 @@ const ALL_FIELDS = [...LAYOUT_FIELDS, ...PUNCT_FIELDS, ...ADVANCED_FIELDS]
 
 const draft = ref<TextToggles | null>(null)
 const saving = ref(false)
-const advancedOpen = ref(false)
 const panel = ref<HTMLElement | null>(null)
 let returnFocus: HTMLElement | null = null
 
@@ -82,7 +81,6 @@ watch(
     if (open) {
       draft.value = { ...(props.initial ?? fallbackToggles) }
       mode.value = props.splitMode
-      advancedOpen.value = false
       returnFocus = document.activeElement as HTMLElement | null
     } else {
       saving.value = false
@@ -259,24 +257,15 @@ onBeforeUnmount(() => {
                 />
               </label>
 
-              <!-- 高级清理：低频项折叠；启用 N 项时标题上给出徽标提示。 -->
+              <!-- 高级清理：与标点整理同组常显；启用 N 项时标题带徽标提示。 -->
               <div class="mt-3 border-t pt-3">
-                <button
-                  type="button"
-                  class="flex items-center gap-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded"
-                  :aria-expanded="advancedOpen"
-                  @click="advancedOpen = !advancedOpen"
-                >
-                  <ChevronRight class="h-4 w-4 transition-transform" :class="advancedOpen ? 'rotate-90' : ''" />
-                  <span>高级清理</span>
+                <h4 class="flex items-center gap-1.5 text-sm font-medium">
+                  高级清理
                   <span v-if="advancedEnabledCount > 0" class="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                     已启用 {{ advancedEnabledCount }} 项
                   </span>
-                </button>
-                <p v-if="!advancedOpen" class="mt-1.5 pl-5 text-xs text-muted-foreground">
-                  清理孤立西文标点、引号规范、破折号规范。
-                </p>
-                <label v-for="field in ADVANCED_FIELDS" v-show="advancedOpen" :key="field.key" class="mt-3 flex items-start justify-between gap-3">
+                </h4>
+                <label v-for="field in ADVANCED_FIELDS" :key="field.key" class="mt-3 flex items-start justify-between gap-3">
                   <span class="min-w-0">
                     <span class="block text-sm">{{ field.label }}</span>
                     <span class="block text-xs text-muted-foreground">{{ field.hint }}</span>
