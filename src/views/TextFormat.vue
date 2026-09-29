@@ -65,8 +65,10 @@ watch(flow, (f) => {
   if (!f) return
   splitMode.value = f.force_by_length ? 'by_length' : 'smart'
   // 刷新恢复：文件栏回填流程的源文件（「重新处理」无需重新选择文件）。
-  if (!sourceFile.value?.file_id && f.source_file_id) {
-    sourceFile.value = { path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name ?? '已选择的 TXT 文件' }
+  // 源文件已不存在（老数据 adopt 的哨兵 ID 等）时不回填假文件名——那样
+  // 「重新处理」只会 404；留空让用户重新选择真实文件即可。
+  if (!sourceFile.value?.file_id && f.source_file_id && f.source_file_name) {
+    sourceFile.value = { path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name }
   }
 })
 
