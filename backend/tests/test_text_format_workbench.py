@@ -197,6 +197,33 @@ def test_get_state_does_not_resubmit_stages_while_one_is_in_flight(client: TestC
     assert sum(1 for t in tasks if t["task_type"] == "text.format") == 1
 
 
+def test_flow_and_state_endpoints_convert_task_submission_errors(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """提交面错误（存储迁移窗口等）按旧提交面同款转换为状态码，而不是 500 traceback。"""
+    import backend.api.text_format as api_module
+    from backend.platform.task_submission import TaskSubmissionError
+
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+
+    def boom(*args, **kwargs):
+        raise TaskSubmissionError(409, "存储根目录正在迁移，暂时无法提交任务")
+
+    monkeypatch.setattr(api_module, "start_or_continue_flow", boom)
+    monkeypatch.setattr(api_module, "flow_state", boom)
+
+    posted = client.post(
+        f"/api/v1/projects/{project_id}/text-format/flow",
+        headers={"X-CSRF-Token": csrf}, json={},
+    )
+    assert posted.status_code == 409, posted.text
+    assert "迁移" in posted.json()["detail"]
+
+    got = client.get(f"/api/v1/projects/{project_id}/text-format/state")
+    assert got.status_code == 409, got.text
+    assert "迁移" in got.json()["detail"]
+
+
 def test_zero_chapter_input_falls_back_to_by_length(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.test")
     csrf = first["csrf_token"]

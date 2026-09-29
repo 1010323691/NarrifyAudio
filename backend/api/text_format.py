@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..platform.database import get_db
 from ..platform.deps import require_authenticated_user, require_csrf
 from ..platform.models import Project, User
+from ..platform.task_submission import TaskSubmissionError
 from ..services.task_operations import owned_project
 from ..services.text_format_workbench import (
     WorkbenchError,
@@ -79,16 +80,24 @@ def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depen
     except WorkbenchError as error:
         _raise(error)
         raise
+    except TaskSubmissionError as exc:
+        # 存储迁移等提交面错误：与旧提交面（task_operations）同等转换为状态码，不冒 500。
+        raise HTTPException(exc.status_code, exc.message) from exc
 
 
 @router.get("/{project_id}/text-format/state")
 def get_text_format_state(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    """Aggregated state. A running flow with no in-flight stage tasks is
+    advanced idempotently (stable tflow keys), so the read also recovers
+    flows whose last task finished after the client left."""
     item = _owned(db, user, project_id)
     try:
         return flow_state(db, user, item.id)
     except WorkbenchError as error:
         _raise(error)
         raise
+    except TaskSubmissionError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
 
 
 @router.post("/{project_id}/text-format/review-marks")
