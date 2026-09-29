@@ -603,7 +603,6 @@ def mark_review(db: Session, user: User, project_id: str, task_id: str, chapter_
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise WorkbenchError(404, "项目不存在")
-    _mark_task(db, user, project, task_id)
     _, result = _mark_task(db, user, project, task_id)
     if chapter_key not in _valid_chapter_keys(result):
         raise WorkbenchError(404, "该章节不属于此处理版本")
