@@ -317,8 +317,8 @@ onBeforeUnmount(() => {
 
     <ProjectGateAlert />
 
-    <!-- 文件栏 -->
-    <div class="wb-filebar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
+    <!-- 文件栏：ready 阶段并入结果摘要行，独立行只在其余阶段展示，省出的高度留给章节列表 -->
+    <div v-if="!(phase === 'ready' && version)" class="wb-filebar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
       <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
         <FileText class="h-5 w-5" />
       </div>
@@ -409,9 +409,28 @@ onBeforeUnmount(() => {
             <div class="text-xs text-muted-foreground">已核对</div>
           </div>
         </div>
-        <div class="ml-auto flex flex-wrap items-center gap-2 text-xs">
+        <div class="ml-auto flex shrink-0 flex-wrap items-center gap-2 text-xs">
           <Badge v-if="version.version_status === 'stale'" variant="destructive">已被新版本覆盖</Badge>
           <Badge v-if="settingsDirty" variant="warning">设置已修改，重新处理后生效</Badge>
+          <!-- 文件信息并入摘要行（原独立文件栏），保留更换文件/处理设置入口 -->
+          <div class="flex min-w-0 items-center gap-2">
+            <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <FileText class="h-4 w-4" />
+            </div>
+            <div class="min-w-0">
+              <p class="max-w-56 truncate text-sm font-medium" :title="sourceFile?.name">{{ sourceFile?.name ?? '尚未选择文件' }}</p>
+              <p class="text-muted-foreground">
+                TXT<template v-if="sourceFile?.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
+              </p>
+            </div>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
+            <Button variant="outline" size="sm" @click="settingsOpen = true">
+              <Settings2 class="h-4 w-4" />
+              处理设置
+            </Button>
+          </div>
         </div>
       </div>
     </div>
