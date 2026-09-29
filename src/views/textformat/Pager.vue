@@ -20,6 +20,15 @@ const emit = defineEmits<{
 
 const u = computed(() => props.unit ?? '章')
 
+/** 左侧结果范围：「第 1–20 条，共 339 章」；空列表只给总数。 */
+const rangeLabel = computed(() => {
+  const t = props.total
+  if (t === 0) return `共 0 ${u.value}`
+  const from = (props.page - 1) * props.pageSize + 1
+  const to = Math.min(props.page * props.pageSize, t)
+  return `第 ${from}–${to} 条，共 ${t} ${u.value}`
+})
+
 /** 页码窗口：≤7 页全显示；否则固定「首页 + 当前±1（靠边时 3 个）+ 末页」。
     例：17 页 → ‹ 1 2 3 … 17 ›，避免页码整排展开占用视觉空间。 */
 const pageItems = computed<(number | '...')[]>(() => {
@@ -41,22 +50,20 @@ const pageItems = computed<(number | '...')[]>(() => {
 
 <template>
   <div :class="cn('flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground', props.class)">
-    <span class="tabular-nums">共 {{ props.total }} {{ u }}</span>
-    <label class="flex items-center gap-1.5">
-      每页
-      <select
-        class="h-7 rounded-md border bg-background px-1.5 text-xs"
-        :value="props.pageSize"
-        @change="emit('update:pageSize', Number(($event.target as HTMLSelectElement).value))"
-      >
-        <option v-for="n in props.pageSizeOptions ?? [20, 50]" :key="n" :value="n">{{ n }}</option>
-      </select>
-      条
-    </label>
-    <div class="ml-auto flex items-center gap-1">
+    <span class="tabular-nums">{{ rangeLabel }}</span>
+    <select
+      class="h-7 cursor-pointer rounded-[8px] border border-input bg-background px-2 text-xs text-foreground"
+      aria-label="每页条数"
+      :value="props.pageSize"
+      @change="emit('update:pageSize', Number(($event.target as HTMLSelectElement).value))"
+    >
+      <option v-for="n in props.pageSizeOptions ?? [20, 50]" :key="n" :value="n">{{ n }} 条 / 页</option>
+    </select>
+    <!-- 页码靠右：36×36 无边框点击区，当前页浅紫底紫字，其他页悬停浅灰底，键盘聚焦保留轮廓。 -->
+    <nav class="ml-auto flex items-center gap-3" aria-label="分页">
       <button
         type="button"
-        class="flex h-7 w-7 items-center justify-center rounded-md border disabled:cursor-not-allowed disabled:opacity-40"
+        class="flex h-9 w-9 items-center justify-center rounded-[8px] text-foreground/70 transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
         aria-label="上一页"
         :disabled="props.page <= 1"
         @click="emit('update:page', props.page - 1)"
@@ -64,27 +71,27 @@ const pageItems = computed<(number | '...')[]>(() => {
         <ChevronLeft class="h-4 w-4" />
       </button>
       <template v-for="(item, i) in pageItems" :key="i">
-        <span v-if="item === '...'" class="px-1">…</span>
+        <span v-if="item === '...'" class="flex h-9 w-9 items-center justify-center" aria-hidden="true">…</span>
         <button
           v-else
           type="button"
-          class="flex h-7 min-w-7 items-center justify-center rounded-md px-1 tabular-nums"
+          class="flex h-9 w-9 items-center justify-center rounded-[8px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           :class="item === props.page
-            ? 'bg-primary font-semibold text-primary-foreground'
-            : 'border hover:bg-accent'"
+            ? 'bg-primary/10 text-primary'
+            : 'text-foreground/70 hover:bg-muted'"
           :aria-current="item === props.page ? 'page' : undefined"
           @click="emit('update:page', item)"
         >{{ item }}</button>
       </template>
       <button
         type="button"
-        class="flex h-7 w-7 items-center justify-center rounded-md border disabled:cursor-not-allowed disabled:opacity-40"
+        class="flex h-9 w-9 items-center justify-center rounded-[8px] text-foreground/70 transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
         aria-label="下一页"
         :disabled="props.page >= props.pageCount"
         @click="emit('update:page', props.page + 1)"
       >
         <ChevronRight class="h-4 w-4" />
       </button>
-    </div>
+    </nav>
   </div>
 </template>
