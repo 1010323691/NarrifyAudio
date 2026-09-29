@@ -39,10 +39,11 @@ export const REASON_LABELS: Record<string, string> = {
   kept: '保留原样',
 }
 
-/** 章节表「核对原因」列的简要标签：比 matter 长文案更短，advisory 原因优先。 */
+/** 章节表「核对原因」列的简要标签：比 matter 长文案更短，advisory 原因优先。
+ *  编号重复类统一口径为「原章节号出现 N 次」（与详情结论卡一致，不再写「重复 N 次」）。 */
 export const REASON_BRIEF: Record<string, string> = {
-  duplicate_number: '原章节号重复',
-  duplicate_kept: '原章节号重复',
+  duplicate_number: '原章节号出现',
+  duplicate_kept: '原章节号出现',
   duplicate_split: '重复正文拆分',
   truncated: '重复正文已截除',
   inferred: '推断章节边界',
@@ -66,6 +67,36 @@ export function chapterBriefLabel(reasons: string[], dupCount = 0): string {
   return (code === 'duplicate_number' || (code === 'duplicate_kept' && dupCount >= 2)) && dupCount >= 2
     ? `${base} ${dupCount} 次`
     : base
+}
+
+/** 详情「核对原因卡」的简短结论：默认收起只展示标题 + 一行说明，
+ *  完整处置说明（「如果确实重复，需要修改原文并重新处理」等）在卡内展开。
+ *  ``dup`` 为同原编号组的规模/位置（仅重复类原因有值）。 */
+export function matterBrief(
+  reason: string,
+  dup: { count: number; index: number } | null,
+): { title: string; sub: string } {
+  if (dup && (reason === 'duplicate_number' || reason === 'duplicate_kept')) {
+    return {
+      title: `原章节号出现 ${dup.count} 次`,
+      sub: `本章为第 ${dup.index} 处，已按原文顺序编号，正文保留`,
+    }
+  }
+  if (reason === 'duplicate_split' && dup) {
+    return { title: `原章节号出现 ${dup.count} 次`, sub: `正文拆分为 ${dup.count} 章，内容全部保留` }
+  }
+  switch (reason) {
+    case 'truncated':
+      return { title: '重复正文已截除', sub: '仅保留首次出现，请核对章尾' }
+    case 'inferred':
+      return { title: '章节边界由引擎推断', sub: '对照原文确认起止位置' }
+    case 'mechanical':
+      return { title: '引擎按结构线索拆分', sub: '对照原文确认起止位置' }
+    case 'range_mid':
+      return { title: '切点已按段落边界对齐', sub: '请核对本章开头是否完整' }
+    default:
+      return { title: REASON_LABELS[reason] ?? reason, sub: '' }
+  }
 }
 
 /** 章节号零补齐：位数以最大章节号位数为标准（如最多 339 章 → 第001章）。 */

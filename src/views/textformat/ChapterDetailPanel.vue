@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
 import Alert from '@/components/ui/Alert.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
-import { AlertTriangle, Check, Info, Loader2, RotateCcw } from 'lucide-vue-next'
+import { AlertTriangle, Check, Loader2, RotateCcw } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
-import { confidenceClass, confidenceLabel, padChapterNum, reasonLabel } from '@/utils/bookLabels'
+import { confidenceClass, confidenceLabel, matterBrief, padChapterNum, reasonLabel } from '@/utils/bookLabels'
 import type { WorkbenchChapter, WorkbenchMatter } from '@/api/textFormat'
 import type { PreviewState } from '@/composables/useTextFormatWorkbench'
 
@@ -20,12 +21,28 @@ const props = withDefaults(defineProps<{
   hasNext: boolean
   /** 章节号补齐位数（= 最大章节号位数），与章节表一致；缺省按 3 位。 */
   numPad?: number
-}>(), { numPad: 3 })
+  /** 同原编号组的规模/位置（详情结论卡与「查看同号章节」用）；非重复场景为 null。 */
+  dupInfo?: { count: number; index: number } | null
+}>(), { numPad: 3, dupInfo: null })
 const emit = defineEmits<{
   (e: 'prev'): void
   (e: 'next'): void
   (e: 'mark'): void
+  (e: 'show-same-number', origNum: number): void
 }>()
+
+// 原因卡展开状态：切章时收起。
+const expanded = ref<string[]>([])
+watch(() => props.chapter?.key, () => { expanded.value = [] })
+const toggleExpand = (id: string) => {
+  expanded.value = expanded.value.includes(id)
+    ? expanded.value.filter((x) => x !== id)
+    : [...expanded.value, id]
+}
+const isExpanded = (id: string) => expanded.value.includes(id)
+const showSameNumber = computed(() => !!props.dupInfo && props.chapter != null && props.chapter.orig_num != null)
+const briefTitle = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).title
+const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).sub
 </script>
 
 <template>
@@ -54,17 +71,32 @@ const emit = defineEmits<{
       </div>
 
       <div class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
-        <!-- 核对事项（常驻，advisory 在前） -->
-        <template v-if="props.matters.length">
-          <Alert v-for="matter in props.matters" :key="matter.id" :variant="matter.advisory ? 'warning' : 'default'" class="text-xs">
-            <AlertTriangle v-if="matter.advisory" class="h-4 w-4 shrink-0" />
-            <Info v-else class="h-4 w-4 shrink-0" />
-            <div>
-              <p>{{ matter.text }}</p>
-              <p v-if="matter.detail" class="mt-1 text-muted-foreground">{{ matter.detail }}</p>
-            </div>
-          </Alert>
-        </template>
+        <!-- 核对原因卡：默认只展示简短结论，完整处置说明放入卡内展开区 -->
+        <div
+          v-for="matter in props.matters"
+          :key="matter.id"
+          class="rounded-md border p-3 text-xs"
+          :class="{ 'border-l-2 border-l-amber-400': matter.advisory }"
+        >
+          <div class="text-sm font-medium">{{ briefTitle(matter) }}</div>
+          <p v-if="briefSub(matter)" class="mt-0.5 text-muted-foreground">{{ briefSub(matter) }}</p>
+          <div class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <button
+              v-if="showSameNumber"
+              type="button"
+              class="text-primary hover:underline"
+              @click="emit('show-same-number', props.chapter!.orig_num!)"
+            >查看同号章节</button>
+            <span v-if="showSameNumber" class="text-muted-foreground">·</span>
+            <button type="button" class="text-primary hover:underline" @click="toggleExpand(matter.id)">
+              {{ isExpanded(matter.id) ? '收起处理说明' : '展开处理说明' }}
+            </button>
+          </div>
+          <div v-if="isExpanded(matter.id)" class="mt-2 space-y-1 border-t pt-2">
+            <p>{{ matter.text }}</p>
+            <p v-if="matter.detail" class="text-muted-foreground">{{ matter.detail }}</p>
+          </div>
+        </div>
 
         <!-- 正文预览 -->
         <div v-if="!props.canRead" class="flex h-24 items-center justify-center text-xs text-muted-foreground">
