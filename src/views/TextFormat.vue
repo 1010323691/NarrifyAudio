@@ -2,17 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
-import { useProjectStore } from '@/stores/project'
 import { useToast } from '@/components/ui/toast'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
-import { previewUrl, zipUrl } from '@/api/textFormat'
 import { retryDurableTask, type DurableTask } from '@/api/durableTasks'
 import { stageLabel, modeLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
-import type { WorkbenchChapter } from '@/api/textFormat'
 
 import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
@@ -35,7 +32,6 @@ import Pager from '@/views/textformat/Pager.vue'
 import FormatSettingsDialog from '@/views/textformat/FormatSettingsDialog.vue'
 
 const router = useRouter()
-const project = useProjectStore()
 const settings = useSettingsStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -145,20 +141,7 @@ function onSettingsReprocess(draft: TextToggles, whole: boolean) {
   })
 }
 
-// --- versioned reads / exports ----------------------------------------------
-function downloadChapter(chapter: WorkbenchChapter) {
-  const v = version.value
-  const file = chapterFile(chapter)
-  if (!v || !file) return
-  window.location.href = previewUrl(project.activeProjectId, v.flow_id, file.name, true)
-}
-
-function downloadZip() {
-  const v = version.value
-  if (!v) return
-  window.location.href = zipUrl(project.activeProjectId, v.flow_id)
-}
-
+// --- navigation -----------------------------------------------------------------
 function goNext() {
   if (!canEnterParse.value) return
   router.push('/script')
@@ -490,10 +473,7 @@ onBeforeUnmount(() => {
               <ChapterTable
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"
-                :can-read="canReadVersion"
-                :marks-busy-key="marksBusy"
                 @select="onChapterSelect"
-                @download="downloadChapter"
               />
             </div>
             <Pager
@@ -520,7 +500,6 @@ onBeforeUnmount(() => {
               @prev="moveSelection(-1)"
               @next="moveSelection(1)"
               @mark="() => toggleMark(selectedKey)"
-              @download-all="downloadZip"
             />
           </aside>
         </div>
@@ -703,7 +682,6 @@ onBeforeUnmount(() => {
               @prev="moveSelection(-1)"
               @next="moveSelection(1)"
               @mark="() => toggleMark(selectedKey)"
-              @download-all="downloadZip"
             />
           </div>
         </section>

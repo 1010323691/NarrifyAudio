@@ -127,13 +127,7 @@ export function deleteReviewMark(projectId: string, taskId: string, chapterKey: 
 }
 
 /** Versioned chapter-text read (flow_id binds the manifest generation). */
-export function previewUrl(projectId: string, flowId: string, name: string, download = false): string {
+export function previewUrl(projectId: string, flowId: string, name: string): string {
   const params = new URLSearchParams({ flow_id: flowId })
-  if (download) params.set('download', 'true')
   return `${API_BASE}${base(projectId)}/file/${encodeURIComponent(name)}?${params.toString()}`
-}
-
-/** Whole-version export: the complete zip, validated before streaming. */
-export function zipUrl(projectId: string, flowId: string): string {
-  return `${API_BASE}${base(projectId)}/zip?flow_id=${encodeURIComponent(flowId)}`
 }

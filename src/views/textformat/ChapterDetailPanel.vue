@@ -2,7 +2,7 @@
 import Alert from '@/components/ui/Alert.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
-import { AlertTriangle, Check, Download, Info, Loader2, RotateCcw } from 'lucide-vue-next'
+import { AlertTriangle, Check, Info, Loader2, RotateCcw } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
 import { confidenceClass, confidenceLabel, reasonLabel } from '@/utils/bookLabels'
 import type { WorkbenchChapter, WorkbenchMatter } from '@/api/textFormat'
@@ -23,26 +23,14 @@ const emit = defineEmits<{
   (e: 'prev'): void
   (e: 'next'): void
   (e: 'mark'): void
-  (e: 'download-all'): void
 }>()
 </script>
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <!-- 面板头：章节详情 + 下载全部 -->
-    <div class="flex shrink-0 items-center justify-between gap-2 border-b px-5 py-3">
+    <!-- 面板头 -->
+    <div class="shrink-0 border-b px-5 py-3">
       <span class="text-sm font-medium">章节详情</span>
-      <Button
-        variant="outline"
-        size="sm"
-        class="h-7 gap-1.5 px-2 text-xs"
-        :disabled="!props.canRead"
-        :title="props.canRead ? '下载全部章节（完整 ZIP）' : '该版本正文不可用'"
-        @click="emit('download-all')"
-      >
-        <Download class="h-3.5 w-3.5" />
-        下载全部
-      </Button>
     </div>
 
     <div v-if="!props.chapter" class="flex flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
