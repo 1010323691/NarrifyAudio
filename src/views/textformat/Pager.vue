@@ -20,13 +20,16 @@ const emit = defineEmits<{
 
 const u = computed(() => props.unit ?? '章')
 
-/** 页码窗口：≤7 页全显示，否则 1 … 当前±1 … 末页。 */
+/** 页码窗口：≤7 页全显示；否则固定「首页 + 当前±1（靠边时 3 个）+ 末页」。
+    例：17 页 → ‹ 1 2 3 … 17 ›，避免页码整排展开占用视觉空间。 */
 const pageItems = computed<(number | '...')[]>(() => {
   const n = props.pageCount
   if (n <= 7) return Array.from({ length: n }, (_, i) => i + 1)
   const cur = props.page
-  const start = Math.max(2, Math.min(cur - 1, n - 2))
-  const end = Math.min(n - 1, Math.max(cur + 1, n - 1))
+  let start = Math.max(2, cur - 1)
+  let end = Math.min(n - 1, cur + 1)
+  if (cur <= 2) { start = 2; end = Math.min(3, n - 1) }
+  else if (cur >= n - 1) { start = Math.max(2, n - 2); end = n - 1 }
   const items: (number | '...')[] = [1]
   if (start > 2) items.push('...')
   for (let i = start; i <= end; i += 1) items.push(i)

@@ -17,7 +17,9 @@ const props = withDefaults(defineProps<{
   reasonBriefs?: Record<string, string>
   /** 章节号补齐位数（= 最大章节号位数）；缺省按 3 位显示。 */
   numPad?: number
-}>(), { reasonBriefs: () => ({}) , numPad: 3 })
+  /** 已核对章节 key：核对状态徽标随标记实时同步（pending 是后端静态字段）。 */
+  markedKeys?: Set<string>
+}>(), { reasonBriefs: () => ({}) , numPad: 3, markedKeys: () => new Set<string>() })
 const emit = defineEmits<{
   (e: 'select', key: string): void
 }>()
@@ -54,7 +56,8 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
         </TableCell>
         <TableCell class="text-right tabular-nums">{{ formatNumber(chapter.chars) }}</TableCell>
         <TableCell>
-          <Badge v-if="chapter.pending" variant="warning">待核对</Badge>
+          <Badge v-if="chapter.key && props.markedKeys.has(chapter.key)" variant="success">已核对</Badge>
+          <Badge v-else-if="chapter.pending" variant="warning">待核对</Badge>
           <Badge v-else-if="chapter.adjusted" variant="success">已调整</Badge>
           <!-- 正常章节低强调：只有真正需要检查的行才着色。 -->
           <span v-else class="text-xs text-muted-foreground/70">正常</span>
@@ -92,5 +95,9 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
    右侧列组贴住表格右缘，不留大片右侧空白。 */
 .wb-chapter-table :deep(table) {
   table-layout: fixed;
+}
+/* 选中行高亮：列表与详情同步定位后，选中行要一眼可辨。 */
+.wb-chapter-table :deep(tr[data-state='selected']) {
+  background-color: hsl(var(--primary) / 0.08);
 }
 </style>
