@@ -274,8 +274,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="wb-page space-y-4">
-    <header class="page-header mb-5 shrink-0">
+  <div class="wb-page space-y-2">
+    <header class="page-header shrink-0">
       <div>
         <p class="eyebrow">Pipeline · Text</p>
         <h1 class="page-title">排版与分册</h1>
