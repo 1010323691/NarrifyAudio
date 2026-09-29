@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import Alert from '@/components/ui/Alert.vue'
 import Badge from '@/components/ui/Badge.vue'
 import Button from '@/components/ui/Button.vue'
@@ -31,9 +31,15 @@ const emit = defineEmits<{
   (e: 'show-same-number', origNum: number): void
 }>()
 
-// 原因卡展开状态：切章时收起。
+// 原因卡展开状态：切章时收起，正文区滚动位置同步归零（不复用上一章的滚动）。
 const expanded = ref<string[]>([])
-watch(() => props.chapter?.key, () => { expanded.value = [] })
+const detailScroll = ref<HTMLElement | null>(null)
+watch(() => props.chapter?.key, () => {
+  expanded.value = []
+  void nextTick().then(() => {
+    if (detailScroll.value) detailScroll.value.scrollTop = 0
+  })
+})
 const toggleExpand = (id: string) => {
   expanded.value = expanded.value.includes(id)
     ? expanded.value.filter((x) => x !== id)
@@ -70,7 +76,7 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
         <p class="mt-1 text-xs text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</p>
       </div>
 
-      <div class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
+      <div ref="detailScroll" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
         <!-- 核对原因卡：默认只展示简短结论，完整处置说明放入卡内展开区 -->
         <div
           v-for="matter in props.matters"
