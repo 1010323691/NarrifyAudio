@@ -21,6 +21,10 @@ export interface DurableTask {
   error_code: string
   error_message: string
   result: DurableTaskResult | null
+  /** 提交数据里的输入标识（script.parse = 分册文件名/文件 id）；失败任务没有
+   *  result 时用它把任务关联回具体章节。旧任务/非解析任务为 null（键恒输出）。 */
+  source_name?: string | null
+  source_file_id?: string | null
 }
 
 const ACTIVE_DURABLE_STATUSES = new Set(['pending', 'queued', 'running', 'cancelling', 'retrying'])

@@ -85,11 +85,14 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
   padding-bottom: 0.375rem;
   height: auto;
 }
+/* td 上下 12.325px（子像素，勿取整）：与文本解析页同骨架，滚动区 504px − 表头 32.5px
+   = 471.5px，10 行对齐整页 ⇒ 行高 = 471.5 ÷ 10 = 47.15px = 内容 22.5px + 2×12.325px。
+   窗口高度变化后对齐会漂移，属固有约束。 */
 .wb-chapter-table :deep(td) {
   padding-left: 1rem;
   padding-right: 1rem;
-  padding-top: 0.5rem;
-  padding-bottom: 0.5rem;
+  padding-top: 12.325px;
+  padding-bottom: 12.325px;
 }
 /* 核对状态列内容整体右移一点点，拉开与字数列的间距（20px > 基线 16px）。 */
 .wb-chapter-table :deep(th.wb-col-status),

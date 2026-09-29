@@ -12,7 +12,7 @@
  * ``scanned`` fires with the raw ``DirListResult`` so a caller can read the
  * directory's absolute ``path``.
  */
-import { onMounted, ref, watch } from 'vue'
+import { onActivated, onMounted, ref, watch } from 'vue'
 import { listDir } from '@/api/files'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { formatBytes } from '@/utils/format'
@@ -107,6 +107,18 @@ function select(name: string) {
 onMounted(scan)
 watch(projectSet, scan)
 watch(() => props.module, scan)
+
+// keep-alive 页面返回时重扫：本页宿主（角色配音）的目录内容可能在别页更新
+// （如「文本解析」写出新的 03_parsed_json 文件），列表要跟上。首次激活 =
+// onMounted 已扫过，跳过。
+let firstActivation = true
+onActivated(() => {
+  if (firstActivation) {
+    firstActivation = false
+    return
+  }
+  void scan()
+})
 </script>
 
 <template>

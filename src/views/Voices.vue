@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { usePipelineStateStore } from '@/stores/pipelineState'
@@ -270,6 +270,18 @@ onMounted(async () => {
   await loadVoices()
   await taskStore.refresh()
   reattachTasks()
+})
+
+let firstActivation = true
+onActivated(() => {
+  // keep-alive 首次激活 = onMounted 已加载，跳过。之后每次返回本页重取角色列表：
+  // 「文本解析」页刚完成的新解析结果（03_parsed_json 更新）必须在这里可见。
+  if (firstActivation) {
+    firstActivation = false
+    return
+  }
+  void loadVoices()
+  void taskStore.refresh().then(() => reattachTasks())
 })
 
 async function doFoundations(opts: {

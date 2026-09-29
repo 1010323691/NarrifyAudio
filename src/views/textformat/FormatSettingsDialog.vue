@@ -252,28 +252,21 @@ onBeforeUnmount(() => {
               </label>
             </div>
           </div>
+      </div>
 
-          <div class="rounded-lg bg-primary/10 p-3 text-xs">
-            <p class="flex items-start gap-1.5 font-medium">
-              <Info class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>保存仅更新设置，当前结果不会改变。</span>
-            </p>
-            <p class="mt-1 pl-5 text-muted-foreground">若要立即应用，请选择「保存并重新处理」。</p>
-          </div>
+      <footer class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-t px-5 py-3">
+        <span class="text-xs text-muted-foreground">仅对本项目生效。</span>
+        <span class="text-xs text-muted-foreground">保存仅更新设置，当前结果不会改变；若要立即应用，请选择「保存并重新处理」。</span>
+        <div class="ml-auto flex items-center gap-2">
+          <Button variant="ghost" size="sm" @click="emit('close')">取消</Button>
+          <Button variant="outline" size="sm" class="text-primary" :disabled="props.busy" @click="saveAndReprocess">
+            {{ props.busy ? '处理中，暂时不能重新处理' : '保存并重新处理' }}
+          </Button>
+          <Button size="sm" :disabled="props.busy || !dirty || saving" @click="saveDraft">
+            保存设置
+          </Button>
         </div>
-
-        <footer class="flex shrink-0 flex-wrap items-center gap-2 border-t px-5 py-3">
-          <span class="text-xs text-muted-foreground">仅对本项目生效。</span>
-          <div class="ml-auto flex items-center gap-2">
-            <Button variant="ghost" size="sm" @click="emit('close')">取消</Button>
-            <Button variant="outline" size="sm" class="text-primary" :disabled="props.busy" @click="saveAndReprocess">
-              {{ props.busy ? '处理中，暂时不能重新处理' : '保存并重新处理' }}
-            </Button>
-            <Button size="sm" :disabled="props.busy || !dirty || saving" @click="saveDraft">
-              保存设置
-            </Button>
-          </div>
-        </footer>
+      </footer>
       </section>
     </div>
   </Teleport>

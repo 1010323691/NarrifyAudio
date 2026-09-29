@@ -23,12 +23,17 @@ class TaskSubmissionError(Exception):
 
 def task_dict(task: Task) -> dict:
     result = task.result.result if task.result is not None else None
+    payload = task.payload if isinstance(task.payload, dict) else {}
+    # 输入标识从提交数据（payload）读取而不是 result：失败 / 取消任务没有
+    # result，UI 仍需要据此把任务关联回具体的源文件（如解析页的章节行）。
     return {
         "id": task.id, "project_id": task.project_id, "task_type": task.task_type,
         "status": task.status, "progress": task.progress,
         "error_code": task.error_code, "error_message": task.error_message,
         "result": result, "created_at": task.created_at.isoformat(),
         "updated_at": task.updated_at.isoformat(),
+        "source_name": payload.get("source_name"),
+        "source_file_id": payload.get("input_file_id"),
     }
 
 

@@ -11,7 +11,8 @@
     "test:state-isolation": "node scripts/test-state-isolation.mjs",
     "test:workbench": "node scripts/test-textformat-workbench.mjs",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

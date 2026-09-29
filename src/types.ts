@@ -427,11 +427,6 @@ export interface ApplyPreviewResult {
 }
 
 // ------------------------------ script (LLM -> JSON) ------------------------------
-/** Response of ``POST /api/script/generate-files``: one independent task per file. */
-export interface GenerateFilesResult {
-  task_ids: string[]
-  files: { file: string; task_id: string }[]
-}
 
 // ------------------------------ tasks ------------------------------
 export type TaskStatus =
@@ -606,7 +601,7 @@ export interface AppConfig {
   }
 }
 
-/** 解析检查开关（用户解析页勾选，随 `POST /api/script/generate-files` 任务提交；
+/** 解析检查开关（用户解析页勾选，随解析提交（v1 `POST .../script-parse/run`）任务提交；
  *  每个字段可选——未提供 = 沿用当前生效配置。提交值固化为该任务的配置快照。 */
 export interface ParseChecks {
   /** chunk 忠实性校验（关闭 = 跳过校验与恢复重跑，JSON 可解析性重试不受影响）。 */

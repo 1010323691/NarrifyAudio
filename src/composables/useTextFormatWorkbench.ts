@@ -82,9 +82,6 @@ export function useTextFormatWorkbench() {
   const matterById = computed<Map<string, WorkbenchMatter>>(
     () => new Map((version.value?.matters ?? []).map((m) => [m.id, m])),
   )
-  const versionMatters = computed<WorkbenchMatter[]>(
-    () => (version.value?.matters ?? []).filter((m) => m.scope === 'version'),
-  )
   const isMarked = (key: string | null) => !!key && (version.value?.review_marks ?? []).includes(key)
   const pendingCount = computed(() => chapters.value.filter((c) => c.pending && !isMarked(c.key)).length)
   const markedCount = computed(() => (version.value?.review_marks ?? []).length)
@@ -469,7 +466,7 @@ export function useTextFormatWorkbench() {
     selectedKey, marksBusy, preview,
     // derived
     pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
-    isMarked, currentChapter, chapterMatters, chapterFile, versionMatters, dupInfo,
+    isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
     // actions
     resume, startFlow, retryFailedStage, toggleMark, loadPreview,
     selectChapter: (key: string | null) => { selectedKey.value = key },

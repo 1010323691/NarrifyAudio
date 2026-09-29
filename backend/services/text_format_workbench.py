@@ -237,11 +237,15 @@ def _chapter_matter_text(label: str, ch: dict, group: list[dict]) -> tuple[str, 
     return (f"引擎标记了该章（{label}），建议人工核对", "处置方式：请对照原文核对该章，无误后标记已核对。")
 
 
-def build_review_matters(split_result: dict, mode: str | None, forced_length: bool = False) -> tuple[list[dict], list[dict]]:
-    """Return (chapters with derived fields, version-level matters)."""
+def build_review_matters(split_result: dict) -> tuple[list[dict], list[dict]]:
+    """Return (chapters with derived fields, chapter-level matters).
+
+    版本级 matters 已移除：页顶 banner 展示已从前端删除，逐章处置说明由章节级
+    matters 完整承载（章节表「核对原因」列 + 详情面板原因卡）；原始审计数据
+    （actions/warnings/removed）仍随 report 字段下发。
+    """
     report = split_result.get("report") or {}
     warnings = report.get("warnings") or []
-    removed = report.get("removed") or []
     mid_paragraph = any(str(w.get("type")) == "range_header_split_mid_paragraph" for w in warnings)
 
     matters: list[dict] = []
@@ -286,30 +290,6 @@ def build_review_matters(split_result: dict, mode: str | None, forced_length: bo
             "matters": chapter_matter_ids,
         })
 
-    # Version-level: removed chapters keep a verification entry (P0-04).
-    for entry in removed:
-        add_matter("version", "removed", f"已删除重复章节：第 {entry.get('numStr') or '?'} 章「{entry.get('title') or '无标题'}」",
-                   advisory=True, detail="该章节未进入最终结果，可在处理记录中查看依据。")
-
-    # Version-level: warnings. Chapter-attributable ones (range mid-paragraph)
-    # already appear as chapter matters; here keep the raw detail as a version
-    # note so the 处理记录 tab holds the full audit trail.
-    for w in warnings:
-        wtype = str(w.get("type", ""))
-        advisory = wtype in {"range_header_split_mid_paragraph", "range_header_split_skipped"}
-        add_matter("version", f"warning:{wtype}", str(w.get("detail") or wtype), advisory=advisory)
-
-    if mode == "by_length":
-        count = len(split_result.get("files") or [])
-        target = split_result.get("length_target")
-        # 用户显式选择「按字数分册」时章节可能已被识别，措辞不能写「未识别到章节」。
-        prefix = "按字数分册：" if forced_length else "未识别到章节，"
-        add_matter("version", "length_fallback",
-                  f"{prefix}已按约 {target or 3000} 字/册将全文拆分为 {count} 册；切点落在段落/句子边界。",
-                  advisory=False)
-    elif mode == "whole_book":
-        add_matter("version", "whole_book", "按整本继续：未做章节拆分，整本书作为单一文件输出。", advisory=False)
-
     return chapters, matters
 
 
@@ -321,7 +301,7 @@ def _version_from_flow(db: Session, user: User, project: Project, flow: TextForm
         return None
     result = task.result.result or {}
     mode = flow.split_mode
-    chapters, matters = build_review_matters(result, mode, forced_length=bool(flow.force_by_length))
+    chapters, matters = build_review_matters(result)
     if mode == "whole_book" and not chapters:
         chapters = [{
             "key": "whole", "seq": 1, "num": None, "numStr": "", "title": "整本",
