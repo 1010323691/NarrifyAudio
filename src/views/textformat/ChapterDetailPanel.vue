@@ -53,8 +53,8 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <!-- 面板头 -->
-    <div class="shrink-0 border-b px-5 py-3">
+    <!-- 面板头：py-4 使其 53px，与左列筛选行等高——内容区上下边界与表格滚动区严格对齐 -->
+    <div class="shrink-0 border-b px-5 py-4">
       <span class="text-sm font-medium">章节详情</span>
     </div>
 
@@ -62,21 +62,20 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
       在左侧表格中选择一章查看
     </div>
     <template v-else>
-      <!-- 标题区 -->
-      <div class="shrink-0 px-5 pb-2.5 pt-4">
-        <div class="flex flex-wrap items-center gap-2">
-          <h3 class="text-lg font-semibold leading-tight">
-            第{{ padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad) }}章
-            {{ props.chapter.title || '（无标题）' }}
-          </h3>
-          <Badge v-if="props.chapter.pending && !props.marked" variant="warning">待核对</Badge>
-          <Badge v-if="props.marked" variant="success">已核对</Badge>
-          <Badge v-if="props.chapter.adjusted" variant="outline">已调整</Badge>
-        </div>
-        <p class="mt-1 text-xs text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</p>
-      </div>
-
       <div ref="detailScroll" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
+        <!-- 标题区并入滚动区：顶栏只剩「章节详情」面板头，内容区上边界与左列表格严格对齐 -->
+        <div>
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="text-lg font-semibold leading-tight">
+              第{{ padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad) }}章
+              {{ props.chapter.title || '（无标题）' }}
+            </h3>
+            <Badge v-if="props.chapter.pending && !props.marked" variant="warning">待核对</Badge>
+            <Badge v-if="props.marked" variant="success">已核对</Badge>
+            <Badge v-if="props.chapter.adjusted" variant="outline">已调整</Badge>
+          </div>
+          <p class="mt-1 text-xs text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</p>
+        </div>
         <!-- 核对原因卡：默认只展示简短结论，完整处置说明放入卡内展开区 -->
         <div
           v-for="matter in props.matters"
@@ -150,8 +149,8 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
         </div>
       </div>
 
-      <!-- 操作行：上一章 / 标记已核对 / 下一章 -->
-      <div class="flex shrink-0 items-center gap-2 border-t px-5 py-3">
+      <!-- 操作行：py-1.5 压至 49px，与左列分页器等高（上一章 / 标记已核对 / 下一章） -->
+      <div class="flex shrink-0 items-center gap-2 border-t px-5 py-1.5">
         <Button variant="outline" size="sm" class="shrink-0" :disabled="!props.hasPrev" @click="emit('prev')">
           上一章
         </Button>
