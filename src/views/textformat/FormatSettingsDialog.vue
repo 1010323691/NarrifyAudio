@@ -57,18 +57,15 @@ const LAYOUT_FIELDS: ToggleField[] = [
   { key: 'dialogue_separate', label: '对话分段', hint: '将引号内的对话独立成段' },
   { key: 'keep_single_space', label: '保留单空格', hint: '保留正文中的单个空格' },
 ]
-/** 标点整理（常用）：高频标点规则。 */
+/** 标点整理：高频与低频（原「高级清理」）规则同级平铺展示。 */
 const PUNCT_FIELDS: ToggleField[] = [
   { key: 'punct_ellipsis', label: '省略号规范', hint: '连续句点统一为省略号' },
   { key: 'punct_repeated', label: '连续标点合并', hint: '重复的同类标点仅保留一个' },
-]
-/** 高级清理（低频）：默认折叠，启用项在标题上显示「已启用 N 项」。 */
-const ADVANCED_FIELDS: ToggleField[] = [
   { key: 'punct_lone_ascii', label: '清理孤立西文标点', hint: '删除无配对的英文括号/引号' },
   { key: 'punct_quotes', label: '引号规范', hint: '统一引号配对与方向' },
   { key: 'punct_dash', label: '破折号规范', hint: '统一破折号写法' },
 ]
-const ALL_FIELDS = [...LAYOUT_FIELDS, ...PUNCT_FIELDS, ...ADVANCED_FIELDS]
+const ALL_FIELDS = [...LAYOUT_FIELDS, ...PUNCT_FIELDS]
 
 const draft = ref<TextToggles | null>(null)
 const saving = ref(false)
@@ -92,10 +89,6 @@ watch(
   (value) => {
     if (props.open && value) draft.value = { ...value }
   },
-)
-
-const advancedEnabledCount = computed(() =>
-  ADVANCED_FIELDS.reduce((n, f) => n + (draft.value && draft.value[f.key] ? 1 : 0), 0),
 )
 
 const dirty = computed(() => {
@@ -220,7 +213,7 @@ onBeforeUnmount(() => {
             </p>
           </div>
 
-          <!-- 两组设置：桌面双列、窄屏单列；高级清理默认折叠。 -->
+          <!-- 两组设置：桌面双列、窄屏单列。 -->
           <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div class="rounded-lg border p-4">
               <h3 class="text-sm font-medium">文本排版</h3>
@@ -256,27 +249,6 @@ onBeforeUnmount(() => {
                   @update:model-value="(v: boolean) => { if (draft) (draft as any)[field.key] = v }"
                 />
               </label>
-
-              <!-- 高级清理：与标点整理同组常显；启用 N 项时标题带徽标提示。 -->
-              <div class="mt-3 border-t pt-3">
-                <h4 class="flex items-center gap-1.5 text-sm font-medium">
-                  高级清理
-                  <span v-if="advancedEnabledCount > 0" class="rounded-full bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                    已启用 {{ advancedEnabledCount }} 项
-                  </span>
-                </h4>
-                <label v-for="field in ADVANCED_FIELDS" :key="field.key" class="mt-3 flex items-start justify-between gap-3">
-                  <span class="min-w-0">
-                    <span class="block text-sm">{{ field.label }}</span>
-                    <span class="block text-xs text-muted-foreground">{{ field.hint }}</span>
-                  </span>
-                  <Switch
-                    :model-value="!!(draft && draft[field.key])"
-                    :disabled="props.busy"
-                    @update:model-value="(v: boolean) => { if (draft) (draft as any)[field.key] = v }"
-                  />
-                </label>
-              </div>
             </div>
           </div>
 
