@@ -126,7 +126,7 @@ def get_text_format_file(project_id: str, name: str, flow_id: str, download: boo
     attachment; otherwise plain text for inline preview (fetch .text())."""
     item = _owned(db, user, project_id)
     try:
-        path = preview_path(db, user, item, flow_id, name)
+        path = preview_path(db, user, item, flow_id, name, inline=not download)
     except WorkbenchError as error:
         _raise(error)
         raise

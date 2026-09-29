@@ -465,6 +465,13 @@ def test_preview_size_limit_is_applied_before_reading(client: TestClient, monkey
         params={"flow_id": state["flow"]["id"]},
     )
     assert too_large.status_code == 413, too_large.text
+    # 附件下载不受预览尺寸上限约束（内联预览才有 8MB 上限）。
+    downloadable = client.get(
+        f"/api/v1/projects/{project_id}/text-format/file/{file_name}",
+        params={"flow_id": state["flow"]["id"], "download": "true"},
+    )
+    assert downloadable.status_code == 200, downloadable.text
+    assert "attachment" in downloadable.headers.get("content-disposition", "")
 
 
 def test_concurrent_flows_are_blocked_server_side(client: TestClient):

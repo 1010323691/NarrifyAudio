@@ -660,14 +660,15 @@ def _live_record(db: Session, user: User, project: Project, entry: dict) -> Proj
     return live
 
 
-def preview_path(db: Session, user: User, project: Project, flow_id: str, name: str) -> Path:
+def preview_path(db: Session, user: User, project: Project, flow_id: str, name: str, *, inline: bool = True) -> Path:
     flow = _ready_flow(db, user, project, flow_id)
     entry = next((m for m in flow.manifest or [] if m.get("name") == name), None)
     if entry is None:
         raise WorkbenchError(404, "该文件不属于此处理版本")
     live = _live_record(db, user, project, entry)
-    if live.size_bytes > PREVIEW_MAX_BYTES:
-        raise WorkbenchError(413, "文件较大，请直接下载查看")
+    # 尺寸上限只约束内联预览（浏览器 fetch 全文）；附件下载不设限。
+    if inline and live.size_bytes > PREVIEW_MAX_BYTES:
+        raise WorkbenchError(413, "文件较大，无法在线预览")
     return object_path(live.object_key, configured_storage_root(db))
 
 
