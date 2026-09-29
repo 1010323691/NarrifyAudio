@@ -57,12 +57,14 @@ function Test-PortOpen([int]$port) {
         @{ Ip = [System.Net.IPAddress]::Parse('::1'); Family = [System.Net.Sockets.AddressFamily]::InterNetworkV6 }
     )
     foreach ($t in $targets) {
-        $client = New-Object System.Net.Sockets.TcpClient($t.Family)
+        $client = $null
         try {
+            # 构造也放进 try：无 IPv6 栈的机器上 v6 家族 socket 构造可能抛异常，不能中断脚本
+            $client = New-Object System.Net.Sockets.TcpClient($t.Family)
             $client.Connect($t.Ip, $port)
             if ($client.Connected) { return $true }
         } catch { }
-        finally { $client.Close() }
+        finally { if ($client) { $client.Close() } }
     }
     return $false
 }
@@ -83,8 +85,8 @@ $apiPidFile = Join-Path $logDir 'api.pid'
 #     锁只覆盖「启动阶段」（探测 + 拉起 + 等健康），进入 Vite 前台前释放；
 #     FileStream 句柄随进程退出由 OS 自动释放，无 stale lock。
 #     被阻塞的第二个实例等锁释放后走正常流程——端口/pidfile 探测自然命中「复用」；
-#     因第一个实例的 Vite 此时通常尚未 bind，先轮询 5173 数秒，仍被占用则走下方
-#     「已占用 → 优雅退出」分支；若极端等到轮询结束仍未 bind，双 npm 抢跑、
+#     因第一个实例的 Vite 此时通常尚未 bind，先在一个 8s 墙钟预算内轮询 5173，
+#     仍被占用则走下方「已占用 → 优雅退出」分支；若极端等完预算仍未 bind，双 npm 抢跑、
 #     后起者按 vite strictPort 响亮报错退出（无双后端、无双 Vite）---
 $lockPath = Join-Path $logDir 'dev-all.lock'
 $lockStream = $null
@@ -175,10 +177,13 @@ if (-not $healthOk) {
 # --- 启动阶段结束：释放互斥锁（后续 Vite 前台进程不再持锁）---
 if ($lockStream) { $lockStream.Dispose() }
 
-# --- 走过锁等待的第二个实例：第一个实例的 Vite 通常还没 bind 5173，给它几秒完成 bind，
-#     好让下面走「已占用 → 优雅退出」，而不是双 npm 抢跑 ---
+# --- 走过锁等待的第二个实例：第一个实例的 Vite 通常还没 bind 5173，给它一点时间完成 bind，
+#     好让下面走「已占用 → 优雅退出」，而不是双 npm 抢跑。
+#     用墙钟预算（8s）而非固定轮数：端口关闭时本机探测一轮含数秒连接拒绝延迟
+#     （机器级特性），固定 12 轮最坏会拖到数十秒 ---
 if ($waitedForLock) {
-    for ($i = 0; $i -lt 12; $i++) {
+    $pollDeadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $pollDeadline) {
         if (Test-PortOpen 5173) { break }
         Start-Sleep -Milliseconds 500
     }
