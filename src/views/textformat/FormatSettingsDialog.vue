@@ -32,7 +32,8 @@ const modeHint = computed(() => {
 const mode = ref<SplitMode>('smart')
 
 /** 「章节识别」并入分册方式：不再单独暴露。排版阶段对章节标题行的独立成段
- *  处理恒开（detect_chapters 固定 true），三种分册方式下排版质量都不降级。 */
+ *  处理恒开（服务端落流程快照时固定 detect_chapters=true），两种分册方式下
+ *  排版质量都不降级。 */
 const fallbackToggles: TextToggles = {
   keep_single_space: false,
   sentence_break: true,
@@ -61,7 +62,7 @@ const LAYOUT_FIELDS: ToggleField[] = [
 const PUNCT_FIELDS: ToggleField[] = [
   { key: 'punct_ellipsis', label: '省略号规范', hint: '连续句点统一为省略号' },
   { key: 'punct_repeated', label: '连续标点合并', hint: '重复的同类标点仅保留一个' },
-  { key: 'punct_lone_ascii', label: '清理孤立西文标点', hint: '删除无配对的英文括号/引号' },
+  { key: 'punct_lone_ascii', label: '清理孤立西文标点', hint: '中文旁的半角逗号/叹号/问号转全角' },
   { key: 'punct_quotes', label: '引号规范', hint: '统一引号配对与方向' },
   { key: 'punct_dash', label: '破折号规范', hint: '统一破折号写法' },
 ]
@@ -231,7 +232,7 @@ onBeforeUnmount(() => {
               </label>
               <p class="mt-4 flex items-start gap-1.5 border-t pt-3 text-xs text-muted-foreground">
                 <Info class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>章节标题行恒按独立段落排版（章节识别随分册方式自动控制）。</span>
+                <span>章节标题行恒按独立段落排版；分册阶段自动识别章节。</span>
               </p>
             </div>
 
