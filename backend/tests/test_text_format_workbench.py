@@ -137,6 +137,8 @@ def test_flow_runs_pipeline_and_recovers_without_resubmitting(client: TestClient
     # The final stage consumed the formatted output, and the flow recorded
     # the manifest for versioned reads.
     assert flow["manifest_count"] == 2
+    # 源文件名随 state 返回：前端刷新后回填文件栏（「重新处理」无需重选文件）。
+    assert flow["source_file_name"] == "workbench-novel.txt"
 
     # Continuing a ready flow is a no-op (no new tasks).
     again = _post_flow(client, csrf, project_id, body).json()

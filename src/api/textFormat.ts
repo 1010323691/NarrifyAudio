@@ -58,6 +58,8 @@ export interface WorkbenchVersion {
 export interface WorkbenchFlow {
   id: string
   source_file_id: string
+  /** Display name of the source TXT (set once the backend resolves it). */
+  source_file_name?: string | null
   config_snapshot: Record<string, unknown>
   whole_book: boolean
   format_task_id: string | null

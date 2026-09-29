@@ -492,8 +492,14 @@ def flow_state(db: Session, user: User, project_id: str) -> dict:
                                  "status": task.status, "progress": task.progress, "failed": True}
                     break
 
+    flow_json = None
+    if flow is not None:
+        flow_json = _flow_dict(flow)
+        # 源文件名一并给出：前端刷新后回填文件栏，「重新处理」无需重新选择文件。
+        source = db.get(ProjectFile, flow.source_file_id)
+        flow_json["source_file_name"] = source.original_name if source is not None else None
     return {
-        "flow": _flow_dict(flow) if flow is not None else None,
+        "flow": flow_json,
         "version": version,
         "next_task": next_task,
         "active_tasks": [

@@ -72,7 +72,12 @@ const lengthTarget = computed(() => settings.config?.split?.length_target ?? 300
 
 // Keep the dialog's 整本处理 switch in sync with the last run's choice.
 watch(flow, (f) => {
-  if (f) wholeBook.value = f.whole_book
+  if (!f) return
+  wholeBook.value = f.whole_book
+  // 刷新恢复：文件栏回填流程的源文件（「重新处理」无需重新选择文件）。
+  if (!sourceFile.value?.file_id && f.source_file_id) {
+    sourceFile.value = { path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name ?? '已选择的 TXT 文件' }
+  }
 })
 
 // --- actions ----------------------------------------------------------------
@@ -98,6 +103,14 @@ async function start(restart: boolean) {
   }
 }
 
+// 「选择 TXT」只受 无项目/处理中/有活跃任务/加载 限制——不能要求已选文件，否则永远点不开。
+const chooseDisabled = computed(
+  () =>
+    !projectSet.value ||
+    phase.value === 'processing' ||
+    activeTasks.value.length > 0 ||
+    loading.value,
+)
 const startDisabled = computed(
   () =>
     !projectSet.value ||
@@ -315,7 +328,7 @@ onBeforeUnmount(() => {
     <!-- 文件栏 -->
     <div class="wb-filebar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
       <FileText class="h-4 w-4 shrink-0 text-muted-foreground" />
-      <Button variant="outline" size="sm" :disabled="startDisabled" @click="choose">
+      <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">
         选择 TXT
       </Button>
       <span v-if="sourceFile" class="max-w-[320px] truncate text-sm font-medium" :title="sourceFile.name">
