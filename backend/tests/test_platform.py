@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import uuid
 import shutil
@@ -1186,6 +1187,8 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
     assert result["status"] == "succeeded"
     assert result["result"]["engine"] == "script.parse"
     assert "output_path" not in result["result"]
+    # 输入指纹随结果落盘：解析页用它判断同名文件被覆盖后旧结果是否过期。
+    assert result["result"]["source_sha256"] == hashlib.sha256(b"narrator: hello").hexdigest()
     assert observed["model"] == "durable-snapshot-model"
     files = client.get(f"/api/v1/projects/{project['id']}/files").json()
     artifacts = [item for item in files if item["module"] == "03_parsed_json"]

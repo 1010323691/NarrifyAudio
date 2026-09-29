@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
+import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import { cancelParseBatch, generateScriptFiles } from '@/api/script'
 import { listDir } from '@/api/files'
+import { listProjectFiles } from '@/api/project'
+import { listProjectDurableTasks } from '@/api/durableTasks'
 import type { FileItem, ParseChecks, TaskSnapshot } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -30,9 +33,11 @@ import {
   RefreshCw,
   ListChecks,
   Eraser,
+  TriangleAlert,
 } from 'lucide-vue-next'
 
 const settings = useSettingsStore()
+const project = useProjectStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 
@@ -49,6 +54,9 @@ const { projectSet } = useProjectGate()
 interface ParseFile extends FileItem {
   /** True when 03_parsed_json/<file-stem>.json already exists (already parsed). */
   done: boolean
+  /** Parsed, but that parse ran against OLDER file content (the split file was re-published
+   *  with the same name). Excluded from 已完成 — needs re-parsing. */
+  stale: boolean
 }
 const files = ref<ParseFile[]>([])
 const filesLoading = ref(false)
@@ -57,6 +65,7 @@ const selected = reactive<Record<string, boolean>>({})
 
 const selectedNames = computed(() => files.value.filter((f) => selected[f.name]).map((f) => f.name))
 const doneCount = computed(() => files.value.filter((f) => f.done).length)
+const staleCount = computed(() => files.value.filter((f) => f.stale).length)
 const allSelected = computed(() => files.value.length > 0 && files.value.every((f) => selected[f.name]))
 const allPendingSelected = computed(() => {
   const pending = files.value.filter((f) => !f.done)
@@ -244,26 +253,67 @@ onMounted(async () => {
   reattachJobs()
 })
 
+let firstActivation = true
+onActivated(() => {
+  // keep-alive 首次进入也会触发 activated——跳过（onMounted 已加载）。
+  if (firstActivation) {
+    firstActivation = false
+    return
+  }
+  // 从别的页面回来：排版分册可能已重新处理（同名覆盖），重新做文件时效校验。
+  if (projectSet.value) void loadFiles()
+})
+
 async function loadFiles() {
   if (!projectSet.value) {
     files.value = []
     return
   }
+  const pid = project.activeProjectId
   filesLoading.value = true
   filesError.value = ''
   try {
     const r = await listDir('02_split_text', true)
     // 已生成判断：03_parsed_json/ 下是否已有 <文件基名>.json（后端对缺失目录返回空列表）。
+    // 时效校验（P0-03）：02 文件当前 sha（v1 文件表）× 最近一次成功解析记录的
+    // source_sha256——同名文件被重新分册覆盖后，旧解析结果标「输入已变更」。
+    // 任一数据源缺失（旧任务无 sha / 请求失败）退化为旧行为：只看 03 json 是否存在。
     const out = await listDir('03_parsed_json', true).catch(() => null)
+    const [tracked, tasks] = pid
+      ? await Promise.all([
+          listProjectFiles(pid).catch(() => []),
+          listProjectDurableTasks(pid).catch(() => []),
+        ])
+      : [[], []]
     const outNames = new Set((out?.items ?? []).map((i) => i.name))
+    const fileIdByName = new Map<string, string>()
+    const shaByFileId = new Map<string, string>()
+    for (const t of tracked) {
+      if (!t.name) continue
+      fileIdByName.set(t.name, t.id)
+      shaByFileId.set(t.id, t.sha256)
+    }
+    // 项目任务列表按创建时间倒序、script.parse 按源文件去重（entry identity），
+    // 因此每个源文件的第一条成功解析即其最新一次。
+    const parseShaByFileId = new Map<string, string>()
+    for (const t of tasks) {
+      if (t.task_type !== 'script.parse' || t.status !== 'succeeded' || !t.result) continue
+      const fid = t.result.source_file_id
+      const sha = t.result.source_sha256
+      if (typeof fid === 'string' && typeof sha === 'string' && !parseShaByFileId.has(fid)) {
+        parseShaByFileId.set(fid, sha)
+      }
+    }
     const txts: ParseFile[] = r.items
       .filter((i) => !i.is_dir && i.name.toLowerCase().endsWith('.txt'))
       .map((f) => {
         const stem = f.name.replace(/\.[^.]+$/, '')
-        return {
-          ...f,
-          done: outNames.has(stem + '.json'),
-        }
+        const hasJson = outNames.has(stem + '.json')
+        const fileId = fileIdByName.get(f.name)
+        const parseSha = fileId ? parseShaByFileId.get(fileId) : undefined
+        const currentSha = fileId ? shaByFileId.get(fileId) : undefined
+        const stale = hasJson && !!parseSha && !!currentSha && parseSha !== currentSha
+        return { ...f, done: hasJson && !stale, stale }
       })
     files.value = txts
     // 默认全不选：只保留仍存在于磁盘的既有勾选（已完成文件同样可勾选，用于重新解析 / 跑其他流程），
@@ -374,6 +424,10 @@ async function cancelAll() {
         </div>
       </CardHeader>
       <CardContent class="space-y-4">
+        <Alert v-if="staleCount" variant="warning">
+          <template #icon><TriangleAlert class="h-4 w-4 shrink-0" /></template>
+          {{ staleCount }} 个分册文本已更新，对应的解析结果基于旧内容，请重新解析。
+        </Alert>
         <Alert v-if="filesError" variant="destructive">
           <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
           {{ filesError }}
@@ -430,6 +484,7 @@ async function cancelAll() {
                   <RefreshCw class="h-3.5 w-3.5" />重试
                 </Button>
               </template>
+              <Badge v-else-if="row.file.stale" variant="warning" class="shrink-0">输入已变更</Badge>
               <Badge v-else-if="row.file.done" variant="success" class="shrink-0">已完成</Badge>
             </div>
             <p v-if="row.job && row.job.state.label === '失败'" class="mt-1 pl-7 text-xs text-destructive">
@@ -457,6 +512,7 @@ async function cancelAll() {
           <span class="ml-auto text-xs text-muted-foreground">
             已选 {{ selectedNames.length }} / {{ files.length }} 个
             <span v-if="doneCount"> · 已完成 {{ doneCount }} 个</span>
+            <span v-if="staleCount"> · 输入已变更 {{ staleCount }} 个</span>
             <span v-if="selectedDoneCount"> · 含已完成 {{ selectedDoneCount }}</span>
             · 后台 Worker 按部署容量处理，等待中的任务会排队
           </span>
