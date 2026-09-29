@@ -236,8 +236,6 @@ def test_zero_chapter_input_falls_back_to_by_length(client: TestClient):
     assert len(version["chapters"]) >= 2
     assert all(c["reasons"] == ["length_split"] for c in version["chapters"])
     assert all(c["pending"] is False for c in version["chapters"])
-    fallback = [m for m in version["matters"] if m["reason"] == "length_fallback"]
-    assert fallback and fallback[0]["scope"] == "version" and fallback[0]["advisory"] is False
 
 
 def test_whole_book_mode_normalizes_to_single_entry(client: TestClient):
@@ -256,7 +254,6 @@ def test_whole_book_mode_normalizes_to_single_entry(client: TestClient):
     assert whole["key"] == "whole"
     assert whole["title"] == "整本"
     assert whole["chars"] > 0
-    assert any(m["reason"] == "whole_book" for m in version["matters"])
 
 
 def test_force_by_length_chaptered_input_splits_by_length(client: TestClient):
@@ -275,10 +272,6 @@ def test_force_by_length_chaptered_input_splits_by_length(client: TestClient):
     assert flow["split_mode"] == "by_length"
     assert version["mode"] == "by_length"
     assert all(c["reasons"] == ["length_split"] for c in version["chapters"])
-    # 版本级说明事项仍给出，但文案不再谎称「未识别到章节」（章节其实识别到了）。
-    length_notes = [m for m in version["matters"] if m["reason"] == "length_fallback"]
-    assert length_notes and length_notes[0]["scope"] == "version"
-    assert "未识别到章节" not in length_notes[0]["text"]
 
 
 def test_force_by_length_defers_to_whole_book(client: TestClient):

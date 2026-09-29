@@ -8,7 +8,8 @@ import { API_BASE, http } from './client'
 
 export interface WorkbenchMatter {
   id: string
-  scope: 'chapter' | 'version'
+  /** 版本级 matters 已随页顶 banner 一并移除（章节级提示足够），后端现只产出 chapter 级。 */
+  scope: 'chapter'
   reason: string
   advisory: boolean
   text: string

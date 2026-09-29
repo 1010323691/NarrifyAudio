@@ -53,10 +53,25 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <!-- 面板头：py-2.5 + 32px 行，复刻左列筛选行的构造（10+32+10+1 边框 = 53px），
-         避免 py-4+行高舍入多出 1px——内容区上下边界与表格滚动区严格对齐 -->
+    <!-- 面板头：py-2.5 + 32px 行（h-8），复刻左列筛选行的构造（10+32+10+1 边框 = 53px），
+         内容区上下边界与表格滚动区严格对齐。标题区并入顶栏（章号/标题 + 核对 badge + 字数，
+         滚动时始终可见）；未选章节时显示占位。 -->
     <div class="flex shrink-0 items-center border-b px-5 py-2.5">
-      <span class="flex h-8 items-center text-sm font-medium">章节详情</span>
+      <div class="flex h-8 min-w-0 items-center gap-2">
+        <template v-if="props.chapter">
+          <h3
+            class="min-w-0 flex-1 truncate text-base font-semibold leading-none"
+            :title="`第${padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad)}章${props.chapter.title ? ` ${props.chapter.title}` : '（无标题）'}`"
+          >
+            第{{ padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad) }}章{{ props.chapter.title ? ` ${props.chapter.title}` : '（无标题）' }}
+          </h3>
+          <Badge v-if="props.chapter.pending && !props.marked" variant="warning" class="shrink-0">待核对</Badge>
+          <Badge v-if="props.marked" variant="success" class="shrink-0">已核对</Badge>
+          <Badge v-if="props.chapter.adjusted" variant="outline" class="shrink-0">已调整</Badge>
+          <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</span>
+        </template>
+        <span v-else class="flex-1 text-sm text-muted-foreground/60">未选择</span>
+      </div>
     </div>
 
     <div v-if="!props.chapter" class="flex flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground">
@@ -64,19 +79,6 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
     </div>
     <template v-else>
       <div ref="detailScroll" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-4 px-5">
-        <!-- 标题区并入滚动区：顶栏只剩「章节详情」面板头，内容区上边界与左列表格严格对齐 -->
-        <div>
-          <div class="flex flex-wrap items-center gap-2">
-            <h3 class="text-lg font-semibold leading-tight">
-              第{{ padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad) }}章
-              {{ props.chapter.title || '（无标题）' }}
-            </h3>
-            <Badge v-if="props.chapter.pending && !props.marked" variant="warning">待核对</Badge>
-            <Badge v-if="props.marked" variant="success">已核对</Badge>
-            <Badge v-if="props.chapter.adjusted" variant="outline">已调整</Badge>
-          </div>
-          <p class="mt-1 text-xs text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</p>
-        </div>
         <!-- 核对原因卡：默认只展示简短结论，完整处置说明放入卡内展开区 -->
         <div
           v-for="matter in props.matters"

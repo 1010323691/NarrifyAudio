@@ -35,7 +35,7 @@ const {
   filter, query, reasonFilter, sameOrigNum, reasonOptions,
   selectedKey, marksBusy, preview,
   pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
-  isMarked, currentChapter, chapterMatters, chapterFile, versionMatters, dupInfo,
+  isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
   retryFailedStage, toggleMark, selectChapter, startFlow,
 } = useTextFormatWorkbench()
 
@@ -454,15 +454,8 @@ onBeforeUnmount(() => {
         <AlertTriangle class="h-4 w-4 shrink-0" />
         <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
       </Alert>
-      <Alert
-        v-for="matter in versionMatters"
-        :key="matter.id"
-        :variant="matter.advisory ? 'warning' : 'info'"
-        class="text-xs"
-      >
-        <AlertTriangle v-if="matter.advisory" class="h-4 w-4 shrink-0" />
-        <p>{{ matter.text }}</p>
-      </Alert>
+      <!-- 版本级处理提示（matters）不再在页顶铺全宽 banner：每章的处置说明已由
+           章节表「核对原因」列与详情面板章节级 matter 卡承载，页顶只留版本状态警示。 -->
     </template>
 
     <!-- 工作区 -->
