@@ -7,7 +7,7 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
-import { stageLabel, modeLabel, chapterBriefLabel, chapterNumWidth } from '@/utils/bookLabels'
+import { stageLabel, modeLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -31,9 +31,10 @@ const { push: toast } = useToast()
 const {
   phase, flow, version, nextTask, activeTasks, loading,
   filteredChapters, pagedChapters, pageCount, page, pageSize,
-  filter, query, selectedKey, marksBusy, preview,
+  filter, query, reasonFilter, sameOrigNum, reasonOptions,
+  selectedKey, marksBusy, preview,
   pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
-  isMarked, currentChapter, chapterMatters, chapterFile, versionMatters,
+  isMarked, currentChapter, chapterMatters, chapterFile, versionMatters, dupInfo,
   retryFailedStage, toggleMark, selectChapter, startFlow,
 } = useTextFormatWorkbench()
 
@@ -175,6 +176,31 @@ function ensurePageFor(key: string) {
   if (idx >= 0) page.value = Math.floor(idx / pageSize.value) + 1
 }
 
+// 列表与详情同步定位：选中变化（上/下一章、键盘、核对后自动跳过）时，
+// 章节表翻页（既有逻辑）之外再把选中行滚入可视区并高亮，避免左右脱节。
+const tableScrollEl = ref<HTMLElement | null>(null)
+async function scrollSelectedRow() {
+  await nextTick()
+  tableScrollEl.value?.querySelector<HTMLElement>('[data-state="selected"]')
+    ?.scrollIntoView({ block: 'nearest' })
+}
+watch(selectedKey, (key) => {
+  if (key) void scrollSelectedRow()
+})
+
+/** 「查看同号章节」：表格只展示该原编号组便于集中比较，选中行保持在视图内。 */
+function onShowSameNumber(origNum: number) {
+  sameOrigNum.value = origNum
+  if (selectedKey.value) {
+    ensurePageFor(selectedKey.value)
+    void scrollSelectedRow()
+  }
+}
+const sameGroupCount = computed(() => {
+  if (sameOrigNum.value == null) return 0
+  return (version.value?.chapters ?? []).filter((c) => c.orig_num === sameOrigNum.value).length
+})
+
 function moveSelection(delta: number) {
   const list = filteredChapters.value
   if (!list.length) return
@@ -248,6 +274,9 @@ const chooseLabel = computed(() => (sourceFile.value ? '更换文件' : '选择 
 
 // 章节号补齐位数：以最大章节号位数为标准（339 章 → 第001章）
 const chapterNumPad = computed(() => chapterNumWidth(version.value?.chapters ?? []))
+
+// 已核对 key 集合：表格「核对状态」徽标随标记实时变化（pending 是后端静态字段）。
+const markedKeySet = computed(() => new Set(version.value?.review_marks ?? []))
 
 // 「核对原因」列：key → 简要标签（编号重复类附同原编号章节数）
 const chapterBriefs = computed<Record<string, string>>(() => {
@@ -432,7 +461,7 @@ onBeforeUnmount(() => {
                 :key="f[0]"
                 type="button"
                 class="filter-pill tabular-nums"
-                :class="{ 'filter-pill-active': filter === f[0] }"
+                :class="{ 'filter-pill-active': filter === f[0] && sameOrigNum == null }"
                 @click="filter = f[0]"
               >
                 {{ f[1] }}
@@ -440,13 +469,32 @@ onBeforeUnmount(() => {
                   {{ f[0] === 'all' ? version.chapters.length : f[0] === 'pending' ? pendingCount : adjustedCount }}
                 </span>
               </button>
+              <select
+                v-model="reasonFilter"
+                class="h-8 rounded-md border bg-background px-1.5 text-xs"
+                aria-label="按核对原因筛选"
+              >
+                <option value="">全部原因</option>
+                <option v-for="r in reasonOptions" :key="r" :value="r">{{ reasonLabel(r) }}</option>
+              </select>
+              <button
+                v-if="sameOrigNum != null"
+                type="button"
+                class="filter-pill filter-pill-active flex items-center gap-1.5"
+                title="点击退出同号章节比较"
+                @click="sameOrigNum = null"
+              >
+                原第{{ sameOrigNum }}章 · {{ sameGroupCount }} 章
+                <X class="h-3 w-3" />
+              </button>
             </div>
-            <div class="min-h-0 flex-1 overflow-y-auto">
+            <div ref="tableScrollEl" class="min-h-0 flex-1 overflow-y-auto">
               <ChapterTable
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"
                 :reason-briefs="chapterBriefs"
                 :num-pad="chapterNumPad"
+                :marked-keys="markedKeySet"
                 @select="onChapterSelect"
               />
             </div>
@@ -470,11 +518,13 @@ onBeforeUnmount(() => {
               :marks-busy="!!marksBusy"
               :can-read="canReadVersion"
               :num-pad="chapterNumPad"
+              :dup-info="dupInfo"
               :has-prev="detailHasPrev"
               :has-next="detailHasNext"
               @prev="moveSelection(-1)"
               @next="moveSelection(1)"
               @mark="() => toggleMark(selectedKey)"
+              @show-same-number="onShowSameNumber"
             />
           </aside>
         </div>
@@ -552,11 +602,13 @@ onBeforeUnmount(() => {
               :marks-busy="!!marksBusy"
               :can-read="canReadVersion"
               :num-pad="chapterNumPad"
+              :dup-info="dupInfo"
               :has-prev="detailHasPrev"
               :has-next="detailHasNext"
               @prev="moveSelection(-1)"
               @next="moveSelection(1)"
               @mark="() => toggleMark(selectedKey)"
+              @show-same-number="onShowSameNumber"
             />
           </div>
         </section>

@@ -45,6 +45,11 @@ function close(t: ToastItem) {
   dismiss(t.id)
 }
 
+function onAction(t: ToastItem) {
+  close(t)
+  t.action?.onClick()
+}
+
 onBeforeUnmount(() => timers.forEach(clearTimeout))
 </script>
 
@@ -60,6 +65,12 @@ onBeforeUnmount(() => timers.forEach(clearTimeout))
         <div class="flex-1 space-y-0.5 text-sm">
           <p class="font-medium">{{ t.title }}</p>
           <p v-if="t.description" class="text-muted-foreground">{{ t.description }}</p>
+          <button
+            v-if="t.action"
+            type="button"
+            class="mt-1.5 rounded-md bg-primary/10 px-2 py-1 text-xs font-medium text-primary transition hover:bg-primary/20"
+            @click="onAction(t)"
+          >{{ t.action.label }}</button>
         </div>
         <button
           class="shrink-0 rounded p-0.5 opacity-60 transition hover:opacity-100"

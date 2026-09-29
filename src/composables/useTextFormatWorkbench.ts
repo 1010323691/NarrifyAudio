@@ -54,6 +54,10 @@ export function useTextFormatWorkbench() {
   // --- workbench UI state -------------------------------------------------
   const selectedKey = ref<string | null>(null)
   const filter = ref<'all' | 'pending' | 'adjusted'>('all')
+  /** 按核对原因筛选（原因代码；'' = 全部）。 */
+  const reasonFilter = ref('')
+  /** 查看同号章节（原编号）：置位后表格只展示该组，便于集中比较。 */
+  const sameOrigNum = ref<number | null>(null)
   const query = ref('')
   const page = ref(1)
   const pageSize = ref(20)
@@ -107,20 +111,43 @@ export function useTextFormatWorkbench() {
   // --- table filtering / pagination (in-memory, hundreds of chapters) -----
   const filteredChapters = computed(() => {
     let list = chapters.value
-    if (filter.value === 'pending') list = list.filter((c) => c.pending && !isMarked(c.key))
-    else if (filter.value === 'adjusted') list = list.filter((c) => c.adjusted)
+    if (sameOrigNum.value != null) {
+      // 同号比较模式：整组展示，忽略状态/原因筛选（组内混有已核对/正常章也要可比）。
+      list = list.filter((c) => c.orig_num === sameOrigNum.value)
+    } else {
+      if (filter.value === 'pending') list = list.filter((c) => c.pending && !isMarked(c.key))
+      else if (filter.value === 'adjusted') list = list.filter((c) => c.adjusted)
+      if (reasonFilter.value) list = list.filter((c) => (c.reasons ?? []).includes(reasonFilter.value))
+    }
     const q = query.value.trim().toLowerCase()
     if (q) list = list.filter((c) => (c.title ?? '').toLowerCase().includes(q) || String(c.seq).includes(q))
     return list
+  })
+  /** 可筛选原因：本版本出现过的非「保留」原因，按首次出现顺序。 */
+  const reasonOptions = computed(() => {
+    const seen: string[] = []
+    for (const c of chapters.value) {
+      for (const r of c.reasons ?? []) if (r !== 'kept' && !seen.includes(r)) seen.push(r)
+    }
+    return seen
   })
   const pageCount = computed(() => Math.max(1, Math.ceil(filteredChapters.value.length / pageSize.value)))
   const pagedChapters = computed(() => {
     const p = Math.min(page.value, pageCount.value)
     return filteredChapters.value.slice((p - 1) * pageSize.value, p * pageSize.value)
   })
-  watch([filter, query], () => { page.value = 1 })
+  watch([filter, query, reasonFilter, sameOrigNum], () => { page.value = 1 })
 
   const currentChapter = computed(() => chapters.value.find((c) => c.key === selectedKey.value) ?? null)
+  /** 选中章节在同原编号组里的规模与位置（按正文顺序）；「重复」类原因的结论卡与
+   * 「查看同号章节」共用。组小于 2 或无原编号时返回 null。 */
+  const dupInfo = computed(() => {
+    const ch = currentChapter.value
+    if (!ch || ch.orig_num == null) return null
+    const group = chapters.value.filter((c) => c.orig_num === ch.orig_num)
+    if (group.length < 2) return null
+    return { count: group.length, index: group.findIndex((c) => c.key === ch.key) + 1 }
+  })
   function chapterMatters(chapter: WorkbenchChapter): WorkbenchMatter[] {
     return (chapter.matters ?? []).map((id) => matterById.value.get(id)).filter((m): m is WorkbenchMatter => !!m)
   }
@@ -279,7 +306,23 @@ export function useTextFormatWorkbench() {
       } else {
         await postReviewMark(projectId, v.task_id, chapterKey)
         v.review_marks = [...v.review_marks, chapterKey]
-        advanceAfterMark()
+        const advanced = advanceAfterMark(chapterKey)
+        const ch = chapters.value.find((c) => c.key === chapterKey)
+        const numLabel = ch ? (ch.numStr || String(ch.seq)) : ''
+        // 标记成功：给出可撤销的反馈（撤销 = 跳回该章并取消标记），减少来回点击。
+        toast({
+          title: `第${numLabel}章 已标记已核对`,
+          variant: 'success',
+          // 只有待核对过滤下才有「自动跳过」语义，其余过滤不提示。
+          description: filter.value === 'pending'
+            ? (advanced ? '已跳到下一个待核对章节' : '已是最后一个待核对章节')
+            : undefined,
+          duration: 6000,
+          action: { label: '撤销', onClick: () => {
+            selectedKey.value = chapterKey
+            void toggleMark(chapterKey)
+          } },
+        })
       }
       return true
     } catch (e: any) {
@@ -294,17 +337,24 @@ export function useTextFormatWorkbench() {
     }
   }
 
-  /** With the 待核对 filter active, jump to the next pending chapter after a mark. */
-  function advanceAfterMark() {
-    if (filter.value !== 'pending' || !selectedKey.value) return
-    const list = filteredChapters.value
-    const idx = list.findIndex((c) => c.key === selectedKey.value)
-    const next = list[idx + 1]
-    if (next) {
-      const position = filteredChapters.value.findIndex((c) => c.key === next.key)
-      page.value = Math.floor(Math.max(0, position) / pageSize.value) + 1
-      selectedKey.value = next.key
-    }
+  /** With the 待核对 filter active, jump to the next pending chapter after a
+   *  mark. The just-marked chapter is already gone from the filtered list, so
+   *  "next" is resolved in original (seq) order, not list position — marking
+   *  the middle item must move forward, not jump to the first item. Returns
+   *  whether the selection actually moved (drives the toast). */
+  function advanceAfterMark(justMarkedKey: string): boolean {
+    if (filter.value !== 'pending' || selectedKey.value !== justMarkedKey) return false
+    const all = chapters.value
+    const markedIdx = all.findIndex((c) => c.key === justMarkedKey)
+    if (markedIdx < 0) return false
+    const next = filteredChapters.value.find(
+      (c) => all.findIndex((x) => x.key === c.key) > markedIdx,
+    )
+    if (!next) return false
+    const position = filteredChapters.value.findIndex((c) => c.key === next.key)
+    page.value = Math.floor(Math.max(0, position) / pageSize.value) + 1
+    selectedKey.value = next.key
+    return true
   }
 
   // --- versioned preview (stale-response guard + lifecycle abort) -----------
@@ -394,10 +444,11 @@ export function useTextFormatWorkbench() {
     // state
     phase, flow, version, nextTask, activeTasks, loading,
     chapters, filteredChapters, pagedChapters, pageCount, page, pageSize,
-    filter, query, selectedKey, marksBusy, preview,
+    filter, query, reasonFilter, sameOrigNum, reasonOptions,
+    selectedKey, marksBusy, preview,
     // derived
     pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
-    isMarked, currentChapter, chapterMatters, chapterFile, versionMatters,
+    isMarked, currentChapter, chapterMatters, chapterFile, versionMatters, dupInfo,
     // actions
     resume, startFlow, retryFailedStage, toggleMark, loadPreview,
     selectChapter: (key: string | null) => { selectedKey.value = key },

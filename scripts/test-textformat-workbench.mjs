@@ -108,13 +108,14 @@ function workbenchApi({ getState, postFlow, calls }) {
   }
 }
 
-function setupWorkbench({ getState, postFlow } = {}) {
+function setupWorkbench({ getState, postFlow, extra } = {}) {
   const calls = { post: 0, mark: 0, unmark: 0, wait: 0 }
   const load = harness({
     '@/api/textFormat': workbenchApi({ getState, postFlow, calls }),
     '@/composables/useDurableTaskWait': {
       useDurableTaskWait: () => ({ wait: async () => { calls.wait += 1; return {} } }),
     },
+    ...extra,
   })
   const project = load('@/stores/project').useProjectStore()
   project.setCurrent({ set: true, project_id: 'P1', project_name: '测试' })
@@ -260,6 +261,92 @@ test('settingsDirty compares the flow config snapshot against the current config
   assert.equal(wb.settingsDirty.value, true)
   settings.config = { text: { x: 1 } }
   assert.equal(wb.settingsDirty.value, true) // 缺键也判脏
+})
+
+test('reason filter, same-number group and dupInfo drive the reason card', async () => {
+  const chapters = [
+    { key: 'c1', seq: 1, title: 'A', chars: 10, pending: true, adjusted: true, reasons: ['duplicate_number'], matters: [], orig_num: 5 },
+    { key: 'c2', seq: 2, title: 'B', chars: 10, pending: true, adjusted: true, reasons: ['duplicate_kept'], matters: [], orig_num: 5 },
+    { key: 'c3', seq: 3, title: 'C', chars: 10, pending: false, adjusted: false, reasons: ['kept'], matters: [], orig_num: 3 },
+    { key: 'c4', seq: 4, title: 'D', chars: 10, pending: true, adjusted: true, reasons: ['inferred'], matters: [], orig_num: 4 },
+  ]
+  const { wb } = setupWorkbench({
+    getState: async () => ({
+      flow: { id: 'flow-1', status: 'ready', config_snapshot: {} },
+      version: readyVersion(chapters),
+      next_task: null,
+      active_tasks: [],
+    }),
+  })
+  await wb.resume()
+  // 可筛原因 = 出现过的非「保留」原因，按首次出现顺序
+  assert.deepEqual([...wb.reasonOptions.value], ['duplicate_number', 'duplicate_kept', 'inferred'])
+
+  // 原因筛选
+  wb.reasonFilter.value = 'duplicate_kept'
+  await nextTick()
+  assert.equal(wb.page.value, 1) // 切筛选回第一页
+  assert.deepEqual(wb.filteredChapters.value.map((c) => c.key), ['c2'])
+  wb.reasonFilter.value = ''
+
+  // 同号比较：整组展示，忽略状态筛选（组内 c2 已核对也会被排除在 pending 外，但比较模式全留）
+  wb.filter.value = 'pending'
+  wb.sameOrigNum.value = 5
+  await nextTick()
+  assert.equal(wb.page.value, 1)
+  assert.deepEqual(wb.filteredChapters.value.map((c) => c.key), ['c1', 'c2'])
+
+  // dupInfo：同原编号组的规模与位置（按正文顺序）
+  wb.selectChapter('c1')
+  assert.deepEqual({ ...wb.dupInfo.value }, { count: 2, index: 1 })
+  wb.selectChapter('c2')
+  assert.deepEqual({ ...wb.dupInfo.value }, { count: 2, index: 2 })
+  wb.selectChapter('c3')
+  assert.equal(wb.dupInfo.value, null) // 组小于 2 → 无重复语境
+})
+
+test('mark success pushes an undoable toast; unmark does not', async () => {
+  const toasts = []
+  const { wb, calls } = setupWorkbench({
+    getState: async () => ({
+      flow: { id: 'flow-1', status: 'ready', config_snapshot: {} },
+      version: readyVersion(makeChapters(5)),
+      next_task: null,
+      active_tasks: [],
+    }),
+    extra: {
+      '@/components/ui/toast': { useToast: () => ({ push: (t) => toasts.push(t) }) },
+    },
+  })
+  await wb.resume()
+  wb.filter.value = 'pending'
+  await nextTick()
+  wb.selectChapter('c1')
+  assert.equal(toasts.length, 0)
+  await wb.toggleMark('c1')
+  assert.equal(calls.mark, 1)
+  assert.equal(wb.selectedKey.value, 'c2') // 自动跳到下一待核对
+  assert.equal(toasts.length, 1)
+  assert.equal(toasts[0].title, '第1章 已标记已核对')
+  assert.equal(toasts[0].description, '已跳到下一个待核对章节')
+  assert.equal(typeof toasts[0].action.onClick, 'function')
+
+  // 撤销：跳回该章并取消标记，不产生新 toast
+  toasts[0].action.onClick()
+  assert.equal(wb.selectedKey.value, 'c1')
+  await new Promise((r) => setTimeout(r, 50)) // toggleMark 是异步的
+  assert.equal(calls.unmark, 1)
+  assert.equal(wb.isMarked('c1'), false)
+  assert.equal(toasts.length, 1)
+
+  // 标记中间项：前进到下一待核对（c4），而不是跳回第一项
+  toasts.length = 0
+  wb.selectChapter('c3')
+  await wb.toggleMark('c3')
+  assert.equal(calls.mark, 2)
+  assert.equal(wb.selectedKey.value, 'c4')
+  assert.equal(toasts.length, 1)
+  assert.equal(toasts[0].title, '第3章 已标记已核对')
 })
 
 test('a late state response from the previous project cannot overwrite the new project state', async () => {
