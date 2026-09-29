@@ -7,7 +7,7 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
-import { stageLabel, modeLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
+import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -410,9 +410,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="ml-auto flex flex-wrap items-center gap-2 text-xs">
-          <Badge variant="outline">{{ modeLabel(version.mode) }}</Badge>
           <Badge v-if="version.version_status === 'stale'" variant="destructive">已被新版本覆盖</Badge>
-          <Badge v-else variant="success">当前版本</Badge>
           <Badge v-if="settingsDirty" variant="warning">设置已修改，重新处理后生效</Badge>
         </div>
       </div>
