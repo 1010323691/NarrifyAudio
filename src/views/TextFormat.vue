@@ -8,7 +8,7 @@ import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
 import { retryDurableTask, type DurableTask } from '@/api/durableTasks'
-import { stageLabel, modeLabel } from '@/utils/bookLabels'
+import { stageLabel, modeLabel, chapterBriefLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
 
 import Button from '@/components/ui/Button.vue'
@@ -277,6 +277,19 @@ const canReadVersion = computed(() => version.value?.version_status === 'current
 const adjustedCount = computed(() => version.value?.chapters.filter((c) => c.adjusted).length ?? 0)
 const chooseLabel = computed(() => (sourceFile.value ? '更换文件' : '选择 TXT'))
 
+// 「核对原因」列：key → 简要标签（编号重复类附同原编号章节数）
+const chapterBriefs = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  const v = version.value
+  if (!v) return map
+  const byOrig = new Map<number | null, number>()
+  for (const c of v.chapters) byOrig.set(c.orig_num, (byOrig.get(c.orig_num) ?? 0) + 1)
+  for (const c of v.chapters) {
+    if (c.key) map[c.key] = chapterBriefLabel(c.reasons, byOrig.get(c.orig_num) ?? 0)
+  }
+  return map
+})
+
 // --- lifecycle --------------------------------------------------------------------
 onMounted(() => {
   mediaMql = window.matchMedia('(max-width: 1100px)')
@@ -473,6 +486,7 @@ onBeforeUnmount(() => {
               <ChapterTable
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"
+                :reason-briefs="chapterBriefs"
                 @select="onChapterSelect"
               />
             </div>

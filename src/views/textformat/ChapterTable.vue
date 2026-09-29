@@ -12,10 +12,13 @@ import type { WorkbenchChapter } from '@/api/textFormat'
 const props = defineProps<{
   chapters: WorkbenchChapter[]
   selectedKey: string | null
+  reasonBriefs: Record<string, string>
 }>()
 const emit = defineEmits<{
   (e: 'select', key: string): void
 }>()
+
+const reasonBrief = (chapter: WorkbenchChapter) => props.reasonBriefs[chapter.key ?? ''] ?? '—'
 </script>
 
 <template>
@@ -26,6 +29,7 @@ const emit = defineEmits<{
         <TableHead>标题</TableHead>
         <TableHead class="w-20 text-right">字数</TableHead>
         <TableHead class="w-24">处理结果</TableHead>
+        <TableHead class="w-28">核对原因</TableHead>
       </TableRow>
     </TableHeader>
     <TableBody>
@@ -46,9 +50,12 @@ const emit = defineEmits<{
           <Badge v-else-if="chapter.adjusted" variant="success">已调整</Badge>
           <Badge v-else variant="outline">正常</Badge>
         </TableCell>
+        <TableCell class="text-muted-foreground">
+          <span class="block truncate" :title="reasonBrief(chapter)">{{ reasonBrief(chapter) }}</span>
+        </TableCell>
       </TableRow>
       <TableRow v-if="!chapters.length">
-        <TableCell :colspan="4" class="h-20 text-center text-sm text-muted-foreground">
+        <TableCell :colspan="5" class="h-20 text-center text-sm text-muted-foreground">
           没有符合条件的章节
         </TableCell>
       </TableRow>

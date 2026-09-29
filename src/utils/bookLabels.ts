@@ -39,6 +39,35 @@ export const REASON_LABELS: Record<string, string> = {
   kept: '保留原样',
 }
 
+/** 章节表「核对原因」列的简要标签：比 matter 长文案更短，advisory 原因优先。 */
+export const REASON_BRIEF: Record<string, string> = {
+  duplicate_number: '原章节号重复',
+  duplicate_kept: '原章节号重复',
+  duplicate_split: '重复正文拆分',
+  truncated: '重复正文已截除',
+  inferred: '推断章节边界',
+  mechanical: '按结构线索拆分',
+  range_mid: '切点段落对齐',
+  range: '范围标题补齐',
+  renumbered: '编号已规范化',
+  gap_absorbed: '跳号已并入',
+  length_split: '按字数分册',
+  whole_book: '整本处理',
+}
+
+const ADVISORY_REASONS = ['duplicate_number', 'duplicate_kept', 'duplicate_split', 'truncated', 'inferred', 'mechanical', 'range_mid']
+
+/** 由 reasons 派生表格用简要原因：advisory 优先；编号重复类附出现次数；无调整 → — */
+export function chapterBriefLabel(reasons: string[], dupCount = 0): string {
+  const adv = reasons.find(r => ADVISORY_REASONS.includes(r))
+  const code = adv ?? reasons.find(r => r !== 'kept' && REASON_BRIEF[r]) ?? ''
+  if (!code) return '—'
+  const base = REASON_BRIEF[code] ?? code
+  return (code === 'duplicate_number' || (code === 'duplicate_kept' && dupCount >= 2)) && dupCount >= 2
+    ? `${base} ${dupCount} 次`
+    : base
+}
+
 export function reasonLabel(code: string): string {
   return REASON_LABELS[code] ?? code
 }
