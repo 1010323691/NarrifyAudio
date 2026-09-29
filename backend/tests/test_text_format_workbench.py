@@ -218,6 +218,35 @@ def test_force_by_length_defers_to_whole_book(client: TestClient):
     assert state["version"]["mode"] == "whole_book"
 
 
+def test_flow_snapshot_forces_detect_chapters_on(client: TestClient):
+    """detect_chapters 已并入「分册方式」（恒开）：无论调用方传什么值，落快照前
+    强制置真，其余键原样保留——排版质量不依赖 UI 保存路径或平台默认。"""
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "detect-force.txt", CHAPTERED_BODY)
+    response = _post_flow(
+        client, csrf, project_id,
+        {
+            "source_file_id": uploaded["file_id"],
+            "config": {"detect_chapters": False, "sentence_break": False},
+        },
+    )
+    assert response.status_code == 200, response.text
+    snapshot = response.json()["flow"]["config_snapshot"]
+    assert snapshot["detect_chapters"] is True
+    assert snapshot["sentence_break"] is False
+
+    # 缺省（API 直调不传 config）：快照只含强制的 detect_chapters。
+    second = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf2 = second["csrf_token"]
+    project_id2 = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded2 = _upload(client, csrf2, "detect-force-2.txt", CHAPTERED_BODY)
+    response2 = _post_flow(client, csrf2, project_id2, {"source_file_id": uploaded2["file_id"]})
+    assert response2.status_code == 200, response2.text
+    assert response2.json()["flow"]["config_snapshot"] == {"detect_chapters": True}
+
+
 def test_review_marks_are_version_scoped_and_idempotent(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.test")
     csrf = first["csrf_token"]

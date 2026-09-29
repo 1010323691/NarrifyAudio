@@ -480,9 +480,12 @@ def start_or_continue_flow(
             # Brand-new flow: any in-flight pipeline task (from another
             # session/file) blocks the whole project (P0-02 server-side guard).
             raise WorkbenchError(409, "有排版分册任务正在进行，暂时无法开始处理")
+        # 章节识别恒开：detect_chapters 已并入「分册方式」、不再是用户开关，
+        # 落快照前强制置真——排版质量不依赖调用方传值或平台默认。
+        snapshot = {**(config or {}), "detect_chapters": True}
         flow = TextFormatFlow(
             project_id=project.id, owner_id=user.id, source_file_id=source_file_id,
-            config_snapshot=config or {}, whole_book=bool(whole_book),
+            config_snapshot=snapshot, whole_book=bool(whole_book),
             force_by_length=bool(force_by_length and not whole_book), status="running",
         )
         db.add(flow)
