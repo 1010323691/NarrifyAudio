@@ -243,35 +243,40 @@ def _active_parse_names(db: Session, owner_id: str, project_id: str) -> set[str]
     }
 
 
-def _latest_success_result(db: Session, task_id: str) -> dict | None:
-    """Scalars extracted from a succeeded task's result envelope (JSON item
-    extraction — the full entries array is never materialized). The envelope
+def _latest_success_results(db: Session, task_ids: list[str]) -> dict[str, dict]:
+    """Scalars extracted from succeeded tasks' result envelopes (JSON item
+    extraction — the full entries array is never materialized). One query for
+    the whole batch (review [P3]: the per-task version was an N+1 — a
+    300-chapter project meant 300+ queries per state aggregate). The envelope
     carries the source digest; the artifact's own digest comes from the file
     table, so it is deliberately NOT read from here. Pre-fingerprint
     envelopes (pre-workbench tasks) lack ``source_sha256`` but keep
     ``source_file_id`` / ``input_chars`` — the row that row points to and the
     on-disk input length are how those results are re-verified
     (see ``_legacy_result_status``)."""
-    row = db.execute(
+    if not task_ids:
+        return {}
+    rows = db.execute(
         select(
+            TaskResult.task_id,
             TaskResult.result["source_sha256"].as_string(),
             TaskResult.result["source_file_id"].as_string(),
             TaskResult.result["input_chars"].as_integer(),
             TaskResult.result["name"].as_string(),
             TaskResult.result["file_id"].as_string(),
         )
-        .where(TaskResult.task_id == task_id)
-    ).first()
-    if row is None:
-        return None
-    source_sha, source_file_id, input_chars, name, file_id = row
-    return {
-        "source_sha256": source_sha,
-        "source_file_id": source_file_id,
-        "input_chars": input_chars,
-        "name": name,
-        "file_id": file_id,
-    }
+        .where(TaskResult.task_id.in_(task_ids))
+    ).all()
+    out: dict[str, dict] = {}
+    for task_id, source_sha, source_file_id, input_chars, name, file_id in rows:
+        out[task_id] = {
+            "source_sha256": source_sha,
+            "source_file_id": source_file_id,
+            "input_chars": input_chars,
+            "name": name,
+            "file_id": file_id,
+        }
+    return out
 
 
 def _input_char_count(path: Path) -> int | None:
@@ -332,8 +337,9 @@ def _build_file_states(
     split_rows_by_id = {item.id: item for item in split_rows.values()}
     storage_root = configured_storage_root(db)
 
+    success_lookup = _latest_success_results(db, [task.id for task in latest_success.values()])
     success_meta: dict[str, dict | None] = {
-        task.id: _latest_success_result(db, task.id) for task in latest_success.values()
+        task.id: success_lookup.get(task.id) for task in latest_success.values()
     }
     # Result artifacts must still exist in the file table (republish keeps the
     # row alive; a deleted / never-catalogued artifact fails verification).
@@ -461,6 +467,12 @@ def submit_run(
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise ScriptParseError(404, "项目不存在")
+    # 项目行锁：同项目两个 submit_run 串行化——后者的在途检查（READ COMMITTED
+    # 下逐语句新快照）能看到前者已提交的活跃任务 → 409，关闭并发双解析的窗口。
+    # sqlite（测试环境）不支持 FOR UPDATE，跳过；循环内首个 submit_task_record
+    # 提交即释放行锁，剩余毫秒级窗口只浪费 LLM 成本，无产物损坏（评审 [P4]）。
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(select(Project.id).where(Project.id == project.id).with_for_update())
     if _text_format_busy(db, user.id, project.id):
         raise ScriptParseError(409, "排版与分册任务正在进行，暂不能提交解析")
 
@@ -517,6 +529,9 @@ def submit_run(
         # 用户勾选的检查开关 = 每任务权威值（同 legacy 端点语义）。
         snapshot["generation"].update(checks)
 
+    # 逐文件独立提交（submit_task_record 自提交事务）：批量中途额度耗尽等失败时，
+    # 前序任务已登记并会执行——部分生效语义（与 legacy 单文件提交粒度一致），
+    # 整批不回滚（评审 [P5]：该语义在此明示，PR 已声明）。
     created: list[dict] = []
     for name, _sha in wanted:
         item = split_rows[name]
