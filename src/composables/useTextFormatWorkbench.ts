@@ -401,7 +401,7 @@ export function useTextFormatWorkbench() {
       })
       if (token !== previewToken || selectedKey.value !== key) return
       if (res.status === 413) {
-        preview.value = { key, status: 'error', text: '', error: '文件较大，请直接下载查看' }
+        preview.value = { key, status: 'error', text: '', error: '文件较大，无法在线预览' }
         return
       }
       if (res.status === 409) {

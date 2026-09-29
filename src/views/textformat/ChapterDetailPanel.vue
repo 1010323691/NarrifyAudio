@@ -106,7 +106,7 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
 
         <!-- 正文预览 -->
         <div v-if="!props.canRead" class="flex h-24 items-center justify-center text-xs text-muted-foreground">
-          该版本正文不可用，请下载或重新处理后查看
+          该版本正文不可用，请重新处理后查看
         </div>
         <div v-else-if="props.preview.status === 'loading'" class="flex h-24 items-center justify-center gap-2 text-sm text-muted-foreground">
           <Loader2 class="h-4 w-4 animate-spin" />

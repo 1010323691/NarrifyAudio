@@ -91,7 +91,7 @@ async function start(restart: boolean) {
     restart,
   })
   if (ok && restart) {
-    toast({ title: '已重新开始处理', variant: 'success', description: '旧版本保留为历史记录' })
+    toast({ title: '已重新开始处理', variant: 'success', description: '若本次处理失败，可「重试该阶段」或再次重新处理' })
   }
 }
 
@@ -452,7 +452,7 @@ onBeforeUnmount(() => {
     <template v-if="phase === 'ready' && version">
       <Alert v-if="version.version_status === 'stale'" variant="destructive">
         <AlertTriangle class="h-4 w-4 shrink-0" />
-        <p>该版本正文已被后续处理覆盖，仅可查看核对记录；预览与下载已禁用。</p>
+        <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
       </Alert>
       <Alert
         v-for="matter in versionMatters"
