@@ -283,7 +283,9 @@ const chapterBriefs = computed<Record<string, string>>(() => {
   const v = version.value
   if (!v) return map
   const byOrig = new Map<number | null, number>()
-  for (const c of v.chapters) byOrig.set(c.orig_num, (byOrig.get(c.orig_num) ?? 0) + 1)
+  for (const c of v.chapters) {
+    if (c.orig_num != null) byOrig.set(c.orig_num, (byOrig.get(c.orig_num) ?? 0) + 1)
+  }
   for (const c of v.chapters) {
     if (c.key) map[c.key] = chapterBriefLabel(c.reasons, byOrig.get(c.orig_num) ?? 0)
   }
