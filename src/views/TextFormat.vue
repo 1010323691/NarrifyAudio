@@ -420,7 +420,7 @@ onBeforeUnmount(() => {
     </template>
 
     <!-- 工作区 -->
-    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[480px] flex-col overflow-hidden">
+    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[440px] flex-col overflow-hidden">
       <div class="flex items-center gap-1 border-b px-4" role="tablist" aria-label="工作区标签">
         <button
           v-for="t in [['chapters', '章节结果'], ['preview', '文本预览'], ['records', '处理记录']] as const"
@@ -707,6 +707,11 @@ onBeforeUnmount(() => {
 }
 .wb-workspace {
   border-radius: 0.75rem;
+  /* 固定显示区域：按视口高度约束，长正文/长表格在内部滚动，不再把页面撑开。
+     476px ≈ 上栈（页头+文件栏+摘要）350 + 间距 16 + 底栏 62 + 内容底 padding 44 + 余量；
+     min-h 兜底小视口。 */
+  height: calc(100vh - 476px);
+  height: calc(100dvh - 476px);
 }
 .wb-tab {
   padding: 0.5rem 0.875rem;
