@@ -3,15 +3,9 @@
   "configurations": [
     {
       "name": "narrify-dev",
-      "runtimeExecutable": "npm.cmd",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts\\dev-all.ps1"],
       "port": 5173
-    },
-    {
-      "name": "narrify-dev2",
-      "runtimeExecutable": "npm.cmd",
-      "runtimeArgs": ["run", "dev", "--", "--port", "5174", "--strictPort"],
-      "port": 5174
     }
   ]
 }
