@@ -29,21 +29,32 @@ const rangeLabel = computed(() => {
   return `第 ${from}–${to} 条，共 ${t} ${u.value}`
 })
 
-/** 页码窗口：≤7 页全显示；否则固定「首页 + 当前±1（靠边时 3 个）+ 末页」。
-    例：17 页 → ‹ 1 2 3 … 17 ›，避免页码整排展开占用视觉空间。 */
+/** 页码窗口：固定 7 个页码位（含「…」占位），分页条宽度恒定，切页只换中间内容。
+    首末页常驻；中间窗口随当前页滑动（cur±1），靠边时吸附到边并展成 5 页。
+    例（17 页）：
+      第 1 页： [1]  2  3  4  5  …  17
+      第 3 页：  1  2  [3]  4  5  …  17
+      第 5 页：  1  …  4  [5]  6  …  17
+      第15页：   1  … 13 14 [15] 16  17 */
 const pageItems = computed<(number | '...')[]>(() => {
   const n = props.pageCount
   if (n <= 7) return Array.from({ length: n }, (_, i) => i + 1)
   const cur = props.page
-  let start = Math.max(2, cur - 1)
-  let end = Math.min(n - 1, cur + 1)
-  if (cur <= 2) { start = 2; end = Math.min(3, n - 1) }
-  else if (cur >= n - 1) { start = Math.max(2, n - 2); end = n - 1 }
-  const items: (number | '...')[] = [1]
-  if (start > 2) items.push('...')
+  // 靠边窗口：≤3 吸附首页展到 5；≥n-2 吸附末页展到 n-4；中段固定 3（cur±1）。
+  const win: [number, number] =
+    cur <= 3 ? [1, 5] : cur >= n - 2 ? [n - 4, n] : [cur - 1, cur + 1]
+  const start = Math.max(1, win[0])
+  const end = Math.min(n, win[1])
+  const items: (number | '...')[] = []
+  if (start > 1) {
+    items.push(1)
+    if (start > 2) items.push('...')
+  }
   for (let i = start; i <= end; i += 1) items.push(i)
-  if (end < n - 1) items.push('...')
-  items.push(n)
+  if (end < n) {
+    if (end < n - 1) items.push('...')
+    items.push(n)
+  }
   return items
 })
 </script>
