@@ -530,6 +530,16 @@ def flow_state(db: Session, user: User, project_id: str) -> dict:
             flow = _latest_flow(db, project.id, user.id)
 
     active = _active_flow_tasks(db, user.id, project.id)
+
+    # Recovery: a running flow whose stage tasks are all terminal — the client
+    # left before POSTing continue, or the last task finished in the background
+    # — is advanced idempotently so a plain read restores progress. Submissions
+    # carry stable tflow keys, so concurrent reads cannot duplicate a stage.
+    if flow is not None and flow.status == "running" and not active:
+        _advance(db, user, project, flow)
+        db.commit()
+        flow = _latest_flow(db, project.id, user.id)
+    active = _active_flow_tasks(db, user.id, project.id)
     version = None
     ready_flow = _latest_flow(db, project.id, user.id)
     if ready_flow is not None and ready_flow.status == "ready":

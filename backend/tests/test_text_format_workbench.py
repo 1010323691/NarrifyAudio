@@ -146,6 +146,57 @@ def test_flow_runs_pipeline_and_recovers_without_resubmitting(client: TestClient
     assert again["next_task"] is None
 
 
+def test_get_state_recovers_a_running_flow_whose_last_stage_finished_in_background(client: TestClient):
+    """客户端在末段任务执行期间离开（无人再 POST /flow），任务在后台完成——
+    一次普通 GET state 必须幂等推进流程到 ready，而不是永久停在 running。"""
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "bg-recover.txt", CHAPTERED_BODY)
+    body = {"source_file_id": uploaded["file_id"], "config": {}}
+
+    state = _post_flow(client, csrf, project_id, body).json()
+    for _ in range(2):  # 依次执行 format、analyze，POST 推进到 split 已提交
+        result = process_task_message(
+            {"payload": {"task_id": state["next_task"]["task_id"]}}, worker_id="test-workbench-worker"
+        )
+        assert result == "succeeded"
+        state = _post_flow(client, csrf, project_id, body).json()
+    assert state["next_task"]["stage"] == "split"
+    # split 由 worker 在「客户端已离开」时完成——不 POST /flow。
+    result = process_task_message(
+        {"payload": {"task_id": state["next_task"]["task_id"]}}, worker_id="test-workbench-worker"
+    )
+    assert result == "succeeded"
+
+    got = client.get(f"/api/v1/projects/{project_id}/text-format/state")
+    assert got.status_code == 200, got.text
+    state = got.json()
+    assert state["flow"]["status"] == "ready"
+    assert state["version"], "GET state 必须恢复出可用版本"
+    assert state["next_task"] is None
+    tasks = client.get("/api/v1/tasks", params={"project_id": project_id}).json()
+    assert sum(1 for t in tasks if t["task_type"] == "book.split") == 1  # 恢复不重复提交
+
+
+def test_get_state_does_not_resubmit_stages_while_one_is_in_flight(client: TestClient):
+    """GET 的恢复推进对执行中的阶段是无操作的：不新建任务、next_task 不变。"""
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "inflight-get.txt", CHAPTERED_BODY)
+    started = _post_flow(client, csrf, project_id, {"source_file_id": uploaded["file_id"]}).json()
+    task_id = started["next_task"]["task_id"]
+
+    got = client.get(f"/api/v1/projects/{project_id}/text-format/state")
+    assert got.status_code == 200, got.text
+    body = got.json()
+    assert body["flow"]["status"] == "running"
+    assert body["next_task"]["task_id"] == task_id
+    tasks = client.get("/api/v1/tasks", params={"project_id": project_id}).json()
+    assert sum(1 for t in tasks if t["task_type"] == "text.format") == 1
+
+
 def test_zero_chapter_input_falls_back_to_by_length(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.test")
     csrf = first["csrf_token"]

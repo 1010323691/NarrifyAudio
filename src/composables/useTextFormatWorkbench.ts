@@ -451,8 +451,10 @@ export function useTextFormatWorkbench() {
     if (project.activeProjectId) void resume()
   })
   onActivated(() => {
-    if (flow.value || !project.activeProjectId) return
-    if (project.activeProjectId) void resume()
+    // 不短路旧 flow：keep-alive 切走时泵已中止，回来必须重新恢复（服务端读取
+    // 幂等推进，不会重复处理）；首次激活与 onMounted 的恢复由 loadToken 去重。
+    if (!project.activeProjectId) return
+    void resume()
   })
   onDeactivated(() => previewAbort.abort())
   onUnmounted(() => previewAbort.abort())
