@@ -182,13 +182,16 @@
 
   /* De-glass the panels that wrap a long scroll region. A backdrop-filter
      element re-rasterises its entire area on every scroll frame (~+8ms → a
-     120Hz display halves to 60Hz while a glass list scrolls). These two cards
-     each contain a long list (BGM 章节匹配结果; the Voices 角色 table), so they
-     take a near-opaque card fill and drop the per-frame blur. Border + shadow
-     stay, so the glass silhouette is kept — only the re-blur cost is removed.
-     (TaskCenter's sub-window dialog de-glasses its own scoped rule instead.) */
+     120Hz display halves to 60Hz while a glass list scrolls). The BGM and
+     Voices cards each contain a long list; the workbench workspace wraps the
+     章节表 + 详情面板（正文预览可达上万 px）, the heaviest scroll on the site,
+     so all three take a near-opaque card fill and drop the per-frame blur.
+     Border + shadow stay, so the glass silhouette is kept — only the
+     re-blur cost is removed. (TaskCenter's sub-window dialog de-glasses its
+     own scoped rule instead.) */
   .glass-panel.bgm-results-card,
-  .glass-panel.voices-speakers-card {
+  .glass-panel.voices-speakers-card,
+  .glass-panel.wb-workspace {
     background: hsl(var(--card) / 0.95);
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
