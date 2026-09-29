@@ -59,8 +59,8 @@ const chapterColClass = ['w-20', 'w-24', 'w-28', 'w-32'][Math.min(props.numPad -
           <Badge v-if="chapter.key && props.markedKeys.has(chapter.key)" variant="success">已核对</Badge>
           <Badge v-else-if="chapter.pending" variant="warning">待核对</Badge>
           <Badge v-else-if="chapter.adjusted" variant="success">已调整</Badge>
-          <!-- 正常章节低强调：只有真正需要检查的行才着色。 -->
-          <span v-else class="text-xs text-muted-foreground/70">正常</span>
+          <!-- 正常章节用与已核对相同的绿色徽标，整列状态一眼可辨。 -->
+          <Badge v-else variant="success">正常</Badge>
         </TableCell>
         <TableCell class="text-muted-foreground">
           <span class="block truncate" :title="reasonBrief(chapter)">{{ reasonBrief(chapter) }}</span>
