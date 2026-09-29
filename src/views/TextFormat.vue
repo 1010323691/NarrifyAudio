@@ -267,15 +267,6 @@ function onDrawerKeydown(event: KeyboardEvent) {
   }
 }
 
-function gotoFirstPending() {
-  tab.value = 'chapters'
-  filter.value = 'pending'
-  const first = filteredChapters.value[0]
-  if (!first?.key) return
-  page.value = 1
-  onChapterSelect(first.key)
-}
-
 // --- derived display bits -------------------------------------------------------
 type RecordTone = 'positive' | 'warning' | 'negative' | 'neutral'
 function recordStatus(task: DurableTask): { label: string; tone: RecordTone } {
@@ -428,7 +419,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 版本级事项 / 待核对提示 -->
+    <!-- 版本级事项 -->
     <template v-if="phase === 'ready' && version">
       <Alert v-if="version.version_status === 'stale'" variant="destructive">
         <AlertTriangle class="h-4 w-4 shrink-0" />
@@ -442,16 +433,6 @@ onBeforeUnmount(() => {
       >
         <AlertTriangle v-if="matter.advisory" class="h-4 w-4 shrink-0" />
         <p>{{ matter.text }}</p>
-      </Alert>
-      <Alert v-if="pendingCount > 0" variant="warning">
-        <AlertTriangle class="h-4 w-4 shrink-0" />
-        <div class="flex flex-wrap items-center gap-2">
-          <p><b>{{ pendingCount }} 章</b>建议人工核对——核对不会阻断进入解析，可逐章查看后标记。</p>
-          <Button variant="ghost" size="sm" class="ml-auto shrink-0 gap-1 px-2 text-primary" @click="gotoFirstPending()">
-            查看待核对章节
-            <ArrowRight class="h-3.5 w-3.5" />
-          </Button>
-        </div>
       </Alert>
     </template>
 
