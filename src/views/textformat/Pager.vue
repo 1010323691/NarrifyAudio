@@ -60,10 +60,10 @@ const pageItems = computed<(number | '...')[]>(() => {
       <option v-for="n in props.pageSizeOptions ?? [20, 50]" :key="n" :value="n">{{ n }} 条 / 页</option>
     </select>
     <!-- 页码靠右：36×36 无边框点击区，当前页浅紫底紫字，其他页悬停浅灰底，键盘聚焦保留轮廓。 -->
-    <nav class="ml-auto flex items-center gap-3" aria-label="分页">
+    <nav class="ml-auto flex items-center gap-px" aria-label="分页">
       <button
         type="button"
-        class="flex h-9 w-9 items-center justify-center rounded-[8px] text-foreground/70 transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+        class="flex h-8 w-8 items-center justify-center rounded-[8px] text-foreground/70 transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
         aria-label="上一页"
         :disabled="props.page <= 1"
         @click="emit('update:page', props.page - 1)"
@@ -71,11 +71,11 @@ const pageItems = computed<(number | '...')[]>(() => {
         <ChevronLeft class="h-4 w-4" />
       </button>
       <template v-for="(item, i) in pageItems" :key="i">
-        <span v-if="item === '...'" class="flex h-9 w-9 items-center justify-center" aria-hidden="true">…</span>
+        <span v-if="item === '...'" class="flex h-8 w-8 items-center justify-center" aria-hidden="true">…</span>
         <button
           v-else
           type="button"
-          class="flex h-9 w-9 items-center justify-center rounded-[8px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="flex h-8 w-8 items-center justify-center rounded-[8px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           :class="item === props.page
             ? 'bg-primary/10 text-primary'
             : 'text-foreground/70 hover:bg-muted'"
@@ -85,7 +85,7 @@ const pageItems = computed<(number | '...')[]>(() => {
       </template>
       <button
         type="button"
-        class="flex h-9 w-9 items-center justify-center rounded-[8px] text-foreground/70 transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+        class="flex h-8 w-8 items-center justify-center rounded-[8px] text-foreground/70 transition-colors enabled:hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
         aria-label="下一页"
         :disabled="props.page >= props.pageCount"
         @click="emit('update:page', props.page + 1)"

@@ -517,7 +517,7 @@ onBeforeUnmount(() => {
               />
             </div>
             <Pager
-              class="border-t px-4 py-2.5"
+              class="border-t px-4 py-2"
               :page="page"
               :page-count="pageCount"
               :total="filteredChapters.length"
