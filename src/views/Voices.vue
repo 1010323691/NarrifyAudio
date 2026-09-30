@@ -620,109 +620,111 @@ watch(
         @refresh="loadVoices" @gender="openGenderMenu" @merge="openMerge" @pick="openPicker"
         @foundation="regenFoundation" @clone="remakeClone" @copy="copyDescriptionToPrompt" @prompt="(name, value) => prompts[name] = value"
       />
-      <!-- 阶段 1 · 生成语音推理基础（LLM only） -->
-      <Card class="voices-stage">
-        <CardHeader class="p-3 pb-2">
-          <CardTitle class="text-xs flex items-center gap-2"><Sparkles class="h-4 w-4" />阶段 1 · 生成语音推理基础</CardTitle>
-          <CardDescription class="text-xs">
-            为角色生成声音描述和种子文案。
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
-          <div class="flex flex-wrap items-center gap-2">
-            <Button :disabled="foundationBlocked" @click="doFoundations({})">
-              <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
-              <Sparkles v-else class="h-4 w-4" />
-              {{ foundationBusy ? '生成中…' : '批量生成所有角色' }}
-            </Button>
-            <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
-              <Users class="h-4 w-4" />仅新增角色
-            </Button>
-            <Button variant="outline" size="sm" @click="loadVoices">
-              <RefreshCw class="h-4 w-4" />刷新
-            </Button>
-            <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
-          </div>
-
-          <LiveLogPanel :task="foundationTask" :max-height-class="'h-40'">
-            <template #actions>
-              <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="outline" size="sm" @click="cancelFoundation">
-                <XCircle class="h-3.5 w-3.5" />取消
+      <Card class="voices-production" aria-label="角色声音制作">
+        <!-- 阶段 1 · 生成语音推理基础（LLM only） -->
+        <section class="voices-stage" aria-labelledby="voices-foundation-title">
+          <CardHeader class="p-3 pb-2">
+            <CardTitle id="voices-foundation-title" class="text-xs flex items-center gap-2"><Sparkles class="h-4 w-4" />阶段 1 · 生成语音推理基础</CardTitle>
+            <CardDescription class="text-xs">
+              为角色生成声音描述和种子文案。
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <Button :disabled="foundationBlocked" @click="doFoundations({})">
+                <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
+                <Sparkles v-else class="h-4 w-4" />
+                {{ foundationBusy ? '生成中…' : '批量生成所有角色' }}
               </Button>
-            </template>
-          </LiveLogPanel>
-
-          <div
-            v-if="foundationResult"
-            class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
-          >
-            <CheckCircle2 class="h-4 w-4 shrink-0" />
-            完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，识别 {{ foundationResult.aliases }} 个别名（未启动 TTS）。
-          </div>
-        </CardContent>
-      </Card>
-
-      <!-- 阶段 2 · 制作克隆音频（TTS only） -->
-      <Card class="voices-stage">
-        <CardHeader class="p-3 pb-2">
-          <CardTitle class="text-xs flex items-center gap-2"><AudioWaveform class="h-4 w-4" />阶段 2 · 制作克隆音频</CardTitle>
-          <CardDescription class="text-xs">
-            为角色生成候选音色。请先关闭 LLM，再开始制作。
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
-          <div class="flex flex-wrap items-center gap-2">
-            <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
-              <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
-              <AudioWaveform v-else class="h-4 w-4" />
-              {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
-            </Button>
-            <label class="flex items-center gap-2 text-sm text-muted-foreground">
-              批内行数（上限）
-              <Input
-                :modelValue="cloneConcurrency"
-                type="number"
-                min="1"
-                max="64"
-                class="h-8 w-20"
-                :disabled="cloneBlocked"
-                @update:modelValue="onConcurrency"
-              />
-            </label>
-            <label class="flex items-center gap-2 text-sm text-muted-foreground">
-              备选音频数
-              <Select
-                :modelValue="candidateCount"
-                class="h-8 w-28"
-                :disabled="cloneBlocked"
-                @update:modelValue="candidateCount = String($event)"
-              >
-                <option value="auto">自动</option>
-                <option value="2">2</option>
-                <option value="4">4</option>
-                <option value="6">6</option>
-                <option value="8">8</option>
-              </Select>
-            </label>
-            <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
-          </div>
-
-          <LiveLogPanel :task="cloneTask" :max-height-class="'h-40'">
-            <template #actions>
-              <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="outline" size="sm" @click="cancelClone">
-                <XCircle class="h-3.5 w-3.5" />取消
+              <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
+                <Users class="h-4 w-4" />仅新增角色
               </Button>
-            </template>
-          </LiveLogPanel>
+              <Button variant="outline" size="sm" @click="loadVoices">
+                <RefreshCw class="h-4 w-4" />刷新
+              </Button>
+              <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
+            </div>
 
-          <div
-            v-if="cloneResult"
-            class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
-          >
-            <CheckCircle2 class="h-4 w-4 shrink-0" />
-            完成：克隆音频成功 {{ cloneResult.ok }} / 失败 {{ cloneResult.failed }} / 共 {{ cloneResult.count }} 个角色。
-          </div>
-        </CardContent>
+            <LiveLogPanel :task="foundationTask" :max-height-class="'h-40'">
+              <template #actions>
+                <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="outline" size="sm" @click="cancelFoundation">
+                  <XCircle class="h-3.5 w-3.5" />取消
+                </Button>
+              </template>
+            </LiveLogPanel>
+
+            <div
+              v-if="foundationResult"
+              class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
+            >
+              <CheckCircle2 class="h-4 w-4 shrink-0" />
+              完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，识别 {{ foundationResult.aliases }} 个别名（未启动 TTS）。
+            </div>
+          </CardContent>
+        </section>
+
+        <!-- 阶段 2 · 制作克隆音频（TTS only） -->
+        <section class="voices-stage" aria-labelledby="voices-clone-title">
+          <CardHeader class="p-3 pb-2">
+            <CardTitle id="voices-clone-title" class="text-xs flex items-center gap-2"><AudioWaveform class="h-4 w-4" />阶段 2 · 制作克隆音频</CardTitle>
+            <CardDescription class="text-xs">
+              为角色生成候选音色。请先关闭 LLM，再开始制作。
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
+                <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
+                <AudioWaveform v-else class="h-4 w-4" />
+                {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
+              </Button>
+              <label class="flex items-center gap-2 text-sm text-muted-foreground">
+                批内行数（上限）
+                <Input
+                  :modelValue="cloneConcurrency"
+                  type="number"
+                  min="1"
+                  max="64"
+                  class="h-8 w-20"
+                  :disabled="cloneBlocked"
+                  @update:modelValue="onConcurrency"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-sm text-muted-foreground">
+                备选音频数
+                <Select
+                  :modelValue="candidateCount"
+                  class="h-8 w-28"
+                  :disabled="cloneBlocked"
+                  @update:modelValue="candidateCount = String($event)"
+                >
+                  <option value="auto">自动</option>
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                  <option value="6">6</option>
+                  <option value="8">8</option>
+                </Select>
+              </label>
+              <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
+            </div>
+
+            <LiveLogPanel :task="cloneTask" :max-height-class="'h-40'">
+              <template #actions>
+                <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="outline" size="sm" @click="cancelClone">
+                  <XCircle class="h-3.5 w-3.5" />取消
+                </Button>
+              </template>
+            </LiveLogPanel>
+
+            <div
+              v-if="cloneResult"
+              class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
+            >
+              <CheckCircle2 class="h-4 w-4 shrink-0" />
+              完成：克隆音频成功 {{ cloneResult.ok }} / 失败 {{ cloneResult.failed }} / 共 {{ cloneResult.count }} 个角色。
+            </div>
+          </CardContent>
+        </section>
       </Card>
 
       <div v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" class="voices-footer flex justify-end">
@@ -941,7 +943,9 @@ watch(
 
 <style scoped>
 .voices-page :deep(.page-header) { margin-bottom:12px; }
-.voices-stage { border-radius:12px; }
+.voices-production { overflow:hidden; border-radius:12px; }
+.voices-stage + .voices-stage { position:relative; }
+.voices-stage + .voices-stage::before { position:absolute; top:0; right:12px; left:12px; height:1px; background:hsl(var(--border) / .65); content:''; }
 @media(min-width:881px) and (min-height:700px) {
   .voices-page { display:flex; flex-direction:column; height:calc(100dvh - clamp(28px, 4vw, 52px) - 8px); margin-bottom:-64px; }
   .voices-page > :not(.voice-workbench) { flex-shrink:0; }
