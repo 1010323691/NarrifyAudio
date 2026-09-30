@@ -12,7 +12,8 @@
     "test:workbench": "node scripts/test-textformat-workbench.mjs",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs"
+    "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs",
+    "test:voices-workbench": "node scripts/test-voices-workbench.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

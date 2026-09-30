@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useAuthStore } from '@/stores/auth'
+import { useProjectStore } from '@/stores/project'
+import VoicesWorkbench from './voices/VoicesWorkbench.vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { usePipelineStateStore } from '@/stores/pipelineState'
@@ -35,15 +38,14 @@ import {
   CheckCircle2,
   RefreshCw,
   ArrowRight,
-  FolderOpen,
-  Merge,
-  Copy,
   Search,
   HelpCircle,
 } from 'lucide-vue-next'
 
 const router = useRouter()
 const settings = useSettingsStore()
+const auth = useAuthStore()
+const project = useProjectStore()
 const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
@@ -52,6 +54,9 @@ const { push: toast } = useToast()
 const status = ref<TTSStatus | null>(null)
 const hasScript = ref(false)
 const speakers = ref<VoiceItem[]>([])
+const voicesLoading = ref(false)
+const voicesLoadError = ref('')
+let voicesRequest = 0
 
 // Per-character optional description overrides (a single-char Phase-1 regenerate honours these).
 const prompts = reactive<Record<string, string>>({})
@@ -138,13 +143,6 @@ function openGenderMenu(v: VoiceItem, el: HTMLElement) {
 function closeGenderMenu() {
   genderMenu.value = null
 }
-// Direction A badge styling: muted 10% fill + 30% border + 600/300 text (dark mode aware).
-function genderBadgeClass(g: VoiceItem['gender']): string {
-  const base = 'inline-flex h-5 select-none items-center gap-1 rounded-full border px-1.5 text-[11px] leading-none transition-opacity'
-  if (g === 'male') return `${base} cursor-pointer border-indigo-500/30 bg-indigo-500/10 text-indigo-600 hover:opacity-80 dark:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-40`
-  if (g === 'female') return `${base} cursor-pointer border-rose-500/30 bg-rose-500/10 text-rose-600 hover:opacity-80 dark:text-rose-300 disabled:cursor-not-allowed disabled:opacity-40`
-  return `${base} cursor-pointer border-border bg-transparent text-muted-foreground opacity-70 hover:opacity-90 disabled:cursor-not-allowed`
-}
 async function applyGender(v: VoiceItem, g: 'male' | 'female' | '') {
   if (genderBusy.value) return
   genderBusy.value = true
@@ -221,19 +219,41 @@ function cloneBadge(v: VoiceItem): PhaseBadge {
 }
 
 async function loadVoices() {
+  const request = ++voicesRequest
+  const context = `${auth.user?.id || ''}:${project.activeProjectId}:${script.value}`
+  const current = () => request === voicesRequest && context === `${auth.user?.id || ''}:${project.activeProjectId}:${script.value}`
+  voicesLoading.value = true
+  voicesLoadError.value = ''
   try {
     const r = await listVoices(script.value || undefined)
+    if (!current()) return
     hasScript.value = r.has_script
     speakers.value = r.speakers
-  } catch {
-    hasScript.value = false
-    speakers.value = []
+  } catch (e: any) {
+    if (current()) voicesLoadError.value = e?.message || '角色加载失败，请重试。'
+  } finally {
+    if (current()) voicesLoading.value = false
   }
 }
+
+watch(() => `${auth.user?.id || ''}:${project.activeProjectId}`, () => {
+  ++voicesRequest
+  speakers.value = []
+  hasScript.value = false
+  voicesLoading.value = false
+  voicesLoadError.value = ''
+  Object.keys(prompts).forEach(key => delete prompts[key])
+  closePicker()
+  closeMerge()
+  closeGenderMenu()
+})
+onBeforeUnmount(() => { ++voicesRequest })
 
 // Local → store: a concrete file / most-recent keeps 音频合成 in step; the "all files"
 // scope is Voices-local and must not be written to the shared selection.
 watch(scope, (v) => {
+  speakers.value = []
+  hasScript.value = false
   loadVoices()
   if (v !== ALL_SCRIPT) pipeline.activeScript = v
 })
@@ -525,10 +545,8 @@ watch(
 </script>
 
 <template>
-  <!-- -mx-16：角色表新增「选择音色」按钮后 1152px 列宽不够——本页整体向两侧各借 64px（≈一个按钮宽），
-       只借 MainLayout max-w-6xl 居中留出的空白，不改共享布局，其余页面不受影响。 -->
-  <div class="space-y-6">
-    <header class="page-header mb-5">
+  <div class="voices-page space-y-2">
+    <header class="page-header mb-3">
       <div>
         <p class="eyebrow">Pipeline · Voices</p>
         <h1 class="page-title flex items-center gap-3">
@@ -551,21 +569,39 @@ watch(
     </Alert>
 
     <template v-else>
-      <Alert v-if="!hasScript" variant="default">
-        <Users class="h-4 w-4 shrink-0" />
-        尚未检测到角色，请先在「文本解析」生成解析结果。
-      </Alert>
-
+      <Card class="voices-summary">
+        <CardContent class="flex flex-wrap items-center justify-between gap-3 p-3">
+          <details class="voices-source min-w-0 flex-1">
+            <summary class="cursor-pointer text-xs"><span class="text-muted-foreground">解析脚本范围：</span>{{ scope === ALL_SCRIPT ? '全部文件' : (scope || '最近 / 默认') }}</summary>
+            <div class="mt-2">
+              <WorkspaceEntryPicker module="03_parsed_json" :extensions="['json']" exclude-suffix="_checked.json" v-model="scope" :show-all="true" :all-value="ALL_SCRIPT" label="解析脚本范围" />
+            </div>
+          </details>
+          <div class="flex items-center gap-5 text-[11px] text-muted-foreground">
+            <div><strong class="block text-xl font-semibold tabular-nums text-foreground">{{ speakers.length }}</strong>角色总数</div>
+            <div><strong class="block text-xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{{ readyCount }}</strong>音色已就绪</div>
+            <div><strong class="block text-xl font-semibold tabular-nums text-amber-600 dark:text-amber-400">{{ speakers.length - readyCount }}</strong>待完善</div>
+          </div>
+        </CardContent>
+      </Card>
+      <VoicesWorkbench
+        :speakers="speakers" :prompts="prompts" :loading="voicesLoading" :load-error="voicesLoadError" :has-script="hasScript"
+        :foundation-blocked="foundationBlocked" :clone-blocked="cloneBlocked" :foundation-busy="foundationBusy"
+        :foundation-running="foundationRunning" :clone-running="cloneRunning" :gender-busy="genderBusy"
+        :foundation-badge="foundationBadge" :clone-badge="cloneBadge" :preview-url="previewUrl" :pick-label="pickLabel" :pick-disabled="pickDisabled"
+        @refresh="loadVoices" @gender="openGenderMenu" @merge="openMerge" @pick="openPicker"
+        @foundation="regenFoundation" @clone="remakeClone" @copy="copyDescriptionToPrompt" @prompt="(name, value) => prompts[name] = value"
+      />
       <!-- 阶段 1 · 生成语音推理基础（LLM only） -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><Sparkles class="h-5 w-5" />阶段 1 · 生成语音推理基础</CardTitle>
-          <CardDescription>
+      <Card class="voices-stage">
+        <CardHeader class="p-3 pb-2">
+          <CardTitle class="text-xs flex items-center gap-2"><Sparkles class="h-4 w-4" />阶段 1 · 生成语音推理基础</CardTitle>
+          <CardDescription class="text-xs">
             为角色生成声音描述和种子文案。
           </CardDescription>
         </CardHeader>
-        <CardContent class="space-y-4">
-          <div class="flex flex-wrap items-center gap-3">
+        <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
+          <div class="flex flex-wrap items-center gap-2">
             <Button :disabled="foundationBlocked" @click="doFoundations({})">
               <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
               <Sparkles v-else class="h-4 w-4" />
@@ -580,7 +616,7 @@ watch(
             <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
           </div>
 
-          <LiveLogPanel :task="foundationTask" :max-height-class="'h-72'">
+          <LiveLogPanel :task="foundationTask" :max-height-class="'h-40'">
             <template #actions>
               <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="outline" size="sm" @click="cancelFoundation">
                 <XCircle class="h-3.5 w-3.5" />取消
@@ -599,15 +635,15 @@ watch(
       </Card>
 
       <!-- 阶段 2 · 制作克隆音频（TTS only） -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><AudioWaveform class="h-5 w-5" />阶段 2 · 制作克隆音频</CardTitle>
-          <CardDescription>
+      <Card class="voices-stage">
+        <CardHeader class="p-3 pb-2">
+          <CardTitle class="text-xs flex items-center gap-2"><AudioWaveform class="h-4 w-4" />阶段 2 · 制作克隆音频</CardTitle>
+          <CardDescription class="text-xs">
             为角色生成候选音色。请先关闭 LLM，再开始制作。
           </CardDescription>
         </CardHeader>
-        <CardContent class="space-y-4">
-          <div class="flex flex-wrap items-center gap-3">
+        <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
+          <div class="flex flex-wrap items-center gap-2">
             <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
               <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
               <AudioWaveform v-else class="h-4 w-4" />
@@ -643,7 +679,7 @@ watch(
             <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
           </div>
 
-          <LiveLogPanel :task="cloneTask" :max-height-class="'h-72'">
+          <LiveLogPanel :task="cloneTask" :max-height-class="'h-40'">
             <template #actions>
               <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="outline" size="sm" @click="cancelClone">
                 <XCircle class="h-3.5 w-3.5" />取消
@@ -661,151 +697,9 @@ watch(
         </CardContent>
       </Card>
 
-      <!-- 工作区目录 -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><FolderOpen class="h-5 w-5" />工作区目录</CardTitle>
-          <CardDescription>选择要使用的解析脚本。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <WorkspaceEntryPicker
-            module="03_parsed_json"
-            :extensions="['json']"
-            exclude-suffix="_checked.json"
-            v-model="scope"
-            :show-all="true"
-            :all-value="ALL_SCRIPT"
-            label="解析结果"
-          />
-        </CardContent>
-      </Card>
-
-      <!-- 角色 -->
-      <Card class="voices-speakers-card">
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2">
-            <Users class="h-5 w-5" />角色（{{ speakers.length }}）
-          </CardTitle>
-          <CardDescription v-if="speakers.length">已就绪 {{ readyCount }} / {{ speakers.length }} · 基础 {{ foundationDone }} / 克隆 {{ cloneDone }} / {{ nonAlias.length }}</CardDescription>
-        </CardHeader>
-        <CardContent class="space-y-4">
-          <div v-if="speakers.length" class="voices-speakers-scroll">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-left text-xs text-muted-foreground">
-                  <th class="voices-th">角色</th>
-                  <th class="voices-th">台词数</th>
-                  <th class="voices-th">语音推理基础</th>
-                  <th class="voices-th">克隆音频</th>
-                  <th class="voices-th">声音描述 / 提示词</th>
-                  <th class="voices-th voices-th--right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="v in speakers" :key="v.name" class="border-b align-top last:border-0">
-                  <td class="py-2 pr-3 font-medium">
-                    <div class="whitespace-nowrap">
-                      {{ v.name }}
-                      <span v-if="v.alias_of" class="ml-1 text-xs text-muted-foreground">→ {{ v.alias_of }}</span>
-                      <!-- 性别徽章：阶段 1 预填、点击纠正（alias 行借用目标音色，不单独标记） -->
-                      <button
-                        v-else
-                        type="button"
-                        class="ml-1.5 align-middle"
-                        :class="genderBadgeClass(v.gender)"
-                        :title="v.gender ? '点击修改性别标记' : '标记性别（阶段 1 自动推断，可点击纠正）'"
-                        :disabled="genderBusy || foundationRunning || cloneRunning"
-                        @click.stop="openGenderMenu(v, $event.currentTarget as HTMLElement)"
-                      >
-                        <!-- ♂/♀ = Unicode 性别符号（lucide 0.468 无 Mars/Venus 图标） -->
-                        <span v-if="v.gender === 'male'" class="text-xs leading-none">♂</span>
-                        <span v-else-if="v.gender === 'female'" class="text-xs leading-none">♀</span>
-                        <HelpCircle v-else class="h-3 w-3" />
-                        {{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未定' }}
-                      </button>
-                    </div>
-                    <div class="mt-1 flex items-center">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        class="h-6 w-6 p-0"
-                        title="将该角色合并到其他角色（直接修改解析源数据）"
-                        :disabled="foundationRunning || cloneRunning || speakers.length < 2"
-                        @click="openMerge(v)"
-                      >
-                        <Merge class="h-3 w-3" />
-                      </Button>
-                    </div>
-                  </td>
-                  <td class="py-2 pr-3 text-muted-foreground">{{ v.line_count }}</td>
-                  <td class="py-2 pr-3">
-                    <Badge :variant="foundationBadge(v).variant">
-                      <Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />
-                      {{ foundationBadge(v).label }}
-                    </Badge>
-                  </td>
-                  <td class="py-2 pr-3">
-                    <Badge :variant="cloneBadge(v).variant">
-                      <Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />
-                      {{ cloneBadge(v).label }}
-                    </Badge>
-                  </td>
-                  <td class="py-2 pr-3">
-                    <!-- 固定列宽：描述/提示词列不再被操作列挤窄（表格整体可横向滚动兜底） -->
-                    <div class="w-60 min-w-60">
-                      <div class="truncate text-xs text-muted-foreground" :title="v.description">
-                        {{ v.description || '—' }}
-                      </div>
-                      <div class="mt-1.5 flex items-center gap-1">
-                        <Input
-                          v-model="prompts[v.name]"
-                          class="h-8 min-w-0 flex-1 text-xs"
-                          placeholder="可选：自定义声音描述（阶段 1 重新生成时生效）"
-                          :disabled="foundationBusy"
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          class="h-8 w-8 shrink-0 p-0"
-                          :title="`将 ${v.name} 的声音描述复制到提示词`"
-                          :aria-label="`将 ${v.name} 的声音描述复制到提示词`"
-                          :disabled="foundationBusy || !v.description"
-                          @click="copyDescriptionToPrompt(v)"
-                        >
-                          <Copy class="h-3 w-3" aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </div>
-                  </td>
-                  <td class="py-2">
-                    <div class="flex items-center justify-end gap-2">
-                      <MiniAudioPlayer v-if="v.preview" :src="previewUrl(v)" />
-                      <span class="w-14 shrink-0 text-right text-xs text-muted-foreground" :title="pickLabel(v)">
-                        {{ pickLabel(v) }}
-                      </span>
-                      <Button variant="outline" size="sm" :disabled="pickDisabled(v)" @click="openPicker(v)">
-                        选择音色
-                      </Button>
-                      <Button variant="outline" size="sm" :disabled="foundationBlocked" @click="regenFoundation(v)">
-                        重新生成
-                      </Button>
-                      <Button variant="outline" size="sm" :disabled="cloneBlocked || v.foundation_status !== 'done'" @click="remakeClone(v)">
-                        重新制作
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p v-else class="text-sm text-muted-foreground">（暂无角色）</p>
-        </CardContent>
-      </Card>
-
-      <div v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" class="flex justify-end">
-        <Button size="sm" @click="router.push('/batch')">
-          前往音频合成<ArrowRight class="h-4 w-4" />
-        </Button>
+      <div class="glass-panel voices-footer flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2">
+        <span class="text-[11px] text-muted-foreground">{{ speakers.length ? `已就绪 ${readyCount} / ${speakers.length} 个角色` : '请先生成解析结果' }}</span>
+        <Button v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" size="sm" @click="router.push('/batch')">前往音频合成<ArrowRight class="h-4 w-4" /></Button>
       </div>
     </template>
 
@@ -1014,3 +908,17 @@ watch(
     </div>
   </div>
 </template>
+
+<style scoped>
+.voices-page :deep(.page-title) { font-size:24px; }
+.voices-page :deep(.page-description) { font-size:13px; margin-top:6px; }
+.voices-page :deep(.page-header) { margin-bottom:12px; }
+.voices-stage { border-radius:12px; }
+.voices-stage :deep(button), .voices-footer :deep(button) { min-height:32px; height:32px; font-size:12px; }
+.voices-stage :deep(label), .voices-stage :deep(.text-sm) { font-size:12px; }
+.voices-summary :deep(.text-sm) { font-size:12px; }
+.voices-source summary { overflow-wrap:anywhere; }
+.voices-stage :deep(h3) { font-size:12px; }
+@media(min-width:1200px) { .voices-stage { display:grid; grid-template-columns:200px minmax(0,1fr); align-items:center; } .voices-stage-content { padding-top:12px; } }
+@media(pointer:coarse) { .voices-stage :deep(button), .voices-footer :deep(button) { min-height:44px; height:auto; } }
+</style>
