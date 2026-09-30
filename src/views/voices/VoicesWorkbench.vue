@@ -42,7 +42,7 @@ const emit = defineEmits<{
 const query = ref('')
 const filter = ref('all')
 const page = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(10)
 const selectedName = ref('')
 const detailTab = ref('voice')
 const narrow = ref(false)
@@ -112,11 +112,11 @@ function detailKeydown(event: KeyboardEvent) {
         <table class="voice-table" aria-label="角色状态列表">
           <thead><tr><th>角色 / 别名</th><th class="voice-number">台词</th><th>基础</th><th>音色</th></tr></thead>
           <tbody v-if="loading && !speakers.length">
-            <tr v-for="i in 8" :key="i" aria-hidden="true"><td colspan="4"><Skeleton class="voice-skeleton h-6" /></td></tr>
+            <tr v-for="i in pageSize" :key="i" aria-hidden="true"><td colspan="4"><Skeleton class="voice-skeleton h-5" /></td></tr>
           </tbody>
           <tbody v-else>
             <tr v-for="v in visible" :key="v.name" :class="{ 'voice-selected': selectedName === v.name }" @click="select(v, $event)">
-              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未标记' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button></div><div v-if="v.alias_of" class="truncate text-[11px] text-muted-foreground" :title="v.alias_of">→ {{ v.alias_of }}</div></td>
+              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未标记' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button><span v-if="v.alias_of" class="min-w-0 max-w-[40%] truncate text-[11px] text-muted-foreground" :title="v.alias_of">→ {{ v.alias_of }}</span></div></td>
               <td class="voice-number tabular-nums">{{ v.line_count }}</td>
               <td><Badge :variant="foundationBadge(v).variant"><Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ foundationBadge(v).label }}</Badge></td>
               <td><Badge :variant="cloneBadge(v).variant"><Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ cloneBadge(v).label }}</Badge></td>
@@ -136,6 +136,7 @@ function detailKeydown(event: KeyboardEvent) {
         :page-count="pageCount"
         :total="filtered.length"
         :page-size="pageSize"
+        :page-size-options="[10, 20, 50]"
         unit="个角色"
         @update:page="(p: number) => (page = p)"
         @update:page-size="(s: number) => { pageSize = s; page = 1 }"
@@ -179,15 +180,15 @@ function detailKeydown(event: KeyboardEvent) {
 .voice-filter { border-radius:999px; padding:5px 9px; font-size:11px; color:hsl(var(--muted-foreground)); background:hsl(var(--muted) / .5); }
 .voice-filter[aria-pressed=true] { color:hsl(var(--primary)); background:hsl(var(--primary) / .1); }
 .voice-scroll { min-height:320px; max-height:440px; overflow:auto; flex:1; }
-.voice-table { width:100%; table-layout:fixed; font-size:12px; border-collapse:collapse; }
-.voice-table th { position:sticky; top:0; z-index:1; padding:6px 12px; text-align:left; font-size:11px; font-weight:500; background:hsl(var(--card)); color:hsl(var(--muted-foreground)); }
+.voice-table { width:100%; table-layout:fixed; font-size:12px; line-height:18px; border-collapse:collapse; }
+.voice-table th { position:sticky; top:0; z-index:1; height:28px; padding:5px 12px; text-align:left; font-size:11px; line-height:18px; font-weight:500; background:hsl(var(--card)); color:hsl(var(--muted-foreground)); }
 .voice-table th:first-child { width:40%; }
 .voice-table th:nth-child(2) { width:16%; }
-.voice-table td { height:42px; padding:6px 12px; border-bottom:1px solid hsl(var(--border) / .6); }
+.voice-table td { height:32px; padding:3px 12px; border-bottom:1px solid hsl(var(--border) / .6); }
 .voice-table tbody tr { cursor:pointer; }
 .voice-table tr:hover { background:hsl(var(--muted) / .5); }
 .voice-table .voice-selected { background:hsl(var(--primary) / .08); box-shadow:inset 3px 0 hsl(var(--primary)); }
-.voice-sex { flex-shrink:0; padding:2px 5px; border-radius:4px; font-size:11px; }
+.voice-sex { flex-shrink:0; padding:1px 5px; border-radius:4px; font-size:11px; line-height:18px; }
 .voice-number { font-variant-numeric:tabular-nums; }
 .voice-name { display:block; min-width:0; flex:1; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; font-weight:600; }
 .voice-detail { min-width:0; max-height:540px; overflow:auto; padding:12px; }
