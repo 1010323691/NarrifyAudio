@@ -71,10 +71,10 @@ watch(pageCount, n => { page.value = Math.min(page.value, n) })
 watch(() => props.speakers, items => {
   if (!items.some(v => v.name === selectedName.value)) selectedName.value = items[0]?.name ?? ''
 }, { immediate: true })
-async function select(v: VoiceItem) {
+async function select(v: VoiceItem, event?: MouseEvent) {
   selectedName.value = v.name
   if (narrow.value) {
-    returnFocus = document.activeElement as HTMLElement
+    returnFocus = (event?.currentTarget as HTMLElement | null)?.querySelector<HTMLElement>('button') ?? document.activeElement as HTMLElement
     detailOpen.value = true
     await nextTick()
     detailPanel.value?.querySelector<HTMLElement>('button')?.focus()
@@ -115,8 +115,8 @@ function detailKeydown(event: KeyboardEvent) {
             <tr v-for="i in 8" :key="i" aria-hidden="true"><td colspan="4"><Skeleton class="voice-skeleton h-6" /></td></tr>
           </tbody>
           <tbody v-else>
-            <tr v-for="v in visible" :key="v.name" :class="{ 'voice-selected': selectedName === v.name }">
-              <td><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click="select(v)">{{ v.name }}</button><div v-if="v.alias_of" class="truncate text-[11px] text-muted-foreground" :title="v.alias_of">→ {{ v.alias_of }}</div></td>
+            <tr v-for="v in visible" :key="v.name" :class="{ 'voice-selected': selectedName === v.name }" @click="select(v, $event)">
+              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未标记' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button></div><div v-if="v.alias_of" class="truncate text-[11px] text-muted-foreground" :title="v.alias_of">→ {{ v.alias_of }}</div></td>
               <td class="voice-number tabular-nums">{{ v.line_count }}</td>
               <td><Badge :variant="foundationBadge(v).variant"><Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ foundationBadge(v).label }}</Badge></td>
               <td><Badge :variant="cloneBadge(v).variant"><Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ cloneBadge(v).label }}</Badge></td>
@@ -184,10 +184,12 @@ function detailKeydown(event: KeyboardEvent) {
 .voice-table th:first-child { width:40%; }
 .voice-table th:nth-child(2) { width:16%; }
 .voice-table td { height:42px; padding:6px 12px; border-bottom:1px solid hsl(var(--border) / .6); }
+.voice-table tbody tr { cursor:pointer; }
 .voice-table tr:hover { background:hsl(var(--muted) / .5); }
 .voice-table .voice-selected { background:hsl(var(--primary) / .08); box-shadow:inset 3px 0 hsl(var(--primary)); }
+.voice-sex { flex-shrink:0; padding:2px 5px; border-radius:4px; font-size:11px; }
 .voice-number { font-variant-numeric:tabular-nums; }
-.voice-name { display:block; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; font-weight:600; }
+.voice-name { display:block; min-width:0; flex:1; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; font-weight:600; }
 .voice-detail { min-width:0; max-height:540px; overflow:auto; padding:12px; }
 .voice-gender { padding:4px 8px; border:1px solid hsl(var(--border)); border-radius:999px; font-size:11px; }
 .voice-tabs { display:flex; gap:18px; margin:10px 0 12px; border-bottom:1px solid hsl(var(--border)); }

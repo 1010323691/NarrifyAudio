@@ -5,7 +5,6 @@ import { useProjectStore } from '@/stores/project'
 import VoicesWorkbench from './voices/VoicesWorkbench.vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
-import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations, selectVoice, setGender, ttsStatus } from '@/api/tts'
@@ -25,7 +24,6 @@ import StatusPill from '@/components/ui/StatusPill.vue'
 import Alert from '@/components/ui/Alert.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
-import WorkspaceEntryPicker from '@/components/WorkspaceEntryPicker.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useProjectGate } from '@/composables/useProjectGate'
 import {
@@ -46,7 +44,6 @@ const router = useRouter()
 const settings = useSettingsStore()
 const auth = useAuthStore()
 const project = useProjectStore()
-const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -221,13 +218,8 @@ async function applyGender(v: VoiceItem, g: 'male' | 'female' | '') {
 const foundationTargets = ref<string[] | null>(null)
 const cloneTargets = ref<string[] | null>(null)
 
-// The parsed-JSON selection on THIS page. Local (not the shared store) so the whole-book
-// "全部文件" scope ('__all__') never leaks into 音频合成, which is per-file.
-// '' = most recent; a file name = that file; '__all__' = every file in 03_parsed_json/.
-const ALL_SCRIPT = '__all__'
-const scope = ref(pipeline.activeScript || '')
-// Which parsed JSON(s) to read (mirrors the picker; '__all__' aggregates every file).
-const script = computed(() => scope.value)
+// Always cover all parsed chapters without changing downstream file selection.
+const script = '__all__'
 
 // A phase is "running" while any of its tasks is active (drives the per-row 生成中/制作中 overlay).
 const ACTIVE: string[] = ['pending', 'running', 'paused']
@@ -272,12 +264,12 @@ function cloneBadge(v: VoiceItem): PhaseBadge {
 
 async function loadVoices() {
   const request = ++voicesRequest
-  const context = `${auth.user?.id || ''}:${project.activeProjectId}:${script.value}`
-  const current = () => request === voicesRequest && context === `${auth.user?.id || ''}:${project.activeProjectId}:${script.value}`
+  const context = `${auth.user?.id || ''}:${project.activeProjectId}:${script}`
+  const current = () => request === voicesRequest && context === `${auth.user?.id || ''}:${project.activeProjectId}:${script}`
   voicesLoading.value = true
   voicesLoadError.value = ''
   try {
-    const r = await listVoices(script.value || undefined)
+    const r = await listVoices(script)
     if (!current()) return
     hasScript.value = r.has_script
     speakers.value = r.speakers
@@ -301,19 +293,6 @@ watch(() => `${auth.user?.id || ''}:${project.activeProjectId}`, () => {
 })
 onBeforeUnmount(() => { ++voicesRequest })
 
-// Local → store: a concrete file / most-recent keeps 音频合成 in step; the "all files"
-// scope is Voices-local and must not be written to the shared selection.
-watch(scope, (v) => {
-  speakers.value = []
-  hasScript.value = false
-  loadVoices()
-  if (v !== ALL_SCRIPT) pipeline.activeScript = v
-})
-// Store → local: under keep-alive this page is cached, so a pick made on 音频合成 must
-// refresh the (cached) character list. Guarded so an active "all files" view is kept.
-watch(() => pipeline.activeScript, (v) => {
-  if (scope.value !== ALL_SCRIPT && v !== scope.value) scope.value = v
-})
 
 // 刷新恢复：页面重载后本地 taskId 丢失，但后端任务仍在跑（store 的 refresh 已拉回全量任务）。
 // 按 module 重新挂接在途的阶段 1 / 阶段 2 任务——恢复日志面板绑定、按钮门控与完成 watcher
@@ -367,7 +346,7 @@ async function doFoundations(opts: {
   foundationResult.value = null
   foundationTargets.value = opts.speakers ?? null
   try {
-    const { task_id } = await prepareFoundations({ ...opts, script: script.value || undefined })
+    const { task_id } = await prepareFoundations({ ...opts, script: script })
     foundationTaskId.value = task_id
     await taskStore.refresh()
     // Completion is handled by the watcher on foundationTask.status.
@@ -390,7 +369,7 @@ async function doClones(opts: {
     const { task_id } = await generateVoiceCandidates({
       ...opts,
       concurrency: cloneConcurrency.value,
-      script: script.value || undefined,
+      script: script,
       candidate_count: candidateCount.value === 'auto' ? null : Number(candidateCount.value),
     })
     cloneTaskId.value = task_id
@@ -504,7 +483,7 @@ async function confirmMerge() {
   mergeBusy.value = true
   mergeError.value = ''
   try {
-    const r = await mergeSpeakers(src, tgt, script.value || undefined)
+    const r = await mergeSpeakers(src, tgt, script)
     toast({
       title: '角色已合并',
       variant: 'success',
@@ -625,12 +604,6 @@ watch(
     <template v-else>
       <Card class="voices-summary">
         <CardContent class="flex flex-wrap items-center justify-between gap-3 p-3">
-          <details class="voices-source min-w-0 flex-1">
-            <summary class="cursor-pointer text-xs"><span class="text-muted-foreground">解析脚本范围：</span>{{ scope === ALL_SCRIPT ? '全部文件' : (scope || '最近 / 默认') }}</summary>
-            <div class="mt-2">
-              <WorkspaceEntryPicker module="03_parsed_json" :extensions="['json']" exclude-suffix="_checked.json" v-model="scope" :show-all="true" :all-value="ALL_SCRIPT" label="解析脚本范围" />
-            </div>
-          </details>
           <div class="flex items-center gap-5 text-[11px] text-muted-foreground">
             <div><strong class="block text-xl font-semibold tabular-nums text-foreground">{{ speakers.length }}</strong>角色总数</div>
             <div><strong class="block text-xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{{ readyCount }}</strong>音色已就绪</div>
@@ -752,8 +725,7 @@ watch(
         </CardContent>
       </Card>
 
-      <div class="glass-panel voices-footer flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3 py-2">
-        <span class="text-[11px] text-muted-foreground">{{ speakers.length ? `已就绪 ${readyCount} / ${speakers.length} 个角色` : '请先生成解析结果' }}</span>
+      <div v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" class="voices-footer flex justify-end">
         <Button v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" size="sm" @click="router.push('/batch')">前往音频合成<ArrowRight class="h-4 w-4" /></Button>
       </div>
     </template>
@@ -950,7 +922,7 @@ watch(
         </p>
         <ul class="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
           <li>替换 {{ mergeSourceItem?.name }} 的 {{ mergeSourceItem?.line_count ?? 0 }} 条台词（当前范围：
-            {{ scope === ALL_SCRIPT ? '全部文件' : (scope || '最近文件') }}）。</li>
+            全部已解析章节）。</li>
           <li>删除 {{ mergeSourceItem?.name }} 的声音配置；指向它的别名将改指向目标角色。</li>
           <li>其候选音频文件保留在磁盘上，不会被删除。</li>
         </ul>
@@ -968,14 +940,21 @@ watch(
 </template>
 
 <style scoped>
-.voices-page :deep(.page-title) { font-size:24px; }
-.voices-page :deep(.page-description) { font-size:13px; margin-top:6px; }
 .voices-page :deep(.page-header) { margin-bottom:12px; }
 .voices-stage { border-radius:12px; }
+@media(min-width:881px) and (min-height:700px) {
+  .voices-page { display:flex; flex-direction:column; height:calc(100dvh - clamp(28px, 4vw, 52px) - 8px); margin-bottom:-64px; }
+  .voices-page > :not(.voice-workbench) { flex-shrink:0; }
+  .voices-page :deep(.voice-workbench) { flex:1; min-height:180px; }
+  .voices-page :deep(.voice-list), .voices-page :deep(.voice-detail) { min-height:0; }
+  .voices-page :deep(.voice-scroll) { min-height:0; max-height:none; }
+  .voices-page :deep(.voice-detail) { max-height:none; }
+  .voices-stage { display:grid; grid-template-columns:160px minmax(0,1fr); align-items:center; }
+  .voices-stage-content { padding-top:12px; max-height:clamp(88px, 14dvh, 128px); overflow-y:auto; }
+}
 .voices-stage :deep(button), .voices-footer :deep(button) { min-height:32px; height:32px; font-size:12px; }
 .voices-stage :deep(label), .voices-stage :deep(.text-sm) { font-size:12px; }
 .voices-summary :deep(.text-sm) { font-size:12px; }
-.voices-source summary { overflow-wrap:anywhere; }
 .voices-stage :deep(h3) { font-size:12px; }
 @media(min-width:1200px) { .voices-stage { display:grid; grid-template-columns:200px minmax(0,1fr); align-items:center; } .voices-stage-content { padding-top:12px; } }
 @media(pointer:coarse) { .voices-stage :deep(button), .voices-footer :deep(button) { min-height:44px; height:auto; } }

@@ -8,7 +8,7 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const vue = require('vue')
 const source = readFileSync(new URL('../src/views/Voices.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
-const compiled = ts.transpileModule(source + '\nexport { loadVoices, speakers, scope, prompts, voicesLoading, voicesLoadError, hasScript, regenFoundation, doClones, openMerge, closeMerge, openPicker, closePicker, openMergeConfirm, overlayKeydown, pickerPanel, mergePanel, mergeConfirmPanel, mergeConfirm, mergeTarget, mergeBusy, pickerBusy };', {
+const compiled = ts.transpileModule(source + '\nexport { loadVoices, speakers, prompts, voicesLoading, voicesLoadError, hasScript, regenFoundation, doClones, openMerge, closeMerge, openPicker, closePicker, openMergeConfirm, overlayKeydown, pickerPanel, mergePanel, mergeConfirmPanel, mergeConfirm, mergeTarget, mergeBusy, pickerBusy };', {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
@@ -95,19 +95,17 @@ for (const changed of ['project', 'account']) {
   })
 }
 
-test('single-role foundation regeneration preserves prompt override and script scope', async () => {
+test('single-role foundation regeneration preserves prompt override across all chapters', async () => {
   const h = harness(async () => result('role'))
-  h.scope.value = 'chapter.json'
   await vue.nextTick()
   h.prompts.role = '  warm voice  '
   h.regenFoundation({ name: 'role' })
   await vue.nextTick()
-  assert.equal(JSON.stringify(h.calls[0].body), JSON.stringify({ speakers: ['role'], overrides: { role: 'warm voice' }, script: 'chapter.json' }))
+  assert.equal(JSON.stringify(h.calls[0].body), JSON.stringify({ speakers: ['role'], overrides: { role: 'warm voice' }, script: '__all__' }))
 })
 
 test('whole-book clone request keeps the original batch range and defaults', async () => {
   const h = harness(async () => result('role'))
-  h.scope.value = '__all__'
   await vue.nextTick()
   await h.doClones({ new_only: true })
   assert.equal(JSON.stringify(h.calls[0].body), JSON.stringify({ new_only: true, concurrency: 4, script: '__all__', candidate_count: null }))
@@ -185,4 +183,11 @@ test('voice picker owns Tab and Shift+Tab, and closing restores the drawer opene
   h.overlayKeydown(key('Escape'))
   await flushFocus()
   assert.equal(h.document.activeElement.name, 'drawer-picker')
+})
+
+test('role loading always requests all parsed chapters', async () => {
+  const scopes = []
+  const h = harness(async script => { scopes.push(script); return result('role') })
+  await h.loadVoices()
+  assert.deepEqual(scopes, ['__all__'])
 })
