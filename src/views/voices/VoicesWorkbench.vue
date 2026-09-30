@@ -22,6 +22,7 @@ const props = defineProps<{
   foundationRunning: boolean
   cloneRunning: boolean
   genderBusy: boolean
+  overlayOpen: boolean
   foundationBadge: (v: VoiceItem) => PhaseBadge
   cloneBadge: (v: VoiceItem) => PhaseBadge
   previewUrl: (v: VoiceItem) => string
@@ -60,9 +61,12 @@ const filtered = computed(() => {
     (!q || `${v.name} ${v.alias_of || ''}`.toLocaleLowerCase().includes(q)))
 })
 const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)))
-const visible = computed(() => filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value))
+const visible = computed(() => {
+  const p = Math.min(page.value, pageCount.value)
+  return filtered.value.slice((p - 1) * pageSize.value, p * pageSize.value)
+})
 const selected = computed(() => props.speakers.find(v => v.name === selectedName.value) ?? null)
-watch([query, filter, pageSize], () => { page.value = 1 })
+watch([query, filter], () => { page.value = 1 })
 watch(pageCount, n => { page.value = Math.min(page.value, n) })
 watch(() => props.speakers, items => {
   if (!items.some(v => v.name === selectedName.value)) selectedName.value = items[0]?.name ?? ''
@@ -77,7 +81,7 @@ async function select(v: VoiceItem) {
   }
 }
 function detailKeydown(event: KeyboardEvent) {
-  if (!narrow.value || !detailOpen.value) return
+  if (!narrow.value || !detailOpen.value || props.overlayOpen) return
   if (event.key === 'Escape') { event.stopPropagation(); closeDetail() }
   if (event.key !== 'Tab') return
   const controls = [...(detailPanel.value?.querySelectorAll<HTMLElement>('button:not([disabled]),textarea:not([disabled]),input:not([disabled]),a[href]') ?? [])].filter(el => el.getClientRects().length)
@@ -126,10 +130,19 @@ function detailKeydown(event: KeyboardEvent) {
           <RouterLink v-else-if="!hasScript" to="/script" class="mt-2 inline-block text-primary underline underline-offset-4">前往文本解析</RouterLink>
         </div>
       </div>
-      <Pager v-model:page="page" v-model:pageSize="pageSize" class="voice-pager" :total="filtered.length" :pageCount="pageCount" unit="个角色" />
+      <Pager
+        class="shrink-0 border-t px-4 py-2"
+        :page="page"
+        :page-count="pageCount"
+        :total="filtered.length"
+        :page-size="pageSize"
+        unit="个角色"
+        @update:page="(p: number) => (page = p)"
+        @update:page-size="(s: number) => { pageSize = s; page = 1 }"
+      />
     </div>
     <div v-if="narrow && detailOpen" class="voice-detail-backdrop" @click="closeDetail" />
-    <aside ref="detailPanel" class="voice-detail" :class="{ 'voice-detail-open': detailOpen }" :role="narrow ? 'dialog' : undefined" :aria-modal="narrow && detailOpen ? true : undefined" aria-label="角色详情" @keydown="detailKeydown">
+    <aside ref="detailPanel" class="voice-detail" :class="{ 'voice-detail-open': detailOpen }" :inert="overlayOpen || undefined" :role="narrow ? 'dialog' : undefined" :aria-modal="narrow && detailOpen && !overlayOpen ? true : undefined" aria-label="角色详情" @keydown="detailKeydown">
       <Button v-if="narrow" variant="ghost" class="mb-2 ml-auto flex h-8 w-8 p-0" aria-label="关闭角色详情" @click="closeDetail"><X class="h-4 w-4" /></Button>
       <template v-if="selected">
         <div class="flex flex-wrap items-start justify-between gap-2">
@@ -175,7 +188,6 @@ function detailKeydown(event: KeyboardEvent) {
 .voice-table .voice-selected { background:hsl(var(--primary) / .08); box-shadow:inset 3px 0 hsl(var(--primary)); }
 .voice-number { font-variant-numeric:tabular-nums; }
 .voice-name { display:block; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; font-weight:600; }
-.voice-pager { padding:8px 12px; border-top:1px solid hsl(var(--border)); }
 .voice-detail { min-width:0; max-height:540px; overflow:auto; padding:12px; }
 .voice-gender { padding:4px 8px; border:1px solid hsl(var(--border)); border-radius:999px; font-size:11px; }
 .voice-tabs { display:flex; gap:18px; margin:10px 0 12px; border-bottom:1px solid hsl(var(--border)); }

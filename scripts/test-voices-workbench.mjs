@@ -8,7 +8,7 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const vue = require('vue')
 const source = readFileSync(new URL('../src/views/Voices.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
-const compiled = ts.transpileModule(source + '\nexport { loadVoices, speakers, scope, prompts, voicesLoading, voicesLoadError, hasScript, regenFoundation, doClones };', {
+const compiled = ts.transpileModule(source + '\nexport { loadVoices, speakers, scope, prompts, voicesLoading, voicesLoadError, hasScript, regenFoundation, doClones, openMerge, closeMerge, openPicker, closePicker, openMergeConfirm, overlayKeydown, pickerPanel, mergePanel, mergeConfirmPanel, mergeConfirm, mergeTarget, mergeBusy, pickerBusy };', {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
@@ -21,6 +21,7 @@ function harness(listVoices) {
   const project = vue.reactive({ activeProjectId: 'project-a' })
   const auth = vue.reactive({ user: { id: 'user-a' } })
   const calls = []
+  const document = { activeElement: null }
   const api = {
     listVoices,
     prepareFoundations: async body => { calls.push({ type: 'foundation', body }); return { task_id: 'foundation-a' } },
@@ -28,7 +29,7 @@ function harness(listVoices) {
   }
   const module = { exports: {} }
   runInNewContext(compiled, {
-    module, exports: module.exports,
+    module, exports: module.exports, document,
     require(name) {
       if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onBeforeUnmount() {} }
       if (name === 'vue-router') return { useRouter: () => ({ push() {} }) }
@@ -43,7 +44,7 @@ function harness(listVoices) {
       return { default: {} }
     },
   })
-  return { ...module.exports, project, auth, calls }
+  return { ...module.exports, project, auth, calls, document }
 }
 const result = name => ({ has_script: true, speakers: [{ name }], script_path: '', voice_config_path: '' })
 
@@ -110,4 +111,78 @@ test('whole-book clone request keeps the original batch range and defaults', asy
   await vue.nextTick()
   await h.doClones({ new_only: true })
   assert.equal(JSON.stringify(h.calls[0].body), JSON.stringify({ new_only: true, concurrency: 4, script: '__all__', candidate_count: null }))
+})
+
+function focusFixture(h, names, initial = names[0]) {
+  const controls = names.map(name => ({
+    name, isConnected: true,
+    focus() { h.document.activeElement = this },
+    getClientRects() { return [{}] },
+  }))
+  const panel = {
+    querySelector: () => controls.find(control => control.name === initial),
+    querySelectorAll: () => controls,
+    contains: el => controls.includes(el),
+  }
+  return { panel, controls }
+}
+async function flushFocus() { await vue.nextTick(); await vue.nextTick() }
+function key(key, shiftKey = false) {
+  return { key, shiftKey, prevented: false, preventDefault() { this.prevented = true }, stopPropagation() {} }
+}
+
+test('merge window and nested confirmation own focus and restore each opener', async () => {
+  const h = harness(async () => result('role'))
+  await h.loadVoices()
+  const opener = focusFixture(h, ['drawer-merge']).controls[0]
+  const merge = focusFixture(h, ['close', 'search', 'target', 'next'], 'search')
+  const confirm = focusFixture(h, ['cancel', 'confirm'])
+  h.mergePanel.value = merge.panel
+  h.mergeConfirmPanel.value = confirm.panel
+  opener.focus()
+  h.openMerge(h.speakers.value[0])
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'search')
+  merge.controls.at(-1).focus()
+  const tab = key('Tab')
+  h.overlayKeydown(tab)
+  assert.equal(tab.prevented, true)
+  assert.equal(h.document.activeElement.name, 'close')
+  h.overlayKeydown(key('Tab', true))
+  assert.equal(h.document.activeElement.name, 'next')
+  h.mergeTarget.value = 'target'
+  h.openMergeConfirm()
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'cancel')
+  h.overlayKeydown(key('Escape'))
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'next')
+  h.overlayKeydown(key('Escape'))
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'drawer-merge')
+})
+
+test('voice picker owns Tab and Shift+Tab, and closing restores the drawer opener', async () => {
+  const h = harness(async () => result('role'))
+  await h.loadVoices()
+  const opener = focusFixture(h, ['drawer-picker']).controls[0]
+  const picker = focusFixture(h, ['close', 'candidate', 'confirm'], 'candidate')
+  h.pickerPanel.value = picker.panel
+  opener.focus()
+  h.openPicker(h.speakers.value[0])
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'candidate')
+  picker.controls.at(-1).focus()
+  h.overlayKeydown(key('Tab'))
+  assert.equal(h.document.activeElement.name, 'close')
+  h.overlayKeydown(key('Tab', true))
+  assert.equal(h.document.activeElement.name, 'confirm')
+  h.pickerBusy.value = true
+  h.overlayKeydown(key('Escape'))
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'confirm')
+  h.pickerBusy.value = false
+  h.overlayKeydown(key('Escape'))
+  await flushFocus()
+  assert.equal(h.document.activeElement.name, 'drawer-picker')
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 import VoicesWorkbench from './voices/VoicesWorkbench.vue'
@@ -113,6 +113,58 @@ const mergeError = ref('')
 const mergeSourceItem = computed(
   () => (mergeSource.value ? speakers.value.find((s) => s.name === mergeSource.value) ?? null : null),
 )
+const pickerPanel = ref<HTMLElement | null>(null)
+const mergePanel = ref<HTMLElement | null>(null)
+const mergeConfirmPanel = ref<HTMLElement | null>(null)
+const activeOverlay = computed(() => mergeConfirm.value && mergeTarget.value ? 'confirm'
+  : mergeSourceItem.value ? 'merge' : pickerTarget.value ? 'picker' : null)
+let overlayReturnFocus: HTMLElement | null = null
+let confirmReturnFocus: HTMLElement | null = null
+
+function overlayPanel() {
+  return activeOverlay.value === 'confirm' ? mergeConfirmPanel.value
+    : activeOverlay.value === 'merge' ? mergePanel.value : pickerPanel.value
+}
+function overlayControls(panel: HTMLElement) {
+  return [...panel.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),a[href]')]
+    .filter(el => el.getClientRects().length > 0)
+}
+watch(activeOverlay, async (active, previous) => {
+  await nextTick()
+  if (active !== activeOverlay.value) return
+  const panel = overlayPanel()
+  if (active && panel) {
+    if (previous === 'confirm' && active === 'merge' && confirmReturnFocus?.isConnected) confirmReturnFocus.focus()
+    else (panel.querySelector<HTMLElement>('[data-initial-focus]:not([disabled])') ?? overlayControls(panel)[0])?.focus()
+  } else if (overlayReturnFocus?.isConnected) overlayReturnFocus.focus()
+})
+function openMergeConfirm() {
+  confirmReturnFocus = document.activeElement as HTMLElement
+  mergeConfirm.value = true
+}
+function overlayKeydown(event: KeyboardEvent) {
+  const active = activeOverlay.value
+  const panel = overlayPanel()
+  if (!active || !panel) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    if (active === 'picker' && !pickerBusy.value) closePicker()
+    else if (active === 'confirm' && !mergeBusy.value) mergeConfirm.value = false
+    else if (active === 'merge' && !mergeBusy.value) closeMerge()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const controls = overlayControls(panel)
+  const first = controls[0], last = controls[controls.length - 1]
+  if (!panel.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first)?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+}
 watch(mergeSourceItem, (t) => {
   if (!t && mergeSource.value) closeMerge()
 })
@@ -396,6 +448,7 @@ function pickLabel(v: VoiceItem): string {
 }
 
 function openPicker(v: VoiceItem) {
+  overlayReturnFocus = document.activeElement as HTMLElement
   pickerError.value = ''
   pickerChoice.value = v.selected_audio_id // null = the default first candidate
   pickerName.value = v.name
@@ -428,6 +481,7 @@ async function confirmPick() {
 // 合并角色：把 source 角色的全部台词直接改写进 Parse 源数据（零 LLM 调用），删除其声音
 // 配置。流程 = 选人子窗口（搜索筛选）→ 二次确认 → 同步写 → 刷新角色列表。
 function openMerge(v: VoiceItem) {
+  overlayReturnFocus = document.activeElement as HTMLElement
   mergeError.value = ''
   mergeQuery.value = ''
   mergeTarget.value = null
@@ -545,7 +599,7 @@ watch(
 </script>
 
 <template>
-  <div class="voices-page space-y-2">
+  <div class="voices-page space-y-2" @keydown="overlayKeydown">
     <header class="page-header mb-3">
       <div>
         <p class="eyebrow">Pipeline · Voices</p>
@@ -588,6 +642,7 @@ watch(
         :speakers="speakers" :prompts="prompts" :loading="voicesLoading" :load-error="voicesLoadError" :has-script="hasScript"
         :foundation-blocked="foundationBlocked" :clone-blocked="cloneBlocked" :foundation-busy="foundationBusy"
         :foundation-running="foundationRunning" :clone-running="cloneRunning" :gender-busy="genderBusy"
+        :overlay-open="Boolean(activeOverlay)"
         :foundation-badge="foundationBadge" :clone-badge="cloneBadge" :preview-url="previewUrl" :pick-label="pickLabel" :pick-disabled="pickDisabled"
         @refresh="loadVoices" @gender="openGenderMenu" @merge="openMerge" @pick="openPicker"
         @foundation="regenFoundation" @clone="remakeClone" @copy="copyDescriptionToPrompt" @prompt="(name, value) => prompts[name] = value"
@@ -714,7 +769,7 @@ watch(
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       @click.self="closePicker"
     >
-      <div class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
+      <div ref="pickerPanel" role="dialog" aria-modal="true" aria-label="选择音色" class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
         <div class="flex items-start justify-between gap-3">
           <div>
             <h2 class="text-lg font-semibold">选择音色 · {{ pickerTarget.name }}</h2>
@@ -722,7 +777,7 @@ watch(
               试听候选音频并选择最终音色；未选择时使用第 1 条。
             </p>
           </div>
-          <Button variant="ghost" size="icon" :disabled="pickerBusy" @click="closePicker">
+          <Button variant="ghost" size="icon" aria-label="关闭音色选择" :disabled="pickerBusy" @click="closePicker">
             <X class="h-4 w-4" />
           </Button>
         </div>
@@ -738,6 +793,7 @@ watch(
               type="radio"
               class="h-4 w-4 shrink-0 accent-primary"
               name="voice-candidate"
+              data-initial-focus
               :checked="pickerChoice === c.id"
               :disabled="pickerBusy"
               @change="pickerChoice = c.id"
@@ -817,7 +873,7 @@ watch(
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       @click.self="closeMerge"
     >
-      <div class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
+      <div ref="mergePanel" role="dialog" :aria-modal="!mergeConfirm ? true : undefined" :inert="mergeConfirm || undefined" aria-label="合并角色" class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
         <div class="flex items-start justify-between gap-3">
           <div>
             <h2 class="text-lg font-semibold">合并角色 · {{ mergeSourceItem.name }}</h2>
@@ -825,7 +881,7 @@ watch(
               将该角色的台词并入所选角色，并移除原角色配置。
             </p>
           </div>
-          <Button variant="ghost" size="icon" :disabled="mergeBusy" @click="closeMerge">
+          <Button variant="ghost" size="icon" aria-label="关闭角色合并" :disabled="mergeBusy" @click="closeMerge">
             <X class="h-4 w-4" />
           </Button>
         </div>
@@ -836,6 +892,8 @@ watch(
             v-model="mergeQuery"
             class="h-9 pl-8 text-sm"
             placeholder="搜索目标角色…"
+            aria-label="搜索目标角色"
+            data-initial-focus
             :disabled="mergeBusy"
           />
         </div>
@@ -870,7 +928,7 @@ watch(
 
         <div class="flex items-center justify-end gap-2">
           <Button variant="outline" size="sm" :disabled="mergeBusy" @click="closeMerge">取消</Button>
-          <Button :disabled="mergeBusy || !mergeTarget" @click="mergeConfirm = true">
+          <Button :disabled="mergeBusy || !mergeTarget" @click="openMergeConfirm">
             下一步：确认合并
           </Button>
         </div>
@@ -883,7 +941,7 @@ watch(
       class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
       @click.self="mergeConfirm = false"
     >
-      <div class="w-full max-w-md space-y-4 rounded-lg border bg-background p-5 shadow-lg">
+      <div ref="mergeConfirmPanel" role="dialog" aria-modal="true" aria-label="确认合并" class="w-full max-w-md space-y-4 rounded-lg border bg-background p-5 shadow-lg">
         <h2 class="text-lg font-semibold">确认合并？</h2>
         <p class="flex items-center gap-2 text-sm">
           <span class="font-medium">{{ mergeSourceItem?.name }}</span>
