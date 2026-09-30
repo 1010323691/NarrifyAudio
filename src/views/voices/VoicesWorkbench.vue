@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useTenRowHeight } from '@/composables/useTenRowHeight'
 import type { VoiceItem } from '@/types'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
@@ -48,19 +49,8 @@ const detailTab = ref('voice')
 const narrow = ref(false)
 const detailOpen = ref(false)
 const detailPanel = ref<HTMLElement | null>(null)
-const listViewport = ref<HTMLElement | null>(null)
-const tableHead = ref<HTMLElement | null>(null)
-const fittedRowHeight = ref(32)
-const rowHeight = computed(() => pageSize.value === 10 ? fittedRowHeight.value : 32)
-let listObserver: ResizeObserver | null = null
-function fitRows() {
-  const viewportHeight = listViewport.value?.getBoundingClientRect().height ?? 0
-  if (!viewportHeight || !tableHead.value) return
-  const bodyHeight = viewportHeight - tableHead.value.getBoundingClientRect().height - 0.5
-  // Chromium lays out in 1/64px units. Round down to keep the tenth row inside the viewport.
-  const minimum = window.matchMedia('(pointer:coarse)').matches ? 51 : 32
-  fittedRowHeight.value = Math.max(minimum, Math.floor(bodyHeight / 10 * 64) / 64)
-}
+const voiceTable = ref<HTMLTableElement | null>(null)
+const rowHeight = useTenRowHeight(voiceTable, pageSize)
 let returnFocus: HTMLElement | null = null
 let media: MediaQueryList | null = null
 function updateNarrow() { narrow.value = media?.matches ?? false; if (!narrow.value) detailOpen.value = false }
@@ -69,16 +59,10 @@ onMounted(() => {
   media = window.matchMedia('(max-width:1100px)')
   updateNarrow()
   media.addEventListener('change', updateNarrow)
-  listObserver = new ResizeObserver(fitRows)
-  if (listViewport.value) listObserver.observe(listViewport.value)
-  if (tableHead.value) listObserver.observe(tableHead.value)
-  fitRows()
 })
 onBeforeUnmount(() => {
   media?.removeEventListener('change', updateNarrow)
-  listObserver?.disconnect()
 })
-watch(pageSize, async () => { await nextTick(); fitRows() })
 const pendingCount = computed(() => props.speakers.filter(v => v.status !== 'ready').length)
 const filtered = computed(() => {
   const q = query.value.trim().toLocaleLowerCase()
@@ -133,9 +117,9 @@ function detailKeydown(event: KeyboardEvent) {
         <p>{{ loadError }}</p><p v-if="speakers.length" class="mt-1 text-muted-foreground">正在展示上次已知状态。</p>
         <Button variant="outline" class="mt-2 h-8" :disabled="loading" @click="emit('refresh')">重试加载</Button>
       </div>
-      <div ref="listViewport" class="voice-scroll">
-        <table class="voice-table" :style="{ '--voice-row-height': `${rowHeight}px` }" aria-label="角色状态列表">
-          <thead ref="tableHead"><tr><th>角色 / 别名</th><th class="voice-number">台词</th><th>基础</th><th>音色</th></tr></thead>
+      <div class="voice-scroll">
+        <table ref="voiceTable" class="voice-table" :style="{ '--voice-row-height': `${rowHeight}px` }" aria-label="角色状态列表">
+          <thead><tr><th>角色 / 别名</th><th class="voice-number">台词</th><th>基础</th><th>音色</th></tr></thead>
           <tbody v-if="loading && !speakers.length">
             <tr v-for="i in pageSize" :key="i" aria-hidden="true"><td colspan="4"><Skeleton class="voice-skeleton h-5" /></td></tr>
           </tbody>

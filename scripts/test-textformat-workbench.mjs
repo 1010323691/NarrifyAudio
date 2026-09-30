@@ -204,9 +204,12 @@ test('pending/adjusted filters, search and page slicing; marks toggle and advanc
   assert.equal(wb.phase.value, 'ready')
   assert.equal(wb.pendingCount.value, 5)
 
-  assert.equal(wb.pageCount.value, 2) // 25 章 / 每页 20
-  assert.equal(wb.pagedChapters.value.length, 20)
+  assert.equal(wb.pageCount.value, 3) // 25 章 / 每页 10
+  assert.equal(wb.pagedChapters.value.length, 10)
   wb.page.value = 2
+  assert.equal(wb.pagedChapters.value.length, 10)
+  assert.equal(wb.pagedChapters.value[0].key, 'c11')
+  wb.page.value = 3
   assert.equal(wb.pagedChapters.value.length, 5)
   assert.equal(wb.pagedChapters.value[0].key, 'c21')
 

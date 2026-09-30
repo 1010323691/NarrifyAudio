@@ -61,7 +61,7 @@ export function useTextFormatWorkbench() {
   const sameOrigNum = ref<number | null>(null)
   const query = ref('')
   const page = ref(1)
-  const pageSize = ref(20)
+  const pageSize = ref(10)
   const marksBusy = ref<string | null>(null)
   const preview = ref<PreviewState>({ key: null, status: 'idle', text: '', error: '' })
 
