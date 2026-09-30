@@ -267,9 +267,12 @@ test('filters, search and pagination over chapter rows', async () => {
   const { wb } = await setup({ stateFor: async () => stateV(files) })
   await wb.refreshState()
   assert.equal(wb.total.value, 25)
-  assert.equal(wb.pageCount.value, 2) // 25 章 / 每页 20
-  assert.equal(wb.pagedRows.value.length, 20)
+  assert.equal(wb.pageCount.value, 3) // 25 章 / 每页 10
+  assert.equal(wb.pagedRows.value.length, 10)
   wb.page.value = 2
+  assert.equal(wb.pagedRows.value.length, 10)
+  assert.equal(wb.pagedRows.value[0].chapter.name, '011.txt')
+  wb.page.value = 3
   assert.equal(wb.pagedRows.value.length, 5)
   assert.equal(wb.pagedRows.value[0].chapter.name, '021.txt')
 
@@ -280,7 +283,7 @@ test('filters, search and pagination over chapter rows', async () => {
   wb.filter.value = 'pending'
   await nextTick()
   assert.equal(wb.filteredRows.value.length, 20)
-  assert.equal(wb.pageCount.value, 1)
+  assert.equal(wb.pageCount.value, 2)
 
   wb.query.value = '007'
   await nextTick()

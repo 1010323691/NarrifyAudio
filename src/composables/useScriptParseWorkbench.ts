@@ -156,7 +156,7 @@ export function useScriptParseWorkbench() {
   const query = ref('')
   const filter = ref<'all' | 'pending' | 'done'>('all')
   const page = ref(1)
-  const pageSize = ref(20)
+  const pageSize = ref(10)
   const selectedName = ref<string | null>(null)
   const tab = ref<'result' | 'source'>('result')
   /** 用户手动切过 tab 后，自动默认（空条目回落原文）不再干预。 */

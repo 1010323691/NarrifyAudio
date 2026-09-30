@@ -290,6 +290,7 @@ onBeforeUnmount(() => {
                 :selected="selected"
                 :selected-name="selectedName"
                 :num-pad="chapterNumPad"
+                :page-size="pageSize"
                 :select-disabled="busy"
                 @select="onChapterSelect"
                 @toggle="toggleSelect"
@@ -303,6 +304,7 @@ onBeforeUnmount(() => {
               :page-count="pageCount"
               :total="filteredRows.length"
               :page-size="pageSize"
+              :page-size-options="[10, 20, 50]"
               @update:page="(p: number) => (page = p)"
               @update:page-size="(s: number) => { pageSize = s; page = 1 }"
             />
