@@ -124,10 +124,12 @@ async function refreshRows() {
 
 // ---------------------------------------------------------------------------
 // Selection: a local multi-select map (keyed by file name). The shared single
-// value pipeline.activeScript (角色配音 reads it) mirrors the FIRST selected file —
-// written only on user interaction, so a multi-select is never collapsed by its
-// own sync; an external change (角色配音 picking a file) collapses the selection
-// to that file (the previous cross-page replace semantics).
+// value pipeline.activeScript mirrors the FIRST selected file — written only on
+// user interaction, so a multi-select is never collapsed by its own sync; an
+// external change collapses the selection to that file (the previous cross-page
+// replace semantics). No page triggers such a change today: 角色配音's workbench
+// no longer reads the shared value, and a store reset always rebuilds this
+// keep-alive page instead — so the watch is a dormant cross-page safety net.
 // ---------------------------------------------------------------------------
 const selected = reactive<Record<string, boolean>>({})
 let lastSynced = pipeline.activeScript
