@@ -16,8 +16,10 @@ import type {
  * Parsed script selection and the merge result are the two current handoffs.
  */
 export const usePipelineStateStore = defineStore('pipelineState', () => {
-  // Which parsed JSON (a file name in 03_parsed_json/) the downstream 角色配音 / 音频合成
-  // stages should read. Shared by both pages so they operate on the same file.
+  // Which parsed JSON (a file name in 03_parsed_json/) the 音频合成 page operates on:
+  // it writes the FIRST selected file on every user interaction and re-seeds the
+  // selection on mount. 角色配音 no longer participates — its workbench always
+  // covers every parsed chapter ('__all__'), never leaking a file pick downstream.
   // Empty string → the backend falls back to the most recently written JSON.
   const activeScript = ref('')
   const mergeResult = ref<MergeResult | null>(null)

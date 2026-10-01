@@ -517,6 +517,7 @@ onBeforeUnmount(() => {
                 :selected-key="selectedKey"
                 :reason-briefs="chapterBriefs"
                 :num-pad="chapterNumPad"
+                :page-size="pageSize"
                 :marked-keys="markedKeySet"
                 @select="onChapterSelect"
               />
@@ -527,6 +528,7 @@ onBeforeUnmount(() => {
               :page-count="pageCount"
               :total="filteredChapters.length"
               :page-size="pageSize"
+              :page-size-options="[10, 20, 50]"
               @update:page="(p: number) => (page = p)"
               @update:page-size="(s: number) => { pageSize = s; page = 1 }"
             />

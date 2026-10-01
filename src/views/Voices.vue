@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useAuthStore } from '@/stores/auth'
+import { useProjectStore } from '@/stores/project'
+import VoicesWorkbench from './voices/VoicesWorkbench.vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
-import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations, selectVoice, setGender, ttsStatus } from '@/api/tts'
@@ -22,7 +24,6 @@ import StatusPill from '@/components/ui/StatusPill.vue'
 import Alert from '@/components/ui/Alert.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
-import WorkspaceEntryPicker from '@/components/WorkspaceEntryPicker.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useProjectGate } from '@/composables/useProjectGate'
 import {
@@ -35,16 +36,14 @@ import {
   CheckCircle2,
   RefreshCw,
   ArrowRight,
-  FolderOpen,
-  Merge,
-  Copy,
   Search,
   HelpCircle,
 } from 'lucide-vue-next'
 
 const router = useRouter()
 const settings = useSettingsStore()
-const pipeline = usePipelineStateStore()
+const auth = useAuthStore()
+const project = useProjectStore()
 const taskStore = useTaskStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -52,6 +51,9 @@ const { push: toast } = useToast()
 const status = ref<TTSStatus | null>(null)
 const hasScript = ref(false)
 const speakers = ref<VoiceItem[]>([])
+const voicesLoading = ref(false)
+const voicesLoadError = ref('')
+let voicesRequest = 0
 
 // Per-character optional description overrides (a single-char Phase-1 regenerate honours these).
 const prompts = reactive<Record<string, string>>({})
@@ -108,6 +110,60 @@ const mergeError = ref('')
 const mergeSourceItem = computed(
   () => (mergeSource.value ? speakers.value.find((s) => s.name === mergeSource.value) ?? null : null),
 )
+const pickerPanel = ref<HTMLElement | null>(null)
+const mergePanel = ref<HTMLElement | null>(null)
+const mergeConfirmPanel = ref<HTMLElement | null>(null)
+const activeOverlay = computed(() => mergeConfirm.value && mergeTarget.value ? 'confirm'
+  : mergeSourceItem.value ? 'merge' : pickerTarget.value ? 'picker' : null)
+let overlayReturnFocus: HTMLElement | null = null
+let confirmReturnFocus: HTMLElement | null = null
+
+function overlayPanel() {
+  return activeOverlay.value === 'confirm' ? mergeConfirmPanel.value
+    : activeOverlay.value === 'merge' ? mergePanel.value : pickerPanel.value
+}
+function overlayControls(panel: HTMLElement) {
+  return [...panel.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),a[href]')]
+    .filter(el => el.getClientRects().length > 0)
+}
+watch(activeOverlay, async (active, previous) => {
+  await nextTick()
+  if (active !== activeOverlay.value) return
+  const panel = overlayPanel()
+  if (active && panel) {
+    if (previous === 'confirm' && active === 'merge' && confirmReturnFocus?.isConnected) confirmReturnFocus.focus()
+    else (panel.querySelector<HTMLElement>('[data-initial-focus]:not([disabled])') ?? overlayControls(panel)[0])?.focus()
+  } else if (overlayReturnFocus?.isConnected) overlayReturnFocus.focus()
+})
+function openMergeConfirm() {
+  confirmReturnFocus = document.activeElement as HTMLElement
+  mergeConfirm.value = true
+}
+function overlayKeydown(event: KeyboardEvent) {
+  const active = activeOverlay.value
+  const panel = overlayPanel()
+  if (!active || !panel) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    if (active === 'picker' && !pickerBusy.value) closePicker()
+    else if (active === 'confirm' && !mergeBusy.value) mergeConfirm.value = false
+    else if (active === 'merge' && !mergeBusy.value) closeMerge()
+    return
+  }
+  if (event.key !== 'Tab') return
+  const controls = overlayControls(panel)
+  if (!controls.length) return // in-flight: every control is disabled — nothing to trap, so
+  // let the browser's default Tab run instead of swallowing the key with no target.
+  const first = controls[0], last = controls[controls.length - 1]
+  if (!panel.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first)?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+}
 watch(mergeSourceItem, (t) => {
   if (!t && mergeSource.value) closeMerge()
 })
@@ -138,13 +194,6 @@ function openGenderMenu(v: VoiceItem, el: HTMLElement) {
 function closeGenderMenu() {
   genderMenu.value = null
 }
-// Direction A badge styling: muted 10% fill + 30% border + 600/300 text (dark mode aware).
-function genderBadgeClass(g: VoiceItem['gender']): string {
-  const base = 'inline-flex h-5 select-none items-center gap-1 rounded-full border px-1.5 text-[11px] leading-none transition-opacity'
-  if (g === 'male') return `${base} cursor-pointer border-indigo-500/30 bg-indigo-500/10 text-indigo-600 hover:opacity-80 dark:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-40`
-  if (g === 'female') return `${base} cursor-pointer border-rose-500/30 bg-rose-500/10 text-rose-600 hover:opacity-80 dark:text-rose-300 disabled:cursor-not-allowed disabled:opacity-40`
-  return `${base} cursor-pointer border-border bg-transparent text-muted-foreground opacity-70 hover:opacity-90 disabled:cursor-not-allowed`
-}
 async function applyGender(v: VoiceItem, g: 'male' | 'female' | '') {
   if (genderBusy.value) return
   genderBusy.value = true
@@ -171,13 +220,8 @@ async function applyGender(v: VoiceItem, g: 'male' | 'female' | '') {
 const foundationTargets = ref<string[] | null>(null)
 const cloneTargets = ref<string[] | null>(null)
 
-// The parsed-JSON selection on THIS page. Local (not the shared store) so the whole-book
-// "全部文件" scope ('__all__') never leaks into 音频合成, which is per-file.
-// '' = most recent; a file name = that file; '__all__' = every file in 03_parsed_json/.
-const ALL_SCRIPT = '__all__'
-const scope = ref(pipeline.activeScript || '')
-// Which parsed JSON(s) to read (mirrors the picker; '__all__' aggregates every file).
-const script = computed(() => scope.value)
+// Always cover all parsed chapters without changing downstream file selection.
+const script = '__all__'
 
 // A phase is "running" while any of its tasks is active (drives the per-row 生成中/制作中 overlay).
 const ACTIVE: string[] = ['pending', 'running', 'paused']
@@ -221,27 +265,36 @@ function cloneBadge(v: VoiceItem): PhaseBadge {
 }
 
 async function loadVoices() {
+  const request = ++voicesRequest
+  const context = `${auth.user?.id || ''}:${project.activeProjectId}:${script}`
+  const current = () => request === voicesRequest && context === `${auth.user?.id || ''}:${project.activeProjectId}:${script}`
+  voicesLoading.value = true
+  voicesLoadError.value = ''
   try {
-    const r = await listVoices(script.value || undefined)
+    const r = await listVoices(script)
+    if (!current()) return
     hasScript.value = r.has_script
     speakers.value = r.speakers
-  } catch {
-    hasScript.value = false
-    speakers.value = []
+  } catch (e: any) {
+    if (current()) voicesLoadError.value = e?.message || '角色加载失败，请重试。'
+  } finally {
+    if (current()) voicesLoading.value = false
   }
 }
 
-// Local → store: a concrete file / most-recent keeps 音频合成 in step; the "all files"
-// scope is Voices-local and must not be written to the shared selection.
-watch(scope, (v) => {
-  loadVoices()
-  if (v !== ALL_SCRIPT) pipeline.activeScript = v
+watch(() => `${auth.user?.id || ''}:${project.activeProjectId}`, () => {
+  ++voicesRequest
+  speakers.value = []
+  hasScript.value = false
+  voicesLoading.value = false
+  voicesLoadError.value = ''
+  Object.keys(prompts).forEach(key => delete prompts[key])
+  closePicker()
+  closeMerge()
+  closeGenderMenu()
 })
-// Store → local: under keep-alive this page is cached, so a pick made on 音频合成 must
-// refresh the (cached) character list. Guarded so an active "all files" view is kept.
-watch(() => pipeline.activeScript, (v) => {
-  if (scope.value !== ALL_SCRIPT && v !== scope.value) scope.value = v
-})
+onBeforeUnmount(() => { ++voicesRequest })
+
 
 // 刷新恢复：页面重载后本地 taskId 丢失，但后端任务仍在跑（store 的 refresh 已拉回全量任务）。
 // 按 module 重新挂接在途的阶段 1 / 阶段 2 任务——恢复日志面板绑定、按钮门控与完成 watcher
@@ -295,7 +348,7 @@ async function doFoundations(opts: {
   foundationResult.value = null
   foundationTargets.value = opts.speakers ?? null
   try {
-    const { task_id } = await prepareFoundations({ ...opts, script: script.value || undefined })
+    const { task_id } = await prepareFoundations({ ...opts, script: script })
     foundationTaskId.value = task_id
     await taskStore.refresh()
     // Completion is handled by the watcher on foundationTask.status.
@@ -318,7 +371,7 @@ async function doClones(opts: {
     const { task_id } = await generateVoiceCandidates({
       ...opts,
       concurrency: cloneConcurrency.value,
-      script: script.value || undefined,
+      script: script,
       candidate_count: candidateCount.value === 'auto' ? null : Number(candidateCount.value),
     })
     cloneTaskId.value = task_id
@@ -376,6 +429,7 @@ function pickLabel(v: VoiceItem): string {
 }
 
 function openPicker(v: VoiceItem) {
+  overlayReturnFocus = document.activeElement as HTMLElement
   pickerError.value = ''
   pickerChoice.value = v.selected_audio_id // null = the default first candidate
   pickerName.value = v.name
@@ -408,6 +462,7 @@ async function confirmPick() {
 // 合并角色：把 source 角色的全部台词直接改写进 Parse 源数据（零 LLM 调用），删除其声音
 // 配置。流程 = 选人子窗口（搜索筛选）→ 二次确认 → 同步写 → 刷新角色列表。
 function openMerge(v: VoiceItem) {
+  overlayReturnFocus = document.activeElement as HTMLElement
   mergeError.value = ''
   mergeQuery.value = ''
   mergeTarget.value = null
@@ -430,7 +485,7 @@ async function confirmMerge() {
   mergeBusy.value = true
   mergeError.value = ''
   try {
-    const r = await mergeSpeakers(src, tgt, script.value || undefined)
+    const r = await mergeSpeakers(src, tgt, script)
     toast({
       title: '角色已合并',
       variant: 'success',
@@ -525,10 +580,8 @@ watch(
 </script>
 
 <template>
-  <!-- -mx-16：角色表新增「选择音色」按钮后 1152px 列宽不够——本页整体向两侧各借 64px（≈一个按钮宽），
-       只借 MainLayout max-w-6xl 居中留出的空白，不改共享布局，其余页面不受影响。 -->
-  <div class="space-y-6">
-    <header class="page-header mb-5">
+  <div class="voices-page space-y-2" @keydown="overlayKeydown">
+    <header class="page-header mb-3">
       <div>
         <p class="eyebrow">Pipeline · Voices</p>
         <h1 class="page-title flex items-center gap-3">
@@ -551,261 +604,133 @@ watch(
     </Alert>
 
     <template v-else>
-      <Alert v-if="!hasScript" variant="default">
-        <Users class="h-4 w-4 shrink-0" />
-        尚未检测到角色，请先在「文本解析」生成解析结果。
-      </Alert>
-
-      <!-- 阶段 1 · 生成语音推理基础（LLM only） -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><Sparkles class="h-5 w-5" />阶段 1 · 生成语音推理基础</CardTitle>
-          <CardDescription>
-            为角色生成声音描述和种子文案。
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="space-y-4">
-          <div class="flex flex-wrap items-center gap-3">
-            <Button :disabled="foundationBlocked" @click="doFoundations({})">
-              <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
-              <Sparkles v-else class="h-4 w-4" />
-              {{ foundationBusy ? '生成中…' : '批量生成所有角色' }}
-            </Button>
-            <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
-              <Users class="h-4 w-4" />仅新增角色
-            </Button>
-            <Button variant="outline" size="sm" @click="loadVoices">
-              <RefreshCw class="h-4 w-4" />刷新
-            </Button>
-            <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
+      <Card class="voices-summary">
+        <CardContent class="flex flex-wrap items-center justify-between gap-3 p-3">
+          <div class="flex items-center gap-5 text-[11px] text-muted-foreground">
+            <div><strong class="block text-xl font-semibold tabular-nums text-foreground">{{ speakers.length }}</strong>角色总数</div>
+            <div><strong class="block text-xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{{ readyCount }}</strong>音色已就绪</div>
+            <div><strong class="block text-xl font-semibold tabular-nums text-amber-600 dark:text-amber-400">{{ speakers.length - readyCount }}</strong>待完善</div>
           </div>
-
-          <LiveLogPanel :task="foundationTask" :max-height-class="'h-72'">
-            <template #actions>
-              <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="outline" size="sm" @click="cancelFoundation">
-                <XCircle class="h-3.5 w-3.5" />取消
+        </CardContent>
+      </Card>
+      <VoicesWorkbench
+        :speakers="speakers" :prompts="prompts" :loading="voicesLoading" :load-error="voicesLoadError" :has-script="hasScript"
+        :foundation-blocked="foundationBlocked" :clone-blocked="cloneBlocked" :foundation-busy="foundationBusy"
+        :foundation-running="foundationRunning" :clone-running="cloneRunning" :gender-busy="genderBusy"
+        :overlay-open="Boolean(activeOverlay)"
+        :foundation-badge="foundationBadge" :clone-badge="cloneBadge" :preview-url="previewUrl" :pick-label="pickLabel" :pick-disabled="pickDisabled"
+        @refresh="loadVoices" @gender="openGenderMenu" @merge="openMerge" @pick="openPicker"
+        @foundation="regenFoundation" @clone="remakeClone" @copy="copyDescriptionToPrompt" @prompt="(name, value) => prompts[name] = value"
+      />
+      <Card class="voices-production" aria-label="角色声音制作">
+        <!-- 阶段 1 · 生成语音推理基础（LLM only） -->
+        <section class="voices-stage" aria-labelledby="voices-foundation-title">
+          <CardHeader class="p-3 pb-2">
+            <CardTitle id="voices-foundation-title" class="text-xs flex items-center gap-2"><Sparkles class="h-4 w-4" />阶段 1 · 生成语音推理基础</CardTitle>
+            <CardDescription class="text-xs">
+              为角色生成声音描述和种子文案。
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <Button :disabled="foundationBlocked" @click="doFoundations({})">
+                <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
+                <Sparkles v-else class="h-4 w-4" />
+                {{ foundationBusy ? '生成中…' : '批量生成所有角色' }}
               </Button>
-            </template>
-          </LiveLogPanel>
-
-          <div
-            v-if="foundationResult"
-            class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
-          >
-            <CheckCircle2 class="h-4 w-4 shrink-0" />
-            完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，识别 {{ foundationResult.aliases }} 个别名（未启动 TTS）。
-          </div>
-        </CardContent>
-      </Card>
-
-      <!-- 阶段 2 · 制作克隆音频（TTS only） -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><AudioWaveform class="h-5 w-5" />阶段 2 · 制作克隆音频</CardTitle>
-          <CardDescription>
-            为角色生成候选音色。请先关闭 LLM，再开始制作。
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="space-y-4">
-          <div class="flex flex-wrap items-center gap-3">
-            <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
-              <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
-              <AudioWaveform v-else class="h-4 w-4" />
-              {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
-            </Button>
-            <label class="flex items-center gap-2 text-sm text-muted-foreground">
-              批内行数（上限）
-              <Input
-                :modelValue="cloneConcurrency"
-                type="number"
-                min="1"
-                max="64"
-                class="h-8 w-20"
-                :disabled="cloneBlocked"
-                @update:modelValue="onConcurrency"
-              />
-            </label>
-            <label class="flex items-center gap-2 text-sm text-muted-foreground">
-              备选音频数
-              <Select
-                :modelValue="candidateCount"
-                class="h-8 w-28"
-                :disabled="cloneBlocked"
-                @update:modelValue="candidateCount = String($event)"
-              >
-                <option value="auto">自动</option>
-                <option value="2">2</option>
-                <option value="4">4</option>
-                <option value="6">6</option>
-                <option value="8">8</option>
-              </Select>
-            </label>
-            <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
-          </div>
-
-          <LiveLogPanel :task="cloneTask" :max-height-class="'h-72'">
-            <template #actions>
-              <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="outline" size="sm" @click="cancelClone">
-                <XCircle class="h-3.5 w-3.5" />取消
+              <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
+                <Users class="h-4 w-4" />仅新增角色
               </Button>
-            </template>
-          </LiveLogPanel>
+              <Button variant="outline" size="sm" @click="loadVoices">
+                <RefreshCw class="h-4 w-4" />刷新
+              </Button>
+              <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
+            </div>
 
-          <div
-            v-if="cloneResult"
-            class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
-          >
-            <CheckCircle2 class="h-4 w-4 shrink-0" />
-            完成：克隆音频成功 {{ cloneResult.ok }} / 失败 {{ cloneResult.failed }} / 共 {{ cloneResult.count }} 个角色。
-          </div>
-        </CardContent>
+            <LiveLogPanel :task="foundationTask" :max-height-class="'h-40'">
+              <template #actions>
+                <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="outline" size="sm" @click="cancelFoundation">
+                  <XCircle class="h-3.5 w-3.5" />取消
+                </Button>
+              </template>
+            </LiveLogPanel>
+
+            <div
+              v-if="foundationResult"
+              class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
+            >
+              <CheckCircle2 class="h-4 w-4 shrink-0" />
+              完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，识别 {{ foundationResult.aliases }} 个别名（未启动 TTS）。
+            </div>
+          </CardContent>
+        </section>
+
+        <!-- 阶段 2 · 制作克隆音频（TTS only） -->
+        <section class="voices-stage" aria-labelledby="voices-clone-title">
+          <CardHeader class="p-3 pb-2">
+            <CardTitle id="voices-clone-title" class="text-xs flex items-center gap-2"><AudioWaveform class="h-4 w-4" />阶段 2 · 制作克隆音频</CardTitle>
+            <CardDescription class="text-xs">
+              为角色生成候选音色。请先关闭 LLM，再开始制作。
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
+                <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
+                <AudioWaveform v-else class="h-4 w-4" />
+                {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
+              </Button>
+              <label class="flex items-center gap-2 text-sm text-muted-foreground">
+                批内行数（上限）
+                <Input
+                  :modelValue="cloneConcurrency"
+                  type="number"
+                  min="1"
+                  max="64"
+                  class="h-8 w-20"
+                  :disabled="cloneBlocked"
+                  @update:modelValue="onConcurrency"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-sm text-muted-foreground">
+                备选音频数
+                <Select
+                  :modelValue="candidateCount"
+                  class="h-8 w-28"
+                  :disabled="cloneBlocked"
+                  @update:modelValue="candidateCount = String($event)"
+                >
+                  <option value="auto">自动</option>
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                  <option value="6">6</option>
+                  <option value="8">8</option>
+                </Select>
+              </label>
+              <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
+            </div>
+
+            <LiveLogPanel :task="cloneTask" :max-height-class="'h-40'">
+              <template #actions>
+                <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="outline" size="sm" @click="cancelClone">
+                  <XCircle class="h-3.5 w-3.5" />取消
+                </Button>
+              </template>
+            </LiveLogPanel>
+
+            <div
+              v-if="cloneResult"
+              class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
+            >
+              <CheckCircle2 class="h-4 w-4 shrink-0" />
+              完成：克隆音频成功 {{ cloneResult.ok }} / 失败 {{ cloneResult.failed }} / 共 {{ cloneResult.count }} 个角色。
+            </div>
+          </CardContent>
+        </section>
       </Card>
 
-      <!-- 工作区目录 -->
-      <Card>
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><FolderOpen class="h-5 w-5" />工作区目录</CardTitle>
-          <CardDescription>选择要使用的解析脚本。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <WorkspaceEntryPicker
-            module="03_parsed_json"
-            :extensions="['json']"
-            exclude-suffix="_checked.json"
-            v-model="scope"
-            :show-all="true"
-            :all-value="ALL_SCRIPT"
-            label="解析结果"
-          />
-        </CardContent>
-      </Card>
-
-      <!-- 角色 -->
-      <Card class="voices-speakers-card">
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2">
-            <Users class="h-5 w-5" />角色（{{ speakers.length }}）
-          </CardTitle>
-          <CardDescription v-if="speakers.length">已就绪 {{ readyCount }} / {{ speakers.length }} · 基础 {{ foundationDone }} / 克隆 {{ cloneDone }} / {{ nonAlias.length }}</CardDescription>
-        </CardHeader>
-        <CardContent class="space-y-4">
-          <div v-if="speakers.length" class="voices-speakers-scroll">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-left text-xs text-muted-foreground">
-                  <th class="voices-th">角色</th>
-                  <th class="voices-th">台词数</th>
-                  <th class="voices-th">语音推理基础</th>
-                  <th class="voices-th">克隆音频</th>
-                  <th class="voices-th">声音描述 / 提示词</th>
-                  <th class="voices-th voices-th--right">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="v in speakers" :key="v.name" class="border-b align-top last:border-0">
-                  <td class="py-2 pr-3 font-medium">
-                    <div class="whitespace-nowrap">
-                      {{ v.name }}
-                      <span v-if="v.alias_of" class="ml-1 text-xs text-muted-foreground">→ {{ v.alias_of }}</span>
-                      <!-- 性别徽章：阶段 1 预填、点击纠正（alias 行借用目标音色，不单独标记） -->
-                      <button
-                        v-else
-                        type="button"
-                        class="ml-1.5 align-middle"
-                        :class="genderBadgeClass(v.gender)"
-                        :title="v.gender ? '点击修改性别标记' : '标记性别（阶段 1 自动推断，可点击纠正）'"
-                        :disabled="genderBusy || foundationRunning || cloneRunning"
-                        @click.stop="openGenderMenu(v, $event.currentTarget as HTMLElement)"
-                      >
-                        <!-- ♂/♀ = Unicode 性别符号（lucide 0.468 无 Mars/Venus 图标） -->
-                        <span v-if="v.gender === 'male'" class="text-xs leading-none">♂</span>
-                        <span v-else-if="v.gender === 'female'" class="text-xs leading-none">♀</span>
-                        <HelpCircle v-else class="h-3 w-3" />
-                        {{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未定' }}
-                      </button>
-                    </div>
-                    <div class="mt-1 flex items-center">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        class="h-6 w-6 p-0"
-                        title="将该角色合并到其他角色（直接修改解析源数据）"
-                        :disabled="foundationRunning || cloneRunning || speakers.length < 2"
-                        @click="openMerge(v)"
-                      >
-                        <Merge class="h-3 w-3" />
-                      </Button>
-                    </div>
-                  </td>
-                  <td class="py-2 pr-3 text-muted-foreground">{{ v.line_count }}</td>
-                  <td class="py-2 pr-3">
-                    <Badge :variant="foundationBadge(v).variant">
-                      <Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />
-                      {{ foundationBadge(v).label }}
-                    </Badge>
-                  </td>
-                  <td class="py-2 pr-3">
-                    <Badge :variant="cloneBadge(v).variant">
-                      <Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />
-                      {{ cloneBadge(v).label }}
-                    </Badge>
-                  </td>
-                  <td class="py-2 pr-3">
-                    <!-- 固定列宽：描述/提示词列不再被操作列挤窄（表格整体可横向滚动兜底） -->
-                    <div class="w-60 min-w-60">
-                      <div class="truncate text-xs text-muted-foreground" :title="v.description">
-                        {{ v.description || '—' }}
-                      </div>
-                      <div class="mt-1.5 flex items-center gap-1">
-                        <Input
-                          v-model="prompts[v.name]"
-                          class="h-8 min-w-0 flex-1 text-xs"
-                          placeholder="可选：自定义声音描述（阶段 1 重新生成时生效）"
-                          :disabled="foundationBusy"
-                        />
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          class="h-8 w-8 shrink-0 p-0"
-                          :title="`将 ${v.name} 的声音描述复制到提示词`"
-                          :aria-label="`将 ${v.name} 的声音描述复制到提示词`"
-                          :disabled="foundationBusy || !v.description"
-                          @click="copyDescriptionToPrompt(v)"
-                        >
-                          <Copy class="h-3 w-3" aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </div>
-                  </td>
-                  <td class="py-2">
-                    <div class="flex items-center justify-end gap-2">
-                      <MiniAudioPlayer v-if="v.preview" :src="previewUrl(v)" />
-                      <span class="w-14 shrink-0 text-right text-xs text-muted-foreground" :title="pickLabel(v)">
-                        {{ pickLabel(v) }}
-                      </span>
-                      <Button variant="outline" size="sm" :disabled="pickDisabled(v)" @click="openPicker(v)">
-                        选择音色
-                      </Button>
-                      <Button variant="outline" size="sm" :disabled="foundationBlocked" @click="regenFoundation(v)">
-                        重新生成
-                      </Button>
-                      <Button variant="outline" size="sm" :disabled="cloneBlocked || v.foundation_status !== 'done'" @click="remakeClone(v)">
-                        重新制作
-                      </Button>
-                    </div>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p v-else class="text-sm text-muted-foreground">（暂无角色）</p>
-        </CardContent>
-      </Card>
-
-      <div v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" class="flex justify-end">
-        <Button size="sm" @click="router.push('/batch')">
-          前往音频合成<ArrowRight class="h-4 w-4" />
-        </Button>
+      <div v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" class="voices-footer flex justify-end">
+        <Button v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" size="sm" @click="router.push('/batch')">前往音频合成<ArrowRight class="h-4 w-4" /></Button>
       </div>
     </template>
 
@@ -820,7 +745,7 @@ watch(
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       @click.self="closePicker"
     >
-      <div class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
+      <div ref="pickerPanel" role="dialog" aria-modal="true" aria-label="选择音色" class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
         <div class="flex items-start justify-between gap-3">
           <div>
             <h2 class="text-lg font-semibold">选择音色 · {{ pickerTarget.name }}</h2>
@@ -828,7 +753,7 @@ watch(
               试听候选音频并选择最终音色；未选择时使用第 1 条。
             </p>
           </div>
-          <Button variant="ghost" size="icon" :disabled="pickerBusy" @click="closePicker">
+          <Button variant="ghost" size="icon" aria-label="关闭音色选择" :disabled="pickerBusy" @click="closePicker">
             <X class="h-4 w-4" />
           </Button>
         </div>
@@ -844,6 +769,7 @@ watch(
               type="radio"
               class="h-4 w-4 shrink-0 accent-primary"
               name="voice-candidate"
+              data-initial-focus
               :checked="pickerChoice === c.id"
               :disabled="pickerBusy"
               @change="pickerChoice = c.id"
@@ -923,7 +849,7 @@ watch(
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       @click.self="closeMerge"
     >
-      <div class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
+      <div ref="mergePanel" role="dialog" :aria-modal="!mergeConfirm ? true : undefined" :inert="mergeConfirm || undefined" aria-label="合并角色" class="max-h-[80vh] w-full max-w-lg space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
         <div class="flex items-start justify-between gap-3">
           <div>
             <h2 class="text-lg font-semibold">合并角色 · {{ mergeSourceItem.name }}</h2>
@@ -931,7 +857,7 @@ watch(
               将该角色的台词并入所选角色，并移除原角色配置。
             </p>
           </div>
-          <Button variant="ghost" size="icon" :disabled="mergeBusy" @click="closeMerge">
+          <Button variant="ghost" size="icon" aria-label="关闭角色合并" :disabled="mergeBusy" @click="closeMerge">
             <X class="h-4 w-4" />
           </Button>
         </div>
@@ -942,6 +868,8 @@ watch(
             v-model="mergeQuery"
             class="h-9 pl-8 text-sm"
             placeholder="搜索目标角色…"
+            aria-label="搜索目标角色"
+            data-initial-focus
             :disabled="mergeBusy"
           />
         </div>
@@ -976,7 +904,7 @@ watch(
 
         <div class="flex items-center justify-end gap-2">
           <Button variant="outline" size="sm" :disabled="mergeBusy" @click="closeMerge">取消</Button>
-          <Button :disabled="mergeBusy || !mergeTarget" @click="mergeConfirm = true">
+          <Button :disabled="mergeBusy || !mergeTarget" @click="openMergeConfirm">
             下一步：确认合并
           </Button>
         </div>
@@ -989,7 +917,7 @@ watch(
       class="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4"
       @click.self="mergeConfirm = false"
     >
-      <div class="w-full max-w-md space-y-4 rounded-lg border bg-background p-5 shadow-lg">
+      <div ref="mergeConfirmPanel" role="dialog" aria-modal="true" aria-label="确认合并" class="w-full max-w-md space-y-4 rounded-lg border bg-background p-5 shadow-lg">
         <h2 class="text-lg font-semibold">确认合并？</h2>
         <p class="flex items-center gap-2 text-sm">
           <span class="font-medium">{{ mergeSourceItem?.name }}</span>
@@ -998,7 +926,7 @@ watch(
         </p>
         <ul class="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
           <li>替换 {{ mergeSourceItem?.name }} 的 {{ mergeSourceItem?.line_count ?? 0 }} 条台词（当前范围：
-            {{ scope === ALL_SCRIPT ? '全部文件' : (scope || '最近文件') }}）。</li>
+            全部已解析章节）。</li>
           <li>删除 {{ mergeSourceItem?.name }} 的声音配置；指向它的别名将改指向目标角色。</li>
           <li>其候选音频文件保留在磁盘上，不会被删除。</li>
         </ul>
@@ -1014,3 +942,26 @@ watch(
     </div>
   </div>
 </template>
+
+<style scoped>
+.voices-page :deep(.page-header) { margin-bottom:12px; }
+.voices-production { overflow:hidden; border-radius:12px; }
+.voices-stage + .voices-stage { position:relative; }
+.voices-stage + .voices-stage::before { position:absolute; top:0; right:12px; left:12px; height:1px; background:hsl(var(--border) / .65); content:''; }
+@media(min-width:881px) and (min-height:700px) {
+  .voices-page { display:flex; flex-direction:column; height:calc(100dvh - clamp(28px, 4vw, 52px) - 8px); margin-bottom:-64px; }
+  .voices-page > :not(.voice-workbench) { flex-shrink:0; }
+  .voices-page :deep(.voice-workbench) { flex:1; min-height:180px; }
+  .voices-page :deep(.voice-list), .voices-page :deep(.voice-detail) { min-height:0; }
+  .voices-page :deep(.voice-scroll) { min-height:0; max-height:none; }
+  .voices-page :deep(.voice-detail) { max-height:none; }
+  .voices-stage { display:grid; grid-template-columns:160px minmax(0,1fr); align-items:center; }
+  .voices-stage-content { padding-top:12px; max-height:clamp(88px, 14dvh, 128px); overflow-y:auto; }
+}
+.voices-stage :deep(button), .voices-footer :deep(button) { min-height:32px; height:32px; font-size:12px; }
+.voices-stage :deep(label), .voices-stage :deep(.text-sm) { font-size:12px; }
+.voices-summary :deep(.text-sm) { font-size:12px; }
+.voices-stage :deep(h3) { font-size:12px; }
+@media(min-width:1200px) { .voices-stage { display:grid; grid-template-columns:200px minmax(0,1fr); align-items:center; } .voices-stage-content { padding-top:12px; } }
+@media(pointer:coarse) { .voices-stage :deep(button), .voices-footer :deep(button) { min-height:44px; height:auto; } }
+</style>
