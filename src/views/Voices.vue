@@ -153,6 +153,8 @@ function overlayKeydown(event: KeyboardEvent) {
   }
   if (event.key !== 'Tab') return
   const controls = overlayControls(panel)
+  if (!controls.length) return // in-flight: every control is disabled — nothing to trap, so
+  // let the browser's default Tab run instead of swallowing the key with no target.
   const first = controls[0], last = controls[controls.length - 1]
   if (!panel.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
     event.preventDefault()

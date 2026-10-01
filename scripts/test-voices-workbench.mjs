@@ -191,3 +191,19 @@ test('role loading always requests all parsed chapters', async () => {
   await h.loadVoices()
   assert.deepEqual(scopes, ['__all__'])
 })
+
+test('an in-flight picker without focusable controls does not swallow Tab', async () => {
+  const h = harness(async () => result('role'))
+  await h.loadVoices()
+  const picker = focusFixture(h, []) // busy request: every control in the panel is disabled
+  h.pickerPanel.value = picker.panel
+  h.openPicker(h.speakers.value[0])
+  await flushFocus()
+  h.pickerBusy.value = true
+  const tab = key('Tab')
+  h.overlayKeydown(tab)
+  assert.equal(tab.prevented, false)
+  const shift = key('Tab', true)
+  h.overlayKeydown(shift)
+  assert.equal(shift.prevented, false)
+})
