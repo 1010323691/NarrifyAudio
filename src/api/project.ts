@@ -22,18 +22,6 @@ export interface ProjectFileSummary {
   modified_at: string
 }
 
-/** One tracked artifact row (``GET /api/v1/projects/{id}/files``) — carries the live content sha. */
-export interface ProjectFileRecord {
-  id: string
-  name: string
-  module: string | null
-  kind: string
-  content_type: string
-  size_bytes: number
-  sha256: string
-  created_at: string
-}
-
 export interface ProjectStorageSummary {
   project_id: string
   name: string
@@ -87,11 +75,6 @@ export function deleteProject(projectId: string): Promise<{ ok: boolean }> {
 
 export function getProjectSummary(projectId: string): Promise<ProjectStorageSummary> {
   return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary`)
-}
-
-/** Tracked files of a project with live sha256 — used to detect stale parse inputs. */
-export function listProjectFiles(projectId: string): Promise<ProjectFileRecord[]> {
-  return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/files`)
 }
 
 export function getProjectProgressSummary(projectId: string): Promise<ProjectProgressSummary> {
