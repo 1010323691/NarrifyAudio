@@ -1,4 +1,5 @@
-# CI 门禁：与本地 `npm run build:all` + 后端全量测试等价（见 CLAUDE.md「常用命令」）。
+# CI 门禁：与本地 `npm run build:all`（Vite 生产构建 + 分层门禁）+ 后端全量测试等价；
+# 前端 job 另含 4 个 node:test 沙箱回归（build:all 不含，本地对应 `npm run test:*`）。
 # - frontend: 类型检查 + Vite 生产构建 + node:test 沙箱回归（store 状态隔离 + 三个工作台）
 # - backend:  语法检查 + api→services→platform→core 分层门禁 + pytest 全量套件
 #
