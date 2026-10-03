@@ -1,5 +1,5 @@
 # CI 门禁：与本地 `npm run build:all` + 后端全量测试等价（见 CLAUDE.md「常用命令」）。
-# - frontend: 类型检查 + Vite 生产构建 + Pinia 状态隔离回归
+# - frontend: 类型检查 + Vite 生产构建 + node:test 沙箱回归（store 状态隔离 + 三个工作台）
 # - backend:  语法检查 + api→services→platform→core 分层门禁 + pytest 全量套件
 #
 # 私有仓库免费 runner 分钟有限：两个 job 并行跑，同一分支的旧运行自动取消。
@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   frontend:
-    name: 前端 typecheck / build / state-isolation
+    name: 前端 typecheck / build / 沙箱回归
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +39,15 @@ jobs:
       # Pinia store 竞态隔离回归（node:test 沙箱跑真实 store 代码，改 store 行为的门禁）
       - name: 状态隔离回归
         run: npm run test:state-isolation
+
+      # 三个工作台组合回归（node:test 沙箱跑真实 composable/view 代码，改其竞态逻辑的门禁，
+      # 与 state-isolation 同款机制，见 scripts/test-*-workbench.mjs）
+      - name: 章节核对工作台回归
+        run: npm run test:workbench
+      - name: 文本解析工作台回归
+        run: npm run test:script-parse-workbench
+      - name: 角色音色工作台回归
+        run: npm run test:voices-workbench
 
   backend:
     name: 后端 compileall / 分层门禁 / pytest
