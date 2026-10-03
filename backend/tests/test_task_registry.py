@@ -37,6 +37,11 @@ def test_table_has_all_19_types_with_policy_sets_pinned():
         "tts.preview_render", "bgm.segment", "bgm.mix", "bgm.match", "bgm.package",
         "music.suggest_tags", "audio.zip", "audio.export", "tts.reset",
     })
+    # 直连 6 类型名同样字面钉扎（影子 if-chain 清退后，这里是类型名的唯一钉扎点）。
+    assert set(SUPPORTED_TASK_TYPES) - LEGACY_ENGINE_TASK_TYPES == frozenset({
+        "text.format", "book.analyze", "book.split", "script.parse",
+        "audio.silences", "audio.cut",
+    })
 
 
 def test_types_module_reexports_the_registry_sets():
