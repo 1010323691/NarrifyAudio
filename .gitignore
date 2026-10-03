@@ -27,8 +27,7 @@ install_tts_env.log
 # NarrifyAudio persistent platform runtime (database, object storage, local secrets)
 /.narrify/
 /storage/
-# 本地生成的图表文档产物（archify 交付的 HTML / 源规格等），不入库
-/docs/
+# agent 交接资料（docs/agent-context/）已入库；archify 图表产物若落在 docs/ 下，按需补子路径忽略规则
 
 # 0015 migration backup dumps (contain user data — never commit)
 .backups/
