@@ -13,9 +13,10 @@ direct types, ``engine_task_executor.ENGINE_BRANCHES`` for the thirteen
 legacy engine types). The table deliberately holds names, not live function
 references: a single literal table holding the references would create a
 module cycle (both dispatchers import the type frozensets at module level),
-and the plan rules out decorator-based implicit registration. Each dispatch
-cross-checks the table against the retained legacy if-chain (shadow
-double-run, fail-closed) until the old chains are retired per #34.
+and the plan rules out decorator-based implicit registration. Dispatch
+resolves through the dispatchers' explicit function maps;
+``test_task_registry`` pins every table row's executor name to the live
+function in the owning map.
 """
 from __future__ import annotations
 

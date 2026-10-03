@@ -66,7 +66,7 @@ npm.cmd run test:voices-workbench # 角色音色工作台组合回归（node:tes
 
 ## 需求落点速查（改一个功能，从哪进）
 
-- **改某个流水线任务的行为**（合成/合并/BGM/分集…）：以任务类型字符串（`tts.merge`、`bgm.mix`…）为锚点，`platform/task_registry.py` 的表一行给出计费/权限/executor 绑定；executor 实现按 `legacy_engine` 分两处：`task_worker.DIRECT_EXECUTORS`（6 个新类型）或 `engine_task_executor.ENGINE_BRANCHES`（13 个 legacy 类型），实际算法在 `engines/*`。注意：分发目前处于"影子双跑"过渡期（注册表裁决 vs 旧 if-chain 交叉核对，不一致 fail closed），改分发逻辑两侧要同改。
+- **改某个流水线任务的行为**（合成/合并/BGM/分集…）：以任务类型字符串（`tts.merge`、`bgm.mix`…）为锚点，`platform/task_registry.py` 的表一行给出计费/权限/executor 绑定；executor 实现按 `legacy_engine` 分两处：`task_worker.DIRECT_EXECUTORS`（6 个新类型）或 `engine_task_executor.ENGINE_BRANCHES`（13 个 legacy 类型），实际算法在 `engines/*`。注册表是分发决策的唯一事实源：分发器按函数表 `DIRECT_EXECUTORS` / `ENGINE_BRANCHES` 路由，`test_task_registry` 钉住表与函数表的一致（影子双跑已于 2026-10-03 清退，见 #34）。
 - **新增任务类型**：`task_registry` 表 + 对应分发器的 executor + `platform/task_submission.py` 提交校验 + 前端 `src/utils/taskTypes.ts` / `taskLabels.ts`（类型前缀知识还重复在 `ProjectOverview.vue`、`Admin.vue`，需同步）。
 - **UI 页面/交互**：`src/views/X.vue` + `src/router.ts` 注册（项目阶段页面加 `meta: { projectStage: true }`）+ `src/api/` 对应客户端；长时操作一律走任务提交 + 轮询/SSE，不在请求里同步跑。
 - **配置项**：项目配置随工程存 DB（`/api/config` 读写活动工作区配置，永不写根模板）；LLM 凭据等由管理控制台管（`api/admin.py` + `platform/system_config.py` 的 `SystemConfig`）；`core/config.py` 的功能默认值由 `platform.system_config` 注册的 provider 供给（分层契约要求 core 不反向 import platform）。
