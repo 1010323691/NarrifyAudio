@@ -6,6 +6,8 @@ NarrifyAudio 是 Windows 本地有声书制作工作台，支持项目管理、�
 
 基础部署不需要 GPU、CUDA 或本地 TTS 模型，可以先完成登录、项目管理、文本排版和章节核对。剧本解析需要另外配置可访问的 LLM 服务；本地语音合成需要另外准备 TTS 环境。
 
+Linux 完整部署见 [readme-linux.md](readme-linux.md)，包含 Redis、systemd、Nginx、LLM 和 GPU TTS 的安装与验收链路。
+
 - 第一次部署：按[首次安装](#首次安装)的 8 个步骤执行。
 - 已安装的电脑：查看[日常启停](#日常启停)。
 - 扩展制作功能：查看[可选制作能力](#可选制作能力)。
