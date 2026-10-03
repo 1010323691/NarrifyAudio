@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..platform.platform_settings import settings
 from ..platform.database import SessionLocal, get_db
-from ..platform.deps import require_admin, require_csrf
+from ..platform.deps import require_admin, require_admin_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
 from ..platform.system_config import update_feature_defaults_cache
@@ -106,9 +106,7 @@ def get_application_settings(_: User = Depends(require_admin), db: Session = Dep
 
 
 @router.patch("/settings/application")
-def update_application_settings(payload: dict, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def update_application_settings(payload: dict, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     if not isinstance(payload, dict) or not payload or not set(payload).issubset(_FEATURE_CONFIG_SECTIONS):
         raise HTTPException(422, "只能更新功能配置分段")
     try:
@@ -179,9 +177,7 @@ def get_storage_settings(_: User = Depends(require_admin), db: Session = Depends
 
 
 @router.patch("/settings/storage")
-def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def update_storage_settings(payload: StorageRootUpdate, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     # Keep this transaction independent from the durable migration marker's
     # commits: only one administrator may move/compensate directories at a time.
     with SessionLocal() as guard:
@@ -302,9 +298,7 @@ def get_quota_settings(_: User = Depends(require_admin), db: Session = Depends(g
 
 
 @router.patch("/settings/quota")
-def update_quota_settings(payload: InitialQuotaUpdate, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def update_quota_settings(payload: InitialQuotaUpdate, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     config = db.get(SystemConfig, "quota.initial_units")
     if config is None:
         config = SystemConfig(key="quota.initial_units", value={"units": payload.units})
@@ -326,9 +320,7 @@ def get_registration_settings(_: User = Depends(require_admin), db: Session = De
 
 
 @router.patch("/settings/registration")
-def update_registration_settings(payload: RegistrationUpdate, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def update_registration_settings(payload: RegistrationUpdate, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     config = db.get(SystemConfig, "registration.enabled")
     if config is None:
         db.add(SystemConfig(key="registration.enabled", value={"enabled": payload.enabled}))
@@ -395,9 +387,7 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
 
 
 @router.patch("/users/{user_id}")
-def update_user(user_id: str, payload: UserState, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def update_user(user_id: str, payload: UserState, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(404, "用户不存在")
@@ -427,9 +417,7 @@ def _quota_json(account: UserQuotaAccount) -> dict:
 
 
 @router.post("/users/{user_id}/quota/adjust")
-def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     if payload.amount == 0:
         raise HTTPException(422, "额度调整不能为 0")
     user = db.get(User, user_id)
@@ -600,9 +588,7 @@ def task_metrics(_: User = Depends(require_admin), db: Session = Depends(get_db)
 
 
 @router.post("/tasks/{task_id}/cancel")
-def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def cancel_task(task_id: str, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(404, "任务不存在")
@@ -617,10 +603,8 @@ def cancel_task(task_id: str, actor: User = Depends(require_csrf), db: Session =
 
 
 @router.post("/tasks/{task_id}/retry")
-def retry_task(task_id: str, actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+def retry_task(task_id: str, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     """Requeue a failed, zero-cost task while preserving its event history."""
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
     task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
     if task is None:
         raise HTTPException(404, "任务不存在")

@@ -292,8 +292,8 @@ ENGINE_BRANCHES: dict[str, Callable] = {
 
 
 def _shadow_engine_kind(task_type: str) -> str:
-    """S1 影子双跑：批次 3 之前 execute_engine_task 旧 12 分支 if-chain 的裁决，
-    逐字保留；注册表查表为主、本函数交叉核对（不一致 fail closed）；一个版本周期后删除。"""
+    """S1 影子双跑：批次 3 之前 execute_engine_task 旧 13 分支 if-chain 的裁决，
+    逐字保留；注册表查表为主、本函数交叉核对（不一致 fail closed）；清退跟踪 #34。"""
     if task_type not in LEGACY_ENGINE_TASK_TYPES:
         return "<unsupported>"
     if task_type == "voices.foundation":

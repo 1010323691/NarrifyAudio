@@ -36,6 +36,7 @@ npm.cmd run lint:imports         # 分层门禁单独运行
 npm.cmd run test:state-isolation # 前端状态隔离回归（node:test 沙箱跑 Pinia store）
 npm.cmd run test:workbench       # 章节核对工作台组合回归（node:test 沙箱跑 useTextFormatWorkbench 恢复/派生/分页逻辑）
 npm.cmd run test:script-parse-workbench # 文本解析工作台组合回归（node:test 沙箱跑 useScriptParseWorkbench 行状态/提交/缓存/竞态）
+npm.cmd run test:voices-workbench # 角色音色工作台组合回归（node:test 沙箱跑 Voices.vue 加载/提交/合并/竞态逻辑）
 .\.venv\Scripts\python.exe -m pytest backend/tests -n 4 --dist loadscope  # 后端全量测试（4 进程并行，见下方说明）
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py  # 单个文件
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py -k 名称片段  # 单个用例
@@ -57,7 +58,7 @@ npm.cmd run test:script-parse-workbench # 文本解析工作台组合回归（no
 
 ## 任务系统
 
-- 18 种任务类型（6 平台直连 + 12 legacy 引擎）的单一事实源是 `backend/platform/task_registry.py`（`task_types.py` 只做 re-export）。
+- 19 种任务类型（6 平台直连 + 13 legacy 引擎）的单一事实源是 `backend/platform/task_registry.py`（`task_types.py` 只做 re-export）。
 - 提交链路：路由 → `platform/task_submission.py:submit_task_record` → 事务内写 Task + OutboxEvent → Worker 的 `outbox.publish_pending` 投递 Redis Streams（租约 + XAUTOCLAIM 恢复，`recover_database_tasks` 兜底数据库侧遗留任务）→ 两个执行分发器：`platform/task_worker.py:execute_claim`（新类型）与 `platform/engine_task_executor.py:execute_engine_task`（legacy 引擎类型）。
 - 任务 HTTP 表面已统一为 `/api/v1/tasks*` 单套（列表/历史/SSE `GET /api/v1/tasks/stream`/取消/重试/批量控制都在 `api/platform_tasks.py` 一个 router；前端 `src/api/tasks.ts` + `durableTasks.ts` 共享它，`stores/task.ts` 以单条多路复用 SSE 承载全应用任务事件）。旧的「legacy SSE 表面 vs v1 轮询」双表面描述已作废，不存在双任务数据源。
 - 额度按操作计费（`platform/quota.py` 的 `QuotaHold`）是现行生效路径；任务级 `QuotaReservation` 已退役。
@@ -65,7 +66,7 @@ npm.cmd run test:script-parse-workbench # 文本解析工作台组合回归（no
 
 ## 需求落点速查（改一个功能，从哪进）
 
-- **改某个流水线任务的行为**（合成/合并/BGM/分集…）：以任务类型字符串（`tts.merge`、`bgm.mix`…）为锚点，`platform/task_registry.py` 的表一行给出计费/权限/executor 绑定；executor 实现按 `legacy_engine` 分两处：`task_worker.DIRECT_EXECUTORS`（6 个新类型）或 `engine_task_executor.ENGINE_BRANCHES`（12 个 legacy 类型），实际算法在 `engines/*`。注意：分发目前处于"影子双跑"过渡期（注册表裁决 vs 旧 if-chain 交叉核对，不一致 fail closed），改分发逻辑两侧要同改。
+- **改某个流水线任务的行为**（合成/合并/BGM/分集…）：以任务类型字符串（`tts.merge`、`bgm.mix`…）为锚点，`platform/task_registry.py` 的表一行给出计费/权限/executor 绑定；executor 实现按 `legacy_engine` 分两处：`task_worker.DIRECT_EXECUTORS`（6 个新类型）或 `engine_task_executor.ENGINE_BRANCHES`（13 个 legacy 类型），实际算法在 `engines/*`。注意：分发目前处于"影子双跑"过渡期（注册表裁决 vs 旧 if-chain 交叉核对，不一致 fail closed），改分发逻辑两侧要同改。
 - **新增任务类型**：`task_registry` 表 + 对应分发器的 executor + `platform/task_submission.py` 提交校验 + 前端 `src/utils/taskTypes.ts` / `taskLabels.ts`（类型前缀知识还重复在 `ProjectOverview.vue`、`Admin.vue`，需同步）。
 - **UI 页面/交互**：`src/views/X.vue` + `src/router.ts` 注册（项目阶段页面加 `meta: { projectStage: true }`）+ `src/api/` 对应客户端；长时操作一律走任务提交 + 轮询/SSE，不在请求里同步跑。
 - **配置项**：项目配置随工程存 DB（`/api/config` 读写活动工作区配置，永不写根模板）；LLM 凭据等由管理控制台管（`api/admin.py` + `platform/system_config.py` 的 `SystemConfig`）；`core/config.py` 的功能默认值由 `platform.system_config` 注册的 provider 供给（分层契约要求 core 不反向 import platform）。
@@ -82,7 +83,7 @@ TTS 引擎（`tts-engine/tts_worker.py`，约 2300 行）是 one-shot 子进程�
 
 - 哈希路由，两个互不链接的门面：用户工作台（`/`，`MainLayout`，`requiresUser`）与管理控制台（`/admin`，`AdminLayout`，`requiresAdmin`），各有独立登录页与角色守卫（`src/router.ts`）。`meta.projectStage` 视图在无活跃项目时重定向到 dashboard。
 - `src/api/client.ts` 是唯一 HTTP 入口：cookie session + 从 `narrify_csrf` cookie 取 `X-CSRF-Token`。开发走 Vite `/api` 代理；生产默认同源 `/api`（FastAPI 托管 `dist/`，GET catch-all 回 SPA shell，未知 `/api/*` 保持诚实 404）。分域部署在**构建时**设 `VITE_API_BASE` / `VITE_CSRF_COOKIE_NAME`，改完需重新构建。
-- Pinia stores（`src/stores/`）带竞态保护：reset 必须使在途请求失效（旧账号的配置/创建结果不得复活）。这些场景由 `scripts/test-state-isolation.mjs`（`npm run test:state-isolation`，node:test + vm 沙箱加载真实 store 代码）钉住——改 store 行为时该文件是回归门禁。章节核对工作台的组合逻辑（`src/composables/useTextFormatWorkbench.ts` 的恢复泵 / canEnterParse / 过滤分页 / 竞态丢弃）由 `scripts/test-textformat-workbench.mjs`（`npm run test:workbench`，同款沙箱）钉住；文本解析工作台（`src/composables/useScriptParseWorkbench.ts` 的行状态双轴 / 提交门控 / 预览缓存 / 跨项目竞态）由 `scripts/test-script-parse-workbench.mjs`（`npm run test:script-parse-workbench`，同款沙箱）钉住。
+- Pinia stores（`src/stores/`）带竞态保护：reset 必须使在途请求失效（旧账号的配置/创建结果不得复活）。这些场景由 `scripts/test-state-isolation.mjs`（`npm run test:state-isolation`，node:test + vm 沙箱加载真实 store 代码）钉住——改 store 行为时该文件是回归门禁。章节核对工作台的组合逻辑（`src/composables/useTextFormatWorkbench.ts` 的恢复泵 / canEnterParse / 过滤分页 / 竞态丢弃）由 `scripts/test-textformat-workbench.mjs`（`npm run test:workbench`，同款沙箱）钉住；文本解析工作台（`src/composables/useScriptParseWorkbench.ts` 的行状态双轴 / 提交门控 / 预览缓存 / 跨项目竞态）由 `scripts/test-script-parse-workbench.mjs`（`npm run test:script-parse-workbench`，同款沙箱）钉住；角色音色工作台（`src/views/Voices.vue` 的加载 / 克隆提交 / 合并弹窗 / 竞态丢弃）由 `scripts/test-voices-workbench.mjs`（`npm run test:voices-workbench`，同款沙箱）钉住。
 - `dist/` 是构建产物，不手改。
 
 ## 运行时数据与配置

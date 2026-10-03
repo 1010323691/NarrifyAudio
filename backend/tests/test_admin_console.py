@@ -51,6 +51,42 @@ def test_regular_user_cannot_access_admin_api(client: TestClient):
     assert users.status_code == 403, users.text
 
 
+def test_regular_user_cannot_call_admin_write_endpoints(client: TestClient):
+    # Every admin write endpoint must reject a regular user at the role gate
+    # (403「需要管理员权限」) once CSRF is satisfied, and reject a missing CSRF
+    # token earlier (403「CSRF 校验失败」) — the require_admin_csrf order.
+    registered = client.post(
+        "/api/auth/register",
+        json={"email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}", "password": "test-pass-1234"},
+    )
+    assert registered.status_code == 201, registered.text
+    body = registered.json()
+    csrf = body["csrf_token"]
+    user_id = body["user"]["id"]
+
+    def call(method: str, url: str, payload: dict | None = None) -> None:
+        response = client.request(method, url, json=payload, headers={"X-CSRF-Token": csrf})
+        assert response.status_code == 403, (url, response.status_code, response.text)
+        assert "需要管理员权限" in response.text, (url, response.text)
+
+    call("patch", "/api/v1/admin/settings/application", {})
+    call("patch", "/api/v1/admin/settings/storage", {"root_path": "C:/narrify-storage"})
+    call("patch", "/api/v1/admin/settings/quota", {"units": 1000})
+    call("patch", "/api/v1/admin/settings/registration", {"enabled": True})
+    call("patch", f"/api/v1/admin/users/{user_id}", {"is_active": True})
+    call("post", f"/api/v1/admin/users/{user_id}/quota/adjust",
+         {"amount": 1, "idempotency_key": uuid.uuid4().hex})
+    call("post", "/api/v1/admin/tasks/00000000-0000-0000-0000-000000000000/cancel")
+    call("post", "/api/v1/admin/tasks/00000000-0000-0000-0000-000000000000/retry")
+    call("post", "/api/v1/admin/resources/cleanup-temp")
+
+    # CSRF is checked before the role gate: without the token the failure is
+    # the CSRF 403, not the role 403.
+    response = client.post("/api/v1/admin/resources/cleanup-temp")
+    assert response.status_code == 403, response.text
+    assert "CSRF 校验失败" in response.text, response.text
+
+
 def _create_task(client: TestClient, csrf: str, project_id: str, key: str) -> str:
     response = client.post(
         "/api/v1/tasks",

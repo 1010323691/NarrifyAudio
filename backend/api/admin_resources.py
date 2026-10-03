@@ -4,13 +4,13 @@ from __future__ import annotations
 from datetime import datetime
 import shutil
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core.paths import MUSIC_LIBRARY_DIR
 from ..platform.database import get_db
-from ..platform.deps import require_admin, require_csrf
+from ..platform.deps import require_admin, require_admin_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, Task, User
 from ..platform.storage import configured_storage_root
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
@@ -94,9 +94,7 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
 
 
 @router.post("/resources/cleanup-temp")
-def cleanup_stale_temp(actor: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    if actor.role != "admin":
-        raise HTTPException(403, "需要管理员权限")
+def cleanup_stale_temp(actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
     root = configured_storage_root(db)
     projects = db.execute(
         select(Project, User.username).join(User, User.id == Project.owner_id)

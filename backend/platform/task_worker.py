@@ -875,7 +875,7 @@ DIRECT_EXECUTORS: dict[str, Callable[[TaskClaim], TaskOutcome]] = {
 def _shadow_dispatch_kind(task_type: str) -> str:
     """S1 影子双跑：批次 3 之前 execute_claim 旧 if-chain 的裁决，逐字保留。
 
-    注册表查表为主、本函数交叉核对（不一致 fail closed）；一个版本周期后删除。
+    注册表查表为主、本函数交叉核对（不一致 fail closed）；清退跟踪 #34。
     返回：``"legacy"``（旧链委托 engine_task_executor）/ 直连执行器函数名 / ``"<unsupported>"``。
     """
     if task_type not in SUPPORTED_TASK_TYPES:
@@ -903,7 +903,7 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
     spec = TASK_TYPES.get(claim.task_type)
     if spec is None:
         raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
-    # S1 影子双跑：注册表裁决与旧分发链必须一致，不一致 fail closed（旧链一个版本周期后删）。
+    # S1 影子双跑：注册表裁决与旧分发链必须一致，不一致 fail closed（旧链清退跟踪 #34）。
     expected = _shadow_dispatch_kind(claim.task_type)
     if (expected == "legacy") != spec.legacy_engine:
         raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与旧分发链不一致")

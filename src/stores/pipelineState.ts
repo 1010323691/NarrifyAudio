@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import type {
   MergeResult,
 } from '@/types'
@@ -24,9 +24,6 @@ export const usePipelineStateStore = defineStore('pipelineState', () => {
   const activeScript = ref('')
   const mergeResult = ref<MergeResult | null>(null)
 
-  // The audio stage consumes *audio* — the merged audiobook (or a user-picked file).
-  const audioInput = computed(() => mergeResult.value?.path ?? null)
-
   function setActiveScript(name: string) {
     activeScript.value = name
   }
@@ -42,7 +39,6 @@ export const usePipelineStateStore = defineStore('pipelineState', () => {
   return {
     activeScript,
     mergeResult,
-    audioInput,
     setActiveScript,
     recordMerge,
     reset,

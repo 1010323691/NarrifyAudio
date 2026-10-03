@@ -9,14 +9,13 @@ source of truth.
 
 The executor column names the binding entry in the owning dispatcher's
 explicit function map (``task_worker.DIRECT_EXECUTORS`` for the six platform
-direct types, ``engine_task_executor.ENGINE_BRANCHES`` for the twelve
+direct types, ``engine_task_executor.ENGINE_BRANCHES`` for the thirteen
 legacy engine types). The table deliberately holds names, not live function
 references: a single literal table holding the references would create a
 module cycle (both dispatchers import the type frozensets at module level),
 and the plan rules out decorator-based implicit registration. Each dispatch
 cross-checks the table against the retained legacy if-chain (shadow
-double-run, fail-closed) for one version cycle, after which the old chains
-are deleted.
+double-run, fail-closed) until the old chains are retired per #34.
 """
 from __future__ import annotations
 
