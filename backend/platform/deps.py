@@ -54,6 +54,13 @@ def require_csrf(request: Request, ctx: AuthContext = Depends(get_auth_context))
     return ctx.user
 
 
+def require_admin_csrf(request: Request, user: User = Depends(require_csrf)) -> User:
+    """Admin-gated counterpart of :func:`require_csrf` for state-changing routes."""
+    if user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+    return user
+
+
 def require_legacy_access(
     request: Request, ctx: AuthContext = Depends(get_auth_context)
 ) -> User:
