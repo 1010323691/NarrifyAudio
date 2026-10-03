@@ -17,9 +17,11 @@ from backend.tests.test_tts_worker import _load_worker
 def test_worker_and_engine_pause_rules_match():
     tw = _load_worker()
     # Grid spans every branch: override wins (explicit 0, negative, numeric
-    # string, surrounding whitespace), dirty input falls back, exact speaker
-    # match (None == None, "B " != "B") vs speaker change, pause/same defaults.
-    overrides = [None, 0, -30, 500, "500", " 700 ", "bad", "fast"]
+    # string, surrounding whitespace), dirty input falls back (stray strings
+    # raise ValueError, unhashables like {} / [5] raise TypeError), exact
+    # speaker match (None == None, "B " != "B") vs speaker change, pause/same
+    # defaults.
+    overrides = [None, 0, -30, 500, "500", " 700 ", "bad", "fast", {}, [5]]
     speakers = [None, "A", "B", "B "]
     pauses = [250, 500, 1000]
     for override in overrides:
