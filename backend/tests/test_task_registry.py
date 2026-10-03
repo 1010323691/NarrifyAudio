@@ -1,8 +1,7 @@
-"""S1: the unified 19-type registry is the single source of truth, and the
-retained legacy if-chains (shadow double-run) agree with it for every type."""
+"""S1: the unified 19-type registry is the single source of truth for dispatch
+policy; every table row's executor name must bind to the live function in the
+owning dispatcher's map (shadow double-run retired, #34)."""
 from __future__ import annotations
-
-import dataclasses
 
 import pytest
 
@@ -48,39 +47,21 @@ def test_types_module_reexports_the_registry_sets():
 
 
 def test_every_type_binds_to_a_live_executor_in_its_dispatcher():
+    # 注册表 executor 名必须与分发器函数表里的活函数一致（影子双跑清退后这是
+    # 表与运行时分发之间的一致性保证，替代旧的运行时交叉核对）。
     for name, spec in TASK_TYPES.items():
         if spec.legacy_engine:
             runner = engine_task_executor.ENGINE_BRANCHES[name]
             assert runner.__name__ == spec.executor, name
-            assert task_worker._shadow_dispatch_kind(name) == "legacy"
-            assert engine_task_executor._shadow_engine_kind(name) == spec.executor
         else:
             runner = task_worker.DIRECT_EXECUTORS[name]
             assert runner.__name__ == spec.executor, name
-            assert task_worker._shadow_dispatch_kind(name) == spec.executor
-            assert engine_task_executor._shadow_engine_kind(name) == "<unsupported>"
     assert len(engine_task_executor.ENGINE_BRANCHES) == 13
     assert len(task_worker.DIRECT_EXECUTORS) == 6
 
 
-def test_shadow_agrees_with_registry_for_unknown_types():
-    assert task_worker._shadow_dispatch_kind("bogus.type") == "<unsupported>"
-    assert engine_task_executor._shadow_engine_kind("bogus.type") == "<unsupported>"
-    assert TASK_TYPES.get("bogus.type") is None
-
-
 def test_unsupported_type_still_rejected_by_execute_claim():
+    assert TASK_TYPES.get("bogus.type") is None
     with pytest.raises(TaskExecutionError) as ei:
         task_worker.execute_claim(_claim("bogus.type"))
     assert ei.value.code == "unsupported_task_type"
-
-
-def test_registry_mismatch_fails_closed(monkeypatch):
-    # 篡改注册表（executor 名与旧链裁决不符）→ execute_claim 在执行前 fail closed。
-    tampered = dict(TASK_TYPES)
-    tampered["text.format"] = dataclasses.replace(
-        tampered["text.format"], executor="_execute_wrong_binding")
-    monkeypatch.setattr(task_worker, "TASK_TYPES", tampered)
-    with pytest.raises(TaskExecutionError) as ei:
-        task_worker.execute_claim(_claim("text.format"))
-    assert ei.value.code == "registry_mismatch"

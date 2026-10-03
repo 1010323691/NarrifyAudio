@@ -291,39 +291,6 @@ ENGINE_BRANCHES: dict[str, Callable] = {
 }
 
 
-def _shadow_engine_kind(task_type: str) -> str:
-    """S1 影子双跑：批次 3 之前 execute_engine_task 旧 13 分支 if-chain 的裁决，
-    逐字保留；注册表查表为主、本函数交叉核对（不一致 fail closed）；清退跟踪 #34。"""
-    if task_type not in LEGACY_ENGINE_TASK_TYPES:
-        return "<unsupported>"
-    if task_type == "voices.foundation":
-        return "_run_voices_foundation"
-    if task_type == "voices.clone":
-        return "_run_voices_clone"
-    if task_type == "tts.batch":
-        return "_run_tts_batch"
-    if task_type == "tts.merge":
-        return "_run_tts_merge"
-    if task_type == "tts.preview_render":
-        return "_run_tts_preview_render"
-    if task_type == "bgm.segment":
-        return "_run_bgm_segment"
-    if task_type == "bgm.mix":
-        return "_run_bgm_mix"
-    if task_type == "music.suggest_tags":
-        return "_run_music_suggest_tags"
-    if task_type == "bgm.match":
-        return "_run_bgm_match"
-    if task_type == "bgm.package":
-        return "_run_bgm_package"
-    if task_type == "audio.zip":
-        return "_run_audio_zip"
-    if task_type == "audio.export":
-        return "_run_audio_export"
-    # 旧链兜底分支（legacy 的剩余类型只有 tts.reset）
-    return "_run_tts_reset"
-
-
 def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
     """Run an existing business engine inside the durable Worker boundary."""
     handle = EngineExecutionContext(claim)
@@ -339,12 +306,7 @@ def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
             spec = TASK_TYPES.get(claim.task_type)
             if spec is None or not spec.legacy_engine:
                 raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
-            # S1 影子双跑：注册表裁决与旧分发链必须一致，不一致 fail closed（旧链一个版本周期后删）。
-            if _shadow_engine_kind(claim.task_type) != spec.executor:
-                raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与旧分发链不一致")
             runner = ENGINE_BRANCHES[claim.task_type]
-            if runner.__name__ != spec.executor:
-                raise TaskExecutionError("registry_mismatch", f"任务类型 {claim.task_type}：注册表与执行器绑定不一致")
             result = runner(handle, claim, payload, side_effect_outputs, side_effect_deletes)
             if isinstance(result, TaskOutcome):
                 return result
