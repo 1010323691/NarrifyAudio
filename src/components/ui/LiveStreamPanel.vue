@@ -7,6 +7,8 @@
  * ``ScrollArea``); the auto-follow reuses ``useLogAutoFollow`` on the stream string.
  */
 import { computed } from 'vue'
+import { useClientDisplayStore } from '@/stores/clientDisplay'
+const clientDisplay = useClientDisplayStore()
 import type { TaskSnapshot } from '@/types'
 import { cn } from '@/lib/utils'
 import { useLogAutoFollow } from '@/utils/logFollow'
@@ -27,7 +29,7 @@ const boxClass = computed(() => cn('rounded-md border bg-muted/40', props.maxHei
 </script>
 
 <template>
-  <div v-if="task" class="space-y-2.5">
+  <div v-if="task && clientDisplay.logsEnabled" class="space-y-2.5">
     <div class="flex items-center justify-between gap-2">
       <span class="text-xs text-muted-foreground">模型输出</span>
     </div>

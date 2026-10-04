@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useSettingsStore } from '@/stores/settings'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { useScriptParseWorkbench } from '@/composables/useScriptParseWorkbench'
 
@@ -9,6 +8,7 @@ import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Badge from '@/components/ui/Badge.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
+import { useClientDisplayStore } from '@/stores/clientDisplay'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import LiveStreamPanel from '@/components/ui/LiveStreamPanel.vue'
 import {
@@ -33,7 +33,6 @@ import ParseChecksDialog from '@/views/scriptparse/ParseChecksDialog.vue'
 import Pager from '@/views/textformat/Pager.vue'
 
 const router = useRouter()
-const settings = useSettingsStore()
 const { projectSet } = useProjectGate()
 
 const {
@@ -49,8 +48,9 @@ const {
   checks, refreshState,
 } = useScriptParseWorkbench()
 
-// 「解析日志显示」（设置页，默认关）：开 = 显示可折叠实时日志面板。
-const showParseLogs = computed(() => settings.config?.ui.show_parse_logs ?? false)
+// 管理员统一控制所有客户端的详细输出。
+const clientDisplay = useClientDisplayStore()
+const showParseLogs = computed(() => clientDisplay.logsEnabled)
 const checksOpen = ref(false)
 const logsExpanded = ref(false)
 
@@ -323,7 +323,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 可折叠实时日志（「解析日志显示」开启且有在途任务时） -->
+    <!-- 管理员开启客户端日志且有在途任务时显示 -->
     <div v-if="showParseLogs && activeRows.length" class="glass-panel shrink-0 overflow-hidden">
       <button
         type="button"

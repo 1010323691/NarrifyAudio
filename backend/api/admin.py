@@ -18,7 +18,7 @@ from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_admin_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
-from ..platform.system_config import update_feature_defaults_cache
+from ..platform.system_config import client_logs_enabled, update_feature_defaults_cache
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
 from ..services.task_operations import RetryNotAllowedError, check_retry_eligible, task_worker_group
@@ -63,6 +63,23 @@ class StorageRootUpdate(BaseModel):
 
 class InitialQuotaUpdate(BaseModel):
     units: int = Field(ge=0, le=10_000_000)
+
+
+class ClientLogsUpdate(BaseModel):
+    enabled: bool = Field(strict=True)
+
+
+@router.patch("/settings/client-logs")
+def update_client_logs(payload: ClientLogsUpdate, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
+    row = db.get(SystemConfig, "client.logs")
+    if row is None:
+        row = SystemConfig(key="client.logs", value={})
+        db.add(row)
+    row.value = {"enabled": payload.enabled}
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.client_logs_changed",
+                    target_type="system_config", target_id="client.logs", metadata_json=row.value))
+    db.commit()
+    return {"enabled": client_logs_enabled(db)}
 
 
 class RegistrationUpdate(BaseModel):

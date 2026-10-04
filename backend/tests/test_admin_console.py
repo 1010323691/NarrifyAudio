@@ -69,6 +69,7 @@ def test_regular_user_cannot_call_admin_write_endpoints(client: TestClient):
         assert response.status_code == 403, (url, response.status_code, response.text)
         assert "需要管理员权限" in response.text, (url, response.text)
 
+    call("patch", "/api/v1/admin/settings/client-logs", {"enabled": True})
     call("patch", "/api/v1/admin/settings/application", {})
     call("patch", "/api/v1/admin/settings/storage", {"root_path": "C:/narrify-storage"})
     call("patch", "/api/v1/admin/settings/quota", {"units": 1000})
@@ -448,3 +449,38 @@ def test_admin_application_settings_never_persist_user_owned_parse_checks(client
     for key in check_keys:
         assert ws_gen[key] is True
     assert ws_gen["spot_check_rate"] == 0.07
+
+
+def test_client_logs_are_global_admin_only_and_default_off(client: TestClient):
+    from backend.platform.models import SystemConfig
+
+    with SessionLocal.begin() as db:
+        row = db.get(SystemConfig, "client.logs")
+        if row:
+            db.delete(row)
+    csrf, _ = _create_admin(client)
+    assert client.get("/api/config/client-logs").json() == {"enabled": False}
+    url = "/api/v1/admin/settings/client-logs"
+    assert client.patch(url, json={"enabled": True}).status_code == 403
+    headers = {"X-CSRF-Token": csrf}
+    assert client.patch(url, json={"enabled": "false"}, headers=headers).status_code == 422
+    assert client.patch(url, json={"enabled": True}, headers=headers).json() == {"enabled": True}
+    try:
+        # A different client/account with no selected workspace sees the shared value.
+        with TestClient(app) as other:
+            registered = other.post("/api/auth/register", json={
+                "email": f"{uuid.uuid4()}@example.test", "username": f"user{uuid.uuid4().hex[:12]}",
+                "password": "test-pass-1234",
+            })
+            assert registered.status_code == 201
+            assert other.get("/api/config/client-logs").json() == {"enabled": True}
+            assert other.patch(url, json={"enabled": False}, headers={
+                "X-CSRF-Token": registered.json()["csrf_token"],
+            }).status_code == 403
+            assert client.patch(url, json={"enabled": False}, headers=headers).json() == {"enabled": False}
+            assert other.get("/api/config/client-logs").json() == {"enabled": False}
+    finally:
+        with SessionLocal.begin() as db:
+            row = db.get(SystemConfig, "client.logs")
+            if row:
+                db.delete(row)

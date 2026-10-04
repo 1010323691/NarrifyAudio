@@ -164,10 +164,9 @@ function detailKeydown(event: KeyboardEvent) {
           <button id="voice-prompt-tab" type="button" role="tab" :aria-selected="detailTab === 'prompt'" aria-controls="voice-prompt-panel" @click="detailTab = 'prompt'">提示词覆盖</button>
         </div>
         <div v-show="detailTab === 'voice'" id="voice-sound-panel" role="tabpanel" aria-labelledby="voice-sound-tab">
-          <h3 class="text-xs font-medium">声音描述</h3><p class="voice-description">{{ selected.description || '尚未生成声音描述，请先生成语音推理基础。' }}</p>
+          <h3 class="text-xs font-medium">声音描述</h3><p class="voice-description" tabindex="0" aria-label="声音描述">{{ selected.description || '尚未生成声音描述，请先生成语音推理基础。' }}</p>
           <div class="mb-2 flex items-center justify-between gap-2"><h3 class="text-xs font-medium">当前音色</h3><span class="text-[11px] text-muted-foreground">{{ pickLabel(selected) }}</span></div>
           <div class="voice-player"><MiniAudioPlayer v-if="selected.preview" :key="previewUrl(selected)" :src="previewUrl(selected)" /><span v-else class="text-xs text-muted-foreground">暂无试听音频</span></div>
-          <div class="mt-3 flex flex-wrap gap-2"><Button variant="outline" class="h-8 text-xs" :disabled="pickDisabled(selected)" @click="emit('pick', selected)">选择音色</Button><Button variant="outline" class="h-8 text-xs" :disabled="cloneBlocked || selected.foundation_status !== 'done'" @click="emit('clone', selected)">重新制作</Button></div>
         </div>
         <div v-show="detailTab === 'prompt'" id="voice-prompt-panel" role="tabpanel" aria-labelledby="voice-prompt-tab">
           <label for="voice-prompt" class="text-xs font-medium">自定义声音描述</label>
@@ -175,7 +174,12 @@ function detailKeydown(event: KeyboardEvent) {
           <p class="text-[11px] text-muted-foreground">仅在重新生成此角色的语音推理基础时生效。</p>
           <Button variant="outline" class="mt-2 h-8 text-xs" :disabled="foundationBusy || !selected.description" @click="emit('copy', selected)"><Copy class="h-3 w-3" />复制已有描述</Button>
         </div>
-        <div class="mt-4 border-t pt-3"><h3 class="mb-2 text-xs font-medium">角色操作</h3><div class="flex flex-wrap gap-2"><Button variant="outline" class="h-8 text-xs" :disabled="foundationBlocked" @click="emit('foundation', selected)">重新生成基础</Button><Button variant="outline" class="h-8 text-xs" :disabled="foundationRunning || cloneRunning || speakers.length < 2" @click="emit('merge', selected)"><Merge class="h-3 w-3" />合并角色</Button></div></div>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <Button v-if="detailTab === 'voice'" variant="outline" class="h-8 text-xs" :disabled="pickDisabled(selected)" @click="emit('pick', selected)">选择音色</Button>
+          <Button v-if="detailTab === 'voice'" variant="outline" class="h-8 text-xs" :disabled="cloneBlocked || selected.foundation_status !== 'done'" @click="emit('clone', selected)">重新制作</Button>
+          <Button variant="outline" class="h-8 text-xs" :disabled="foundationBlocked" @click="emit('foundation', selected)">重新生成基础</Button>
+          <Button variant="outline" class="h-8 text-xs" :disabled="foundationRunning || cloneRunning || speakers.length < 2" @click="emit('merge', selected)"><Merge class="h-3 w-3" />合并角色</Button>
+        </div>
       </template>
       <p v-else class="voice-empty">{{ loading ? '正在加载角色…' : '选择角色查看声音与音色详情' }}</p>
     </aside>
@@ -205,7 +209,7 @@ function detailKeydown(event: KeyboardEvent) {
 .voice-tabs { display:flex; gap:18px; margin:10px 0 12px; border-bottom:1px solid hsl(var(--border)); }
 .voice-tabs button { padding:8px 0; font-size:12px; border-bottom:2px solid transparent; }
 .voice-tabs button[aria-selected=true] { color:hsl(var(--primary)); border-bottom-color:hsl(var(--primary)); }
-.voice-description { margin:6px 0 12px; padding:10px; border-radius:8px; background:hsl(var(--muted) / .4); white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; line-height:1.65; }
+.voice-description { box-sizing:border-box; height:calc(3.3em + 20px); margin:6px 0 12px; padding:10px; border-radius:8px; background:hsl(var(--muted) / .4); overflow-y:auto; overflow-x:hidden; white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; line-height:1.65; }
 .voice-player { padding:10px; border:1px solid hsl(var(--border)); border-radius:8px; }
 .voice-prompt { display:block; width:100%; min-height:120px; margin:6px 0; padding:10px; border:1px solid hsl(var(--input)); border-radius:8px; background:hsl(var(--background)); font-size:12px; resize:vertical; }
 .voice-empty { padding:40px 12px; text-align:center; font-size:12px; color:hsl(var(--muted-foreground)); }
