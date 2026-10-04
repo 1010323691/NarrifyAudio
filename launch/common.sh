@@ -4,6 +4,15 @@ set -euo pipefail
 LAUNCH_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$LAUNCH_DIR/.." && pwd)"
 
+# The user-level toolchain (node/npm, pg16, redis, ffmpeg) lives in
+# ~/.local; prepend it like the systemd units do, so the launchers work from
+# non-login shells whose PATH export lives only in ~/.profile.
+case ":${PATH:-}:" in
+  *":${HOME:?HOME is required}/.local/bin:"*) ;;
+  *) PATH="${HOME}/.local/bin:${PATH:-}"
+     export PATH ;;
+esac
+
 # System-wide installs (readme-linux.md) put the units in /etc/systemd/system
 # and need sudo; user-level deployments keep all five units in
 # ~/.config/systemd/user/ and run them on the user bus without sudo.
