@@ -7,7 +7,7 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const vue = require('vue')
 const source = readFileSync(new URL('../src/views/Admin.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
-const compiled = ts.transpileModule(source + '\nexport { load, users, loading, error, loadedTabs, userRole, userState, userSearch, userSort, matchingUsers, shownUsers, userPage, runAction, actionBusy, lastAdmin, registration, toggleRegistration };', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const compiled = ts.transpileModule(source + '\nexport { load, users, loading, error, loadedTabs, userRole, userState, userSearch, userSort, matchingUsers, shownUsers, userPage, runAction, actionBusy, lastAdmin, registration, toggleRegistration, saveToggle, savingToggle, submitQuota, savingQuota };', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 function harness(overrides = {}, initialTab = 'users') {
   const route = vue.reactive({ query: { tab: initialTab } })
@@ -110,4 +110,35 @@ test('slow monitoring responses survive multiple polling ticks', async () => {
   assert.equal(h.loadedTabs.value.has('overview'), true)
   assert.equal(h.loading.value, false)
   h.poll(); assert.equal(calls, 2)
+})
+
+test('immediate switches retain confirmed state and own their pending feedback', async () => {
+  const save = deferred(); let calls = 0; let reads = 0
+  const h = harness({
+    getRegistrationSettings: async () => { reads++; return { enabled: true } },
+    updateRegistrationSettings: () => { calls++; return save.promise },
+  }, 'settings')
+  await h.load()
+  const pending = h.saveToggle('registration')
+  assert.equal(h.savingToggle.value, 'registration')
+  await h.submitQuota()
+  assert.equal(h.savingQuota.value, false)
+  assert.equal(h.registration.value.enabled, true)
+  await h.saveToggle('logs'); await h.saveToggle('registration')
+  assert.equal(calls, 1); assert.equal(h.savingToggle.value, 'registration')
+  save.resolve({ enabled: false }); await pending
+  assert.equal(h.registration.value.enabled, false)
+  assert.equal(h.savingToggle.value, null); assert.equal(h.actionBusy.value, false)
+  assert.equal(reads, 1)
+})
+
+test('failed immediate saves restore interaction without changing the confirmed state', async () => {
+  const h = harness({
+    getRegistrationSettings: async () => ({ enabled: true }),
+    updateRegistrationSettings: async () => { throw new Error('save unavailable') },
+  }, 'settings')
+  await h.load(); await h.saveToggle('registration')
+  assert.equal(h.registration.value.enabled, true)
+  assert.equal(h.error.value, 'save unavailable')
+  assert.equal(h.savingToggle.value, null); assert.equal(h.actionBusy.value, false)
 })

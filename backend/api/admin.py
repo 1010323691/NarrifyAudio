@@ -857,7 +857,7 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
             "api_requests": api_requests_today(tz_offset_minutes),
             "llm_tokens": None,
             "tts_characters": None,
-            "api_requests_scope": "当前 API 进程 · 控制台时区日期；进程重启后清零",
+            "api_requests_scope": "当前 API 进程 · 控制台时区日期；不含状态检查；重启后清零",
         },
         "tasks": {
             "running": metrics["stage_counts"]["consuming"],

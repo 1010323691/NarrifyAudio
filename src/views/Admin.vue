@@ -15,6 +15,7 @@ import CardHeader from '@/components/ui/CardHeader.vue'
 import CardTitle from '@/components/ui/CardTitle.vue'
 import CardContent from '@/components/ui/CardContent.vue'
 import Input from '@/components/ui/Input.vue'
+import Switch from '@/components/ui/Switch.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
@@ -76,6 +77,20 @@ const logModule = ref('all')
 const loading = ref(false)
 const error = ref('')
 const actionBusy = ref(false)
+const savingToggle = ref<'logs' | 'registration' | null>(null)
+const savingQuota = ref(false)
+async function submitQuota() {
+  if (actionBusy.value) return
+  savingQuota.value = true
+  try { await runAction(saveQuota) }
+  finally { savingQuota.value = false }
+}
+async function saveToggle(kind: 'logs' | 'registration') {
+  if (actionBusy.value) return
+  savingToggle.value = kind
+  try { await runAction(kind === 'logs' ? toggleClientLogs : toggleRegistration) }
+  finally { savingToggle.value = null }
+}
 async function runAction(action: () => Promise<void>) {
   if (actionBusy.value) return
   const actionTab = tab.value
@@ -424,7 +439,7 @@ async function cleanupTemp() {
           <Button v-if="userFiltered" variant="ghost" size="sm" @click="clearUserFilters">清空筛选</Button>
         </div>
       </div>
-      <Card><CardContent class="pad"><AdminTable table-class="wide-table"><thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近登录</th><th>使用量</th><th>项目 / 工作空间</th><th>存储占用</th><th class="user-actions">操作</th></tr></thead>
+      <Card><CardContent class="admin-table-content"><AdminTable table-class="wide-table"><thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近登录</th><th>使用量</th><th>项目 / 工作空间</th><th>存储占用</th><th class="user-actions">操作</th></tr></thead>
         <tbody><tr v-for="user in shownUsers" :key="user.id" :aria-selected="selectedUser?.id === user.id"><td><strong>{{ user.display_name || user.username }}</strong><small>{{ user.username }} · {{ user.email }}</small></td>
           <td><div class="badge-stack"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></div></td>
           <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td>
@@ -482,15 +497,15 @@ async function cleanupTemp() {
       <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>账户与客户端</CardTitle></CardHeader><CardContent>
         <div class="admin-setting-row">
           <div><h3>客户端功能日志</h3><p>统一控制实时日志和模型输出，已打开的客户端会自动同步。任务进度与失败提示继续显示。</p></div>
-          <div class="controls"><StatusPill :label="clientDisplay.logsEnabled ? '已开启' : '已关闭'" :tone="clientDisplay.logsEnabled ? 'positive' : 'neutral'" /><Button variant="outline" size="sm" :disabled="!clientDisplay.loaded || clientDisplay.saving || actionBusy" :aria-pressed="clientDisplay.logsEnabled" @click="runAction(toggleClientLogs)">{{ clientDisplay.saving ? '保存中…' : clientDisplay.logsEnabled ? '关闭日志' : '开启日志' }}</Button></div>
+          <div class="admin-toggle-control"><span class="admin-toggle-feedback">即时保存</span><Switch aria-label="客户端功能日志" :model-value="clientDisplay.logsEnabled" :disabled="!clientDisplay.loaded || actionBusy" :busy="savingToggle === 'logs'" @update:model-value="saveToggle('logs')" /></div>
         </div>
         <div class="admin-setting-row">
           <div><h3>新用户注册</h3><p>控制登录页面是否允许新用户自行创建账户。</p></div>
-          <div class="controls"><StatusPill :label="registration?.enabled ? '已开启' : '已关闭'" :tone="registration?.enabled ? 'positive' : 'neutral'" /><Button variant="outline" size="sm" :disabled="!registration || loading || actionBusy" :aria-pressed="registration?.enabled ?? false" @click="runAction(toggleRegistration)">{{ actionBusy ? '保存中…' : registration?.enabled ? '关闭注册' : '开启注册' }}</Button></div>
+          <div class="admin-toggle-control"><span class="admin-toggle-feedback">即时保存</span><Switch aria-label="允许新用户注册" :model-value="registration?.enabled ?? false" :disabled="!registration || loading || actionBusy" :busy="savingToggle === 'registration'" @update:model-value="saveToggle('registration')" /></div>
         </div>
         <div class="admin-setting-row">
           <div><label for="initial-quota">新用户初始额度</label><p>设置新账户获得的制作额度，必须为非负整数。</p></div>
-          <div class="controls"><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="w-28" /><Button variant="outline" size="sm" :disabled="!quota || actionBusy" @click="runAction(saveQuota)">{{ actionBusy ? '保存中…' : '保存' }}</Button></div>
+          <div class="controls"><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="w-28" /><Button variant="outline" size="sm" class="admin-quota-save" :disabled="!quota || actionBusy" @click="submitQuota">{{ savingQuota ? '保存中…' : '保存' }}</Button></div>
         </div>
       </CardContent></Card>
       <Card v-else-if="settingsSection === 'storage'"><CardHeader><CardTitle>存储路径</CardTitle></CardHeader><CardContent class="admin-form">
@@ -509,7 +524,7 @@ async function cleanupTemp() {
         <div class="controls"><select v-model="taskStatus" aria-label="任务状态"><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><Input v-model="taskSearch" aria-label="搜索任务" placeholder="任务 ID、类型或用户" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button></div>
       </div>
       <div class="metric-grid task-summary"><AdminStatCard label="排队中"><template #value>{{ metricCount(taskStatusSummary, 'pending', 'queued', 'retrying') }}</template></AdminStatCard><AdminStatCard label="运行中"><template #value>{{ metricCount(taskStatusSummary, 'running', 'cancelling') }}</template></AdminStatCard><AdminStatCard label="已完成"><template #value>{{ metricCount(taskStatusSummary, 'succeeded') }}</template></AdminStatCard><AdminStatCard label="失败 / 超时"><template #value>{{ metricCount(taskStatusSummary, 'failed', 'timeout') }}</template></AdminStatCard><AdminStatCard label="已取消"><template #value>{{ metricCount(taskStatusSummary, 'cancelled') }}</template></AdminStatCard></div>
-      <Card><CardContent class="pad"><AdminTable table-class="wide-table"><thead><tr><th>类型 / ID</th><th>用户</th><th>项目</th><th>状态</th><th>Worker</th><th>创建时间</th><th class="user-actions">操作</th></tr></thead>
+      <Card><CardContent class="admin-table-content"><AdminTable table-class="wide-table"><thead><tr><th>类型 / ID</th><th>用户</th><th>项目</th><th>状态</th><th>Worker</th><th>创建时间</th><th class="user-actions">操作</th></tr></thead>
         <tbody><tr v-for="task in tasks" :key="task.id" :aria-selected="selectedTask?.id === task.id"><td><strong>{{ task.task_type }}</strong><small class="mono">{{ task.id }}</small></td><td>{{ task.owner_username }}</td><td class="mono">{{ task.project_id?.slice(0, 8) ?? '—' }}</td><td><StatusPill :label="statusLabel(task.status)" :tone="tone(task.status)" /></td><td class="clip" :title="task.worker_id ?? ''">{{ task.worker_id || '—' }}</td><td>{{ date(task.created_at) }}</td><td class="user-actions"><Button variant="outline" size="sm" @click="selectedTask = task">详情</Button></td></tr></tbody></AdminTable><AdminEmptyState v-if="!tasks.length" title="没有匹配的任务" description="调整状态或搜索条件后重新筛选。" /></CardContent></Card>
       <AdminDrawer v-if="selectedTask" title="任务详情" @close="selectedTask = null"><div class="admin-form">
         <p v-if="error" role="alert" class="admin-error">{{ error }}</p>
@@ -529,7 +544,7 @@ async function cleanupTemp() {
           <Input v-model="logSearch" aria-label="搜索日志" placeholder="搜索类型或消息" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button>
         </div>
       </div>
-      <Card><CardContent class="pad"><AdminTable><thead><tr><th>时间</th><th>级别</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
+      <Card><CardContent class="admin-table-content"><AdminTable><thead><tr><th>时间</th><th>级别</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
         <tbody><tr v-for="entry in events" :key="entry.id"><td>{{ date(entry.time) }}</td><td><StatusPill :label="entry.level === 'error' ? '异常' : entry.level" :tone="entry.level === 'error' ? 'negative' : 'neutral'" /></td><td>{{ entry.module }}</td><td>{{ entry.type }}</td><td class="clip" :title="entry.message">{{ entry.message }}</td></tr></tbody></AdminTable><AdminEmptyState v-if="!events.length" title="当前范围内没有记录" description="尝试扩大时间范围或调整筛选条件。" /></CardContent></Card>
     </section>
     </div>

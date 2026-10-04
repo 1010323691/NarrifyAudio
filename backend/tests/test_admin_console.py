@@ -285,8 +285,56 @@ def test_admin_event_module_mapping(task_type: str, expected: str):
 def test_api_requests_today_uses_a_separate_daily_aggregate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(observability, "_daily_counts", {})
     for _ in range(8):
-        observability.record_api_request("/api/health", 200, 1.0)
+        observability.record_api_request("/api/v1/projects", 200, 1.0)
     assert observability.api_requests_today() == 8
+
+
+@pytest.mark.parametrize("route", [
+    "/api/health", "/api/config/client-logs", "/api/v1/admin/overview",
+    "/api/v1/admin/performance", "/api/v1/admin/task-metrics",
+    "/api/v1/admin/tasks", "/api/v1/admin/gpu-scheduler/status",
+    "/api/v1/tasks", "/api/v1/tasks/{task_id}", "/api/v1/tasks/stream",
+])
+def test_status_checks_do_not_increase_daily_usage_but_keep_diagnostics(monkeypatch, route):
+    monkeypatch.setattr(observability, "_daily_counts", {})
+    monkeypatch.setattr(observability, "_minute_counts", {})
+    monkeypatch.setattr(observability, "_samples", observability.deque(maxlen=5000))
+    observability.record_api_request(route, 200, 1.0)
+    observability.record_api_request(route, 503, 2.0)
+    assert observability.api_requests_today() == 0
+    assert observability.api_requests_today(0) == 0
+    assert observability.api_requests_today(-540) == 0
+    assert observability.api_snapshot()["request_count"] == 2
+    assert observability.api_snapshot()["server_error_count"] == 1
+
+
+@pytest.mark.parametrize("route,method", [
+    ("/api/v1/projects", "GET"),
+    ("/api/v1/admin/users", "GET"),
+    ("/api/v1/admin/settings/registration", "PUT"),
+    ("/api/v1/tasks", "POST"),
+    ("/api/v1/tasks/{task_id}", "DELETE"),
+])
+def test_business_requests_and_mutations_still_increase_daily_usage(monkeypatch, route, method):
+    monkeypatch.setattr(observability, "_daily_counts", {})
+    monkeypatch.setattr(observability, "_minute_counts", {})
+    observability.record_api_request(route, 200, 1.0, method)
+    assert observability.api_requests_today() == 1
+    assert observability.api_requests_today(0) == 1
+    assert observability.api_requests_today(-540) == 1
+
+
+def test_admin_polling_routes_do_not_count_their_own_requests(client, monkeypatch):
+    _create_admin(client)
+    monkeypatch.setattr(observability, "_daily_counts", {})
+    monkeypatch.setattr(observability, "_minute_counts", {})
+    for route in ("/api/health", "/api/config/client-logs", "/api/v1/admin/overview", "/api/v1/admin/task-metrics"):
+        assert client.get(route).status_code == 200
+    assert observability.api_requests_today() == 0
+    assert client.get("/api/v1/admin/users").status_code == 200
+    overview = client.get("/api/v1/admin/overview")
+    assert overview.json()["today"]["api_requests"] == 1
+    assert observability.api_requests_today() == 1
 
 
 # --------------------------------------------------------------------------- #

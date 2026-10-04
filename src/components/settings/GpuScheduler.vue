@@ -8,6 +8,7 @@ import CardTitle from '@/components/ui/CardTitle.vue'
 import CardContent from '@/components/ui/CardContent.vue'
 import Input from '@/components/ui/Input.vue'
 import Button from '@/components/ui/Button.vue'
+import Switch from '@/components/ui/Switch.vue'
 
 const props = defineProps<{ mode: 'paths' | 'parameters' | 'status' }>()
 const auth = useAuthStore()
@@ -140,8 +141,10 @@ onBeforeUnmount(() => { epoch++; if (timer) clearInterval(timer) })
         <Button :disabled="busy" @click="save">保存服务脚本</Button>
       </template>
       <template v-if="mode === 'parameters' && draft">
-        <label class="flex items-center gap-2"><input v-model="draft.enabled" type="checkbox" />启用单 GPU 动态调度</label>
-        <label class="flex items-center gap-2"><input v-model="draft.shutdown_when_idle" type="checkbox" />空闲到期关闭 GPU 服务</label>
+        <div class="admin-toggle-grid grid gap-3 sm:grid-cols-2">
+          <div class="flex items-center justify-between gap-4"><label for="gpu-scheduler-enabled">启用单 GPU 动态调度</label><Switch id="gpu-scheduler-enabled" v-model="draft.enabled" :disabled="busy" /></div>
+          <div class="flex items-center justify-between gap-4"><label for="gpu-scheduler-idle">空闲到期关闭 GPU 服务</label><Switch id="gpu-scheduler-idle" v-model="draft.shutdown_when_idle" :disabled="busy" /></div>
+        </div>
         <div class="gpu-parameter-grid grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label v-for="field in fields" :key="field.key" class="space-y-2"><span class="text-sm">{{ field.label }}</span><Input v-model.number="draft[field.key]" type="number" :min="field.min" :max="field.max" :step="field.key === 'startup_retry_count' ? 1 : 0.1" /></label>
         </div>
