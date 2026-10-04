@@ -1,0 +1,2 @@
+# Linux launchers retain LF line endings in Windows checkouts.
+launch/*.sh text eol=lf

@@ -21,7 +21,32 @@
 | 音频工具 | winget FFmpeg / SoX_ng | APT FFmpeg / SoX，无需 `sox.exe` 兼容副本 |
 | 日志 | 进程控制台及应用日志 | journald 加应用 / 任务日志 |
 
-Windows 的 `launch/start.ps1`、`launch/start-data-services.ps1`、`launch/stop-data-services.ps1` 和 `install_tts_env.ps1` 不适用于 Linux。当前仓库没有 Linux 一键安装脚本；下面给出可按步骤保存的服务配置。
+Windows 的 `.ps1` / `.bat` 脚本不适用于 Linux。`launch/` 提供 Bash 启停脚本，系统依赖、数据库和 systemd 服务仍需按本文先行配置；它们不是一键安装脚本。
+
+## Linux 启停脚本
+
+完成下文的 PostgreSQL、Redis、前端构建及三个 `narrify-*` systemd 服务配置后，在仓库根目录执行：
+
+```bash
+bash launch/start-data-services.sh # 启动 PostgreSQL、Redis
+bash launch/start.sh               # 启动数据服务，应用全停时执行迁移，再启动 API、Worker
+bash launch/stop.sh                # 停止 API、Worker，保留数据服务
+bash launch/stop-data-services.sh  # 应用停止后再停止数据服务
+```
+
+服务操作按需调用 `sudo`，API 和 Worker 仍由 systemd 以 `narrify` 用户运行，使用 `/etc/narrify-audio/narrify.env`。前端使用构建后的 `dist/` 或 Nginx 入口，正式启动脚本不运行 Vite。日志使用 `journalctl -u narrify-api -u narrify-worker`。默认数据服务名为 `postgresql@16-main.service`、`redis-server.service`；其他发行版可通过 `POSTGRES_SERVICE` / `REDIS_SERVICE` 环境变量覆盖，并同步调整 systemd 单元的依赖。
+
+本地开发可使用独立的前台启动器：
+
+```bash
+# 先安装 Linux .venv、npm 依赖并配置仓库根目录 .env，再启动数据服务。
+# 必须先停掉已有的 API、Worker、Vite，避免重复运行。
+bash launch/dev-all.sh
+```
+
+开发脚本需要 Bash 4.3+、curl、util-linux 提供的 `flock` / `setsid`，通过 Linux `.venv/bin/python` 将 `.env` 中的 `NARRIFY_*` 作为数据加载，不执行文件中的 shell 代码。它执行迁移，启动 API、Worker 和 Vite（`127.0.0.1:5173`）；后台日志写入 `logs/dev/`。重复启动会被锁拒绝，任何组件退出会结束整套开发进程。按 `Ctrl+C` 停止脚本启动的进程，最多等待 10 秒后强制结束；数据服务继续运行。`dev-all.sh` 运行期间，数据服务停止脚本会拒绝停止数据库和 Redis。
+
+脚本统一使用 LF 换行，默认通过 `bash launch/脚本名.sh` 调用，也可直接执行。
 
 ## 最终运行链路
 

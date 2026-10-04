@@ -10,7 +10,7 @@ Narrify Audio 是 Windows 本地有声书制作工作台，由 Vue 3 + TypeScrip
 - `backend/migrations/`：Alembic 数据库迁移；pytest 测试位于 `backend/tests/`。
 - `tts-engine/`：独立的 TTS 工作进程代码；大型模型依赖安装到共享 `.venv`，但仍通过子进程运行，不在 FastAPI 进程内导入。
 - `backend/resources/`：提示词及其他运行时资源。`dist/` 是构建产物，不应手动编辑。
-- `launch/`：Windows 应用、数据服务的启动与停止入口，以及开发预览启动脚本。
+- `launch/`：Windows 与 Linux 应用、数据服务的启停入口，以及开发预览启动脚本；Linux 脚本使用 LF 换行，服务部署遵循 `readme-linux.md`。
 - `scripts/`：构建、分层检查与前端回归脚本；`docs/`：项目和架构设计文档。
 
 ## 架构约束

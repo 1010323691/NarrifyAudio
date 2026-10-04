@@ -307,7 +307,7 @@ winget install --id sox_ng.sox_ng --exact --source winget
 
 - `src/`：Vue 页面、组件、API 客户端和状态管理。
 - `backend/`：FastAPI 路由、业务逻辑、数据库模型和 Worker。
-- `launch/`：Windows 启动、停止及开发预览脚本；从任意当前目录调用时均定位仓库根目录。
+- `launch/`：Windows 和 Linux 启停及开发预览脚本；Linux `.sh` 用法见 [Linux 部署指南](readme-linux.md)。
 - `tts-engine/`：隔离运行的 TTS 子进程代码。
 - `backend/resources/`：提示词和运行资源。
 - `.env`：本机数据库、队列和初始管理员配置；不要提交。
