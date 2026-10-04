@@ -491,6 +491,7 @@ export interface AppConfig {
   /** 分册：零章节按字数分册的每册目标字数（管理员后台配置，用户侧只读展示）。 */
   split: {
     length_target: number
+    smart_split_long_chapters: boolean
   }
   ffmpeg: {
     ffmpeg_path: string

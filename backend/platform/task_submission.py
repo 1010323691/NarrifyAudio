@@ -7,6 +7,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..core.config import get_config
 from .models import OutboxEvent, Project, Task, User, UserQuotaAccount, utcnow
 from .storage import lock_storage_migration, storage_migration
 from .task_lifecycle import append_task_event
@@ -84,9 +85,18 @@ def submit_task_record(
             raise TaskSubmissionError(409, "幂等键对应的请求内容不同")
         db.rollback()
         return existing
+    # Resolve shared policy only for a NEW task, after both idempotency checks.
+    # Keep the original request hash independent of changing admin defaults.
+    stored_payload = dict(payload)
+    if task_type == "book.split":
+        split = get_config().split
+        stored_payload["split_policy"] = {
+            "smart_split_long_chapters": split.smart_split_long_chapters,
+            "length_target": split.length_target,
+        }
     task = Task(
         owner_id=user.id, project_id=project.id, task_type=task_type,
-        payload={**payload, "_request_hash": request_hash}, idempotency_key=idempotency_key,
+        payload={**stored_payload, "_request_hash": request_hash}, idempotency_key=idempotency_key,
     )
     db.add(task)
     db.flush()

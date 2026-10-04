@@ -296,12 +296,16 @@ const chapterBriefs = computed<Record<string, string>>(() => {
   const map: Record<string, string> = {}
   const v = version.value
   if (!v) return map
-  const byOrig = new Map<number | null, number>()
+  const byOrig = new Map<number | null, Set<string>>()
   for (const c of v.chapters) {
-    if (c.orig_num != null) byOrig.set(c.orig_num, (byOrig.get(c.orig_num) ?? 0) + 1)
+    if (c.orig_num != null) {
+      const sources = byOrig.get(c.orig_num) ?? new Set<string>()
+      sources.add(c.source_chapter_id ?? c.key ?? String(c.seq))
+      byOrig.set(c.orig_num, sources)
+    }
   }
   for (const c of v.chapters) {
-    if (c.key) map[c.key] = chapterBriefLabel(c.reasons, byOrig.get(c.orig_num) ?? 0)
+    if (c.key) map[c.key] = chapterBriefLabel(c.reasons, byOrig.get(c.orig_num)?.size ?? 0)
   }
   return map
 })

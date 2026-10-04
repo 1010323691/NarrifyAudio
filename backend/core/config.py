@@ -54,6 +54,7 @@ class SplitConfig(BaseModel):
     # 经 get_config 的 platform 覆盖生效）。工作空间文件里的值读取不生效、
     # 用户侧 /api/config 不可写（bgm 同款处理），GET 仍返回有效值供工作台展示。
     length_target: int = Field(default=3_000, ge=100, le=200_000)
+    smart_split_long_chapters: bool = True
 
 
 class AudioConfig(BaseModel):

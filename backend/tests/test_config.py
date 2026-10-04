@@ -529,6 +529,7 @@ def test_bgm_config_partial_round_trip():
 
 def test_split_config_default_and_bounds():
     assert SplitConfig().length_target == 3000
+    assert SplitConfig().smart_split_long_chapters is True
     with pytest.raises(ValidationError):
         SplitConfig(length_target=99)
     with pytest.raises(ValidationError):
@@ -542,6 +543,7 @@ def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeyp
     core_config.init_workspace_config(ws)
     old = _read(ws / "config" / "setting.json")
     old["split"]["length_target"] = 12345
+    old["split"]["smart_split_long_chapters"] = False
     (ws / "config" / "setting.json").write_text(json.dumps(old), encoding="utf-8")
     core_config.set_workspace_pointer(str(ws))
     core_config.reset_config_cache()
@@ -549,11 +551,12 @@ def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeyp
     assert core_config.get_config().split == SplitConfig()
 
     # 平台 provider 覆盖生效（管理员把目标字数改成 5000）。
-    monkeypatch.setattr(core_config, "_platform_defaults_provider", lambda: {"split": {"length_target": 5000}})
+    monkeypatch.setattr(core_config, "_platform_defaults_provider", lambda: {"split": {"length_target": 5000, "smart_split_long_chapters": False}})
     assert core_config.get_config().split.length_target == 5000
+    assert core_config.get_config().split.smart_split_long_chapters is False
 
     # 用户侧保存（哪怕携带 split 段）落盘的始终是代码默认值，历史旧值随保存被清出。
-    cfg = core_config.update_config({"log": {"level": "DEBUG"}, "split": {"length_target": 777}})
+    cfg = core_config.update_config({"log": {"level": "DEBUG"}, "split": {"length_target": 777, "smart_split_long_chapters": False}})
     assert cfg.split == SplitConfig()
     assert cfg.log.level == "DEBUG"
     saved = _read(ws / "config" / "setting.json")

@@ -15,7 +15,8 @@
     "live": true
   },
   "split": {
-    "length_target": 3000
+    "length_target": 3000,
+    "smart_split_long_chapters": true
   },
   "audio": {
     "target_duration": "10:00",

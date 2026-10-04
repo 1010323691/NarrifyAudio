@@ -380,6 +380,25 @@ test('reason filter, same-number group and dupInfo drive the reason card', async
   assert.equal(wb.dupInfo.value, null) // 组小于 2 → 无重复语境
 })
 
+test('balanced siblings do not inflate original-number duplicate counts', async () => {
+  let chapters = [
+    { ...makeChapters(1)[0], key: 'c1', seq: 1, orig_num: 2, source_chapter_id: 'first', reasons: ['long_chapter_split'] },
+    { ...makeChapters(1)[0], key: 'c2', seq: 2, orig_num: 2, source_chapter_id: 'first', reasons: ['long_chapter_split'] },
+  ]
+  const { wb } = setupWorkbench({
+    getState: async () => ({ flow: { id: 'flow-1', status: 'ready', config_snapshot: {} }, version: readyVersion(chapters), next_task: null, active_tasks: [] }),
+  })
+  await wb.resume()
+  wb.selectChapter('c2')
+  assert.equal(wb.dupInfo.value, null)
+  chapters = [...chapters, { ...chapters[0], key: 'c3', seq: 3, source_chapter_id: 'second', reasons: ['duplicate_number'] }]
+  await wb.resume()
+  wb.selectChapter('c2')
+  assert.deepEqual({ ...wb.dupInfo.value }, { count: 2, index: 1 })
+  wb.selectChapter('c3')
+  assert.deepEqual({ ...wb.dupInfo.value }, { count: 2, index: 2 })
+})
+
 test('mark success pushes an undoable toast; unmark does not', async () => {
   const toasts = []
   const { wb, calls } = setupWorkbench({
