@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useClientDisplayStore } from '@/stores/clientDisplay'
 import { useSettingsStore } from '@/stores/settings'
 import Toaster from '@/components/ui/Toaster.vue'
 import DialogHost from '@/components/ui/DialogHost.vue'
 import { useAuthStore } from '@/stores/auth'
 
+const route = useRoute()
+const adminFeedback = computed(() => route.path === '/admin' || route.path.startsWith('/admin/'))
 const settings = useSettingsStore()
 const auth = useAuthStore()
 const clientDisplay = useClientDisplayStore()
@@ -33,6 +36,6 @@ onMounted(() => {
 
 <template>
   <router-view />
-  <Toaster />
-  <DialogHost />
+  <Toaster :class="adminFeedback ? 'admin-shell admin-feedback' : ''" />
+  <DialogHost :class="adminFeedback ? 'admin-shell admin-feedback' : ''" />
 </template>

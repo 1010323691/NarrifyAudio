@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import AdminStatCard from '@/components/admin/AdminStatCard.vue'
+import AdminTable from '@/components/admin/AdminTable.vue'
+import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import AdminDrawer from '@/components/admin/AdminDrawer.vue'
+import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
+import AdminLoadingState from '@/components/admin/AdminLoadingState.vue'
 import { useRoute } from 'vue-router'
 import { ArrowUpRight, RefreshCw, RotateCcw, Trash2 } from 'lucide-vue-next'
 import { useClientDisplayStore } from '@/stores/clientDisplay'
@@ -25,6 +31,19 @@ const clientDisplay = useClientDisplayStore()
 const route = useRoute()
 const tab = computed<Tab>(() => validTabs.has(route.query.tab as Tab) ? route.query.tab as Tab : 'overview')
 const { push: toast } = useToast()
+const pageMeta: Record<Tab, [string, string]> = {
+  overview: ['系统总览', '掌握平台运行状态、任务负载与需要关注的异常。'],
+  performance: ['性能监控', '查看主机资源、GPU 服务和 Worker 实时快照。'],
+  users: ['用户管理', '管理账户权限、启用状态与制作额度。'],
+  resources: ['资源与存储', '查看工作空间占用与公共资源，安全清理过期缓存。'],
+  settings: ['系统配置', '统一管理平台制作参数、存储与运行设置。'],
+  tasks: ['任务与队列', '跟踪平台制作任务，查看详情并处理失败任务。'],
+  logs: ['日志与异常', '检索持久化任务失败、审计事件与 API 异常。'],
+}
+const loadedTabs = ref(new Set<Tab>())
+let loadEpoch = 0
+let active = true
+const lastUpdated = ref<Partial<Record<Tab, string>>>({})
 
 const overview = ref<api.AdminOverview | null>(null)
 const performance = ref<api.AdminPerformance | null>(null)
@@ -40,8 +59,10 @@ const runtime = ref<api.RuntimeSettings | null>(null)
 const settingsSection = ref<SettingsSection>('text')
 const rootDraft = ref('')
 const quotaDraft = ref('0')
-const registrationDraft = ref(true)
 const userSearch = ref('')
+const userRole = ref('all')
+const userState = ref('all')
+const userSort = ref('default')
 const userPage = ref(1)
 const selectedUser = ref<api.AdminUser | null>(null)
 const quotaAmount = ref('')
@@ -54,11 +75,40 @@ const logHours = ref(24)
 const logModule = ref('all')
 const loading = ref(false)
 const error = ref('')
+const actionBusy = ref(false)
+async function runAction(action: () => Promise<void>) {
+  if (actionBusy.value) return
+  const actionTab = tab.value
+  const resumeLoad = loading.value
+  actionBusy.value = true
+  // A read begun before this mutation must not overwrite its successful response.
+  loadEpoch++
+  loading.value = false
+  error.value = ''
+  try {
+    await action()
+    if (error.value) toast({ title: '操作未完成', description: error.value, variant: 'destructive' })
+  } finally {
+    actionBusy.value = false
+    if (active && (resumeLoad || tab.value !== actionTab || !loadedTabs.value.has(tab.value))) await load()
+  }
+}
 let timer: ReturnType<typeof setInterval> | null = null
 
-const matchingUsers = computed(() => users.value.filter(row =>
-  `${row.username} ${row.display_name} ${row.email}`.toLowerCase().includes(userSearch.value.toLowerCase()),
-))
+const matchingUsers = computed(() => {
+  const query = userSearch.value.trim().toLowerCase()
+  const rows = users.value.filter(row =>
+    `${row.username} ${row.display_name} ${row.email}`.toLowerCase().includes(query)
+    && (userRole.value === 'all' || row.role === userRole.value)
+    && (userState.value === 'all' || row.is_active === (userState.value === 'active')),
+  )
+  if (userSort.value === 'name') rows.sort((a, b) => a.username.localeCompare(b.username, 'zh-CN'))
+  if (userSort.value === 'storage') rows.sort((a, b) => (b.storage_bytes ?? 0) - (a.storage_bytes ?? 0))
+  if (userSort.value === 'recent') rows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+  return rows
+})
+const userFiltered = computed(() => !!userSearch.value || userRole.value !== 'all' || userState.value !== 'all')
+function clearUserFilters() { userSearch.value = ''; userRole.value = 'all'; userState.value = 'all' }
 const userPages = computed(() => Math.max(1, Math.ceil(matchingUsers.value.length / 20)))
 const shownUsers = computed(() => matchingUsers.value.slice((userPage.value - 1) * 20, userPage.value * 20))
 
@@ -81,7 +131,8 @@ const taskStatusSummary = computed(() => taskMetrics.value?.status_counts ?? {})
 const resourceCategories = computed(() => resources.value?.project_storage?.categories ?? [])
 const cleanupCandidates = computed(() => resources.value?.project_storage?.cleanup_candidates)
 
-watch(userSearch, () => { userPage.value = 1 })
+watch([userSearch, userRole, userState, userSort], () => { userPage.value = 1 })
+watch(userPages, pages => { userPage.value = Math.min(userPage.value, pages) })
 function date(value?: string | null) { return value ? new Date(value).toLocaleString('zh-CN') : '—' }
 // 管理端大小口径：缺失显示「未采集」，<1024 原样（含负值），KB+ 一律 1 位小数
 const ADMIN_BYTES: BytesFormat = { emptyText: '未采集', lowRange: 'raw', decimals: 'always-one' }
@@ -98,60 +149,87 @@ function metricCount(statuses: Record<string, number>, ...keys: string[]) {
 }
 function tone(status: string): 'positive' | 'warning' | 'negative' | 'neutral' {
   if (['healthy', 'succeeded', 'completed', 'idle'].includes(status)) return 'positive'
-  if (['warning', 'queued', 'pending', 'retrying', 'processing', 'running'].includes(status)) return 'warning'
+  if (['warning', 'queued', 'pending', 'retrying', 'processing', 'running', 'cancelling'].includes(status)) return 'warning'
   if (['error', 'failed', 'timeout', 'offline'].includes(status)) return 'negative'
   return 'neutral'
 }
 function statusLabel(status: string) {
   return ({ healthy: '正常', warning: '警告', error: '异常', unknown: '未采集', pending: '排队中', queued: '排队中',
-    running: '运行中', processing: '运行中', retrying: '重试中', succeeded: '已完成', completed: '已完成',
+    cancelling: '取消中', running: '运行中', processing: '运行中', retrying: '重试中', succeeded: '已完成', completed: '已完成',
     failed: '失败', timeout: '超时', cancelled: '已取消', idle: '空闲', offline: '离线' } as Record<string, string>)[status] ?? status
 }
 async function load() {
-  if (loading.value) return
+  if (actionBusy.value) return
+  await loadData()
+}
+// Mutation handlers may refresh their result while keeping external reads blocked.
+async function loadData() {
+  const currentTab = tab.value
+  const ticket = ++loadEpoch
   loading.value = true
   error.value = ''
   try {
-    if (tab.value === 'overview') {
+    if (currentTab === 'overview') {
       const [current, metrics] = await Promise.all([api.getOverview(), api.getTaskMetrics()])
+      if (ticket !== loadEpoch) return
       overview.value = current
       taskMetrics.value = metrics
     }
-    else if (tab.value === 'performance') performance.value = await api.getPerformance()
-    else if (tab.value === 'users') users.value = await api.listUsers()
-    else if (tab.value === 'resources') resources.value = await api.getResources()
-    else if (tab.value === 'settings') {
+    else if (currentTab === 'performance') {
+      const result = await api.getPerformance()
+      if (ticket !== loadEpoch) return
+      performance.value = result
+    }
+    else if (currentTab === 'users') {
+      const result = await api.listUsers()
+      if (ticket !== loadEpoch) return
+      users.value = result
+    }
+    else if (currentTab === 'resources') {
+      const result = await api.getResources()
+      if (ticket !== loadEpoch) return
+      resources.value = result
+    }
+    else if (currentTab === 'settings') {
       await clientDisplay.load()
       const [s, q, r] = await Promise.all([api.getStorageSettings(), api.getQuotaSettings(), api.getRegistrationSettings()])
+      if (ticket !== loadEpoch) return
       storage.value = s
       quota.value = q
       registration.value = r
       rootDraft.value = s.root_path
       quotaDraft.value = String(q.initial_units)
-      registrationDraft.value = r.enabled
-      runtime.value = await api.getRuntimeSettings().catch(() => null)
-    } else if (tab.value === 'tasks') {
+      const limits = await api.getRuntimeSettings().catch(() => null)
+      if (ticket !== loadEpoch) return
+      runtime.value = limits
+    } else if (currentTab === 'tasks') {
       const [rows, metrics] = await Promise.all([api.listTasks(taskStatus.value, taskSearch.value), api.getTaskMetrics()])
+      if (ticket !== loadEpoch) return
       tasks.value = rows
       taskMetrics.value = metrics
       if (selectedTask.value) selectedTask.value = rows.find(row => row.id === selectedTask.value?.id) ?? selectedTask.value
     } else {
-      events.value = await api.getEvents(logLevel.value, logModule.value, logSearch.value, logHours.value)
+      const result = await api.getEvents(logLevel.value, logModule.value, logSearch.value, logHours.value)
+      if (ticket !== loadEpoch) return
+      events.value = result
     }
+    if (ticket === loadEpoch) { loadedTabs.value.add(currentTab); lastUpdated.value[currentTab] = new Date().toLocaleTimeString('zh-CN') }
   } catch (cause: any) {
-    error.value = cause?.message || String(cause)
+    if (ticket === loadEpoch) error.value = cause?.message || String(cause)
   } finally {
-    loading.value = false
+    if (ticket === loadEpoch) loading.value = false
   }
 }
 watch(tab, () => { selectedUser.value = null; selectedTask.value = null; void load() })
 onMounted(() => {
   void load()
   timer = setInterval(() => {
-    if (document.visibilityState === 'visible' && ['overview', 'performance', 'tasks'].includes(tab.value)) void load()
+    if (active && !loading.value && !actionBusy.value && document.visibilityState === 'visible' && ['overview', 'performance', 'tasks'].includes(tab.value)) void load()
   }, 15000)
 })
-onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+onActivated(() => { if (!active) { active = true; void load() } })
+onDeactivated(() => { active = false; loadEpoch++; loading.value = false })
+onBeforeUnmount(() => { loadEpoch++; if (timer) clearInterval(timer) })
 
 async function toggleClientLogs() {
   try {
@@ -159,8 +237,9 @@ async function toggleClientLogs() {
   } catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 
-async function saveRegistration() {
-  try { registration.value = await api.updateRegistrationSettings(registrationDraft.value); toast({ title: '注册设置已保存', variant: 'success' }) }
+async function toggleRegistration() {
+  if (!registration.value) return
+  try { registration.value = await api.updateRegistrationSettings(!registration.value.enabled); toast({ title: '注册设置已保存', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function saveQuota() {
@@ -201,12 +280,12 @@ async function adjustQuota() {
 }
 async function cancelTask(task: api.AdminTask) {
   if (!await showConfirm(`确认取消任务 ${task.id}？`, { title: '取消任务', destructive: true })) return
-  try { await api.cancelTask(task.id); selectedTask.value = null; await load(); toast({ title: '取消请求已提交', variant: 'success' }) }
+  try { await api.cancelTask(task.id); selectedTask.value = null; await loadData(); toast({ title: '取消请求已提交', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function retryTask(task: api.AdminTask) {
   if (!await showConfirm(`将任务 ${task.id} 重新放入队列。确认重试？`, { title: '重新排入任务' })) return
-  try { await api.retryTask(task.id); selectedTask.value = null; await load(); toast({ title: '任务已重新排队', variant: 'success' }) }
+  try { await api.retryTask(task.id); selectedTask.value = null; await loadData(); toast({ title: '任务已重新排队', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function cleanupTemp() {
@@ -215,7 +294,7 @@ async function cleanupTemp() {
   if (!await showConfirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的临时缓存文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`, { title: '清理临时缓存', destructive: true })) return
   try {
     const result = await api.cleanupStaleTemp()
-    await load()
+    await loadData()
     toast({ title: `已清理 ${result.deleted_count} 个文件 · ${bytes(result.deleted_bytes)}`, variant: 'success' })
   } catch (cause: any) { error.value = cause?.message || String(cause) }
 }
@@ -223,36 +302,34 @@ async function cleanupTemp() {
 
 <template>
   <div class="admin-console">
-    <header class="admin-head">
-      <div>
-        <span class="admin-eyebrow">ADMIN CONSOLE</span>
-        <h1>管理后台</h1>
-        <p>平台状态、用户、资源与运行运维</p>
-      </div>
-      <Button variant="outline" :disabled="loading" @click="load"><RefreshCw class="h-4 w-4" />刷新</Button>
-    </header>
-    <p v-if="error" class="admin-error" role="alert">{{ error }} <button @click="load">重试</button></p>
-    <p v-if="loading && !overview && !performance && !users.length && !resources && !tasks.length && !events.length" class="admin-empty" role="status">正在加载管理数据…</p>
+    <AdminPageHeader :title="pageMeta[tab][0]" :description="pageMeta[tab][1]">
+      <span v-if="lastUpdated[tab]" class="admin-updated">更新于 {{ lastUpdated[tab] }}</span>
+      <Button variant="outline" size="sm" :disabled="loading || actionBusy" @click="load"><RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loading }" />{{ loading ? '刷新中' : '刷新数据' }}</Button>
+    </AdminPageHeader>
+    <p v-if="error" class="admin-error" role="alert"><strong>无法完成请求</strong> · {{ error }} <button @click="load">重新尝试</button></p>
+    <AdminLoadingState v-if="loading && !loadedTabs.has(tab)" />
+    <div v-show="loadedTabs.has(tab)" :aria-busy="loading">
 
     <section v-if="tab === 'overview' && overview" class="admin-section">
       <div class="admin-title">
-        <div><h2>系统总览</h2><p>更新时间 {{ date(overview.generated_at) }}</p></div>
+        <p>系统健康</p>
         <StatusPill :label="overview.services.some(item => item.status === 'error') ? '存在异常' : overview.services.some(item => item.status === 'warning') ? '需要关注' : '运行正常'" :tone="overview.services.some(item => item.status === 'error') ? 'negative' : overview.services.some(item => item.status === 'warning') ? 'warning' : 'positive'" />
+      </div>
+      <div class="metric-grid">
+        <AdminStatCard label="运行中任务"><template #value>{{ overview.tasks.running }}</template></AdminStatCard>
+        <AdminStatCard label="排队任务"><template #value>{{ overview.tasks.queued }}</template></AdminStatCard>
+        <AdminStatCard label="失败任务" :value-class="metricCount(taskMetrics?.status_counts ?? {}, 'failed', 'timeout') ? 'text-danger' : ''"><template #value>{{ metricCount(taskMetrics?.status_counts ?? {}, 'failed', 'timeout') }}</template></AdminStatCard>
+        <AdminStatCard label="今日 API 请求"><template #value>{{ overview.today.api_requests ?? '未采集' }}</template>{{ overview.today.api_requests_scope }}</AdminStatCard>
+        <AdminStatCard label="活跃用户 · 15 分钟"><template #value>{{ overview.today.active_users }}</template></AdminStatCard>
+        <AdminStatCard label="今日 TTS 字符" value-class="metric-optional"><template #value>{{ overview.today.tts_characters ?? '未采集' }}</template></AdminStatCard>
+        <AdminStatCard label="今日 LLM Token" value-class="metric-optional"><template #value>{{ overview.today.llm_tokens ?? '未采集' }}</template></AdminStatCard>
+        <AdminStatCard label="今日完成任务"><template #value>{{ overview.today.completed }}</template></AdminStatCard>
       </div>
       <div class="service-grid">
         <div v-for="service in overview.services" :key="service.key" class="service-row">
           <div><strong>{{ service.name }}</strong><StatusPill :label="statusLabel(service.status)" :tone="tone(service.status)" /></div>
           <p :title="service.detail">{{ service.detail }}</p>
         </div>
-      </div>
-      <div class="metric-grid">
-        <div class="metric"><span>运行中任务</span><strong>{{ overview.tasks.running }}</strong></div>
-        <div class="metric"><span>排队任务</span><strong>{{ overview.tasks.queued }}</strong></div>
-        <div class="metric"><span>失败任务</span><strong :class="metricCount(taskMetrics?.status_counts ?? {}, 'failed', 'timeout') ? 'text-danger' : ''">{{ metricCount(taskMetrics?.status_counts ?? {}, 'failed', 'timeout') }}</strong></div>
-        <div class="metric"><span>今日 API 请求</span><strong>{{ overview.today.api_requests ?? '未采集' }}</strong><small>{{ overview.today.api_requests_scope }}</small></div>
-        <div class="metric"><span>活跃用户 · 15 分钟</span><strong>{{ overview.today.active_users }}</strong></div>
-        <div class="metric"><span>今日 TTS 字符</span><strong>{{ overview.today.tts_characters ?? '未采集' }}</strong></div>
-        <div class="metric"><span>今日 LLM Token</span><strong>{{ overview.today.llm_tokens ?? '未采集' }}</strong></div>
       </div>
       <div class="overview-grid">
         <Card>
@@ -268,11 +345,9 @@ async function cleanupTemp() {
         <Card>
           <CardHeader><CardTitle>最近异常</CardTitle></CardHeader>
           <CardContent>
-            <div v-if="overview.recent_errors.length" class="admin-table">
-              <table class="compact-table"><thead><tr><th>时间</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
+            <AdminTable v-if="overview.recent_errors.length" table-class="compact-table"><thead><tr><th>时间</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
                 <tbody><tr v-for="entry in overview.recent_errors" :key="entry.id"><td>{{ date(entry.time) }}</td><td><StatusPill :label="entry.module" /></td><td>{{ entry.type }}</td><td class="clip" :title="entry.message">{{ entry.message }}</td></tr></tbody>
-              </table>
-            </div>
+              </AdminTable>
             <p v-else class="admin-muted">暂无近期异常记录</p>
             <RouterLink to="/admin?tab=logs">打开日志与异常 <ArrowUpRight class="inline h-3.5 w-3.5" /></RouterLink>
           </CardContent>
@@ -281,8 +356,7 @@ async function cleanupTemp() {
     </section>
 
     <section v-if="tab === 'performance' && performance" class="admin-section">
-      <GpuScheduler mode="status" />
-      <div class="admin-title"><div><h2>服务与性能</h2><p>实时快照 · {{ date(performance.generated_at) }}</p></div></div>
+      <div class="admin-title"><div><p>实时快照 · {{ date(performance.generated_at) }}</p></div></div>
       <div class="overview-grid">
         <Card><CardHeader><CardTitle>系统</CardTitle></CardHeader><CardContent class="kv-list">
           <p><span>CPU</span><strong>{{ performance.system.cpu_percent == null ? '未采集' : `${performance.system.cpu_percent}%` }}</strong></p>
@@ -302,6 +376,7 @@ async function cleanupTemp() {
           </template><p v-else class="admin-muted">当前 API 主机未检测到 GPU 指标</p>
         </CardContent></Card>
       </div>
+      <GpuScheduler mode="status" />
       <div class="service-metrics">
         <Card><CardHeader><CardTitle>LLM</CardTitle></CardHeader><CardContent class="kv-list">
           <p><span>运行 / 排队</span><strong>{{ metricCount(serviceTaskMetrics.llm, 'running', 'cancelling') }} / {{ metricCount(serviceTaskMetrics.llm, 'pending', 'queued', 'retrying') }}</strong></p>
@@ -329,86 +404,99 @@ async function cleanupTemp() {
         </CardContent></Card>
       </div>
       <Card><CardHeader><CardTitle>API 请求明细</CardTitle></CardHeader><CardContent>
-        <div class="admin-table"><table><thead><tr><th>路由</th><th>请求</th><th>5xx</th><th>错误率</th><th>平均</th><th>P95</th></tr></thead>
-          <tbody><tr v-for="endpoint in performance.api.endpoints" :key="endpoint.route"><td class="mono">{{ endpoint.route }}</td><td>{{ endpoint.requests }}</td><td>{{ endpoint.server_errors }}</td><td>{{ (endpoint.error_rate * 100).toFixed(2) }}%</td><td>{{ endpoint.average_ms }} ms</td><td>{{ endpoint.p95_ms }} ms</td></tr></tbody></table></div>
+        <AdminTable><thead><tr><th>路由</th><th>请求</th><th>5xx</th><th>错误率</th><th>平均</th><th>P95</th></tr></thead>
+          <tbody><tr v-for="endpoint in performance.api.endpoints" :key="endpoint.route"><td class="mono">{{ endpoint.route }}</td><td>{{ endpoint.requests }}</td><td>{{ endpoint.server_errors }}</td><td>{{ (endpoint.error_rate * 100).toFixed(2) }}%</td><td>{{ endpoint.average_ms }} ms</td><td>{{ endpoint.p95_ms }} ms</td></tr></tbody></AdminTable>
         <p v-if="!performance.api.endpoints.length" class="admin-empty">此时间窗口暂无请求样本</p>
       </CardContent></Card>
       <Card><CardHeader><CardTitle>Worker 状态</CardTitle></CardHeader><CardContent>
-        <div class="admin-table"><table><thead><tr><th>Worker</th><th>状态</th><th>槽位</th><th>任务类型</th><th>最近心跳</th></tr></thead>
-          <tbody><tr v-for="worker in performance.workers" :key="worker.worker_id"><td class="mono">{{ worker.worker_id }}</td><td><StatusPill :label="statusLabel(worker.status)" :tone="tone(worker.status)" /></td><td>{{ worker.capabilities.active_slots ?? 0 }} / {{ worker.capabilities.slots ?? '—' }}</td><td class="clip" :title="String(worker.capabilities.task_types ?? '')">{{ Array.isArray(worker.capabilities.task_types) ? worker.capabilities.task_types.join(' · ') : '—' }}</td><td>{{ date(worker.last_seen_at) }}</td></tr></tbody></table></div>
+        <AdminTable><thead><tr><th>Worker</th><th>状态</th><th>槽位</th><th>任务类型</th><th>最近心跳</th></tr></thead>
+          <tbody><tr v-for="worker in performance.workers" :key="worker.worker_id"><td class="mono">{{ worker.worker_id }}</td><td><StatusPill :label="statusLabel(worker.status)" :tone="tone(worker.status)" /></td><td>{{ worker.capabilities.active_slots ?? 0 }} / {{ worker.capabilities.slots ?? '—' }}</td><td class="clip" :title="String(worker.capabilities.task_types ?? '')">{{ Array.isArray(worker.capabilities.task_types) ? worker.capabilities.task_types.join(' · ') : '—' }}</td><td>{{ date(worker.last_seen_at) }}</td></tr></tbody></AdminTable>
         <p v-if="!performance.workers.length" class="admin-empty">暂无 Worker 心跳</p>
       </CardContent></Card>
     </section>
 
     <section v-if="tab === 'users'" class="admin-section">
-      <div class="admin-title"><div><h2>用户管理</h2><p>{{ matchingUsers.length }} 位用户 · 套餐字段当前未配置</p></div><Input v-model="userSearch" placeholder="搜索用户名或邮箱" class="search" /></div>
-      <Card><CardContent class="pad"><div class="admin-table"><table class="wide-table"><thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近登录</th><th>套餐</th><th>使用量</th><th>项目 / 工作空间</th><th>存储占用</th><th class="user-actions">操作</th></tr></thead>
-        <tbody><tr v-for="user in shownUsers" :key="user.id"><td><strong>{{ user.display_name || user.username }}</strong><small>{{ user.username }} · {{ user.email }}</small></td>
+      <div class="admin-title"><p>{{ matchingUsers.length }} 位用户 · 每页 20 条</p>
+        <div class="controls"><Input v-model="userSearch" aria-label="搜索用户" placeholder="搜索用户名或邮箱" class="search" />
+          <select v-model="userRole" aria-label="用户角色"><option value="all">全部角色</option><option value="admin">管理员</option><option value="user">普通用户</option></select>
+          <select v-model="userState" aria-label="账户状态"><option value="all">全部状态</option><option value="active">已启用</option><option value="disabled">已禁用</option></select>
+          <select v-model="userSort" aria-label="用户排序"><option value="default">默认排序</option><option value="name">用户名</option><option value="recent">最近注册</option><option value="storage">存储占用最多</option></select>
+          <Button v-if="userFiltered" variant="ghost" size="sm" @click="clearUserFilters">清空筛选</Button>
+        </div>
+      </div>
+      <Card><CardContent class="pad"><AdminTable table-class="wide-table"><thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近登录</th><th>使用量</th><th>项目 / 工作空间</th><th>存储占用</th><th class="user-actions">操作</th></tr></thead>
+        <tbody><tr v-for="user in shownUsers" :key="user.id" :aria-selected="selectedUser?.id === user.id"><td><strong>{{ user.display_name || user.username }}</strong><small>{{ user.username }} · {{ user.email }}</small></td>
           <td><div class="badge-stack"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></div></td>
-          <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td><td>未配置</td>
+          <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td>
           <td>{{ user.consumed_units ?? 0 }} 已用<small>{{ user.reserved_units ?? 0 }} 预留 · {{ user.available_units ?? 0 }} 可用</small></td>
           <td>{{ user.project_count ?? 0 }} 个项目</td>
           <td>{{ bytes(user.storage_bytes) }}<small>{{ user.project_file_count ?? '未采集' }} 个目录文件 · {{ user.file_count ?? 0 }} 个已登记</small></td>
-          <td class="user-actions"><Button variant="outline" size="sm" @click="selectedUser = user">详情 / 操作</Button></td></tr></tbody></table></div>
-        <p v-if="!shownUsers.length" class="admin-empty">没有匹配的用户</p>
+          <td class="user-actions"><Button variant="outline" size="sm" @click="selectedUser = user">管理</Button></td></tr></tbody></AdminTable>
+        <AdminEmptyState v-if="!shownUsers.length" title="没有匹配的用户" description="尝试其他用户名或邮箱，或清空搜索条件。"><Button v-if="userFiltered" variant="outline" size="sm" @click="clearUserFilters">清空搜索</Button></AdminEmptyState>
         <div v-if="matchingUsers.length" class="pager"><Button variant="outline" size="sm" :disabled="userPage <= 1" @click="userPage--">上一页</Button>{{ userPage }} / {{ userPages }}<Button variant="outline" size="sm" :disabled="userPage >= userPages" @click="userPage++">下一页</Button></div>
       </CardContent></Card>
-      <Card v-if="selectedUser"><CardHeader><CardTitle>用户详情 · {{ selectedUser.username }}</CardTitle></CardHeader><CardContent class="admin-form">
+      <AdminDrawer v-if="selectedUser" :title="selectedUser.username" @close="selectedUser = null"><div class="admin-form">
+        <p v-if="error" role="alert" class="admin-error">{{ error }}</p>
         <p class="mono">{{ selectedUser.id }}</p><p>{{ selectedUser.email }} · {{ selectedUser.display_name || selectedUser.username }}</p>
-        <p>套餐：未配置 · 项目：{{ selectedUser.project_count ?? 0 }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
+        <p>项目：{{ selectedUser.project_count ?? 0 }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
         <p>额度：{{ selectedUser.consumed_units ?? 0 }} 已用 · {{ selectedUser.reserved_units ?? 0 }} 预留 · {{ selectedUser.available_units ?? 0 }} 可用</p>
-        <div class="controls"><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { role: selectedUser.role === 'admin' ? 'user' : 'admin' })">{{ selectedUser.role === 'admin' ? '移除管理员' : '设为管理员' }}</Button><Button variant="outline" :disabled="lastAdmin(selectedUser)" @click="changeUser(selectedUser, { is_active: !selectedUser.is_active })">{{ selectedUser.is_active ? '禁用用户' : '启用用户' }}</Button></div>
-        <div class="controls"><label for="quota-adjust">额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="输入数量，正数增加 / 负数扣减" class="search" /><Button variant="outline" @click="adjustQuota">确认调整</Button></div>
-      </CardContent></Card>
+        <div class="controls"><Button variant="outline" :disabled="actionBusy || lastAdmin(selectedUser)" @click="runAction(async () => { if (selectedUser) await changeUser(selectedUser, { role: selectedUser.role === 'admin' ? 'user' : 'admin' }) })">{{ selectedUser.role === 'admin' ? '移除管理员' : '设为管理员' }}</Button><Button variant="outline" :disabled="actionBusy || lastAdmin(selectedUser)" @click="runAction(async () => { if (selectedUser) await changeUser(selectedUser, { is_active: !selectedUser.is_active }) })">{{ selectedUser.is_active ? '禁用用户' : '启用用户' }}</Button></div>
+        <p v-if="lastAdmin(selectedUser)" class="admin-muted">此账户是最后一位启用的管理员，无法移除权限或禁用。</p>
+        <div class="controls"><label for="quota-adjust">额度调整</label><Input id="quota-adjust" v-model="quotaAmount" type="number" placeholder="输入数量，正数增加 / 负数扣减" class="search" /><Button :disabled="actionBusy" @click="runAction(adjustQuota)">{{ actionBusy ? '处理中…' : '确认调整' }}</Button></div>
+      </div></AdminDrawer>
     </section>
 
     <section v-if="tab === 'resources' && resources" class="admin-section">
-      <div class="admin-title"><div><h2>资源与存储</h2><p>{{ resources.scope }}</p></div></div>
+      <div class="admin-title"><div><p>{{ resources.scope }}</p></div></div>
       <div class="metric-grid resource-metrics">
-        <div class="metric"><span>磁盘已用 / 可用</span><strong>{{ bytes(resources.disk_used_bytes) }}</strong><small>{{ bytes(resources.disk_free_bytes) }} 可用 · 共 {{ bytes(resources.disk_total_bytes) }}</small></div>
-        <div class="metric"><span>项目存储占用</span><strong>{{ bytes(resources.project_storage?.size_bytes) }}</strong><small>{{ resources.project_storage?.file_count ?? '未采集' }} 个文件</small></div>
-        <div class="metric"><span>项目总数</span><strong>{{ resources.projects }}</strong></div>
-        <div class="metric"><span>公共音乐库</span><strong>{{ resources.music_library.count }} 首</strong><small>{{ bytes(resources.music_library.size_bytes) }} · {{ resources.music_library.assigned_chapters ?? '—' }} 次章节指派</small></div>
+        <AdminStatCard label="磁盘已用 / 可用"><template #value>{{ bytes(resources.disk_used_bytes) }}</template>{{ bytes(resources.disk_free_bytes) }} 可用 · 共 {{ bytes(resources.disk_total_bytes) }}</AdminStatCard>
+        <AdminStatCard label="项目存储占用"><template #value>{{ bytes(resources.project_storage?.size_bytes) }}</template>{{ resources.project_storage?.file_count ?? '未采集' }} 个文件</AdminStatCard>
+        <AdminStatCard label="项目总数"><template #value>{{ resources.projects }}</template></AdminStatCard>
+        <AdminStatCard label="公共音乐库"><template #value>{{ resources.music_library.count }} 首</template>{{ bytes(resources.music_library.size_bytes) }} · {{ resources.music_library.assigned_chapters ?? '—' }} 次章节指派</AdminStatCard>
       </div>
       <div class="overview-grid">
         <Card><CardHeader><CardTitle>工作空间文件分类</CardTitle></CardHeader><CardContent>
-          <div class="admin-table"><table><thead><tr><th>类别</th><th>文件数</th><th>大小</th></tr></thead><tbody><tr v-for="row in resourceCategories" :key="row.kind"><td>{{ row.label }}</td><td>{{ row.count }}</td><td>{{ bytes(row.size_bytes) }}</td></tr></tbody></table></div>
+          <AdminTable table-class="resource-category-table"><thead><tr><th>类别</th><th>文件数</th><th>大小</th></tr></thead><tbody><tr v-for="row in resourceCategories" :key="row.kind"><td>{{ row.label }}</td><td>{{ row.count }}</td><td>{{ bytes(row.size_bytes) }}</td></tr></tbody></AdminTable>
           <p v-if="!resourceCategories.length" class="admin-empty">此 API 版本尚未提供工作空间扫描数据</p>
         </CardContent></Card>
         <Card><CardHeader><CardTitle>用户占用 · 前 20</CardTitle></CardHeader><CardContent>
-          <div class="admin-table"><table><thead><tr><th>用户</th><th>工作空间</th><th>文件数</th><th>实际占用</th><th>登记文件</th></tr></thead>
-            <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '未采集' }}</td><td>{{ resources.project_storage ? row.file_count ?? 0 : '未采集' }}</td><td>{{ resources.project_storage ? bytes(row.size_bytes) : '未采集' }}</td><td>{{ row.registered_file_count ?? row.count ?? '未采集' }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr></tbody></table></div>
+          <AdminTable table-class="resource-users-table"><thead><tr><th>用户</th><th>工作空间</th><th>文件数</th><th>实际占用</th><th>登记文件</th></tr></thead>
+            <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '未采集' }}</td><td>{{ resources.project_storage ? row.file_count ?? 0 : '未采集' }}</td><td>{{ resources.project_storage ? bytes(row.size_bytes) : '未采集' }}</td><td>{{ row.registered_file_count ?? row.count ?? '未采集' }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr></tbody></AdminTable>
           <p v-if="!resources.users.length" class="admin-empty">暂无用户资源</p>
         </CardContent></Card>
       </div>
       <Card><CardHeader><CardTitle>临时文件清理</CardTitle></CardHeader><CardContent class="cleanup-row">
         <div><p><strong>{{ cleanupCandidates?.count ?? '未采集' }}</strong> 个超过 {{ cleanupCandidates?.older_than_days ?? 7 }} 天的临时文件 · {{ bytes(cleanupCandidates?.size_bytes) }}</p><small>仅清理不活跃工作空间中的普通临时文件；跳过特殊文件和正在运行任务的工作空间。</small></div>
-        <Button variant="outline" :disabled="!cleanupCandidates?.count || loading" @click="cleanupTemp"><Trash2 class="h-4 w-4" />清理过期临时文件</Button>
+        <Button variant="outline" :disabled="!cleanupCandidates?.count || loading || actionBusy" @click="runAction(cleanupTemp)"><Trash2 class="h-4 w-4" />清理过期临时文件</Button>
       </CardContent></Card>
       <p class="admin-muted">扫描范围：{{ resources.root_path }} · 模型或日志位于工作空间以外时，不包含在空间分类中。</p>
     </section>
 
-    <section v-if="tab === 'settings'" class="admin-section">
-      <div class="admin-title"><div><h2>系统配置</h2><p>管理员统一管理平台功能配置与运行参数。</p></div></div>
+    <section v-if="tab === 'settings'" class="admin-section admin-config">
       <nav class="settings-nav" aria-label="系统配置分类">
-        <button v-for="item in ([['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频'],['general','通用'],['storage','存储路径'],['runtime','Worker / Queue']] as [SettingsSection,string][])" :key="item[0]" :class="settingsSection === item[0] ? 'active' : ''" @click="settingsSection = item[0]">{{ item[1] }}</button>
+        <button v-for="item in ([['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频'],['general','通用'],['storage','存储路径'],['runtime','Worker / Queue']] as [SettingsSection,string][])" :key="item[0]" :class="settingsSection === item[0] ? 'active' : ''" :aria-pressed="settingsSection === item[0]" @click="settingsSection = item[0]">{{ item[1] }}</button>
       </nav>
       <AdminSettings v-if="settingsSection === 'text' || settingsSection === 'models' || settingsSection === 'audio'" :section="settingsSection" />
       <GpuScheduler v-if="settingsSection === 'models'" mode="paths" />
       <GpuScheduler v-if="settingsSection === 'runtime'" mode="parameters" />
-      <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>通用</CardTitle></CardHeader><CardContent class="admin-form">
-        <div class="controls">
-          <span>所有客户端功能日志：{{ clientDisplay.logsEnabled ? '已开启' : '已关闭' }}</span>
-          <Button :disabled="!clientDisplay.loaded || clientDisplay.saving" :aria-pressed="clientDisplay.logsEnabled" @click="toggleClientLogs">{{ clientDisplay.saving ? '保存中…' : clientDisplay.logsEnabled ? '关闭日志显示' : '开启日志显示' }}</Button>
+      <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>账户与客户端</CardTitle></CardHeader><CardContent>
+        <div class="admin-setting-row">
+          <div><h3>客户端功能日志</h3><p>统一控制实时日志和模型输出，已打开的客户端会自动同步。任务进度与失败提示继续显示。</p></div>
+          <div class="controls"><StatusPill :label="clientDisplay.logsEnabled ? '已开启' : '已关闭'" :tone="clientDisplay.logsEnabled ? 'positive' : 'neutral'" /><Button variant="outline" size="sm" :disabled="!clientDisplay.loaded || clientDisplay.saving || actionBusy" :aria-pressed="clientDisplay.logsEnabled" @click="runAction(toggleClientLogs)">{{ clientDisplay.saving ? '保存中…' : clientDisplay.logsEnabled ? '关闭日志' : '开启日志' }}</Button></div>
         </div>
-        <p class="admin-muted">默认关闭，统一控制各功能的实时日志和模型输出；已打开的客户端会自动同步。任务进度与失败提示继续显示。</p>
-        <label><input v-model="registrationDraft" type="checkbox" /> 允许新用户注册</label><Button :disabled="!registration" @click="saveRegistration">保存注册设置</Button>
-        <label for="initial-quota">新用户初始额度</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
+        <div class="admin-setting-row">
+          <div><h3>新用户注册</h3><p>控制登录页面是否允许新用户自行创建账户。</p></div>
+          <div class="controls"><StatusPill :label="registration?.enabled ? '已开启' : '已关闭'" :tone="registration?.enabled ? 'positive' : 'neutral'" /><Button variant="outline" size="sm" :disabled="!registration || loading || actionBusy" :aria-pressed="registration?.enabled ?? false" @click="runAction(toggleRegistration)">{{ actionBusy ? '保存中…' : registration?.enabled ? '关闭注册' : '开启注册' }}</Button></div>
+        </div>
+        <div class="admin-setting-row">
+          <div><label for="initial-quota">新用户初始额度</label><p>设置新账户获得的制作额度，必须为非负整数。</p></div>
+          <div class="controls"><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="w-28" /><Button variant="outline" size="sm" :disabled="!quota || actionBusy" @click="runAction(saveQuota)">{{ actionBusy ? '保存中…' : '保存' }}</Button></div>
+        </div>
       </CardContent></Card>
       <Card v-else-if="settingsSection === 'storage'"><CardHeader><CardTitle>存储路径</CardTitle></CardHeader><CardContent class="admin-form">
         <label for="storage-root">工作空间根目录</label><Input id="storage-root" v-model="rootDraft" class="mono" />
         <p class="admin-muted">当前路径 {{ storage?.root_path || '读取中' }} · 来源：{{ storage?.source === 'admin' ? '管理员配置' : '部署默认值' }}</p>
-        <p class="admin-muted">更改时后端会迁移已登记的工作空间目录。</p><Button :disabled="!storage" @click="saveRoot">保存存储根目录</Button>
+        <p class="admin-muted">更改时后端会迁移已登记的工作空间目录。</p><Button :disabled="!storage || actionBusy" @click="runAction(saveRoot)">{{ actionBusy ? '保存中…' : '保存存储根目录' }}</Button>
       </CardContent></Card>
       <Card v-else-if="settingsSection === 'runtime'"><CardHeader><CardTitle>Worker / Queue · 部署运行限制</CardTitle></CardHeader><CardContent class="kv-list">
         <template v-if="runtime"><p><span>任务租约</span><strong>{{ runtime.limits.task_lease_seconds }} 秒</strong></p><p><span>最大重试次数</span><strong>{{ runtime.limits.task_max_attempts }}</strong></p><p><span>上传大小上限</span><strong>{{ bytes(runtime.limits.max_upload_bytes) }}</strong></p><p><span>会话时长</span><strong>{{ runtime.limits.session_ttl_hours }} 小时</strong></p><p><span>Timeout / 并发限制</span><strong>未提供平台级配置接口</strong></p><p><span>配置来源</span><strong>部署环境 · 只读</strong></p></template>
@@ -417,38 +505,33 @@ async function cleanupTemp() {
     </section>
 
     <section v-if="tab === 'tasks'" class="admin-section">
-      <div class="admin-title"><div><h2>任务 / 队列</h2><p>管理员运维视图 · 最近 {{ tasks.length }} 条</p></div>
-        <div class="controls"><select v-model="taskStatus" aria-label="任务状态"><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><Input v-model="taskSearch" placeholder="任务 ID、类型或用户" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button></div>
+      <div class="admin-title"><div><p>管理员运维视图 · 最近 {{ tasks.length }} 条</p></div>
+        <div class="controls"><select v-model="taskStatus" aria-label="任务状态"><option value="all">全部状态</option><option value="queued">排队中</option><option value="running">运行中</option><option value="completed">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select><Input v-model="taskSearch" aria-label="搜索任务" placeholder="任务 ID、类型或用户" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button></div>
       </div>
-      <div class="metric-grid task-summary"><div class="metric"><span>排队中</span><strong>{{ metricCount(taskStatusSummary, 'pending', 'queued', 'retrying') }}</strong></div><div class="metric"><span>运行中</span><strong>{{ metricCount(taskStatusSummary, 'running', 'cancelling') }}</strong></div><div class="metric"><span>已完成</span><strong>{{ metricCount(taskStatusSummary, 'succeeded') }}</strong></div><div class="metric"><span>失败 / 超时</span><strong>{{ metricCount(taskStatusSummary, 'failed', 'timeout') }}</strong></div><div class="metric"><span>已取消</span><strong>{{ metricCount(taskStatusSummary, 'cancelled') }}</strong></div></div>
-      <Card><CardContent class="pad"><div class="admin-table"><table class="wide-table"><thead><tr><th>类型 / ID</th><th>用户</th><th>项目</th><th>状态</th><th>Worker</th><th>创建时间</th><th>操作</th></tr></thead>
-        <tbody><tr v-for="task in tasks" :key="task.id"><td><strong>{{ task.task_type }}</strong><small class="mono">{{ task.id }}</small></td><td>{{ task.owner_username }}</td><td class="mono">{{ task.project_id?.slice(0, 8) ?? '—' }}</td><td><StatusPill :label="statusLabel(task.status)" :tone="tone(task.status)" /></td><td class="clip" :title="task.worker_id ?? ''">{{ task.worker_id || '—' }}</td><td>{{ date(task.created_at) }}</td><td><Button variant="outline" size="sm" @click="selectedTask = task">详情</Button></td></tr></tbody></table></div><p v-if="!tasks.length" class="admin-empty">没有匹配的任务</p></CardContent></Card>
-      <Card v-if="selectedTask"><CardHeader><CardTitle>任务详情</CardTitle></CardHeader><CardContent class="admin-form">
+      <div class="metric-grid task-summary"><AdminStatCard label="排队中"><template #value>{{ metricCount(taskStatusSummary, 'pending', 'queued', 'retrying') }}</template></AdminStatCard><AdminStatCard label="运行中"><template #value>{{ metricCount(taskStatusSummary, 'running', 'cancelling') }}</template></AdminStatCard><AdminStatCard label="已完成"><template #value>{{ metricCount(taskStatusSummary, 'succeeded') }}</template></AdminStatCard><AdminStatCard label="失败 / 超时"><template #value>{{ metricCount(taskStatusSummary, 'failed', 'timeout') }}</template></AdminStatCard><AdminStatCard label="已取消"><template #value>{{ metricCount(taskStatusSummary, 'cancelled') }}</template></AdminStatCard></div>
+      <Card><CardContent class="pad"><AdminTable table-class="wide-table"><thead><tr><th>类型 / ID</th><th>用户</th><th>项目</th><th>状态</th><th>Worker</th><th>创建时间</th><th class="user-actions">操作</th></tr></thead>
+        <tbody><tr v-for="task in tasks" :key="task.id" :aria-selected="selectedTask?.id === task.id"><td><strong>{{ task.task_type }}</strong><small class="mono">{{ task.id }}</small></td><td>{{ task.owner_username }}</td><td class="mono">{{ task.project_id?.slice(0, 8) ?? '—' }}</td><td><StatusPill :label="statusLabel(task.status)" :tone="tone(task.status)" /></td><td class="clip" :title="task.worker_id ?? ''">{{ task.worker_id || '—' }}</td><td>{{ date(task.created_at) }}</td><td class="user-actions"><Button variant="outline" size="sm" @click="selectedTask = task">详情</Button></td></tr></tbody></AdminTable><AdminEmptyState v-if="!tasks.length" title="没有匹配的任务" description="调整状态或搜索条件后重新筛选。" /></CardContent></Card>
+      <AdminDrawer v-if="selectedTask" title="任务详情" @close="selectedTask = null"><div class="admin-form">
+        <p v-if="error" role="alert" class="admin-error">{{ error }}</p>
         <p class="mono">{{ selectedTask.id }}</p><p>{{ selectedTask.task_type }} · {{ selectedTask.owner_username }} · 项目 {{ selectedTask.project_id ?? '—' }}</p>
         <p>状态：{{ statusLabel(selectedTask.status) }} · 进度 {{ selectedTask.progress }}% · 第 {{ selectedTask.attempt_no ?? 0 }} 次尝试 · Worker {{ selectedTask.worker_id || '—' }}</p>
         <p>开始：{{ date(selectedTask.started_at) }} · 结束：{{ date(selectedTask.finished_at) }} · 耗时：{{ elapsed(selectedTask.started_at, selectedTask.finished_at) }}</p>
         <p v-if="selectedTask.error_message" class="admin-error">{{ selectedTask.error_code }} · {{ selectedTask.error_message }}</p>
-        <div class="controls"><Button v-if="!['succeeded','failed','timeout','cancelled'].includes(selectedTask.status)" variant="outline" @click="cancelTask(selectedTask)">取消任务</Button><Button v-if="['failed','timeout','cancelled'].includes(selectedTask.status)" variant="outline" @click="retryTask(selectedTask)"><RotateCcw class="h-4 w-4" />重新排队</Button></div>
-      </CardContent></Card>
+        <div class="controls"><Button v-if="!['succeeded','failed','timeout','cancelled'].includes(selectedTask.status)" :disabled="actionBusy" variant="destructive" @click="runAction(async () => { if (selectedTask) await cancelTask(selectedTask) })">取消任务</Button><Button v-if="['failed','timeout','cancelled'].includes(selectedTask.status)" :disabled="actionBusy" variant="outline" @click="runAction(async () => { if (selectedTask) await retryTask(selectedTask) })"><RotateCcw class="h-4 w-4" />重新排队</Button></div>
+      </div></AdminDrawer>
     </section>
 
     <section v-if="tab === 'logs'" class="admin-section">
-      <div class="admin-title"><div><h2>日志与异常</h2><p>持久化任务失败、审计事件和 API 进程内 5xx；每次最多 50 条</p></div>
+      <div class="admin-title"><div><p>持久化任务失败、审计事件和 API 进程内 5xx；每次最多 50 条</p></div>
         <div class="controls"><select v-model="logHours" aria-label="时间范围"><option :value="1">近 1 小时</option><option :value="24">近 24 小时</option><option :value="168">近 7 天</option></select>
           <select v-model="logLevel" aria-label="日志级别"><option value="all">全部级别</option><option value="error">仅异常</option><option value="info">操作记录</option></select>
           <select v-model="logModule" aria-label="日志模块"><option value="all">全部模块</option><option v-for="name in ['system','api','llm','tts','worker','audio']" :key="name" :value="name">{{ name }}</option></select>
-          <Input v-model="logSearch" placeholder="搜索类型或消息" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button>
+          <Input v-model="logSearch" aria-label="搜索日志" placeholder="搜索类型或消息" class="search" @keyup.enter="load" /><Button variant="outline" @click="load">筛选</Button>
         </div>
       </div>
-      <Card><CardContent class="pad"><div class="admin-table"><table><thead><tr><th>时间</th><th>级别</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
-        <tbody><tr v-for="entry in events" :key="entry.id"><td>{{ date(entry.time) }}</td><td><StatusPill :label="entry.level === 'error' ? '异常' : entry.level" :tone="entry.level === 'error' ? 'negative' : 'neutral'" /></td><td>{{ entry.module }}</td><td>{{ entry.type }}</td><td class="clip" :title="entry.message">{{ entry.message }}</td></tr></tbody></table></div><p v-if="!events.length" class="admin-empty">没有匹配的记录</p></CardContent></Card>
+      <Card><CardContent class="pad"><AdminTable><thead><tr><th>时间</th><th>级别</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
+        <tbody><tr v-for="entry in events" :key="entry.id"><td>{{ date(entry.time) }}</td><td><StatusPill :label="entry.level === 'error' ? '异常' : entry.level" :tone="entry.level === 'error' ? 'negative' : 'neutral'" /></td><td>{{ entry.module }}</td><td>{{ entry.type }}</td><td class="clip" :title="entry.message">{{ entry.message }}</td></tr></tbody></AdminTable><AdminEmptyState v-if="!events.length" title="当前范围内没有记录" description="尝试扩大时间范围或调整筛选条件。" /></CardContent></Card>
     </section>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.admin-console{max-width:1500px;min-width:0;margin:auto;padding-bottom:32px}.admin-head,.admin-title{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.admin-head h1{font-size:26px;font-weight:750;line-height:1.25}.admin-head p,.admin-title p{margin-top:4px;color:hsl(var(--muted-foreground));font-size:13px}.admin-eyebrow{font-size:10px;font-weight:800;letter-spacing:.13em;color:hsl(var(--primary))}.admin-section{display:grid;gap:16px}.admin-title h2{font-size:19px;font-weight:750}.service-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:9px}.service-row{min-width:0;border:1px solid var(--glass-border);border-radius:10px;background:var(--glass-tint);box-shadow:var(--glass-highlight),var(--glass-shadow);padding:11px 12px}.service-row>div{display:flex;align-items:center;justify-content:space-between;gap:6px}.service-row strong{font-size:12px}.service-row p{margin-top:7px;overflow:hidden;color:hsl(var(--muted-foreground));font-size:11px;text-overflow:ellipsis;white-space:nowrap}.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px}.metric{min-width:0;border:1px solid var(--glass-border);border-radius:10px;background:var(--glass-tint);box-shadow:var(--glass-highlight),var(--glass-shadow);padding:12px 14px}.metric span{display:block;color:hsl(var(--muted-foreground));font-size:11px}.metric strong{display:block;margin-top:5px;font-size:21px;font-weight:750;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.metric small{display:block;margin-top:4px;color:hsl(var(--muted-foreground));font-size:10px;line-height:1.4}.overview-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.overview-grid>*{min-width:0}.service-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.service-metrics>*{min-width:0}.kv-list{display:grid;gap:9px;font-size:12px}.kv-list p{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid hsl(var(--border));padding-bottom:8px}.kv-list p:last-child{border-bottom:0;padding-bottom:0}.kv-list span,.admin-muted{color:hsl(var(--muted-foreground))}.kv-list strong{text-align:right;font-variant-numeric:tabular-nums}.admin-muted{font-size:12px;line-height:1.5}.admin-console a{display:inline-flex;align-items:center;gap:4px;margin-top:10px;color:hsl(var(--primary));font-size:12px;font-weight:650}.gpu-block+.gpu-block{margin-top:18px;padding-top:14px;border-top:1px solid hsl(var(--border))}.gpu-block h3{margin-bottom:10px;font-size:13px;font-weight:700}.admin-error{border:1px solid hsl(var(--destructive)/.3);border-radius:8px;background:hsl(var(--destructive)/.08);padding:10px;color:hsl(var(--destructive));font-size:12px;overflow-wrap:anywhere}.admin-error button{text-decoration:underline}.text-danger{color:hsl(var(--destructive))}.controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.controls select{min-height:36px;max-width:160px;border:1px solid hsl(var(--border));border-radius:7px;background:hsl(var(--background));padding:0 8px;font-size:13px}.search{width:215px;max-width:100%}.pad{padding-top:16px}.admin-table{width:100%;overflow-x:auto}table{width:100%;min-width:650px;border-collapse:collapse;font-size:12px}.wide-table{min-width:1050px}.compact-table{min-width:500px}th{text-align:left;color:hsl(var(--muted-foreground));font-weight:650;white-space:nowrap}th,td{padding:10px 9px;border-bottom:1px solid hsl(var(--border));vertical-align:middle}td{max-width:300px;overflow-wrap:anywhere}td small{display:block;margin-top:3px;color:hsl(var(--muted-foreground));font-size:10px}tr:last-child td{border-bottom:0}.clip{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.admin-empty{padding:24px;text-align:center;color:hsl(var(--muted-foreground));font-size:13px}.pager{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px;font-size:12px}.admin-form{display:grid;justify-items:start;gap:12px;font-size:13px}.admin-form>*{max-width:100%}.admin-form input[type=checkbox]{width:16px;height:16px;margin-right:5px;accent-color:hsl(var(--primary))}.badge-stack{display:flex;flex-direction:column;align-items:flex-start;gap:4px}.cleanup-row{display:flex;align-items:center;justify-content:space-between;gap:18px}.cleanup-row p{font-size:13px}.cleanup-row small{display:block;margin-top:5px;color:hsl(var(--muted-foreground));font-size:11px}.settings-nav{display:flex;gap:7px;overflow-x:auto;border-bottom:1px solid hsl(var(--border));padding-bottom:8px}.settings-nav button{white-space:nowrap;border:1px solid transparent;border-radius:8px;padding:8px 11px;color:hsl(var(--muted-foreground));font-size:12px;font-weight:650}.settings-nav button.active{border-color:var(--glass-border);background:var(--glass-tint-strong);color:hsl(var(--foreground));box-shadow:var(--glass-highlight)}.task-summary{grid-template-columns:repeat(5,minmax(120px,1fr))}@media(max-width:900px){.overview-grid,.service-metrics{grid-template-columns:1fr}.task-summary{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:600px){.admin-head h1{font-size:22px}.service-grid,.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.task-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-title{align-items:stretch}.controls{width:100%}.controls .search{flex:1 1 150px}.cleanup-row{align-items:flex-start;flex-direction:column}.settings-nav button{padding:7px 9px}}
-.metric-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
-@media(max-width:900px){.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-.admin-section>*{min-width:0;max-width:100%}.user-actions{position:sticky;right:0;background:var(--glass-tint-strong);box-shadow:-8px 0 10px hsl(var(--foreground)/.04)}
-</style>

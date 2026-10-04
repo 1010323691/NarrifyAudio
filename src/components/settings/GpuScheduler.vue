@@ -142,7 +142,7 @@ onBeforeUnmount(() => { epoch++; if (timer) clearInterval(timer) })
       <template v-if="mode === 'parameters' && draft">
         <label class="flex items-center gap-2"><input v-model="draft.enabled" type="checkbox" />启用单 GPU 动态调度</label>
         <label class="flex items-center gap-2"><input v-model="draft.shutdown_when_idle" type="checkbox" />空闲到期关闭 GPU 服务</label>
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="gpu-parameter-grid grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label v-for="field in fields" :key="field.key" class="space-y-2"><span class="text-sm">{{ field.label }}</span><Input v-model.number="draft[field.key]" type="number" :min="field.min" :max="field.max" :step="field.key === 'startup_retry_count' ? 1 : 0.1" /></label>
         </div>
         <p class="text-sm text-muted-foreground">当前侧有等待任务或活动调用时，至少停留配置时长（默认 300 秒）；等待超时不能提前切走。当前侧清空且另一侧排队时，立即切换，不受最短停留或冷却限制。切换仍须确认进程退出。TTS 按任务加载模型，单次仅一个模型子进程使用 GPU。</p>
