@@ -120,9 +120,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
     </RouterLink>
 
     <nav v-if="isAdminArea" class="app-nav" aria-label="系统管理导航">
-      <div class="app-nav__group">
-        <div class="app-nav__label">系统管理</div>
-        <RouterLink v-for="item in ADMIN_ITEMS" :key="item.to" :to="item.to" class="app-nav__item" :class="isAdminItemActive(item) ? 'is-active' : ''">
+      <div v-for="group in [{ label: '运行与监控', indexes: [0, 1, 6, 7] }, { label: '账户与资源', indexes: [2, 3, 4] }, { label: '平台设置', indexes: [5] }]" :key="group.label" class="app-nav__group">
+        <div class="app-nav__label">{{ group.label }}</div>
+        <RouterLink v-for="item in ADMIN_ITEMS.filter((_, index) => group.indexes.includes(index))" :key="item.to" :to="item.to" class="app-nav__item" :class="isAdminItemActive(item) ? 'is-active' : ''" :aria-current="isAdminItemActive(item) ? 'page' : undefined">
           <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>
         </RouterLink>
       </div>

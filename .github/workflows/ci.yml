@@ -40,6 +40,8 @@ jobs:
       # Pinia store 竞态隔离回归（node:test 沙箱跑真实 store 代码，改 store 行为的门禁）
       - name: 状态隔离回归
         run: npm run test:state-isolation
+      - name: 管理控制台回归
+        run: npm run test:admin-console
 
       # 三个工作台组合回归（node:test 沙箱跑真实 composable/view 代码，改其竞态逻辑的门禁，
       # 与 state-isolation 同款机制，见 scripts/test-*-workbench.mjs）

@@ -30,6 +30,9 @@ import { pickFiles } from '@/utils/fileops'
 import { formatDuration } from '@/utils/format'
 import type { MusicLibrary, MusicSuggestion, MusicTagCategory, TaskSnapshot, TrackTags } from '@/types'
 
+import AdminDrawer from '@/components/admin/AdminDrawer.vue'
+import AdminPageHeader from '@/components/admin/AdminPageHeader.vue'
+import AdminLoadingState from '@/components/admin/AdminLoadingState.vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import CardContent from '@/components/ui/CardContent.vue'
@@ -92,7 +95,7 @@ const CAT_BADGE: Record<MusicTagCategory, string> = {
 // ---------------------------------------------------------------------------
 
 const lib = ref<MusicLibrary | null>(null)
-const loading = ref(false)
+const loading = ref(true)
 const loadError = ref('')
 const uploading = ref(false)
 const search = ref('')
@@ -875,10 +878,7 @@ async function refreshAll() {
   await Promise.all([taskStore.refresh(), refresh()])
 }
 
-onMounted(async () => {
-  await taskStore.refresh()
-  void refresh()
-})
+onMounted(() => { void refreshAll() })
 onActivated(() => {
   goRoot() // 重新进入回 root 视图（页面本地视图态无跨导航持久需求）
   if (lib.value) void refreshAll()
@@ -886,14 +886,12 @@ onActivated(() => {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <header class="page-header mb-5">
-      <div>
-        <p class="eyebrow">Music Library</p>
-        <h1 class="page-title flex items-center gap-3"><Disc3 class="h-6 w-6" />音乐库</h1>
-        <p class="page-description">管理背景音乐曲目、标签和文件夹。</p>
-      </div>
-    </header>
+  <div class="admin-library space-y-4">
+    <AdminPageHeader title="音乐库管理" description="组织公共曲目、收藏集与标签，为章节匹配提供音乐资源。">
+      <Button variant="outline" size="sm" :disabled="loading" @click="refreshAll"><RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loading }" />刷新数据</Button>
+      <Button size="sm" :disabled="uploading || loading" @click="doUpload()"><Upload class="h-4 w-4" />{{ uploading ? '上传中…' : '上传音乐' }}</Button>
+    </AdminPageHeader>
+    <AdminLoadingState v-if="loading && !lib" />
 
     <Card
       :class="dragOver ? 'ring-2 ring-primary' : ''"
@@ -927,7 +925,7 @@ onActivated(() => {
       </CardHeader>
       <CardContent class="space-y-4">
         <Alert v-if="loadError" variant="destructive">
-          {{ loadError }}
+          {{ loadError }} <button class="underline" @click="refreshAll">重新加载</button>
         </Alert>
 
         <div v-else-if="allTracks.length" class="grid gap-4 xl:grid-cols-[13rem_minmax(0,1fr)]">
@@ -985,12 +983,12 @@ onActivated(() => {
               <Input
                 v-model="search"
                 class="h-8 pl-8 text-xs"
-                placeholder="搜索文件名…"
+                aria-label="搜索音乐文件" placeholder="搜索文件名…"
               />
             </div>
             <div class="w-44">
               <select
-                v-model="tagFilter"
+                v-model="tagFilter" aria-label="音乐标签筛选"
                 class="flex h-8 w-full rounded-md border border-input bg-background px-2 py-1 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 <option value="">全部标签</option>
@@ -1152,19 +1150,19 @@ onActivated(() => {
           </div>
 
           <!-- 行 = 曲目表 -->
-          <div class="overflow-x-auto overflow-y-visible rounded-lg border"><Table class="min-w-[66rem]">
+          <Table class="music-data-table rounded-lg border" tabindex="0" role="region" aria-label="音乐列表，可横向滚动">
             <TableHeader>
               <TableRow>
                 <TableHead class="w-8">
                   <input
                     type="checkbox"
                     class="h-4 w-4 accent-primary"
-                    :checked="allVisibleSelected"
+                    aria-label="选择当前视图所有音乐" :checked="allVisibleSelected"
                     :disabled="!visibleNames.length || uploading"
                     @change="toggleSelectAll"
                   />
                 </TableHead>
-                <TableHead>文件名</TableHead>
+                <TableHead class="music-name-cell">文件名 / 试听</TableHead>
                 <TableHead class="w-24">文件夹</TableHead>
                 <TableHead class="w-14">格式</TableHead>
                 <TableHead class="w-14">时长</TableHead>
@@ -1173,7 +1171,7 @@ onActivated(() => {
                 <TableHead>标签</TableHead>
                 <TableHead class="w-40">AI 识别</TableHead>
                 <TableHead class="w-16">启用</TableHead>
-                <TableHead class="w-40 text-right">操作</TableHead>
+                <TableHead class="w-40 text-right user-actions">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1182,7 +1180,7 @@ onActivated(() => {
                   <input
                     type="checkbox"
                     class="h-4 w-4 accent-primary"
-                    :checked="!!selected[name]"
+                    :aria-label="`选择音乐 ${name}`" :checked="!!selected[name]"
                     @change="
                       (e) => {
                         if ((e.target as HTMLInputElement).checked) selected[name] = true
@@ -1191,9 +1189,9 @@ onActivated(() => {
                     "
                   />
                 </TableCell>
-                <TableCell class="max-w-64">
-                  <div class="flex items-center gap-2">
-                    <span class="truncate text-sm font-medium" :title="name">{{ name }}</span>
+                <TableCell class="music-name-cell">
+                  <div class="flex flex-col items-start gap-2">
+                    <span class="music-filename truncate text-sm font-medium" :title="name">{{ name }}</span>
                     <MiniAudioPlayer :src="musicPreviewUrl(name)" />
                   </div>
                 </TableCell>
@@ -1221,19 +1219,18 @@ onActivated(() => {
                 <TableCell class="w-28">
                   <div
                     v-if="CATEGORIES.some((c) => tr.tags?.[c]?.length)"
-                    class="group relative flex h-8 w-24 items-center focus:outline-none"
+                    class="group relative flex min-h-8 w-32 flex-wrap items-center gap-1 focus:outline-none"
                     tabindex="0"
                     :aria-label="`查看 ${name} 的全部标签`"
                   >
                     <span
-                      v-for="(t, index) in CATEGORIES.flatMap((c) => (tr.tags?.[c] ?? []).map((x) => [c, x])).slice(0, 3)"
+                      v-for="t in CATEGORIES.flatMap((c) => (tr.tags?.[c] ?? []).map((x) => [c, x])).slice(0, 3)"
                       :key="`${t[0]}-${t[1]}`"
-                      class="inline-flex h-7 min-w-7 items-center justify-center rounded-full border px-1 text-[10px] font-bold shadow-sm"
-                      :class="[CAT_BADGE[t[0] as MusicTagCategory], index ? '-ml-2.5' : '']"
-                      :style="{ zIndex: 4 - index }"
+                      class="inline-flex max-w-16 truncate rounded border px-1.5 py-0.5 text-[11px] font-medium"
+                      :class="CAT_BADGE[t[0] as MusicTagCategory]"
                       :title="String(t[1])"
                     >
-                      {{ String(t[1]).slice(0, 1) }}
+                      {{ String(t[1]) }}
                     </span>
                     <span
                       v-if="CATEGORIES.flatMap((c) => tr.tags?.[c] ?? []).length > 3"
@@ -1301,12 +1298,12 @@ onActivated(() => {
                 </TableCell>
                 <TableCell>
                   <Switch
-                    :model-value="tr.enabled"
+                    :model-value="tr.enabled" :aria-label="`启用音乐 ${name}`"
                     :class="tr.enabled ? '' : 'opacity-60'"
                     @update:model-value="(v) => toggleEnabled(name, v as boolean)"
                   />
                 </TableCell>
-                <TableCell>
+                <TableCell class="user-actions">
                   <!-- 移动展开态：目标文件夹 select（全部文件夹 + 未分类）+ 确认/取消 -->
                   <div v-if="moveOpenFor === name" class="flex flex-col items-end gap-1">
                     <select
@@ -1349,7 +1346,7 @@ onActivated(() => {
                 </TableCell>
               </TableRow>
             </TableBody>
-          </Table></div>
+          </Table>
 
           <p v-if="!trackList.length" class="text-sm text-muted-foreground">
             <template v-if="view.kind === 'folder'">
@@ -1362,7 +1359,7 @@ onActivated(() => {
           </p>
           </div>
         </div>
-        <div v-else class="space-y-2 py-6 text-center">
+        <div v-else-if="!loading" class="space-y-2 py-6 text-center">
           <p class="text-sm text-muted-foreground">音乐库为空——上传 mp3 / wav / flac 开始（也可直接拖入文件）。</p>
           <Button class="mx-auto" :disabled="uploading" @click="doUpload()">
             <Loader2 v-if="uploading" class="h-4 w-4 animate-spin" />
@@ -1382,9 +1379,12 @@ onActivated(() => {
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
-        <p v-if="tagInfo" class="text-xs text-muted-foreground">
-          「{{ CAT_LABEL[tagInfo.cat] }} · {{ tagInfo.name }}」正在被 {{ tagInfo.count }} 首音乐使用。
-        </p>
+        <div v-if="tagInfo" class="admin-tag-selection">
+          <span>「{{ CAT_LABEL[tagInfo.cat] }} · {{ tagInfo.name }}」· {{ tagInfo.count }} 首音乐使用</span>
+          <Button variant="outline" size="sm" @click="doRenameTag(tagInfo.cat, tagInfo.name)">重命名</Button>
+          <Button variant="ghost" size="sm" class="text-destructive" @click="doDeleteTag(tagInfo.cat, tagInfo.name)">删除标签</Button>
+          <Button variant="ghost" size="sm" aria-label="取消标签选择" @click="tagInfo = null"><X class="h-4 w-4" /></Button>
+        </div>
         <div v-for="cat in CATEGORIES" :key="cat" class="space-y-2">
           <div class="text-xs font-semibold text-muted-foreground">{{ CAT_LABEL[cat] }}</div>
           <div class="flex flex-wrap items-center gap-1.5">
@@ -1392,34 +1392,24 @@ onActivated(() => {
               v-for="t in lib?.tags[cat] ?? []"
               :key="t"
               type="button"
-              class="group inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-semibold transition-colors"
+              class="admin-tag-chip inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium transition-colors" :aria-pressed="tagInfo?.cat === cat && tagInfo?.name === t"
               :class="CAT_BADGE[cat]"
               :title="`${CAT_LABEL[cat]} · ${t}（${usageCount(cat, t)} 首音乐使用）`"
               @click="showTagInfo(cat, t)"
             >
               {{ t }}
               <span class="text-[10px] opacity-70">{{ usageCount(cat, t) }}</span>
-              <span class="ml-1 hidden gap-0.5 group-hover:inline-flex">
-                <span
-                  class="cursor-pointer underline opacity-70 hover:opacity-100"
-                  @click.stop="doRenameTag(cat, t)"
-                >改名</span>
-                <span
-                  class="cursor-pointer underline opacity-70 hover:opacity-100"
-                  @click.stop="doDeleteTag(cat, t)"
-                >删除</span>
-              </span>
             </button>
             <form
               class="flex items-center gap-1"
               @submit.prevent="doAddTag(cat)"
             >
               <Input
-                v-model="newTag[cat]"
+                v-model="newTag[cat]" :aria-label="`新增${CAT_LABEL[cat]}标签`"
                 class="h-6 w-24 px-1.5 py-0 text-xs"
                 :placeholder="`新增${CAT_LABEL[cat]}标签`"
               />
-              <Button variant="outline" size="sm" class="h-6 px-1.5" type="submit">
+              <Button variant="outline" size="sm" class="h-6 px-1.5" type="submit" :aria-label="`添加${CAT_LABEL[cat]}标签`">
                 <Plus class="h-3 w-3" />
               </Button>
             </form>
@@ -1530,18 +1520,9 @@ onActivated(() => {
       </div>
     </div>
 
-    <!-- 标签编辑弹层（页内自写 overlay） -->
-    <div
-      v-if="editor"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      @click.self="closeEditor"
-    >
-      <div class="max-h-[85vh] w-full max-w-xl space-y-4 overflow-y-auto rounded-lg border bg-background p-5 shadow-lg">
-        <div>
-          <h2 class="text-base font-semibold">{{ editor.name }}</h2>
-          <p class="mt-0.5 text-xs text-muted-foreground">勾选标签并保存；词表外标签自动归入「自定义」。</p>
-        </div>
-
+    <AdminDrawer v-if="editor" :title="editor.name" @close="closeEditor">
+      <div class="space-y-4">
+        <p class="text-xs text-muted-foreground">选择标签并保存；词表外标签自动归入自定义。</p>
         <div v-for="cat in CATEGORIES" :key="cat" class="space-y-1.5">
           <div class="text-xs font-semibold text-muted-foreground">{{ CAT_LABEL[cat] }}</div>
           <div class="flex flex-wrap gap-1.5">
@@ -1550,6 +1531,7 @@ onActivated(() => {
               :key="t"
               type="button"
               class="rounded-md border px-2 py-0.5 text-xs font-medium transition-colors"
+              :aria-pressed="editor.tags[cat].includes(t)"
               :class="editor.tags[cat].includes(t)
                 ? CAT_BADGE[cat] + ' ring-1 ring-current'
                 : 'border-input text-muted-foreground hover:bg-accent'"
@@ -1562,6 +1544,7 @@ onActivated(() => {
           <div v-if="cat === 'custom'" class="flex items-center gap-1.5">
             <Input
               v-model="customDraft"
+              aria-label="自定义音乐标签"
               class="h-7 w-40 text-xs"
               placeholder="自定义标签，回车添加"
               @keyup.enter="addCustomTag"
@@ -1573,8 +1556,8 @@ onActivated(() => {
         </div>
 
         <div class="space-y-1.5">
-          <div class="text-xs font-semibold text-muted-foreground">描述（AI 推荐用，可空）</div>
-          <Textarea v-model="editor.desc" class="min-h-16 text-sm" placeholder="例如：低沉弦乐，适合夜间行路场景" />
+          <label for="music-description" class="text-xs font-semibold text-muted-foreground">描述（AI 推荐用，可空）</label>
+          <Textarea id="music-description" v-model="editor.desc" class="min-h-16 text-sm" placeholder="例如：低沉弦乐，适合夜间行路场景" />
         </div>
 
         <div class="rounded-md border p-3">
@@ -1618,7 +1601,7 @@ onActivated(() => {
           </Button>
         </div>
       </div>
-    </div>
+    </AdminDrawer>
   </div>
 </template>
 

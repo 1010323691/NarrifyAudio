@@ -8,6 +8,7 @@ import { useToast } from '@/components/ui/toast'
 import { listLlmModels } from '@/api/admin'
 import type { AppConfig, TextToggles } from '@/types'
 
+import AdminLoadingState from '@/components/admin/AdminLoadingState.vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
@@ -41,6 +42,7 @@ const { push: toast } = useToast()
 const draft = ref<AppConfig | null>(null)
 const originalPrompts = ref<AppConfig['prompts'] | null>(null)
 const saving = ref(false)
+const loading = ref(true)
 const active = ref<'text' | 'models' | 'audio'>('text')
 // 「拉取模型」：草稿值探测（无需先保存），结果下拉点选即填入模型名称。
 const fetchingModels = ref(false)
@@ -78,14 +80,17 @@ const USER_OWNED_CHECKS = [
   'spot_check_enabled',
 ] as const
 
-onMounted(async () => {
+async function loadSettings() {
+  loading.value = true
   active.value = props.section
   // Root (admin) channel — the store keeps it apart from the project config
   // store field, so saving below can never overwrite the project values.
   await settings.loadRoot()
   draft.value = settings.rootConfig ? JSON.parse(JSON.stringify(settings.rootConfig)) : null
   originalPrompts.value = draft.value ? { ...draft.value.prompts } : null
-})
+  loading.value = false
+}
+onMounted(loadSettings)
 
 async function save() {
   if (!draft.value) return
@@ -198,7 +203,8 @@ watch(
       </Button>
     </div>
 
-    <Alert v-if="!draft" variant="destructive">平台功能配置暂时无法读取，请刷新后重试。</Alert>
+    <AdminLoadingState v-if="loading" />
+    <Alert v-else-if="!draft" variant="destructive">平台功能配置暂时无法读取。<button class="underline" @click="loadSettings">重新加载</button></Alert>
 
     <template v-else>
       <!-- 文本排版 -->
@@ -210,7 +216,7 @@ watch(
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div v-for="t in TOGGLES" :key="t.key" class="flex items-center justify-between">
               <Label class="font-normal">{{ t.label }}</Label>
-              <Switch v-model="draft.text[t.key]" />
+              <Switch :aria-label="t.label" v-model="draft.text[t.key]" />
             </div>
           </div>
         </CardContent>
@@ -245,24 +251,24 @@ watch(
         </CardHeader>
         <CardContent class="space-y-3">
           <div class="space-y-1.5">
-            <Label>API 地址</Label>
-            <Input v-model="draft.llm.base_url" placeholder="http://localhost:11434/v1" />
+            <Label for="admin-setting-1">API 地址</Label>
+            <Input id="admin-setting-1" v-model="draft.llm.base_url" placeholder="http://localhost:11434/v1" />
           </div>
           <div class="grid gap-4 sm:grid-cols-2">
             <div class="space-y-1.5">
-              <Label>API Key</Label>
-              <Input v-model="draft.llm.api_key" placeholder="local" />
+              <Label for="admin-setting-2">API Key</Label>
+              <Input id="admin-setting-2" v-model="draft.llm.api_key" placeholder="local" />
             </div>
             <div class="space-y-1.5">
-              <Label>模型名称</Label>
+              <Label for="admin-setting-3">模型名称</Label>
               <div class="flex flex-wrap items-center gap-2">
-                <Input v-model="draft.llm.model_name" placeholder="如 qwen3:14b（必填）" class="min-w-0 flex-1" />
+                <Input id="admin-setting-3" v-model="draft.llm.model_name" placeholder="如 qwen3:14b（必填）" class="min-w-0 flex-1" />
                 <Button variant="outline" size="sm" :disabled="fetchingModels" @click="fetchModels">
                   <RefreshCw class="h-4 w-4" :class="fetchingModels ? 'animate-spin' : ''" />
                   {{ fetchingModels ? '拉取中…' : '拉取模型' }}
                 </Button>
               </div>
-              <Select v-if="fetchedModels.length" :modelValue="pickedModel" class="mt-2" @update:modelValue="onPickModel">
+              <Select aria-label="已发现的 LLM 模型" v-if="fetchedModels.length" :modelValue="pickedModel" class="mt-2" @update:modelValue="onPickModel">
                 <option value="" disabled hidden></option>
                 <option v-for="m in fetchedModels" :key="m" :value="m">{{ m }}</option>
               </Select>
@@ -281,44 +287,44 @@ watch(
         <CardContent class="space-y-3">
           <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div class="space-y-1.5">
-              <Label>分段大小（字）</Label>
-              <Input v-model.number="draft.generation.chunk_size" type="number" min="1" />
+              <Label for="admin-setting-4">分段大小（字）</Label>
+              <Input id="admin-setting-4" v-model.number="draft.generation.chunk_size" type="number" min="1" />
             </div>
             <div class="space-y-1.5">
-              <Label>最大返回（tokens）</Label>
-              <Input v-model.number="draft.generation.max_tokens" type="number" min="1" />
+              <Label for="admin-setting-5">最大返回（tokens）</Label>
+              <Input id="admin-setting-5" v-model.number="draft.generation.max_tokens" type="number" min="1" />
             </div>
             <div class="space-y-1.5">
-              <Label>温度</Label>
-              <Input v-model.number="draft.generation.temperature" type="number" step="0.1" min="0" max="2" />
+              <Label for="admin-setting-6">温度</Label>
+              <Input id="admin-setting-6" v-model.number="draft.generation.temperature" type="number" step="0.1" min="0" max="2" />
             </div>
             <div class="space-y-1.5">
-              <Label>Top-P</Label>
-              <Input v-model.number="draft.generation.top_p" type="number" step="0.05" min="0" max="1" />
+              <Label for="admin-setting-7">Top-P</Label>
+              <Input id="admin-setting-7" v-model.number="draft.generation.top_p" type="number" step="0.05" min="0" max="1" />
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label>文本解析 LLM 并发数</Label>
+            <Label for="admin-setting-8">文本解析 LLM 并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
-              <Input v-model.number="draft.generation.parse_worker_concurrency" type="number" min="1" max="32" step="1" class="max-w-[8rem]" />
+              <Input id="admin-setting-8" v-model.number="draft.generation.parse_worker_concurrency" type="number" min="1" max="32" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
                 控制每个后台 Worker 进程内主解析的 LLM 同时请求数。解析工作槽位为该值的 2 倍、最多提前准备或等待该队列。多进程总并发为各进程限额之和。
               </span>
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label>角色基础信息生成并发数</Label>
+            <Label for="admin-setting-9">角色基础信息生成并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
-              <Input v-model.number="draft.generation.max_concurrency" type="number" min="1" step="1" class="max-w-[8rem]" />
+              <Input id="admin-setting-9" v-model.number="draft.generation.max_concurrency" type="number" min="1" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
                 控制角色基础信息的并行生成。
               </span>
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label>归属抽样率（0 = 关闭）</Label>
+            <Label for="admin-setting-10">归属抽样率（0 = 关闭）</Label>
             <div class="flex flex-wrap items-center gap-3">
-              <Input v-model.number="draft.generation.spot_check_rate" type="number" step="0.01" min="0" max="0.5" class="max-w-[8rem]" />
+              <Input id="admin-setting-10" v-model.number="draft.generation.spot_check_rate" type="number" step="0.01" min="0" max="0.5" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
                 设置解析结果的抽样复核比例；0 表示关闭。归属抽样的总开关在用户「文本解析」页。
               </span>
@@ -327,27 +333,27 @@ watch(
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="flex items-center justify-between">
               <Label class="font-normal">纯归属标签删除</Label>
-              <Switch v-model="draft.generation.delete_saying_tags" />
+              <Switch aria-label="纯归属标签删除" v-model="draft.generation.delete_saying_tags" />
             </div>
             <div class="flex items-center justify-between">
               <div class="flex flex-col">
-                <Label class="font-normal">超长段落上限（字）</Label>
+                <Label for="admin-paragraph-limit" class="font-normal">超长段落上限（字）</Label>
                 <span class="text-xs text-muted-foreground">
                   任何条目最终不得超过此字数（机械分段兜底恒生效）。超长段落检查开关（只控制 LLM 语义重切）在用户「文本解析」页。
                 </span>
               </div>
               <Input
-                v-model.number="draft.generation.max_paragraph_chars"
+                id="admin-paragraph-limit" v-model.number="draft.generation.max_paragraph_chars"
                 type="number" min="10" step="10" class="w-20"
               />
             </div>
             <div class="flex items-center justify-between">
               <Label class="font-normal">纯标点条目吸收</Label>
-              <Switch v-model="draft.generation.absorb_punct_entries" />
+              <Switch aria-label="纯标点条目吸收" v-model="draft.generation.absorb_punct_entries" />
             </div>
             <div class="flex items-center justify-between">
               <Label class="font-normal">同人段落合并</Label>
-              <Switch v-model="draft.generation.merge_same_speaker" />
+              <Switch aria-label="同人段落合并" v-model="draft.generation.merge_same_speaker" />
             </div>
           </div>
         </CardContent>
@@ -361,12 +367,12 @@ watch(
         </CardHeader>
         <CardContent class="space-y-3">
           <div class="space-y-1.5">
-            <Label>System Prompt</Label>
-            <Textarea v-model="draft.prompts.system_prompt" rows="8" class="font-mono text-xs" />
+            <Label for="admin-setting-11">System Prompt</Label>
+            <Textarea id="admin-setting-11" v-model="draft.prompts.system_prompt" rows="8" class="font-mono text-xs" />
           </div>
           <div class="space-y-1.5">
-            <Label>User Prompt（模板，含 <code class="text-xs">context</code> / <code class="text-xs">chunk</code> 占位符）</Label>
-            <Textarea v-model="draft.prompts.user_prompt" rows="8" class="font-mono text-xs" />
+            <Label for="admin-setting-12">User Prompt（模板，含 <code class="text-xs">context</code> / <code class="text-xs">chunk</code> 占位符）</Label>
+            <Textarea id="admin-setting-12" v-model="draft.prompts.user_prompt" rows="8" class="font-mono text-xs" />
           </div>
         </CardContent>
       </Card>
@@ -406,26 +412,26 @@ watch(
         <CardContent>
           <div class="grid gap-4 sm:grid-cols-2">
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">目标时长</Label>
-              <Input v-model="draft.audio.target_duration" placeholder="10:00" class="max-w-[120px]" />
+              <Label for="admin-setting-13" class="w-24 shrink-0">目标时长</Label>
+              <Input id="admin-setting-13" v-model="draft.audio.target_duration" placeholder="10:00" class="max-w-[120px]" />
             </div>
             <div class="flex items-center gap-3">
               <Label class="w-24 shrink-0">智能对齐</Label>
-              <Switch v-model="draft.audio.smart_align" />
+              <Switch aria-label="智能对齐" v-model="draft.audio.smart_align" />
             </div>
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">偏移容差</Label>
-              <Input v-model.number="draft.audio.align_tolerance" type="number" min="5" max="30" class="max-w-[100px]" />
+              <Label for="admin-setting-14" class="w-24 shrink-0">偏移容差</Label>
+              <Input id="admin-setting-14" v-model.number="draft.audio.align_tolerance" type="number" min="5" max="30" class="max-w-[100px]" />
               <span class="text-xs text-muted-foreground">秒</span>
             </div>
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">命名格式</Label>
-              <Input v-model="draft.audio.naming_format" placeholder="书名 第 {} 集" class="max-w-[160px]" />
+              <Label for="admin-setting-15" class="w-24 shrink-0">命名格式</Label>
+              <Input id="admin-setting-15" v-model="draft.audio.naming_format" placeholder="书名 第 {} 集" class="max-w-[160px]" />
               <span class="text-xs text-muted-foreground">完整文件名，{} 为编号</span>
             </div>
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">起始编号</Label>
-              <Input v-model="draft.audio.start_number" class="max-w-[100px]" />
+              <Label for="admin-setting-16" class="w-24 shrink-0">起始编号</Label>
+              <Input id="admin-setting-16" v-model="draft.audio.start_number" class="max-w-[100px]" />
             </div>
           </div>
         </CardContent>
@@ -442,28 +448,28 @@ watch(
         <CardContent>
           <div class="grid gap-4 sm:grid-cols-2">
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">BGM 音量</Label>
-              <Input v-model.number="draft.bgm.volume" type="number" step="0.01" min="0" max="2" class="max-w-[100px]" />
+              <Label for="admin-setting-17" class="w-24 shrink-0">BGM 音量</Label>
+              <Input id="admin-setting-17" v-model.number="draft.bgm.volume" type="number" step="0.01" min="0" max="2" class="max-w-[100px]" />
               <span class="text-xs text-muted-foreground">0~2（1 = 原曲电平，2 = 2 倍）</span>
             </div>
             <div class="flex items-center gap-3">
               <Label class="w-24 shrink-0">循环策略</Label>
-              <Switch v-model="draft.bgm.loop" />
+              <Switch aria-label="循环策略" v-model="draft.bgm.loop" />
               <span class="text-xs text-muted-foreground">开 = 循环铺满；关 = 只播一遍，其余静音</span>
             </div>
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">淡入时间</Label>
-              <Input v-model.number="draft.bgm.fade_in" type="number" step="0.5" min="0" class="max-w-[100px]" />
+              <Label for="admin-setting-18" class="w-24 shrink-0">淡入时间</Label>
+              <Input id="admin-setting-18" v-model.number="draft.bgm.fade_in" type="number" step="0.5" min="0" class="max-w-[100px]" />
               <span class="text-xs text-muted-foreground">秒（混音时钳 章节时长/2）</span>
             </div>
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">淡出时间</Label>
-              <Input v-model.number="draft.bgm.fade_out" type="number" step="0.5" min="0" class="max-w-[100px]" />
+              <Label for="admin-setting-19" class="w-24 shrink-0">淡出时间</Label>
+              <Input id="admin-setting-19" v-model.number="draft.bgm.fade_out" type="number" step="0.5" min="0" class="max-w-[100px]" />
               <span class="text-xs text-muted-foreground">秒（混音时钳 章节时长/2）</span>
             </div>
             <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">最低匹配分</Label>
-              <Input v-model.number="draft.bgm.min_match_score" type="number" min="1" step="1" class="max-w-[100px]" />
+              <Label for="admin-setting-20" class="w-24 shrink-0">最低匹配分</Label>
+              <Input id="admin-setting-20" v-model.number="draft.bgm.min_match_score" type="number" min="1" step="1" class="max-w-[100px]" />
               <span class="text-xs text-muted-foreground">低于此分的音乐不进候选</span>
             </div>
           </div>
@@ -474,5 +480,5 @@ watch(
 </template>
 
 <style scoped>
-.admin-settings{display:grid;gap:14px}.settings-actions{display:flex;justify-content:flex-end;margin-top:-6px}
+.admin-settings{display:grid;gap:var(--space-4,16px)}.settings-actions{display:flex;justify-content:flex-end}
 </style>
