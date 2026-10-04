@@ -16,8 +16,8 @@ __pycache__/
 # TTS 环境安装脚本的运行日志（每次运行重写）
 install_tts_env.log
 
-# --- 运行时配置 / 工作空间指针（含本机路径与密钥，不入库）---
-# 根目录 app.json = 通用配置模板 + 当前工作空间指针；产物 / 日志 / 工程配置都在用户工作空间内
+# --- 本机运行时配置 ---
+# 根目录 setting.json 作为无凭据的配置模板跟踪；旧版根目录 app.json 仍忽略
 /app.json
 # Application-level recent workspace history (contains local paths)
 /config/

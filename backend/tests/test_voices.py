@@ -641,8 +641,8 @@ def clone_ws(monkeypatch, tmp_path):
     run the real make_clones / select / list_voices code against it (engine stubbed)."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     ws = tmp_path / "Book"
     core_config.set_workspace_pointer(str(ws))
@@ -1196,8 +1196,8 @@ def test_select_voice_requires_workspace(tmp_path, monkeypatch):
     # No workspace pointer: the guard fires before anything is read or written.
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     try:
         with pytest.raises(HTTPException) as ex:
@@ -1386,8 +1386,8 @@ def test_merge_speakers_requires_workspace(tmp_path, monkeypatch):
     # No workspace pointer: the guard fires before anything is read or written.
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     try:
         with pytest.raises(HTTPException) as ex:
@@ -1474,8 +1474,8 @@ def test_set_gender_rejects_bad_values(clone_ws):
 def test_set_gender_requires_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     try:
         with pytest.raises(HTTPException) as ex:

@@ -2,7 +2,7 @@
 
 Two files, one pointer:
 
-* ``<project>/app.json`` — the root file. It is both the *generic default
+* ``<project>/setting.json`` — the root file. It is both the *generic default
   template* (its non-pointer fields seed every new workspace's config) and the
   *bootstrap pointer*: ``paths.working_dir`` names the active workspace. The
   pointer is the ONLY field the app ever writes there — all other values are
@@ -245,7 +245,7 @@ class AppConfig(BaseModel):
 
 
 # The root file: generic default config template + the workspace pointer (the only writable field).
-TEMPLATE_FILE = PROJECT_ROOT / "app.json"
+TEMPLATE_FILE = PROJECT_ROOT / "setting.json"
 
 _lock = threading.RLock()
 _config_cache: dict[str, AppConfig] = {}
@@ -412,7 +412,7 @@ def _write_config_file(file: Path, config: AppConfig) -> None:
 
 
 def _ensure_template() -> None:
-    """Seed the root ``app.json`` from code defaults on a fresh clone (missing file)."""
+    """Seed the root ``setting.json`` from code defaults on a fresh clone (missing file)."""
     if not TEMPLATE_FILE.exists():
         _write_config_file(TEMPLATE_FILE, AppConfig())
 

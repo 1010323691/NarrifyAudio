@@ -17,8 +17,8 @@ from backend.core import paths as core_paths
 def workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     ws = tmp_path / "Book"
     ws.mkdir()
@@ -154,8 +154,8 @@ def test_merge_status_no_workspace_zero_rows(monkeypatch, tmp_path):
     # Read-only endpoint: no workspace -> all-zero rows (degrade, never 409).
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
                                        encoding="utf-8")
     core_config.reset_config_cache()
     try:

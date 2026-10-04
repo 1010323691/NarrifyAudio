@@ -54,7 +54,7 @@ def _test_schema():
 @pytest.fixture(autouse=True)
 def _fresh_layout_cache():
     """Reset the layout memo around every test. ``core.paths`` caches
-    ``get_or_prepare_layout()`` on the root ``app.json``'s ``(mtime_ns, size)``
+    ``get_or_prepare_layout()`` on the root ``setting.json``'s ``(mtime_ns, size)``
     — but sandboxed tests point ``TEMPLATE_FILE`` at a DIFFERENT per-test
     file, and two such files can share that timestamp pair, so a test could
     silently resolve its PREDECESSOR's workspace from the cache (observed:

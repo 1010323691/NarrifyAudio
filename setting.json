@@ -1,0 +1,106 @@
+{
+  "paths": {
+    "working_dir": ""
+  },
+  "text": {
+    "keep_single_space": false,
+    "sentence_break": true,
+    "dialogue_separate": true,
+    "detect_chapters": true,
+    "punct_ellipsis": true,
+    "punct_repeated": true,
+    "punct_lone_ascii": false,
+    "punct_quotes": false,
+    "punct_dash": false,
+    "live": true
+  },
+  "split": {
+    "length_target": 3000
+  },
+  "audio": {
+    "target_duration": "10:00",
+    "naming_format": "第 {} 集",
+    "start_number": "1",
+    "smart_align": true,
+    "align_tolerance": 15
+  },
+  "tts": {
+    "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    "base_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "design_model": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    "language": "chinese",
+    "device": "auto",
+    "pause_between_speakers_ms": 500,
+    "pause_same_speaker_ms": 250,
+    "batch_concurrency": 80,
+    "batch_auto": false,
+    "batch_seed": -1
+  },
+  "llm": {
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "local",
+    "model_name": "",
+    "stream": true
+  },
+  "prompts": {
+    "system_prompt": "",
+    "user_prompt": ""
+  },
+  "persona_prompts": {
+    "system_prompt": "",
+    "user_prompt": ""
+  },
+  "generation": {
+    "chunk_size": 3000,
+    "max_tokens": 4096,
+    "temperature": 0.6,
+    "top_p": 0.8,
+    "top_k": 0,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "banned_tokens": [],
+    "parse_worker_concurrency": 4,
+    "max_concurrency": 3,
+    "spot_check_rate": 0.05,
+    "spot_check_adaptive": true,
+    "spot_check_min_rate": 0.01,
+    "spot_check_max_rate": 0.1,
+    "spot_check_enabled": true,
+    "revalidate_splits": true,
+    "delete_saying_tags": true,
+    "check_boundary_speakers": true,
+    "validate_instructs": true,
+    "check_chunk_alignment": true,
+    "check_batch_size": 20,
+    "check_context_window": 4,
+    "check_long_paragraphs": true,
+    "max_paragraph_chars": 200,
+    "absorb_punct_entries": true,
+    "merge_same_speaker": true
+  },
+  "ffmpeg": {
+    "ffmpeg_path": "",
+    "ffprobe_path": ""
+  },
+  "log": {
+    "level": "INFO"
+  },
+  "ui": {
+    "theme": "system",
+    "show_parse_logs": false,
+    "show_audio_split": false
+  },
+  "bgm": {
+    "volume": 0.18,
+    "fade_in": 1.5,
+    "fade_out": 3.0,
+    "loop": true,
+    "min_match_score": 1,
+    "segment_batch_size": 20,
+    "segment_volume_tiers": [
+      0.5,
+      1.0,
+      1.5
+    ]
+  }
+}

@@ -88,7 +88,8 @@ TTS 引擎（`tts-engine/tts_worker.py`，约 2300 行）是 one-shot 子进程�
 
 ## 运行时数据与配置
 
-- `storage/`、`config/`、`logs/`、`.narrify/`、`music_library/`、`app.json`（根，工作空间指针 + 模板）、`.backups/` 均为本机运行时/用户数据，已 gitignore——不当源码清理，也不提交。`music_library/` 是跨工程共享的全局音乐库。
+- `storage/`、`config/`、`logs/`、`.narrify/`、`music_library/`、`.backups/` 均为本机运行时/用户数据，已 gitignore——不当源码清理，也不提交。`music_library/` 是跨工程共享的全局音乐库。
+- 根目录 `setting.json` 是已跟踪的默认配置模板及运行时工作空间指针；提交前必须清空工作空间路径，不提交真实凭据。工作空间配置仍为 `config/app.json`。
 - `.env`（gitignored）：`NARRIFY_DATABASE_URL`、`NARRIFY_REDIS_URL`、bootstrap 管理员账号。`postgres` 管理员密码仅供人工 psql 运维，不入 `.env`。LLM 凭据与制作参数在应用内设置页配置，不写进代码/文档/前端。
 
 ## 约定

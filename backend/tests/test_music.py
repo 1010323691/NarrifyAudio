@@ -71,9 +71,9 @@ def sandbox(monkeypatch, tmp_path):
     """Throwaway project root + workspace + music library dir."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", tmp_path / "music_library")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
                                        encoding="utf-8")
     core_config.reset_config_cache()
     ws = tmp_path / "Book"

@@ -34,11 +34,11 @@ from fastapi import HTTPException
 
 @pytest.fixture
 def sandbox(monkeypatch, tmp_path):
-    """Redirect the project-root globals into ``tmp_path`` (clean root app.json)."""
+    """Redirect the project-root globals into ``tmp_path`` (clean root setting.json)."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(
         json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8"
     )
     core_config.reset_config_cache()

@@ -229,11 +229,11 @@ def test_deep_update_replaces_dict_with_scalar():
 @pytest.fixture
 def sandbox(monkeypatch, tmp_path):
     """Point the config module at a throwaway project root with a clean,
-    pointer-less root ``app.json``; reset the in-memory cache around each test."""
+    pointer-less root ``setting.json``; reset the in-memory cache around each test."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(
         json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8"
     )
     core_config.reset_config_cache()
@@ -243,6 +243,16 @@ def sandbox(monkeypatch, tmp_path):
 
 def _read(file):
     return json.loads(file.read_text("utf-8"))
+
+
+def test_setting_template_and_workspace_config_are_separate(sandbox):
+    ws = sandbox / "Book"
+    core_config.set_workspace_pointer(str(ws))
+    core_config.init_workspace_config(ws)
+    core_config.update_config({"text": {"live": False}})
+    assert _read(sandbox / "setting.json")["paths"]["working_dir"] == str(ws)
+    assert _read(sandbox / "setting.json")["text"]["live"] is True
+    assert _read(ws / "config" / "app.json")["text"]["live"] is False
 
 
 def test_get_config_unset_returns_root_template(sandbox):
@@ -255,15 +265,15 @@ def test_set_workspace_pointer_updates_only_pointer(sandbox):
     # A distinct known template value survives the rewrite; the legacy ``book``
     # section (removed with target-chars splitting) is dropped; only the pointer
     # field changes.
-    data = _read(sandbox / "app.json")
+    data = _read(sandbox / "setting.json")
     data["text"] = {"live": False}  # a known value distinct from the default
     data["book"] = {"target_chars": 123456}  # legacy section from an old template
-    (sandbox / "app.json").write_text(json.dumps(data), encoding="utf-8")
+    (sandbox / "setting.json").write_text(json.dumps(data), encoding="utf-8")
     core_config.reset_config_cache()
 
     core_config.set_workspace_pointer(str(sandbox / "MyBook"))
 
-    after = _read(sandbox / "app.json")
+    after = _read(sandbox / "setting.json")
     assert after["paths"]["working_dir"] == str(sandbox / "MyBook")
     assert after["text"]["live"] is False  # known template value preserved
     assert "book" not in after  # legacy section dropped on rewrite
@@ -319,7 +329,7 @@ def test_update_config_writes_workspace_and_forces_pointer(sandbox):
     retired_tts = {"api_base", "api_key", "voice", "concurrency", "parallel_workers"}
     assert not retired_tts & saved["tts"].keys()
     assert "advanced_prompt" not in saved["persona_prompts"]
-    assert _read(sandbox / "app.json")["paths"]["working_dir"] == str(ws)
+    assert _read(sandbox / "setting.json")["paths"]["working_dir"] == str(ws)
 
 
 def test_update_config_persists_ui_show_parse_logs(sandbox):
@@ -373,11 +383,11 @@ def test_init_workspace_config_never_overwrites(sandbox):
 
 def test_template_seeded_from_defaults_when_missing(sandbox):
     # Remove the root file; the next pointer write re-seeds it from code defaults.
-    (sandbox / "app.json").unlink()
+    (sandbox / "setting.json").unlink()
     core_config.reset_config_cache()
     core_config.set_workspace_pointer(str(sandbox / "X"))
-    assert (sandbox / "app.json").exists()
-    data = _read(sandbox / "app.json")
+    assert (sandbox / "setting.json").exists()
+    data = _read(sandbox / "setting.json")
     assert data["paths"]["working_dir"] == str(sandbox / "X")
     assert "tts" in data and "book" not in data  # the full model was seeded (no book section)
 

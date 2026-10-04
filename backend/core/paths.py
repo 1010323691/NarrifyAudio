@@ -1,7 +1,7 @@
 """Unified directory layout for the Narrify Audio backend.
 
 One root — the user's chosen workspace (``paths.working_dir`` in the root
-``app.json``) holds everything for the project::
+``setting.json``) holds everything for the project::
 
     00_temp/           # scratch files for engine subprocesses
     01_input/          # raw uploads + formatted text
@@ -15,7 +15,7 @@ One root — the user's chosen workspace (``paths.working_dir`` in the root
     logs/              # the project's app.log
     config/            # the project's config/app.json
 
-The project root itself holds only ``app.json`` — the generic default config
+The project root itself holds only ``setting.json`` — the generic default config
 template plus the bootstrap pointer to the active workspace (see
 ``core/config.py``). Until a workspace is set there is *no* project location at
 all: the pipeline is locked, the config falls back to the (read-only) root
@@ -113,7 +113,7 @@ class Layout:
 
 
 def is_workspace_set() -> bool:
-    """True once the user has picked a workspace folder (root ``app.json`` pointer)."""
+    """True once the user has picked a workspace folder (root ``setting.json`` pointer)."""
     from .config import _workspace_path  # local import to avoid a cycle
 
     return _workspace_path() is not None
@@ -121,7 +121,7 @@ def is_workspace_set() -> bool:
 
 # -- get_or_prepare_layout memoization ------------------------------------------------------
 # ``get_or_prepare_layout()`` sits on every hot path (the 待合成 poll resolves one layout per package
-# AND per completed segment), and each uncached call re-reads the root ``app.json`` pointer
+# AND per completed segment), and each uncached call re-reads the root ``setting.json`` pointer
 # plus re-runs the 11 mkdir probes. The pointer only changes when the root file itself is
 # rewritten (``set_workspace_pointer`` rewrites it), so the file's
 # ``(mtime_ns, size, st_ino)`` is a faithful invalidation key: steady state costs ONE stat per call.
@@ -134,11 +134,11 @@ _layout_cache: dict[str, tuple[Layout, bool]] = {}
 
 
 def _root_pointer_key():
-    """The cache key: the root ``app.json``'s ``(mtime_ns, size)``; a sentinel while the
+    """The cache key: the root ``setting.json``'s ``(mtime_ns, size)``; a sentinel while the
     file does not exist yet (a fresh sandbox before the first pointer write).
     ``st_ino`` is included because two DIFFERENT files can share a timestamp
     pair — a collision would serve one root's layout for another's (a real
-    flake in sandboxed tests, where each test points at its own app.json)."""
+    flake in sandboxed tests, where each test points at its own setting.json)."""
     from .config import TEMPLATE_FILE  # local import: config imports paths at top level
 
     try:

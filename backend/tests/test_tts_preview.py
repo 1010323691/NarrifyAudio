@@ -22,8 +22,8 @@ from backend.engines.merge import boundary_gap_ms
 def workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     ws = tmp_path / "Book"
     ws.mkdir()
@@ -239,8 +239,8 @@ def test_preview_chapter_name_validation(workspace):
 def test_preview_chapter_no_workspace_degrades(monkeypatch, tmp_path):
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     try:
         detail = api_tts.preview_chapter("s.json")

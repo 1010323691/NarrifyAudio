@@ -167,7 +167,7 @@ sudo -u narrify -H bash -c 'cd /opt/narrify-audio && npm ci && npm run build'
 
 采用同源部署，前端使用默认相对 `/api` 地址，**不设置 `VITE_API_BASE`**。尤其不要把服务器的 `127.0.0.1:8642` 写进前端配置，否则远程浏览器会访问客户端自己的回环地址。构建前核对已有 `.env*` 是否残留分域配置。
 
-API、Worker 和 TTS 共用 `.venv`，TTS 仍保持子进程隔离。当前应用可能写入仓库根目录的 `app.json`、`config/`、`logs/`、`.narrify/` 和 `music_library/`，因此本方案让运行账号拥有项目目录；不能直接将整个 `/opt/narrify-audio` 挂载为只读。
+API、Worker 和 TTS 共用 `.venv`，TTS 仍保持子进程隔离。当前应用可能写入仓库根目录的 `setting.json`、`config/`、`logs/`、`.narrify/` 和 `music_library/`，因此本方案让运行账号拥有项目目录；不能直接将整个 `/opt/narrify-audio` 挂载为只读。
 
 ## 4. 保存部署环境配置
 
@@ -506,7 +506,7 @@ sudo -u postgres pg_dump -Fc narrify | sudo tee \
 
 # 只略过尚未创建的可选目录，实际读取错误仍应视为备份失败。
 runtime_paths=()
-for item in app.json config logs .narrify music_library; do
+for item in setting.json config logs .narrify music_library; do
   if sudo test -e "/opt/narrify-audio/$item"; then
     runtime_paths+=("$item")
   fi
@@ -523,7 +523,7 @@ sudo tar -czf "$backup_dir/narrify-files.tar.gz" \
 1. 停止旧 API / Worker，让在途任务结束或取消，使用 PostgreSQL 16 的 `pg_dump -Fc` 导出数据库；不要复制 Windows PostgreSQL 数据目录。
 2. Linux 重新安装软件和 `.venv`，在空数据库中通过 `pg_restore --no-owner --no-acl` 恢复，由应用用户拥有表，再运行 Alembic。不要把恢复操作叠加到已有业务库。
 3. 原样复制工作空间目录结构、项目配置、参考音频及音乐库，保留用户名、项目 ID 和相对路径，并让 `narrify` 可读写。
-4. 检查数据库 `storage.root`、根目录和工作空间 `app.json` 中的工作目录、模型路径、FFmpeg 路径等，将 Windows 盘符路径调整为 Linux 路径。旧根路径无效时，不直接调用依赖旧目录仍可访问的自动搬迁；先核对恢复出的文件与目标路径，必要时在停机状态修正配置。
+4. 检查数据库 `storage.root`、根目录 `setting.json` 和工作空间 `config/app.json` 中的工作目录、模型路径、FFmpeg 路径等，将 Windows 盘符路径调整为 Linux 路径。旧根路径无效时，不直接调用依赖旧目录仍可访问的自动搬迁；先核对恢复出的文件与目标路径，必要时在停机状态修正配置。
 5. 不复制 Windows `.venv`、`node_modules`、驱动或 `.exe` 工具；模型缓存也需检查链接和文件完整性。Linux 路径区分大小写，大小写不一致的文件引用需要修复。
 6. 先做基础任务验收，再测试 LLM、GPU 推理、取消 / 重试和成品下载，确认新机可用后再切换访问入口。
 

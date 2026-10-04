@@ -20,9 +20,9 @@ STEMS = [f"ch{i}" for i in range(1, 9)]
 def workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", tmp_path / "music_library")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     ws = tmp_path / "Book"
     (ws / "02_split_text").mkdir(parents=True)
     for stem in STEMS:
@@ -306,9 +306,9 @@ def test_chapters_no_workspace_empty(monkeypatch, tmp_path):
     # Read-only endpoint: no workspace -> empty rows (degrade, never 409).
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", tmp_path / "music_library")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
                                        encoding="utf-8")
     core_config.reset_config_cache()
     try:
@@ -348,9 +348,9 @@ def test_timeline_no_workspace(monkeypatch, tmp_path):
     # Read-only endpoint: no workspace -> {"timeline": None} (degrade, never 409).
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", tmp_path / "music_library")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
                                        encoding="utf-8")
     core_config.reset_config_cache()
     try:
@@ -404,9 +404,9 @@ def test_update_chapter_guard_400s(workspace):
 def test_write_endpoints_no_workspace_409(monkeypatch, tmp_path):
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", tmp_path / "music_library")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
                                        encoding="utf-8")
     core_config.reset_config_cache()
     try:

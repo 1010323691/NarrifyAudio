@@ -16,8 +16,8 @@ def library(monkeypatch, tmp_path):
     monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", tmp_path / "music_library")
     core_paths.MUSIC_LIBRARY_DIR.mkdir()
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text('{"paths":{"working_dir":""}}', encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text('{"paths":{"working_dir":""}}', encoding="utf-8")
     core_config.reset_config_cache()
     workspace = tmp_path / "Book"
     workspace.mkdir()

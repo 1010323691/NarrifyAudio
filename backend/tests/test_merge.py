@@ -56,8 +56,8 @@ def workspace(monkeypatch, tmp_path):
     batch manifest directly, seeded per test)."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8")
     core_config.reset_config_cache()
     core_paths.reset_layout_cache()  # module state outlives the monkeypatched TEMPLATE_FILE
     ws = tmp_path / "Book"

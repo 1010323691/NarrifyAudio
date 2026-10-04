@@ -1,7 +1,7 @@
 """Tests for the single-root Layout (everything follows the user's workspace).
 
 Every test points the layout/config at throwaway ``tmp_path`` directories (via
-monkeypatched module globals + a pointer-less root ``app.json``), so the real
+monkeypatched module globals + a pointer-less root ``setting.json``), so the real
 project's files are never touched.
 """
 from __future__ import annotations
@@ -21,12 +21,12 @@ from backend.core import paths as core_paths
 @pytest.fixture
 def sandbox(monkeypatch, tmp_path):
     """Redirect the project-root globals into ``tmp_path`` and start from a clean
-    (pointer-less) root ``app.json``. The in-memory config cache is reset around
+    (pointer-less) root ``setting.json``. The in-memory config cache is reset around
     each test so it re-resolves against the sandbox."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(
         json.dumps({"paths": {"working_dir": ""}}), encoding="utf-8"
     )
     core_config.reset_config_cache()
@@ -38,7 +38,7 @@ def sandbox(monkeypatch, tmp_path):
 
 @pytest.fixture
 def set_pointer(sandbox):
-    """Write the workspace pointer into the sandboxed root ``app.json``."""
+    """Write the workspace pointer into the sandboxed root ``setting.json``."""
 
     def _set(working_dir: str):
         core_config.set_workspace_pointer(working_dir)
@@ -222,7 +222,7 @@ def test_get_or_prepare_layout_stale_pointer_folder_comeback_plants_skeleton_onc
 
 
 def test_get_or_prepare_layout_pointer_change_invalidates_cache(sandbox, set_pointer):
-    """Every real pointer set/clear rewrites the root ``app.json`` — the new
+    """Every real pointer set/clear rewrites the root ``setting.json`` — the new
     ``(mtime_ns, size)`` key must invalidate the memoized layout (no ``reset_*`` call)."""
     ws1 = sandbox / "one"
     ws1.mkdir()
@@ -231,7 +231,7 @@ def test_get_or_prepare_layout_pointer_change_invalidates_cache(sandbox, set_poi
     set_pointer(str(ws1))
     first = core_paths.get_or_prepare_layout()
     assert first.workspace == ws1
-    set_pointer(str(ws2))  # rewrites the root app.json -> a new cache key
+    set_pointer(str(ws2))  # rewrites the root setting.json -> a new cache key
     second = core_paths.get_or_prepare_layout()
     assert second.workspace == ws2
     for name in core_paths.WORKSPACE_DIR_NAMES:  # the new workspace's skeleton is planted

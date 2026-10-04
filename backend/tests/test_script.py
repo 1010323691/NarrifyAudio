@@ -2043,8 +2043,8 @@ def workspace(monkeypatch, tmp_path):
     ``generate_file`` writes its output through ``get_or_prepare_layout().parsed_json``."""
     monkeypatch.setattr(core_paths, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(core_config, "PROJECT_ROOT", tmp_path)
-    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "app.json")
-    (tmp_path / "app.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
+    monkeypatch.setattr(core_config, "TEMPLATE_FILE", tmp_path / "setting.json")
+    (tmp_path / "setting.json").write_text(json.dumps({"paths": {"working_dir": ""}}),
                                        encoding="utf-8")
     core_config.reset_config_cache()
     ws = tmp_path / "Book"
