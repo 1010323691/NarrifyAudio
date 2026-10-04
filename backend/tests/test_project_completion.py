@@ -54,6 +54,25 @@ def test_unparsed_chapters_are_included_in_denominator(tmp_path):
     assert result['04_voice_profiles']['percent'] is None
 
 
+def test_non_utf8_original_uses_the_supported_text_decoder_for_split_progress(tmp_path):
+    write(tmp_path, '01_input/book.txt', '第一章 标题\n内容\n第二章 标题\n内容'.encode('gb18030'))
+    write(tmp_path, '02_split_text/第1章.txt', '内容')
+
+    result = project_completion(tmp_path)
+
+    assert result['02_split_text']['completed'] == 1
+    assert result['02_split_text']['total'] == 2
+    assert result['02_split_text']['percent'] == 50
+
+
+def test_undecodable_original_does_not_claim_an_unknown_split_percentage(tmp_path):
+    write(tmp_path, '01_input/book.txt', b'\xff\x00\xfe')
+
+    result = project_completion(tmp_path)
+
+    assert result['02_split_text']['percent'] is None
+
+
 def test_missing_audio_reduces_completion_and_does_not_change_bound_project(tmp_path):
     chapter(tmp_path, 'a', 3)
     write(tmp_path, '06_audio_merge/a.mp3', b'merged')

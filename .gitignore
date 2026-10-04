@@ -12,6 +12,7 @@ yarn-error.log*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-review-*/
 .import_linter_cache/
 # TTS 环境安装脚本的运行日志（每次运行重写）
 install_tts_env.log

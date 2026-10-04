@@ -45,13 +45,17 @@ def project_completion(root: Path) -> dict:
     originals = [path for name, path in files.items()
                  if name.startswith("01_input/") and name.endswith(".txt") and not path.stem.endswith("_排版")]
     expected_split = len(split)
+    split_total_known = True
     if originals:
         try:
             source = max(originals, key=lambda path: path.stat().st_mtime_ns)
-            text = source.read_text("utf-8-sig")
+            text, _encoding = book.decode_buffer(source.read_bytes())
             expected_split = max(expected_split, len(book.detect_chapters(text)) or 1)
-        except (OSError, UnicodeError):
-            expected_split = 0
+        except (OSError, ValueError):
+            # Keep known generated chapters; never erase their denominator on
+            # a source decoding/read error. With no known chapters, mark the
+            # percentage unknown instead of claiming an inaccurate 0%.
+            split_total_known = expected_split > 0
     total_chapters = max(total_chapters, expected_split)
     voices = read("04_voice_profiles/voice_config.json")
     voices = voices if isinstance(voices, dict) else {}
@@ -91,7 +95,7 @@ def project_completion(root: Path) -> dict:
         reset_workspace(token)
     parsed_all = total_chapters > 0 and len(scripts) == total_chapters
     return {
-        "02_split_text": ratio(len(split), expected_split, "章节"),
+        "02_split_text": ratio(len(split), expected_split, "章节", known=split_total_known),
         "03_parsed_json": ratio(len(scripts), total_chapters, "章节"),
         "04_voice_profiles": ratio(sum(voice_ready(name) for name in speakers), len(speakers), "角色", known=parsed_all or not total_chapters),
         "05_audio_chunk": ratio(segment_done, segment_total, "段", known=parsed_all or not total_chapters),
