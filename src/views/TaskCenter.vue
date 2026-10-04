@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onDeactivated, onActivated, ref } from 'vue'
+import { computed, nextTick, onDeactivated, onActivated, ref, watch } from 'vue'
 import {
   Activity, AudioLines, Check, ChevronRight, CircleAlert, Clock3, Combine,
   FileText, Folder, LoaderCircle, ListTodo, Music4, Pause, Play, RefreshCw,
@@ -72,6 +72,23 @@ const sections = computed(() => TASK_CENTER_CATEGORIES.map((category) => {
     taskCount: groups.reduce((sum, group) => sum + group.tasks.length, 0),
   }
 }))
+
+const browsingCategory = ref<TaskCenterCategoryId | null>(null)
+const browsingSection = computed(() =>
+  sections.value.find((section) => section.id === browsingCategory.value)
+  ?? sections.value.find((section) => section.groups.some((group) => group.activeCount))
+  ?? sections.value.find((section) => section.taskCount > 0)
+  ?? sections.value[0],
+)
+const browsingGroups = computed(() => [...browsingSection.value.groups].sort((a, b) =>
+  Number(b.activeCount > 0) - Number(a.activeCount > 0) || b.latest - a.latest,
+))
+const groupPage = ref(1)
+const groupsPerPage = 5
+const groupPageCount = computed(() => Math.max(1, Math.ceil(browsingGroups.value.length / groupsPerPage)))
+const visibleGroups = computed(() => browsingGroups.value.slice((groupPage.value - 1) * groupsPerPage, groupPage.value * groupsPerPage))
+watch(() => browsingSection.value.id, () => { groupPage.value = 1 })
+watch(groupPageCount, (count) => { groupPage.value = Math.min(groupPage.value, count) })
 
 const selectedCategory = computed(() => selectedGroup.value
   ? TASK_CENTER_CATEGORIES.find((category) => category.id === selectedGroup.value?.categoryId) ?? null
@@ -244,75 +261,101 @@ onDeactivated(() => {
 </script>
 
 <template>
-  <div class="task-center">
-    <header class="task-center__header">
-      <div>
-        <p class="eyebrow">CROSS-PROJECT OVERVIEW</p>
-        <h1 class="page-title">任务中心</h1>
-        <p class="task-center__subtitle">集中查看各本书的制作任务和实时进度。</p>
+  <div class="task-center viewport-page">
+    <header class="page-header">
+      <div class="task-center__header">
+        <div>
+          <p class="eyebrow">CROSS-PROJECT OVERVIEW</p>
+          <h1 class="page-title">任务中心</h1>
+          <p class="page-description">集中查看各本书的制作任务和实时进度。</p>
+        </div>
       </div>
-      <Button variant="outline" :disabled="loading" @click="loadPage()">
-        <RefreshCw class="h-4 w-4" :class="loading ? 'animate-spin' : ''" />刷新历史
-      </Button>
     </header>
 
-    <div v-if="error" class="task-center__error" role="alert">
-      <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ error }}</span>
-      <Button variant="outline" size="sm" @click="loadPage()">重试</Button>
-    </div>
+    <div class="page-region" role="region" aria-label="页面工作区" tabindex="0">
+      <div v-if="error" class="task-center__error" role="alert">
+        <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ error }}</span>
+        <Button variant="outline" size="sm" @click="loadPage()">重试</Button>
+      </div>
 
-    <div v-if="controlError" class="task-center__error" role="alert">
-      <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ controlError }}</span>
-      <Button variant="ghost" size="sm" aria-label="关闭批量控制错误提示" @click="controlError = ''"><X class="h-4 w-4" /></Button>
-    </div>
+      <div v-if="controlError" class="task-center__error" role="alert">
+        <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ controlError }}</span>
+        <Button variant="ghost" size="sm" aria-label="关闭批量控制错误提示" @click="controlError = ''"><X class="h-4 w-4" /></Button>
+      </div>
 
-    <div v-if="loading && !loaded" class="task-center__loading" role="status">
-      <LoaderCircle class="h-5 w-5 animate-spin" />正在读取任务记录…
-    </div>
+      <div v-if="loading && !loaded" class="task-center__loading" role="status">
+        <LoaderCircle class="h-5 w-5 animate-spin" />正在读取任务记录…
+      </div>
 
-    <div v-else class="task-center__sections">
-      <Card v-for="(section, index) in sections" :key="section.id" class="task-center__section">
-        <div class="task-center__section-head">
-          <div class="task-center__section-icon" aria-hidden="true">
-            <component :is="[ScanText, Users, Users, AudioLines, Combine, Music4][index]" class="h-4 w-4" />
+      <div v-else class="task-center__workspace">
+        <nav class="task-center__stages" aria-label="制作阶段">
+          <div class="task-center__nav-head">
+            <p class="task-center__nav-label">制作阶段</p>
+            <Button variant="ghost" size="sm" :disabled="loading" @click="loadPage()">
+              <RefreshCw class="h-4 w-4" :class="loading ? 'animate-spin' : ''" />刷新
+            </Button>
           </div>
-          <div class="task-center__section-copy">
-            <h2>{{ section.label }}</h2>
-            <p>{{ section.description }}</p>
-          </div>
-          <span class="task-center__section-count">{{ section.taskCount }} 项任务</span>
-        </div>
-
-        <div v-if="section.groups.length" class="task-center__folder-list">
-          <button
-            v-for="group in section.groups"
-            :key="group.projectId"
-            type="button"
-            class="task-center__folder"
-            :aria-label="`${group.projectName}，${group.tasks.length} 项任务，打开子任务`"
-            @click="openGroup(section.id, group.projectId, $event)"
-          >
-            <span class="task-center__folder-icon" aria-hidden="true"><Folder class="h-5 w-5" /></span>
-            <span class="task-center__folder-copy">
-              <strong>{{ group.projectName }}</strong>
-              <small>{{ group.tasks.length }} 项任务<span v-if="group.activeCount"> · {{ group.activeCount }} 项进行中</span></small>
-            </span>
-            <StatusPill v-if="group.activeCount" :label="`${group.activeCount} 项进行中`" tone="warning" />
-            <StatusPill v-else :label="statusInfo(group.tasks[0].status).label" :tone="statusInfo(group.tasks[0].status).tone" />
-            <ChevronRight class="task-center__folder-arrow h-4 w-4" aria-hidden="true" />
+          <button v-for="(section, index) in sections" :key="section.id" type="button"
+            class="task-center__stage" :class="{ 'is-selected': browsingSection.id === section.id }"
+            :aria-pressed="browsingSection.id === section.id" @click="browsingCategory = section.id">
+            <span class="task-center__stage-number">{{ String(index + 1).padStart(2, '0') }}</span>
+            <span class="task-center__stage-copy"><strong>{{ section.label }}</strong><small>{{ section.groups.length }} 个项目<span v-if="section.groups.some(group => group.activeCount)"> · 进行中</span></small></span>
+            <span class="task-center__stage-count">{{ section.taskCount }}</span>
           </button>
-        </div>
-        <div v-else class="task-center__empty-section">
-          <span>此分区还没有任务</span>
-        </div>
-      </Card>
-    </div>
+        </nav>
+        <Card class="task-center__section task-center__stage-detail">
+          <div class="task-center__section-head">
+            <div class="task-center__section-icon" aria-hidden="true">
+              <ListTodo class="h-4 w-4" />
+            </div>
+            <div class="task-center__section-copy">
+              <h2>{{ browsingSection.label }}</h2>
+              <p>{{ browsingSection.description }} · 点击项目查看子任务与批量控制</p>
+            </div>
+            <span class="task-center__section-count">{{ browsingSection.taskCount }} 项任务</span>
+          </div>
 
-    <div v-if="cursor" class="task-center__more">
-      <Button variant="outline" :disabled="loadingMore" @click="loadPage(true)">
-        <LoaderCircle v-if="loadingMore" class="h-4 w-4 animate-spin" />
-        <span v-else>加载更早的任务</span>
-      </Button>
+          <div v-if="browsingGroups.length" class="task-center__folder-list">
+            <button
+              v-for="group in visibleGroups"
+              :key="group.projectId"
+              type="button"
+              class="task-center__folder"
+              :aria-label="`${group.projectName}，${group.tasks.length} 项任务，打开子任务`"
+              @click="openGroup(browsingSection.id, group.projectId, $event)"
+            >
+              <span class="task-center__folder-icon" aria-hidden="true"><Folder class="h-5 w-5" /></span>
+              <span class="task-center__folder-copy">
+                <strong>{{ group.projectName }}</strong>
+                <small>{{ group.tasks.length }} 项任务 · 最近提交 {{ formatTime(group.latest) }}</small>
+              </span>
+              <span class="task-center__group-progress"><strong>{{ group.tasks.filter(task => task.status === 'succeeded').length }} / {{ group.tasks.length }}</strong><small>已完成</small></span>
+              <StatusPill v-if="group.activeCount" :label="`${group.activeCount} 项进行中`" tone="warning" />
+              <StatusPill v-else :label="statusInfo(group.tasks[0].status).label" :tone="statusInfo(group.tasks[0].status).tone" />
+              <ChevronRight class="task-center__folder-arrow h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+          <div v-else class="task-center__empty-section">
+            <ListTodo class="h-7 w-7" aria-hidden="true" />
+            <strong>此阶段还没有任务</strong>
+            <span>在项目中提交制作任务后，可在这里跟踪进度。</span>
+          </div>
+          <nav v-if="groupPageCount > 1" class="task-center__group-pages" aria-label="阶段项目分页">
+            <span>{{ browsingGroups.length }} 个项目 · {{ groupPage }} / {{ groupPageCount }} 页</span>
+            <div>
+              <Button variant="ghost" size="sm" :disabled="groupPage === 1" @click="groupPage--">上一页</Button>
+              <Button variant="ghost" size="sm" :disabled="groupPage === groupPageCount" @click="groupPage++">下一页</Button>
+            </div>
+          </nav>
+        </Card>
+      </div>
+
+      <div v-if="cursor" class="task-center__more">
+        <Button variant="outline" :disabled="loadingMore" @click="loadPage(true)">
+          <LoaderCircle v-if="loadingMore" class="h-4 w-4 animate-spin" />
+          <span v-else>加载更早的任务</span>
+        </Button>
+      </div>
     </div>
 
     <div v-if="selectedGroup && selectedCategory" class="task-center__overlay" @click.self="closeDialog()">
@@ -416,7 +459,7 @@ onDeactivated(() => {
 </template>
 
 <style scoped>
-.task-center{display:grid;gap:18px;max-width:1320px;margin:0 auto;padding-bottom:30px}.task-center__header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.task-center__header .page-title{margin-top:3px}.task-center__subtitle{margin-top:5px;color:hsl(var(--muted-foreground));font-size:12px}.task-center__sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-center__section{min-width:0;padding:15px}.task-center__section-head{display:flex;align-items:center;gap:10px}.task-center__section-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border:1px solid hsl(var(--primary)/.12);border-radius:10px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__section-copy{min-width:0;flex:1}.task-center__section-copy h2{font-size:13px;font-weight:750;line-height:1.4}.task-center__section-copy p{margin-top:2px;color:hsl(var(--muted-foreground));font-size:10px}.task-center__section-count{flex:none;color:hsl(var(--muted-foreground));font-size:10px;font-variant-numeric:tabular-nums}.task-center__folder-list{display:grid;gap:6px;margin-top:13px}.task-center__folder{display:flex;align-items:center;gap:10px;width:100%;min-height:60px;border:1px solid hsl(var(--border)/.75);border-radius:11px;background:var(--glass-tint);padding:9px 10px;text-align:left;transition:border-color .15s,background .15s,transform .15s}.task-center__folder:hover{transform:translateY(-1px);border-color:hsl(var(--primary)/.35);background:hsl(var(--primary)/.04)}.task-center__folder:focus-visible,.task-center__close:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:2px}.task-center__folder-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__folder-copy{display:grid;gap:2px;min-width:0;flex:1}.task-center__folder-copy strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.task-center__folder-copy small{color:hsl(var(--muted-foreground));font-size:10px}.task-center__folder-arrow{flex:none;color:hsl(var(--muted-foreground))}.task-center__empty-section{display:grid;place-items:center;min-height:74px;margin-top:11px;border:1px dashed hsl(var(--border));border-radius:10px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:220px;color:hsl(var(--muted-foreground));font-size:13px}.task-center__error{display:flex;align-items:center;gap:9px;border:1px solid hsl(var(--destructive)/.2);border-radius:11px;background:hsl(var(--destructive)/.05);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.task-center__error span{flex:1}.task-center__more{display:flex;justify-content:center}.task-center__overlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;overflow:auto;background:rgba(18,20,37,.48);padding:22px}.task-center__dialog{display:flex;flex-direction:column;height:min(82vh,820px);overflow:hidden;border:1px solid var(--glass-border);border-radius:18px;background:hsl(var(--card)/.95);box-shadow:var(--glass-highlight),var(--glass-shadow-strong);backdrop-filter:none}.task-center__dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;border-bottom:1px solid hsl(var(--border)/.75);padding:20px 22px}.task-center__dialog-head h2{margin-top:3px;font-size:20px;font-weight:760;overflow-wrap:anywhere}.task-center__dialog-head p:last-child{margin-top:3px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__close{display:grid;place-items:center;width:40px;height:40px;flex:none;border:1px solid hsl(var(--border));border-radius:10px;background:hsl(var(--background)/.65);color:hsl(var(--muted-foreground));transition:color .14s,border-color .14s}.task-center__close:hover{border-color:hsl(var(--primary)/.35);color:hsl(var(--foreground))}.task-center__task-list{flex:1;display:grid;align-content:start;gap:0;min-height:0}.task-center__task-row{border-bottom:1px solid hsl(var(--border)/.72)}.task-center__task-row:last-child{border-bottom:0}.task-center__task-icon{display:grid;place-items:center;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__task-progress{display:flex;align-items:center}.task-center__task-progress>div{flex:1}.task-center__task-progress>span{color:hsl(var(--muted-foreground));font-size:10px;text-align:right;font-variant-numeric:tabular-nums}.task-center__dialog-empty{display:grid;place-items:center;align-content:center;gap:8px;flex:1;min-height:0;color:hsl(var(--muted-foreground));font-size:12px}.task-center__dialog-empty svg{color:hsl(var(--primary))}@supports not (backdrop-filter:blur(1px)){.task-center__dialog{background:hsl(var(--background))}}@media(max-width:900px){.task-center__sections{grid-template-columns:1fr}}@media(max-width:520px){.task-center__header{align-items:flex-start}.task-center__header>button{width:100%}.task-center__section{padding:12px}.task-center__section-head{gap:8px}.task-center__section-copy h2{font-size:12px}.task-center__section-count{font-size:9px}.task-center__overlay{padding:10px}.task-center__dialog{height:90vh;border-radius:14px}.task-center__dialog-head{padding:16px}}
+.task-center{display:grid;gap:18px;max-width:1320px;margin:0 auto;padding-bottom:30px}.task-center__header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.task-center__sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-center__section{min-width:0;padding:15px}.task-center__section-head{display:flex;align-items:center;gap:10px}.task-center__section-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border:1px solid hsl(var(--primary)/.12);border-radius:10px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__section-copy{min-width:0;flex:1}.task-center__section-copy h2{font-size:13px;font-weight:750;line-height:1.4}.task-center__section-copy p{margin-top:2px;color:hsl(var(--muted-foreground));font-size:10px}.task-center__section-count{flex:none;color:hsl(var(--muted-foreground));font-size:10px;font-variant-numeric:tabular-nums}.task-center__folder-list{display:grid;gap:6px;margin-top:13px}.task-center__folder{display:flex;align-items:center;gap:10px;width:100%;min-height:60px;border:1px solid hsl(var(--border)/.75);border-radius:11px;background:var(--glass-tint);padding:9px 10px;text-align:left;transition:border-color .15s,background .15s,transform .15s}.task-center__folder:hover{transform:translateY(-1px);border-color:hsl(var(--primary)/.35);background:hsl(var(--primary)/.04)}.task-center__folder:focus-visible,.task-center__close:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:2px}.task-center__folder-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__folder-copy{display:grid;gap:2px;min-width:0;flex:1}.task-center__folder-copy strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.task-center__folder-copy small{color:hsl(var(--muted-foreground));font-size:10px}.task-center__folder-arrow{flex:none;color:hsl(var(--muted-foreground))}.task-center__empty-section{display:grid;place-items:center;min-height:74px;margin-top:11px;border:1px dashed hsl(var(--border));border-radius:10px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:220px;color:hsl(var(--muted-foreground));font-size:13px}.task-center__error{display:flex;align-items:center;gap:9px;border:1px solid hsl(var(--destructive)/.2);border-radius:11px;background:hsl(var(--destructive)/.05);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.task-center__error span{flex:1}.task-center__more{display:flex;justify-content:center}.task-center__overlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;overflow:auto;background:rgba(18,20,37,.48);padding:22px}.task-center__dialog{display:flex;flex-direction:column;height:min(82vh,820px);overflow:hidden;border:1px solid var(--glass-border);border-radius:18px;background:hsl(var(--card)/.95);box-shadow:var(--glass-highlight),var(--glass-shadow-strong);backdrop-filter:none}.task-center__dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;border-bottom:1px solid hsl(var(--border)/.75);padding:20px 22px}.task-center__dialog-head h2{margin-top:3px;font-size:20px;font-weight:760;overflow-wrap:anywhere}.task-center__dialog-head p:last-child{margin-top:3px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__close{display:grid;place-items:center;width:40px;height:40px;flex:none;border:1px solid hsl(var(--border));border-radius:10px;background:hsl(var(--background)/.65);color:hsl(var(--muted-foreground));transition:color .14s,border-color .14s}.task-center__close:hover{border-color:hsl(var(--primary)/.35);color:hsl(var(--foreground))}.task-center__task-list{flex:1;display:grid;align-content:start;gap:0;min-height:0}.task-center__task-row{border-bottom:1px solid hsl(var(--border)/.72)}.task-center__task-row:last-child{border-bottom:0}.task-center__task-icon{display:grid;place-items:center;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__task-progress{display:flex;align-items:center}.task-center__task-progress>div{flex:1}.task-center__task-progress>span{color:hsl(var(--muted-foreground));font-size:10px;text-align:right;font-variant-numeric:tabular-nums}.task-center__dialog-empty{display:grid;place-items:center;align-content:center;gap:8px;flex:1;min-height:0;color:hsl(var(--muted-foreground));font-size:12px}.task-center__dialog-empty svg{color:hsl(var(--primary))}@supports not (backdrop-filter:blur(1px)){.task-center__dialog{background:hsl(var(--background))}}@media(max-width:900px){.task-center__sections{grid-template-columns:1fr}}@media(max-width:520px){.task-center__header{align-items:flex-start}.task-center__header>button{width:100%}.task-center__section{padding:12px}.task-center__section-head{gap:8px}.task-center__section-copy h2{font-size:12px}.task-center__section-count{font-size:9px}.task-center__overlay{padding:10px}.task-center__dialog{height:90vh;border-radius:14px}.task-center__dialog-head{padding:16px}}
 /* Keep each task readable as a single horizontal entry. Narrow screens can scroll the row. */
 .task-center__dialog{width:min(1120px,100%)}
 .task-center__task-list{overflow:auto;padding:0 18px}
@@ -451,4 +494,54 @@ onDeactivated(() => {
 .task-center__batch-actions{display:flex;align-items:center;gap:7px}
 .task-center__batch-control{flex:none;min-height:36px;gap:7px}
 @media(max-width:520px){.task-center__dialog-actions{flex-wrap:wrap;justify-content:flex-end}.task-center__batch-actions{flex-wrap:wrap;justify-content:flex-end}}
+.task-center__workspace { display:grid; grid-template-columns:260px minmax(0,1fr); grid-template-rows:minmax(0,1fr); gap:16px; align-items:stretch; min-width:0; min-height:0; flex:1; }
+.task-center { width:100%; }
+.task-center__stages { padding:8px; border:1px solid hsl(var(--border)); border-radius:12px; background:hsl(var(--card)); }
+.task-center__nav-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 0 6px 10px; }
+.task-center__nav-label { font-size:11px; font-weight:600; color:hsl(var(--muted-foreground)); }
+.task-center__stage { display:flex; align-items:center; gap:10px; width:100%; padding:13px 10px; border-radius:8px; text-align:left; color:hsl(var(--muted-foreground)); transition:background .15s; }
+.task-center__stage:hover { background:hsl(var(--muted)/.6); }
+.task-center__stage.is-selected { background:hsl(var(--primary)/.08); color:hsl(var(--primary)); }
+.task-center__stage:focus-visible { outline:2px solid hsl(var(--ring)); outline-offset:2px; }
+.task-center__stage-number { font-size:11px; font-variant-numeric:tabular-nums; opacity:.7; }
+.task-center__stage-copy { min-width:0; flex:1; display:grid; gap:4px; }
+.task-center__stage-copy strong { font-size:12px; font-weight:600; line-height:1.5; }
+.task-center__stage-copy small { font-size:11px; color:hsl(var(--muted-foreground)); }
+.task-center__stage-count { font-size:12px; font-variant-numeric:tabular-nums; }
+.task-center__stage-detail { display:flex; flex-direction:column; min-width:0; min-height:0; padding:0; overflow:hidden; border-radius:12px; }
+.task-center__stage-detail .task-center__section-head { flex-shrink:0; padding:20px; border-bottom:1px solid hsl(var(--border)); }
+.task-center__stage-detail .task-center__section-copy h2 { font-size:15px; }
+.task-center__stage-detail .task-center__section-copy p { margin-top:5px; font-size:12px; }
+.task-center__stage-detail .task-center__folder-list { display:flex; flex-direction:column; flex:1; min-height:0; margin:0; gap:0; }
+.task-center__stage-detail .task-center__folder { flex:0 1 90px; border:0; border-bottom:1px solid hsl(var(--border)); border-radius:0; min-height:0; padding:18px 20px; background:transparent; }
+.task-center__stage-detail .task-center__folder:last-child { border-bottom:0; }
+.task-center__stage-detail .task-center__folder:hover { transform:none; background:hsl(var(--primary)/.035); }
+.task-center__stage-detail .task-center__folder-copy strong { font-size:14px; font-weight:600; }
+.task-center__stage-detail .task-center__folder-copy small { margin-top:5px; font-size:11px; }
+.task-center__group-progress { display:grid; gap:4px; margin:0 20px; text-align:right; font-variant-numeric:tabular-nums; }
+.task-center__group-progress strong { font-size:13px; font-weight:600; }
+.task-center__group-progress small { font-size:11px; color:hsl(var(--muted-foreground)); }
+.task-center__stage-detail .task-center__empty-section { flex:1; gap:10px; align-content:center; min-height:0; padding:24px; margin:0; border:0; }
+.task-center__group-pages { display:flex; flex-shrink:0; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px; border-top:1px solid hsl(var(--border)); color:hsl(var(--muted-foreground)); font-size:11px; }
+.task-center__group-pages>div { display:flex; gap:4px; }
+:global(.app-shell .app-content) .task-center > .page-region { display:flex; flex-direction:column; overflow:hidden; }
+.task-center__empty-section strong { font-size:14px; font-weight:600; color:hsl(var(--foreground)); }
+.task-center__empty-section svg { color:hsl(var(--muted-foreground)/.6); }
+@media(max-width:1100px) {
+  .task-center__workspace { grid-template-columns:220px minmax(0,1fr); gap:12px; }
+  .task-center__group-progress { margin:0 6px; }
+  .task-center__stage-detail .task-center__folder { padding:16px 12px; }
+}
+@media(max-width:700px) {
+  .task-center__workspace { grid-template-columns:minmax(0,1fr); }
+  .task-center__workspace { grid-template-rows:auto minmax(0,1fr); }
+  .task-center__stages { display:flex; overflow:auto; gap:4px; }
+  .task-center__stages { scrollbar-width:none; }
+  .task-center__stages::-webkit-scrollbar { display:none; }
+  .task-center__nav-head { flex-shrink:0; padding:0 8px; }
+  .task-center__nav-label { display:none; }
+  .task-center__stage { min-width:175px; width:auto; flex-shrink:0; }
+  .task-center__group-progress { display:none; }
+}
+@media(prefers-reduced-motion:reduce) { .task-center__stage, .task-center__folder { transition:none; } }
 </style>

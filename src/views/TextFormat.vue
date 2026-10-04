@@ -11,9 +11,10 @@ import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/u
 import type { TextToggles } from '@/types'
 import type { SplitMode } from '@/api/textFormat'
 
+import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
-import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Progress from '@/components/ui/Progress.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Search, Settings2, X } from 'lucide-vue-next'
@@ -30,7 +31,7 @@ const { push: toast } = useToast()
 
 // Top-level bindings: template refs must be unwrapped at the setup level.
 const {
-  phase, flow, version, nextTask, activeTasks, loading,
+  phase, flow, version, nextTask, activeTasks, loading, pipelineProgress,
   filteredChapters, pagedChapters, pageCount, page, pageSize,
   filter, query, reasonFilter, sameOrigNum, reasonOptions,
   selectedKey, marksBusy, preview,
@@ -318,7 +319,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="wb-page space-y-2">
+  <div class="wb-page viewport-workbench">
     <header class="page-header shrink-0">
       <div>
         <p class="eyebrow">Pipeline · Text</p>
@@ -327,139 +328,83 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <ProjectGateAlert />
+    <div class="workbench-controls" tabindex="0" role="region" aria-label="制作条件与流程">
+      <ProjectGateAlert />
 
-    <!-- 文件栏：ready 阶段并入结果摘要行，独立行只在其余阶段展示，省出的高度留给章节列表 -->
-    <div v-if="!(phase === 'ready' && version)" class="wb-filebar glass-panel flex flex-wrap items-center gap-3 px-4 py-3">
-      <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-        <FileText class="h-5 w-5" />
-      </div>
-      <div class="min-w-0 flex-1">
-        <p class="truncate text-sm font-semibold" :title="sourceFile?.name">
-          {{ sourceFile?.name ?? '尚未选择文件' }}
-        </p>
-        <p class="truncate text-xs text-muted-foreground">
-          <template v-if="sourceFile">
-            TXT<template v-if="sourceFile.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
-          </template>
+      <!-- 文件栏：ready 阶段并入结果摘要行，独立行只在其余阶段展示，省出的高度留给章节列表 -->
+      <WorkbenchContextBar v-if="!(phase === 'ready' && version)">
+        <template #icon><FileText /></template>
+        <template #title><p :title="sourceFile?.name">{{ sourceFile?.name ?? '尚未选择文件' }}</p></template>
+        <template #description>
+          <template v-if="sourceFile">TXT<template v-if="sourceFile.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template></template>
           <template v-else>点击右侧「选择 TXT」上传原稿</template>
-        </p>
-      </div>
-      <div class="flex shrink-0 items-center gap-2">
-        <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">
-          {{ chooseLabel }}
-        </Button>
-        <Button variant="outline" size="sm" @click="settingsOpen = true">
-          <Settings2 class="h-4 w-4" />
-          处理设置
-        </Button>
-      </div>
-    </div>
+        </template>
+        <template #actions>
+          <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
+          <Button variant="outline" size="sm" @click="settingsOpen = true"><Settings2 class="h-4 w-4" />处理设置</Button>
+        </template>
+      </WorkbenchContextBar>
 
-    <!-- 处理中 -->
-    <div v-if="phase === 'processing' && flow" class="glass-panel space-y-3 p-5">
-      <div class="flex items-center gap-3">
-        <Loader2 class="h-5 w-5 shrink-0 animate-spin" />
-        <div class="min-w-0 flex-1">
-          <p class="text-sm font-medium">正在{{ stageLabel(nextTask?.stage) }}…</p>
-          <p class="text-xs text-muted-foreground">
-            排版 → 章节分析 → 分册 自动推进，可离开本页面，稍后回来会继续（不会重复处理）。
-          </p>
-        </div>
-        <span v-if="nextTask" class="shrink-0 text-xs tabular-nums text-muted-foreground">
-          {{ Math.round((nextTask.progress ?? 0) * 100) }}%
-        </span>
-      </div>
-      <Progress :value="nextTask?.progress ?? 0" aria-label="流水线进度" />
-    </div>
-
-    <!-- 失败 -->
-    <Alert v-if="phase === 'failed'" variant="destructive">
-      <AlertTriangle class="h-4 w-4 shrink-0" />
-      <div>
-        <p class="font-medium">流程失败：{{ flow?.error || '未知原因' }}</p>
-        <div class="mt-2 flex gap-2">
-          <Button size="sm" :disabled="loading" @click="retryFailedStage()">重试该阶段</Button>
-          <Button size="sm" variant="outline" :disabled="startDisabled" @click="start(true)">重新处理</Button>
-        </div>
-      </div>
-    </Alert>
-
-    <!-- 结果摘要 -->
-    <div v-if="phase === 'ready' && version" class="glass-panel p-4 shrink-0">
-      <div class="flex flex-wrap items-center gap-x-8 gap-y-3">
-        <!-- 状态块 -->
-        <div class="flex shrink-0 items-center gap-3">
-          <div class="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400">
-            <CheckCircle2 class="h-5 w-5" />
-          </div>
-          <div>
-            <p class="text-sm font-semibold text-emerald-700 dark:text-emerald-400">
-              {{ version.version_status === 'stale' ? '版本已被覆盖' : '处理完成' }}
-            </p>
-            <p class="text-xs text-muted-foreground">{{ version.version_status === 'stale' ? '仅可核对，正文不可读' : '已保存到项目' }}</p>
-          </div>
-        </div>
-        <!-- 统计 -->
-        <div class="flex flex-wrap items-center gap-y-2">
-          <div class="px-6">
-            <div class="text-2xl font-bold tabular-nums">{{ formatNumber(version.total_chars) }}</div>
-            <div class="text-xs text-muted-foreground">总字数</div>
-          </div>
-          <div class="border-l px-6">
-            <div class="text-2xl font-bold tabular-nums">{{ version.chapters.length }}</div>
-            <div class="text-xs text-muted-foreground">最终章节</div>
-          </div>
-          <div class="border-l px-6">
-            <div class="text-2xl font-bold tabular-nums" :class="{ 'text-amber-600 dark:text-amber-400': pendingCount > 0 }">
-              {{ pendingCount }}
-            </div>
-            <div class="text-xs text-muted-foreground">待核对</div>
-          </div>
-          <div class="border-l px-6">
-            <div class="text-2xl font-bold tabular-nums">{{ markedCount }}</div>
-            <div class="text-xs text-muted-foreground">已核对</div>
-          </div>
-        </div>
-        <div class="ml-auto flex shrink-0 flex-wrap items-center gap-4 text-xs">
-          <Badge v-if="version.version_status === 'stale'" variant="destructive">已被新版本覆盖</Badge>
-          <Badge v-if="settingsDirty" variant="warning">设置已修改，重新处理后生效</Badge>
-          <!-- 文件信息并入摘要行（原独立文件栏）：加竖向分隔与更宽的间距，避免贴住统计数字显得拥挤 -->
-          <div class="h-8 w-px shrink-0 bg-border" aria-hidden="true" />
-          <div class="flex min-w-0 items-center gap-3">
-            <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <FileText class="h-5 w-5" />
-            </div>
-            <div class="min-w-0">
-              <p class="max-w-[22rem] truncate text-sm font-medium" :title="sourceFile?.name">{{ sourceFile?.name ?? '尚未选择文件' }}</p>
-              <p class="text-muted-foreground">
-                TXT<template v-if="sourceFile?.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
-              </p>
-            </div>
-          </div>
-          <div class="flex shrink-0 items-center gap-3">
-            <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
-            <Button variant="outline" size="sm" @click="settingsOpen = true">
-              <Settings2 class="h-4 w-4" />
-              处理设置
-            </Button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 版本级事项 -->
-    <template v-if="phase === 'ready' && version">
-      <Alert v-if="version.version_status === 'stale'" variant="destructive">
+      <!-- 失败 -->
+      <Alert v-if="phase === 'failed'" variant="destructive">
         <AlertTriangle class="h-4 w-4 shrink-0" />
-        <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
+        <div>
+          <p class="font-medium">流程失败：{{ flow?.error || '未知原因' }}</p>
+          <div class="mt-2 flex gap-2">
+            <Button size="sm" :disabled="loading" @click="retryFailedStage()">重试该阶段</Button>
+            <Button size="sm" variant="outline" :disabled="startDisabled" @click="start(true)">重新处理</Button>
+          </div>
+        </div>
       </Alert>
-      <!-- 版本级处理提示（matters）不再在页顶铺全宽 banner：每章的处置说明已由
-           章节表「核对原因」列与详情面板章节级 matter 卡承载，页顶只留版本状态警示。 -->
-    </template>
 
+      <!-- 结果摘要 -->
+      <WorkbenchContextBar v-if="phase === 'ready' && version">
+        <template #icon><CheckCircle2 /></template>
+        <template #title><p :title="sourceFile?.name">{{ sourceFile?.name ?? '原稿处理结果' }}</p></template>
+        <template #description>
+          {{ version.version_status === 'stale' ? '版本已被覆盖，仅可核对' : '处理完成，已保存到项目' }}
+          <template v-if="sourceFile?.size"> · TXT {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
+          <WorkbenchStatus v-if="settingsDirty" variant="warning"> · 设置已修改，重新处理后生效</WorkbenchStatus>
+        </template>
+        <template #metrics>
+          <div class="workbench-context-metric"><strong>{{ formatNumber(version.total_chars) }}</strong>总字数</div>
+          <div class="workbench-context-metric"><strong>{{ version.chapters.length }}</strong>最终章节</div>
+          <div class="workbench-context-metric"><strong class="!text-amber-600 dark:!text-amber-400">{{ pendingCount }}</strong>待核对</div>
+          <div class="workbench-context-metric"><strong class="!text-emerald-600 dark:!text-emerald-400">{{ markedCount }}</strong>已核对</div>
+        </template>
+        <template #actions>
+          <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
+          <Button variant="outline" size="sm" @click="settingsOpen = true"><Settings2 class="h-4 w-4" />处理设置</Button>
+        </template>
+      </WorkbenchContextBar>
+
+      <!-- 版本级事项 -->
+      <template v-if="phase === 'ready' && version">
+        <Alert v-if="version.version_status === 'stale'" variant="destructive">
+          <AlertTriangle class="h-4 w-4 shrink-0" />
+          <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
+        </Alert>
+        <!-- 版本级处理提示（matters）不再在页顶铺全宽 banner：每章的处置说明已由
+             章节表「核对原因」列与详情面板章节级 matter 卡承载，页顶只留版本状态警示。 -->
+      </template>
+    </div>
+
+    <!-- 处理状态使用同一标准工作区，避免底栏随进度卡片上移。 -->
+    <div v-if="phase === 'processing' && flow" class="wb-workspace workbench-empty glass-panel" role="status" aria-live="polite">
+      <div class="w-full max-w-xl space-y-4 text-left">
+        <div class="flex items-center gap-3">
+          <Loader2 class="h-5 w-5 shrink-0 animate-spin text-primary" />
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium">正在{{ stageLabel(nextTask?.stage) }}…</p>
+            <p class="mt-1 text-xs text-muted-foreground">排版 → 章节分析 → 分册，可离开页面，回来自动继续。</p>
+          </div>
+          <span v-if="nextTask" class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ Math.floor(pipelineProgress * 100) }}%</span>
+        </div>
+        <Progress :value="pipelineProgress" aria-label="流水线总进度" />
+      </div>
+    </div>
     <!-- 工作区 -->
-    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-[440px] flex-1 flex-col overflow-hidden">
+    <div v-if="phase === 'ready' && version" class="wb-workspace glass-panel flex min-h-0 flex-1 flex-col overflow-hidden">
       <div
         class="min-h-0 flex-1"
         :inert="drawerOpen || undefined"
@@ -533,7 +478,7 @@ onBeforeUnmount(() => {
               @update:page-size="(s: number) => { pageSize = s; page = 1 }"
             />
           </div>
-          <aside v-if="!isNarrow" class="wb-detail min-h-0 border-l-2 bg-muted/20" aria-label="章节详情">
+          <aside v-if="!isNarrow" class="wb-detail min-h-0 border-l bg-muted/20" aria-label="章节详情">
             <ChapterDetailPanel
               :chapter="currentChapter"
               :matters="detailMatters"
@@ -557,8 +502,8 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 空态提示 -->
-    <div v-if="phase === 'empty'" class="glass-panel p-8 text-center text-sm text-muted-foreground">
-      选择 TXT 文件后点击底部「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。
+    <div v-if="phase === 'empty' || phase === 'failed'" class="wb-workspace workbench-empty glass-panel text-sm text-muted-foreground">
+      {{ phase === 'failed' ? '处理未完成，请重试该阶段或重新处理。' : '选择 TXT 文件后点击底部「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。' }}
     </div>
 
     <!-- 底栏 -->
@@ -654,16 +599,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 页面定高撑满视口（扣除 .app-content 上下 padding）：工作区 flex-1 吃掉底部空隙；
-   底栏不贴死窗口下缘，底部留 8px——与 .wb-page space-y-2 的模块间距一致。
-   小视口下工作区内部滚动兜底。用 vh 而非 dvh：宿主窗口容器高度等价 100vh，
-   dvh 在此环境比容器矮，会残留底部空隙。 */
+/* 高度由外层视口提供，工作区只占剩余空间。 */
 .wb-page {
   display: flex;
   flex-direction: column;
-  /* 抵消 .app-content 的 64px 底 padding，避免底栏下方再叠出一段可滚动留白。 */
-  margin-bottom: -64px;
-  height: calc(100vh - clamp(28px, 4vw, 52px) - 8px);
+  height: 100%;
 }
 /* 标题区底部留白从全局 28px 收紧：摘要行与章节列表整体上移，多留可视行数（同 .bgm-page 先例）。 */
 .wb-page .page-header {
@@ -697,7 +637,7 @@ onBeforeUnmount(() => {
 /* 桌面：左章节表 + 右常驻详情（40%）：预览正文与核对说明更好读，左侧标题列相应收窄。 */
 .wb-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40%;
+  grid-template-columns: minmax(0, 1fr) 34%;
   gap: 0;
 }
 .bottom-bar {

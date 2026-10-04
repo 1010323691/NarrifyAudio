@@ -130,7 +130,10 @@ async def upload_file(
     if project is None:
         raise HTTPException(409, "尚未设置工作空间")
     file_id = new_id()
-    name = safe_display_name(Path(filename or file.filename or "upload.bin").name)
+    # Preserve the user's basename for display and recovery. Storage names are
+    # independently sanitized; never overwrite original_name with that alias.
+    original_name = (filename or file.filename or "upload.bin").replace("\\", "/").rsplit("/", 1)[-1] or "upload.bin"
+    name = safe_display_name(original_name)
     dest = (layout.input / file_id / name).resolve()
     if not dest.is_relative_to(layout.input.resolve()):
         raise HTTPException(400, "非法文件名")
@@ -154,7 +157,7 @@ async def upload_file(
                 id=file_id,
                 project_id=project.id,
                 owner_id=ctx.user.id,
-                original_name=name,
+                original_name=original_name,
                 object_key=object_key,
                 content_type=file.content_type or "application/octet-stream",
                 size_bytes=digest_size,
@@ -168,4 +171,4 @@ async def upload_file(
             dest.unlink()
         db.rollback()
         raise
-    return {"path": str(dest), "name": name, "size": digest_size, "id": file_id, "file_id": file_id, "project_id": project.id}
+    return {"path": str(dest), "name": original_name, "size": digest_size, "id": file_id, "file_id": file_id, "project_id": project.id}

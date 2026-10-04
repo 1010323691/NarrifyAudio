@@ -15,7 +15,7 @@ preservation + idempotency) is ported to ``tests/test_text.py`` as the safety ne
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 
 def _is_cjk(ch: str) -> bool:
@@ -150,14 +150,14 @@ def count_chars(s: str) -> int:
     return len(re.sub(r"\s", "", s))
 
 
-def format_text(text: str, cfg: Any) -> dict:
+def format_text(text: str, cfg: Any, *, on_progress: Callable[[float], None] | None = None) -> dict:
     """The main formatting pipeline. Returns ``{text, stats}``."""
     text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"\r", "\n", text)
     raw_lines = text.split("\n")
 
     lines = []
-    for raw in raw_lines:
+    for line_index, raw in enumerate(raw_lines, 1):
         trimmed = trim_edges(raw)  # for title detection (keeps inner spaces)
         chapter_like = is_chapter_title(trimmed)
         is_chapter = cfg.detect_chapters and chapter_like
@@ -185,6 +185,8 @@ def format_text(text: str, cfg: Any) -> dict:
             # 章节号与章节名的分界补一个空格（第十九章神秘分阁主 → 第十九章 神秘分阁主）
             norm = ensure_title_space(norm)
         lines.append((norm, is_chapter))
+        if on_progress:
+            on_progress(0.5 * line_index / max(1, len(raw_lines)))
 
     paragraphs: list[str] = []
     current = ""
@@ -192,7 +194,9 @@ def format_text(text: str, cfg: Any) -> dict:
     prev_ended = False  # last content line ended with sentence punctuation
     force_break = False  # force a new paragraph after a chapter title
 
-    for norm, is_chapter in lines:
+    for line_index, (norm, is_chapter) in enumerate(lines, 1):
+        if on_progress:
+            on_progress(0.5 + 0.4 * line_index / max(1, len(lines)))
         if norm == "":  # blank line -> hard boundary
             if current:
                 paragraphs.append(current)
@@ -226,6 +230,8 @@ def format_text(text: str, cfg: Any) -> dict:
         paragraphs = [convert_quotes(p) for p in paragraphs]
 
     output = "\n\n".join(paragraphs)
+    if on_progress:
+        on_progress(1.0)
     return {
         "text": output,
         "stats": {

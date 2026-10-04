@@ -256,13 +256,17 @@ Invoke-RestMethod 'http://127.0.0.1:5173/api/health'
 
 ### 停止
 
-1. 等待制作任务结束，在 Backend、Worker、Frontend 控制台中分别按 `Ctrl+C`，确认进程退出后关闭窗口。
-2. 需要关闭数据服务时，再双击 `launch/stop-data-services.bat` 并确认 UAC 授权。也可以保留数据服务，便于下次启动。
+1. 等待制作任务结束，双击 `launch/stop.bat` 并确认 UAC 授权。脚本先停止本项目的 API、Worker、Vite 及其子进程，再停止 Memurai 和 PostgreSQL；结果窗口按键后关闭。
+2. 只停止应用、保留数据服务时，在普通 PowerShell 执行 `.\launch\stop.ps1 -AppOnly`。单独停止数据服务仍可使用 `launch/stop-data-services.bat`，但应先确认应用进程已退出。
+
+可执行 `.\launch\stop.ps1 -WhatIf` 预览停止范围，不会实际停止进程或服务。统一停止会中断仍在运行的制作任务，请先等待任务结束。
 
 | PowerShell 命令 | 所需权限 |
 | --- | --- |
 | `.\launch\start-data-services.ps1` | 管理员，启动数据服务 |
 | `.\launch\start.ps1` | 普通用户，数据服务须已运行 |
+| `.\launch\stop.ps1` | 管理员，停止应用及数据服务 |
+| `.\launch\stop.ps1 -AppOnly` | 普通用户，停止自己的应用进程，保留数据服务 |
 | `.\launch\stop-data-services.ps1` | 管理员，应用进程须已退出 |
 
 ## 可选制作能力

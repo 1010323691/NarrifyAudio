@@ -77,6 +77,14 @@ export function useTextFormatWorkbench() {
     if (flow.value.status === 'ready' && version.value) return 'ready'
     return 'processing'
   })
+  const pipelineProgress = computed(() => {
+    if (phase.value === 'ready') return 1
+    const stage = nextTask.value?.stage
+    const index = stage === 'format' ? 0 : stage === 'analyze' ? 1 : stage === 'split' ? 2 : -1
+    if (index < 0) return 0
+    const percent = Number(nextTask.value?.progress ?? 0)
+    return (index + (Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) / 100 : 0)) / 3
+  })
 
   const chapters = computed<WorkbenchChapter[]>(() => version.value?.chapters ?? [])
   const matterById = computed<Map<string, WorkbenchMatter>>(
@@ -227,7 +235,13 @@ export function useTextFormatWorkbench() {
       while (nextTask.value && !nextTask.value.failed) {
         const taskId = nextTask.value.task_id
         try {
-          await waitForTask.wait(taskId)
+          await waitForTask.track(taskId, (task) => {
+            // Never write a previous project or previous stage's late snapshot.
+            if (project.activeProjectId !== projectId || nextTask.value?.task_id !== taskId) return false
+            nextTask.value = { ...nextTask.value, status: task.status, progress: task.progress }
+            activeTasks.value = activeTasks.value.map((row) => row.id === taskId
+              ? { ...row, status: task.status, progress: task.progress } : row)
+          })
         } catch (e: any) {
           if (e?.name === 'AbortError') return // deactivated / project switch — resume later
           throw e
@@ -439,12 +453,11 @@ export function useTextFormatWorkbench() {
     () => project.activeProjectId,
     (id, prev) => {
       if (id === prev) return
-      if (!id) {
-        resetWorkbench()
-        return
-      }
+      resetWorkbench()
+      if (!id) return
       void resume()
     },
+    { flush: 'sync' },
   )
   onMounted(() => {
     if (project.activeProjectId) void resume()
@@ -460,7 +473,7 @@ export function useTextFormatWorkbench() {
 
   return {
     // state
-    phase, flow, version, nextTask, activeTasks, loading,
+    phase, flow, version, nextTask, activeTasks, loading, pipelineProgress,
     chapters, filteredChapters, pagedChapters, pageCount, page, pageSize,
     filter, query, reasonFilter, sameOrigNum, reasonOptions,
     selectedKey, marksBusy, preview,

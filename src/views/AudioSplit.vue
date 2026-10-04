@@ -25,7 +25,7 @@ import CardContent from '@/components/ui/CardContent.vue'
 import Input from '@/components/ui/Input.vue'
 import Label from '@/components/ui/Label.vue'
 import Switch from '@/components/ui/Switch.vue'
-import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Progress from '@/components/ui/Progress.vue'
 import ScrollArea from '@/components/ui/ScrollArea.vue'
@@ -441,7 +441,7 @@ function download(path: string) {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="viewport-page">
     <header class="page-header mb-5">
       <div>
         <p class="eyebrow">Pipeline · Split</p>
@@ -450,203 +450,205 @@ function download(path: string) {
       </div>
     </header>
 
-    <ProjectGateAlert />
+    <div class="page-region" role="region" aria-label="页面工作区" tabindex="0">
+      <ProjectGateAlert />
 
-    <!-- 选择文件 -->
-    <Card>
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2">
-          <AudioLines class="h-5 w-5" />选择音频
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="space-y-3">
-        <WorkspaceEntryPicker
-          module="06_audio_merge"
-          :extensions="['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'webm']"
-          :show-default="false"
-          v-model="selectedName"
-          label="待分集音频"
-          empty-hint="暂无可分集的音频，请先到「音频合并」生成音频。"
-          @scanned="onScanned"
-        />
-        <div v-if="file" class="flex flex-wrap items-center gap-3 rounded-md bg-muted/50 px-3 py-2 text-sm">
-          <span class="font-medium">{{ file.name }}</span>
-        </div>
-        <div v-if="probe" class="flex flex-wrap gap-4 rounded-md bg-muted/50 px-3 py-2 text-sm">
-          <span>时长 <b>{{ formatDuration(probe.duration) }}</b></span>
-          <span>大小 <b>{{ formatBytes(probe.size) }}</b></span>
-          <span>格式 <b class="uppercase">{{ probe.ext }}</b></span>
-        </div>
-      </CardContent>
-    </Card>
-
-    <!-- 参数 -->
-    <Card>
-      <CardHeader>
-        <CardTitle>切割参数</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div class="grid gap-4 sm:grid-cols-2">
-          <div class="flex items-center gap-3">
-            <Label class="w-24 shrink-0">目标时长</Label>
-            <Input v-model="targetDuration" placeholder="如 10:00" class="max-w-[120px]" />
-            <span class="text-xs text-muted-foreground">MM:SS 或 HH:MM:SS</span>
+      <!-- 选择文件 -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            <AudioLines class="h-5 w-5" />选择音频
+          </CardTitle>
+        </CardHeader>
+        <CardContent class="space-y-3">
+          <WorkspaceEntryPicker
+            module="06_audio_merge"
+            :extensions="['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'webm']"
+            :show-default="false"
+            v-model="selectedName"
+            label="待分集音频"
+            empty-hint="暂无可分集的音频，请先到「音频合并」生成音频。"
+            @scanned="onScanned"
+          />
+          <div v-if="file" class="flex flex-wrap items-center gap-3 rounded-md bg-muted/50 px-3 py-2 text-sm">
+            <span class="font-medium">{{ file.name }}</span>
           </div>
-          <div class="flex items-center gap-3">
-            <Label class="w-24 shrink-0">智能对齐</Label>
-            <Switch v-model="smartAlign" />
-            <span class="text-xs text-muted-foreground">把切点对齐到停顿处</span>
+          <div v-if="probe" class="flex flex-wrap gap-4 rounded-md bg-muted/50 px-3 py-2 text-sm">
+            <span>时长 <b>{{ formatDuration(probe.duration) }}</b></span>
+            <span>大小 <b>{{ formatBytes(probe.size) }}</b></span>
+            <span>格式 <b class="uppercase">{{ probe.ext }}</b></span>
           </div>
-          <div v-if="smartAlign" class="flex items-center gap-3">
-            <Label class="w-24 shrink-0">偏移容差</Label>
-            <Input v-model.number="tolerance" type="number" min="5" max="30" class="max-w-[100px]" />
-            <span class="text-xs text-muted-foreground">秒（5–30）</span>
+        </CardContent>
+      </Card>
+
+      <!-- 参数 -->
+      <Card>
+        <CardHeader>
+          <CardTitle>切割参数</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <div class="flex items-center gap-3">
+              <Label class="w-24 shrink-0">目标时长</Label>
+              <Input v-model="targetDuration" placeholder="如 10:00" class="max-w-[120px]" />
+              <span class="text-xs text-muted-foreground">MM:SS 或 HH:MM:SS</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <Label class="w-24 shrink-0">智能对齐</Label>
+              <Switch v-model="smartAlign" />
+              <span class="text-xs text-muted-foreground">把切点对齐到停顿处</span>
+            </div>
+            <div v-if="smartAlign" class="flex items-center gap-3">
+              <Label class="w-24 shrink-0">偏移容差</Label>
+              <Input v-model.number="tolerance" type="number" min="5" max="30" class="max-w-[100px]" />
+              <span class="text-xs text-muted-foreground">秒（5–30）</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <Label class="w-24 shrink-0">命名格式</Label>
+              <Input v-model="namingFormat" placeholder="书名 第 {} 集" class="max-w-[160px]" />
+              <span class="text-xs text-muted-foreground">完整文件名，{} 为编号</span>
+            </div>
+            <div class="flex items-center gap-3">
+              <Label class="w-24 shrink-0">起始编号</Label>
+              <Input v-model="startNumber" class="max-w-[100px]" />
+            </div>
           </div>
-          <div class="flex items-center gap-3">
-            <Label class="w-24 shrink-0">命名格式</Label>
-            <Input v-model="namingFormat" placeholder="书名 第 {} 集" class="max-w-[160px]" />
-            <span class="text-xs text-muted-foreground">完整文件名，{} 为编号</span>
+        </CardContent>
+      </Card>
+
+      <!-- 方案 -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            <Wand2 class="h-5 w-5" />切割方案
+          </CardTitle>
+        </CardHeader>
+        <CardContent class="space-y-4">
+          <div class="flex flex-wrap items-center gap-3">
+            <Button variant="outline" @click="buildPlan" :disabled="busyPlan || !file">
+              <Loader2 v-if="busyPlan" class="h-4 w-4 animate-spin" />
+              <Wand2 v-else class="h-4 w-4" />
+              {{ smartAlign ? '生成智能方案' : '生成均分方案' }}
+            </Button>
+            <span v-if="plan" class="text-sm">
+              共 <b>{{ plan.count }}</b> 段
+              <WorkbenchStatus v-if="plan.aligned" variant="success" class="ml-2">已对齐</WorkbenchStatus>
+              <WorkbenchStatus v-else variant="secondary" class="ml-2">均分</WorkbenchStatus>
+            </span>
           </div>
-          <div class="flex items-center gap-3">
-            <Label class="w-24 shrink-0">起始编号</Label>
-            <Input v-model="startNumber" class="max-w-[100px]" />
+
+          <!-- 智能方案进行中 -->
+          <Alert v-if="planTask" variant="info" class="items-center">
+            <Loader2 class="h-4 w-4 shrink-0 animate-spin" />
+            <div class="flex-1">
+              <div class="mb-1.5">{{ planTask.current || '检测停顿中…' }}</div>
+              <Progress :value="planTask.progress" />
+            </div>
+            <Button variant="outline" size="sm" @click="cancel(planTask.id)">取消</Button>
+          </Alert>
+
+          <!-- 方案表 -->
+          <div v-else-if="plan">
+            <div v-if="plan.aligned" class="mb-2 flex gap-2 text-xs">
+              <WorkbenchStatus variant="success">吸附 {{ plan.snapped }} 处</WorkbenchStatus>
+              <WorkbenchStatus variant="warning" v-if="plan.fallbacks">回退 {{ plan.fallbacks }} 处</WorkbenchStatus>
+            </div>
+            <ScrollArea class="max-h-72 rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead class="w-16">集</TableHead>
+                    <TableHead class="w-28 text-right">起始</TableHead>
+                    <TableHead class="w-28 text-right">时长</TableHead>
+                    <TableHead class="w-28 text-right">结束</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow v-for="s in plan.segments" :key="s.index">
+                    <TableCell>第 {{ s.index + 1 }} 集</TableCell>
+                    <TableCell class="text-right font-mono">{{ formatDuration(s.start) }}</TableCell>
+                    <TableCell class="text-right font-mono">{{ formatDuration(s.duration) }}</TableCell>
+                    <TableCell class="text-right font-mono">{{ formatDuration(s.start + s.duration) }}</TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </ScrollArea>
           </div>
-        </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
 
-    <!-- 方案 -->
-    <Card>
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2">
-          <Wand2 class="h-5 w-5" />切割方案
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <div class="flex flex-wrap items-center gap-3">
-          <Button variant="outline" @click="buildPlan" :disabled="busyPlan || !file">
-            <Loader2 v-if="busyPlan" class="h-4 w-4 animate-spin" />
-            <Wand2 v-else class="h-4 w-4" />
-            {{ smartAlign ? '生成智能方案' : '生成均分方案' }}
-          </Button>
-          <span v-if="plan" class="text-sm">
-            共 <b>{{ plan.count }}</b> 段
-            <Badge v-if="plan.aligned" variant="success" class="ml-2">已对齐</Badge>
-            <Badge v-else variant="secondary" class="ml-2">均分</Badge>
-          </span>
-        </div>
-
-        <!-- 智能方案进行中 -->
-        <Alert v-if="planTask" variant="info" class="items-center">
-          <Loader2 class="h-4 w-4 shrink-0 animate-spin" />
-          <div class="flex-1">
-            <div class="mb-1.5">{{ planTask.current || '检测停顿中…' }}</div>
-            <Progress :value="planTask.progress" />
+      <!-- 切割 -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            <Scissors class="h-5 w-5" />开始切割
+          </CardTitle>
+        </CardHeader>
+        <CardContent class="space-y-4">
+          <div class="flex flex-wrap items-center gap-3">
+            <Button @click="doCut" :disabled="busyCut || !plan || !projectSet">
+              <Loader2 v-if="busyCut" class="h-4 w-4 animate-spin" />
+              <Scissors v-else class="h-4 w-4" />
+              {{ busyCut ? '切割中…' : '开始切割' }}
+            </Button>
+            <Button variant="outline" @click="doZip" :disabled="busyZip || !cutResult || !projectSet">
+              <Package class="h-4 w-4" />
+              打包下载
+            </Button>
+            <Button variant="outline" @click="doExport" :disabled="busyExport || !cutResult || !projectSet">
+              <FolderOutput class="h-4 w-4" />
+              输出到音频源文件夹
+            </Button>
           </div>
-          <Button variant="outline" size="sm" @click="cancel(planTask.id)">取消</Button>
-        </Alert>
 
-        <!-- 方案表 -->
-        <div v-else-if="plan">
-          <div v-if="plan.aligned" class="mb-2 flex gap-2 text-xs">
-            <Badge variant="success">吸附 {{ plan.snapped }} 处</Badge>
-            <Badge variant="warning" v-if="plan.fallbacks">回退 {{ plan.fallbacks }} 处</Badge>
+          <!-- 切割进行中 -->
+          <Alert v-if="cutTask" variant="info" class="items-center">
+            <Loader2 class="h-4 w-4 shrink-0 animate-spin" />
+            <div class="flex-1">
+              <div class="mb-1.5">{{ cutTask.current || '切割中…' }}</div>
+              <Progress :value="cutTask.progress" />
+            </div>
+            <Button variant="outline" size="sm" @click="cancel(cutTask.id)">取消</Button>
+          </Alert>
+
+          <!-- 结果 -->
+          <div v-if="cutResult">
+            <p class="mb-2 text-sm text-muted-foreground">
+              共 <b class="text-foreground">{{ cutResult.file_count }}</b> 个文件 · 输出目录 {{ cutResult.output_dir }}
+            </p>
+            <ScrollArea class="max-h-80 rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>文件名</TableHead>
+                    <TableHead class="w-28 text-right">时长</TableHead>
+                    <TableHead class="w-24 text-right">大小</TableHead>
+                    <TableHead class="w-24"></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow v-for="f in cutResult.files" :key="f.path">
+                    <TableCell class="max-w-[360px] truncate">{{ f.name }}</TableCell>
+                    <TableCell class="text-right font-mono">{{ formatDuration(f.duration) }}</TableCell>
+                    <TableCell class="text-right">{{ formatBytes(f.size) }}</TableCell>
+                    <TableCell>
+                      <div class="flex items-center justify-end gap-1">
+                        <Button variant="ghost" size="sm" @click="download(f.path)">
+                          <Download class="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </ScrollArea>
           </div>
-          <ScrollArea class="max-h-72 rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead class="w-16">集</TableHead>
-                  <TableHead class="w-28 text-right">起始</TableHead>
-                  <TableHead class="w-28 text-right">时长</TableHead>
-                  <TableHead class="w-28 text-right">结束</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow v-for="s in plan.segments" :key="s.index">
-                  <TableCell>第 {{ s.index + 1 }} 集</TableCell>
-                  <TableCell class="text-right font-mono">{{ formatDuration(s.start) }}</TableCell>
-                  <TableCell class="text-right font-mono">{{ formatDuration(s.duration) }}</TableCell>
-                  <TableCell class="text-right font-mono">{{ formatDuration(s.start + s.duration) }}</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </ScrollArea>
-        </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
 
-    <!-- 切割 -->
-    <Card>
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2">
-          <Scissors class="h-5 w-5" />开始切割
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <div class="flex flex-wrap items-center gap-3">
-          <Button @click="doCut" :disabled="busyCut || !plan || !projectSet">
-            <Loader2 v-if="busyCut" class="h-4 w-4 animate-spin" />
-            <Scissors v-else class="h-4 w-4" />
-            {{ busyCut ? '切割中…' : '开始切割' }}
-          </Button>
-          <Button variant="outline" @click="doZip" :disabled="busyZip || !cutResult || !projectSet">
-            <Package class="h-4 w-4" />
-            打包下载
-          </Button>
-          <Button variant="outline" @click="doExport" :disabled="busyExport || !cutResult || !projectSet">
-            <FolderOutput class="h-4 w-4" />
-            输出到音频源文件夹
-          </Button>
-        </div>
-
-        <!-- 切割进行中 -->
-        <Alert v-if="cutTask" variant="info" class="items-center">
-          <Loader2 class="h-4 w-4 shrink-0 animate-spin" />
-          <div class="flex-1">
-            <div class="mb-1.5">{{ cutTask.current || '切割中…' }}</div>
-            <Progress :value="cutTask.progress" />
-          </div>
-          <Button variant="outline" size="sm" @click="cancel(cutTask.id)">取消</Button>
-        </Alert>
-
-        <!-- 结果 -->
-        <div v-if="cutResult">
-          <p class="mb-2 text-sm text-muted-foreground">
-            共 <b class="text-foreground">{{ cutResult.file_count }}</b> 个文件 · 输出目录 {{ cutResult.output_dir }}
-          </p>
-          <ScrollArea class="max-h-80 rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>文件名</TableHead>
-                  <TableHead class="w-28 text-right">时长</TableHead>
-                  <TableHead class="w-24 text-right">大小</TableHead>
-                  <TableHead class="w-24"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow v-for="f in cutResult.files" :key="f.path">
-                  <TableCell class="max-w-[360px] truncate">{{ f.name }}</TableCell>
-                  <TableCell class="text-right font-mono">{{ formatDuration(f.duration) }}</TableCell>
-                  <TableCell class="text-right">{{ formatBytes(f.size) }}</TableCell>
-                  <TableCell>
-                    <div class="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="sm" @click="download(f.path)">
-                        <Download class="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
-          </ScrollArea>
-        </div>
-      </CardContent>
-    </Card>
-
-    <Alert v-if="error" variant="destructive">
-      <XCircle class="h-4 w-4 shrink-0" />{{ error }}
-    </Alert>
+      <Alert v-if="error" variant="destructive">
+        <XCircle class="h-4 w-4 shrink-0" />{{ error }}
+      </Alert>
+    </div>
   </div>
 </template>

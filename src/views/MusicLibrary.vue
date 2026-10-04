@@ -40,6 +40,7 @@ import CardDescription from '@/components/ui/CardDescription.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
 import CardTitle from '@/components/ui/CardTitle.vue'
 import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Alert from '@/components/ui/Alert.vue'
 import Input from '@/components/ui/Input.vue'
 import Textarea from '@/components/ui/Textarea.vue'
@@ -886,537 +887,539 @@ onActivated(() => {
 </script>
 
 <template>
-  <div class="admin-library space-y-4">
+  <div class="admin-library viewport-page">
     <AdminPageHeader title="音乐库管理" description="组织公共曲目、收藏集与标签，为章节匹配提供音乐资源。">
       <Button variant="outline" size="sm" :disabled="loading" @click="refreshAll"><RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loading }" />刷新数据</Button>
       <Button size="sm" :disabled="uploading || loading" @click="doUpload()"><Upload class="h-4 w-4" />{{ uploading ? '上传中…' : '上传音乐' }}</Button>
     </AdminPageHeader>
-    <AdminLoadingState v-if="loading && !lib" />
+    <div class="page-region" role="region" aria-label="页面工作区" tabindex="0">
+      <AdminLoadingState v-if="loading && !lib" />
 
-    <Card
-      :class="dragOver ? 'ring-2 ring-primary' : ''"
-      @dragenter="onDragEnter"
-      @dragleave="onDragLeave"
-      @dragover="onDragOver"
-      @drop="onDrop"
-    >
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2">
-          <Disc3 class="h-5 w-5" />
-          <!-- 面包屑：音乐库（回 root）/ 当前视图名 -->
-          <nav class="flex items-center gap-1.5" aria-label="视图路径">
-            <button
-              type="button"
-              class="font-semibold hover:underline"
-              :class="view.kind === 'root' ? 'pointer-events-none' : ''"
-              @click="goRoot"
-            >
-              音乐库
-            </button>
-            <template v-if="view.kind !== 'root'">
-              <ChevronRight class="h-3.5 w-3.5 text-muted-foreground" />
-              <span>{{ view.kind === 'all' ? '全部音乐' : view.kind === 'unclassified' ? '未分类' : view.name }}</span>
-            </template>
-          </nav>
-        </CardTitle>
-        <CardDescription>
-          批量管理曲目，或根据文件名和描述推荐标签。文件夹用于分类，匹配仅使用标签。
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <Alert v-if="loadError" variant="destructive">
-          {{ loadError }} <button class="underline" @click="refreshAll">重新加载</button>
-        </Alert>
-
-        <div v-else-if="allTracks.length" class="grid gap-4 xl:grid-cols-[13rem_minmax(0,1fr)]">
-          <aside class="space-y-3 xl:sticky xl:top-4 xl:self-start">
-            <div class="rounded-lg border bg-muted/20 p-2">
-              <p class="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">资源视图</p>
-              <button type="button" class="library-view-item" :class="view.kind === 'all' ? 'library-view-item-active' : ''" @click="goAll"><Music class="h-4 w-4" />全部音乐 <span>{{ allTracks.length }}</span></button>
-              <button type="button" class="library-view-item" :class="view.kind === 'unclassified' ? 'library-view-item-active' : ''" @click="goUnclassified"><Folder class="h-4 w-4" />未分类 <span>{{ allTracks.length - folders.reduce((total, f) => total + folderCount(f.name), 0) }}</span></button>
-            </div>
-            <div class="rounded-lg border p-2">
-              <div class="flex items-center justify-between px-2 pb-1.5"><p class="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">收藏集</p><Button variant="ghost" size="sm" class="h-7 w-7 p-0" title="新建收藏集" :disabled="folderBusy" @click="openCreateFolderDialog"><Plus class="h-4 w-4" /></Button></div>
-              <div v-for="f in sortedFolders" :key="f.name" class="group flex min-w-0 items-center rounded-md hover:bg-accent">
-                <button
-                  type="button"
-                  class="library-view-item min-w-0 flex-1"
-                  :class="view.kind === 'folder' && view.name === f.name ? 'library-view-item-active' : ''"
-                  @click="goFolder(f.name)"
-                >
-                  <Folder class="h-4 w-4 shrink-0" />
-                  <span class="truncate">{{ f.name }}</span>
-                  <span>{{ folderCount(f.name) }}</span>
-                </button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="mr-0.5 h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive disabled:opacity-40"
-                  :title="
-                    folderCount(f.name) > 0
-                      ? '非空收藏集不能删除，请先将其中音乐移到其他收藏集或未分类'
-                      : `删除收藏集「${f.name}」（不会删除音乐文件）`
-                  "
-                  :aria-label="`删除收藏集「${f.name}」`"
-                  :disabled="folderBusy || folderCount(f.name) > 0"
-                  @click.stop="openDeleteFolderDialog(f.name)"
-                >
-                  <Trash2 class="h-3.5 w-3.5" />
-                </Button>
-              </div>
-              <p v-if="!sortedFolders.length" class="px-2 py-2 text-xs leading-5 text-muted-foreground">用收藏集组织音乐，不会改变文件路径或 BGM 匹配规则。</p>
-            </div>
-          </aside>
-          <div class="min-w-0 space-y-3">
-          <!-- 工具栏 -->
-          <div class="flex flex-wrap items-center gap-2">
-            <Button size="sm" :disabled="uploading || loading" @click="doUpload()">
-              <Loader2 v-if="uploading" class="h-3.5 w-3.5 animate-spin" />
-              <Upload v-else class="h-3.5 w-3.5" />
-              {{ uploading ? '上传中…' : '批量上传' }}
-            </Button>
-            <span class="text-xs text-muted-foreground" :title="`上传的文件将永久归属「${uploadTarget || '未分类'}」（也可把 mp3 / wav / flac 直接拖入本卡片）`">
-              将保存到：{{ uploadTarget || '未分类' }}
-            </span>
-            <div class="relative w-48">
-              <Search class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                v-model="search"
-                class="h-8 pl-8 text-xs"
-                aria-label="搜索音乐文件" placeholder="搜索文件名…"
-              />
-            </div>
-            <div class="w-44">
-              <select
-                v-model="tagFilter" aria-label="音乐标签筛选"
-                class="flex h-8 w-full rounded-md border border-input bg-background px-2 py-1 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      <Card
+        :class="dragOver ? 'ring-2 ring-primary' : ''"
+        @dragenter="onDragEnter"
+        @dragleave="onDragLeave"
+        @dragover="onDragOver"
+        @drop="onDrop"
+      >
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2">
+            <Disc3 class="h-5 w-5" />
+            <!-- 面包屑：音乐库（回 root）/ 当前视图名 -->
+            <nav class="flex items-center gap-1.5" aria-label="视图路径">
+              <button
+                type="button"
+                class="font-semibold hover:underline"
+                :class="view.kind === 'root' ? 'pointer-events-none' : ''"
+                @click="goRoot"
               >
-                <option value="">全部标签</option>
-                <option v-for="o in filterOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-              </select>
-            </div>
-            <Button variant="outline" size="sm" :disabled="loading" @click="refreshAll">
-              <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />刷新
-            </Button>
-            <span class="ml-auto text-xs text-muted-foreground">
-              <template v-if="view.kind === 'root'">
-                共 {{ allTracks.length }} 首 · 启用 {{ enabledCount }}
+                音乐库
+              </button>
+              <template v-if="view.kind !== 'root'">
+                <ChevronRight class="h-3.5 w-3.5 text-muted-foreground" />
+                <span>{{ view.kind === 'all' ? '全部音乐' : view.kind === 'unclassified' ? '未分类' : view.name }}</span>
               </template>
-              <template v-else>
-                当前视图 {{ trackList.length }} / {{ allTracks.length }} 首 · 启用 {{ enabledCount }}（全库）
-              </template>
-            </span>
-          </div>
+            </nav>
+          </CardTitle>
+          <CardDescription>
+            批量管理曲目，或根据文件名和描述推荐标签。文件夹用于分类，匹配仅使用标签。
+          </CardDescription>
+        </CardHeader>
+        <CardContent class="space-y-4">
+          <Alert v-if="loadError" variant="destructive">
+            {{ loadError }} <button class="underline" @click="refreshAll">重新加载</button>
+          </Alert>
 
-          <!-- 文件夹区（仅 root 视图）：全部音乐入口 + 文件夹行 + 排序 + 新建 -->
-          <div v-if="false" class="space-y-2">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <div class="text-xs font-semibold text-muted-foreground">文件夹</div>
-              <div class="flex items-center gap-2">
+          <div v-else-if="allTracks.length" class="grid gap-4 xl:grid-cols-[13rem_minmax(0,1fr)]">
+            <aside class="space-y-3 xl:sticky xl:top-4 xl:self-start">
+              <div class="rounded-lg border bg-muted/20 p-2">
+                <p class="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">资源视图</p>
+                <button type="button" class="library-view-item" :class="view.kind === 'all' ? 'library-view-item-active' : ''" @click="goAll"><Music class="h-4 w-4" />全部音乐 <span>{{ allTracks.length }}</span></button>
+                <button type="button" class="library-view-item" :class="view.kind === 'unclassified' ? 'library-view-item-active' : ''" @click="goUnclassified"><Folder class="h-4 w-4" />未分类 <span>{{ allTracks.length - folders.reduce((total, f) => total + folderCount(f.name), 0) }}</span></button>
+              </div>
+              <div class="rounded-lg border p-2">
+                <div class="flex items-center justify-between px-2 pb-1.5"><p class="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">收藏集</p><Button variant="ghost" size="sm" class="h-7 w-7 p-0" title="新建收藏集" :disabled="folderBusy" @click="openCreateFolderDialog"><Plus class="h-4 w-4" /></Button></div>
+                <div v-for="f in sortedFolders" :key="f.name" class="group flex min-w-0 items-center rounded-md hover:bg-accent">
+                  <button
+                    type="button"
+                    class="library-view-item min-w-0 flex-1"
+                    :class="view.kind === 'folder' && view.name === f.name ? 'library-view-item-active' : ''"
+                    @click="goFolder(f.name)"
+                  >
+                    <Folder class="h-4 w-4 shrink-0" />
+                    <span class="truncate">{{ f.name }}</span>
+                    <span>{{ folderCount(f.name) }}</span>
+                  </button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="mr-0.5 h-8 w-8 shrink-0 p-0 text-muted-foreground hover:text-destructive disabled:opacity-40"
+                    :title="
+                      folderCount(f.name) > 0
+                        ? '非空收藏集不能删除，请先将其中音乐移到其他收藏集或未分类'
+                        : `删除收藏集「${f.name}」（不会删除音乐文件）`
+                    "
+                    :aria-label="`删除收藏集「${f.name}」`"
+                    :disabled="folderBusy || folderCount(f.name) > 0"
+                    @click.stop="openDeleteFolderDialog(f.name)"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <p v-if="!sortedFolders.length" class="px-2 py-2 text-xs leading-5 text-muted-foreground">用收藏集组织音乐，不会改变文件路径或 BGM 匹配规则。</p>
+              </div>
+            </aside>
+            <div class="min-w-0 space-y-3">
+            <!-- 工具栏 -->
+            <div class="flex flex-wrap items-center gap-2">
+              <Button size="sm" :disabled="uploading || loading" @click="doUpload()">
+                <Loader2 v-if="uploading" class="h-3.5 w-3.5 animate-spin" />
+                <Upload v-else class="h-3.5 w-3.5" />
+                {{ uploading ? '上传中…' : '批量上传' }}
+              </Button>
+              <span class="text-xs text-muted-foreground" :title="`上传的文件将永久归属「${uploadTarget || '未分类'}」（也可把 mp3 / wav / flac 直接拖入本卡片）`">
+                将保存到：{{ uploadTarget || '未分类' }}
+              </span>
+              <div class="relative w-48">
+                <Search class="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  v-model="search"
+                  class="h-8 pl-8 text-xs"
+                  aria-label="搜索音乐文件" placeholder="搜索文件名…"
+                />
+              </div>
+              <div class="w-44">
                 <select
-                  v-model="folderSort"
-                  class="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
-                  title="文件夹排序"
+                  v-model="tagFilter" aria-label="音乐标签筛选"
+                  class="flex h-8 w-full rounded-md border border-input bg-background px-2 py-1 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  <option value="name">名称</option>
-                  <option value="created_at">创建时间</option>
-                  <option value="count">曲目数量</option>
+                  <option value="">全部标签</option>
+                  <option v-for="o in filterOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
-                <Button variant="outline" size="sm" :disabled="folderBusy || loading" @click="openCreateFolderDialog">
-                  <Plus class="h-3.5 w-3.5" />新建文件夹
-                </Button>
               </div>
-            </div>
-
-            <button
-              type="button"
-              class="flex w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-left transition-colors hover:bg-accent"
-              @click="goAll"
-            >
-              <Music class="h-4 w-4 text-muted-foreground" />
-              <span class="text-sm font-medium">全部音乐</span>
-              <span class="text-xs text-muted-foreground">{{ allTracks.length }} 首 · 含全部文件夹的曲目</span>
-              <ChevronRight class="ml-auto h-4 w-4 text-muted-foreground" />
-            </button>
-
-            <div v-if="!sortedFolders.length" class="px-1 text-xs text-muted-foreground">
-              还没有文件夹，点击「新建文件夹」创建。
-            </div>
-            <div
-              v-for="f in sortedFolders"
-              :key="f.name"
-              class="group flex w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-left transition-colors hover:bg-accent"
-              @click="goFolder(f.name)"
-            >
-              <Folder class="h-4 w-4 text-muted-foreground" />
-              <span class="text-sm font-medium">{{ f.name }}</span>
-              <span class="text-xs text-muted-foreground">{{ folderCount(f.name) }} 首</span>
-              <span v-if="f.created_at" class="text-xs text-muted-foreground">{{ f.created_at.slice(0, 10) }}</span>
-              <span
-                class="ml-auto flex items-center gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100"
-                @click.stop
-              >
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="h-6 px-1.5"
-                  :title="`重命名文件夹「${f.name}」（曲目归属随名称同步更新）`"
-                  :disabled="folderBusy"
-                  @click="doRenameFolder(f.name)"
-                >
-                  <Pencil class="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="h-6 px-1.5 text-destructive hover:text-destructive"
-                  :title="
-                    folderCount(f.name) > 0
-                      ? '非空文件夹不能删除——请先将其中音乐移到其他文件夹或未分类'
-                      : '删除文件夹（仅限空文件夹；不删除任何音乐文件）'
-                  "
-                  :disabled="folderBusy || folderCount(f.name) > 0"
-                  @click="openDeleteFolderDialog(f.name)"
-                >
-                  <Trash2 class="h-3.5 w-3.5" />
-                </Button>
+              <Button variant="outline" size="sm" :disabled="loading" @click="refreshAll">
+                <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />刷新
+              </Button>
+              <span class="ml-auto text-xs text-muted-foreground">
+                <template v-if="view.kind === 'root'">
+                  共 {{ allTracks.length }} 首 · 启用 {{ enabledCount }}
+                </template>
+                <template v-else>
+                  当前视图 {{ trackList.length }} / {{ allTracks.length }} 首 · 启用 {{ enabledCount }}（全库）
+                </template>
               </span>
             </div>
-          </div>
 
-          <!-- 批量操作条（选中 ≥1） -->
-          <div
-            v-if="selectedNames.length"
-            class="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 p-2"
-          >
-            <span class="text-xs font-medium">已选 {{ selectedNames.length }} 首</span>
-            <div class="flex items-center gap-1.5">
-              <select
-                v-model="batchCat"
-                class="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
-              >
-                <option v-for="c in CATEGORIES" :key="c" :value="c">{{ CAT_LABEL[c] }}</option>
-              </select>
-              <select v-model="batchTag" class="h-7 max-w-40 rounded-md border border-input bg-background px-1.5 text-xs">
-                <option value="">选择标签…</option>
-                <option v-for="t in lib!.tags[batchCat]" :key="t" :value="t">{{ t }}</option>
-              </select>
-            </div>
-            <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchTag('add')">
-              <Plus class="h-3.5 w-3.5" />加标签
-            </Button>
-            <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchTag('remove')">
-              <X class="h-3.5 w-3.5" />删标签
-            </Button>
-            <span class="h-4 w-px bg-border" />
-            <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchEnable(true)">
-              启用
-            </Button>
-            <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchEnable(false)">
-              禁用
-            </Button>
-            <span class="h-4 w-px bg-border" />
-            <Button variant="destructive" size="sm" :disabled="batchBusy" @click="doBatchDelete">
-              <Trash2 class="h-3.5 w-3.5" />批量删除
-            </Button>
-            <span class="h-4 w-px bg-border" />
-            <div class="flex items-center gap-1.5">
-              <FolderInput class="h-3.5 w-3.5 text-muted-foreground" />
-              <select
-                v-model="batchMoveTo"
-                class="h-7 max-w-32 rounded-md border border-input bg-background px-1.5 text-xs"
-                title="移动目标（全部文件夹 + 未分类）"
-              >
-                <option v-for="o in folderOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-              </select>
-              <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchMove">
-                移到这里
-              </Button>
-            </div>
-            <span class="h-4 w-px bg-border" />
-            <Button variant="outline" size="sm" :disabled="aiBatchBusy" @click="doAiSuggestBatch">
-              <Sparkles class="h-3.5 w-3.5" />AI 推荐（{{ selectedNames.length }} 首）
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              :disabled="aiApplyBusy || !adoptableNames.length"
-              :title="adoptableNames.length ? '采用「有 AI 候选 且 未打标签」的选中曲目（不覆盖手动标签）' : '选中曲目里没有可采用的 AI 候选（需有候选且未打任何标签）'"
-              @click="doAiApply"
-            >
-              <BadgeCheck class="h-3.5 w-3.5" />AI 推荐采用（{{ adoptableNames.length }} 首）
-            </Button>
-            <Button variant="ghost" size="sm" @click="clearSelection">清空选择</Button>
-          </div>
+            <!-- 文件夹区（仅 root 视图）：全部音乐入口 + 文件夹行 + 排序 + 新建 -->
+            <div v-if="false" class="space-y-2">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="text-xs font-semibold text-muted-foreground">文件夹</div>
+                <div class="flex items-center gap-2">
+                  <select
+                    v-model="folderSort"
+                    class="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+                    title="文件夹排序"
+                  >
+                    <option value="name">名称</option>
+                    <option value="created_at">创建时间</option>
+                    <option value="count">曲目数量</option>
+                  </select>
+                  <Button variant="outline" size="sm" :disabled="folderBusy || loading" @click="openCreateFolderDialog">
+                    <Plus class="h-3.5 w-3.5" />新建文件夹
+                  </Button>
+                </div>
+              </div>
 
-          <!-- 行 = 曲目表 -->
-          <Table class="music-data-table rounded-lg border" tabindex="0" role="region" aria-label="音乐列表，可横向滚动">
-            <TableHeader>
-              <TableRow>
-                <TableHead class="w-8">
-                  <input
-                    type="checkbox"
-                    class="h-4 w-4 accent-primary"
-                    aria-label="选择当前视图所有音乐" :checked="allVisibleSelected"
-                    :disabled="!visibleNames.length || uploading"
-                    @change="toggleSelectAll"
-                  />
-                </TableHead>
-                <TableHead class="music-name-cell">文件名 / 试听</TableHead>
-                <TableHead class="w-24">文件夹</TableHead>
-                <TableHead class="w-14">格式</TableHead>
-                <TableHead class="w-14">时长</TableHead>
-                <TableHead class="w-20">大小</TableHead>
-                <TableHead class="w-24" title="全部工作空间已保存的章节指派数">章节使用</TableHead>
-                <TableHead>标签</TableHead>
-                <TableHead class="w-40">AI 识别</TableHead>
-                <TableHead class="w-16">启用</TableHead>
-                <TableHead class="w-40 text-right user-actions">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <TableRow v-for="[name, tr] in trackList" :key="name">
-                <TableCell>
-                  <input
-                    type="checkbox"
-                    class="h-4 w-4 accent-primary"
-                    :aria-label="`选择音乐 ${name}`" :checked="!!selected[name]"
-                    @change="
-                      (e) => {
-                        if ((e.target as HTMLInputElement).checked) selected[name] = true
-                        else delete selected[name]
-                      }
+              <button
+                type="button"
+                class="flex w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-left transition-colors hover:bg-accent"
+                @click="goAll"
+              >
+                <Music class="h-4 w-4 text-muted-foreground" />
+                <span class="text-sm font-medium">全部音乐</span>
+                <span class="text-xs text-muted-foreground">{{ allTracks.length }} 首 · 含全部文件夹的曲目</span>
+                <ChevronRight class="ml-auto h-4 w-4 text-muted-foreground" />
+              </button>
+
+              <div v-if="!sortedFolders.length" class="px-1 text-xs text-muted-foreground">
+                还没有文件夹，点击「新建文件夹」创建。
+              </div>
+              <div
+                v-for="f in sortedFolders"
+                :key="f.name"
+                class="group flex w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-left transition-colors hover:bg-accent"
+                @click="goFolder(f.name)"
+              >
+                <Folder class="h-4 w-4 text-muted-foreground" />
+                <span class="text-sm font-medium">{{ f.name }}</span>
+                <span class="text-xs text-muted-foreground">{{ folderCount(f.name) }} 首</span>
+                <span v-if="f.created_at" class="text-xs text-muted-foreground">{{ f.created_at.slice(0, 10) }}</span>
+                <span
+                  class="ml-auto flex items-center gap-0.5 opacity-0 focus-within:opacity-100 group-hover:opacity-100"
+                  @click.stop
+                >
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-1.5"
+                    :title="`重命名文件夹「${f.name}」（曲目归属随名称同步更新）`"
+                    :disabled="folderBusy"
+                    @click="doRenameFolder(f.name)"
+                  >
+                    <Pencil class="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-1.5 text-destructive hover:text-destructive"
+                    :title="
+                      folderCount(f.name) > 0
+                        ? '非空文件夹不能删除——请先将其中音乐移到其他文件夹或未分类'
+                        : '删除文件夹（仅限空文件夹；不删除任何音乐文件）'
                     "
-                  />
-                </TableCell>
-                <TableCell class="music-name-cell">
-                  <div class="flex flex-col items-start gap-2">
-                    <span class="music-filename truncate text-sm font-medium" :title="name">{{ name }}</span>
-                    <MiniAudioPlayer :src="musicPreviewUrl(name)" />
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <Badge
-                    v-if="tr.folder"
-                    variant="secondary"
-                    class="max-w-20 truncate"
-                    :title="`所属文件夹：${tr.folder}`"
+                    :disabled="folderBusy || folderCount(f.name) > 0"
+                    @click="openDeleteFolderDialog(f.name)"
                   >
-                    {{ tr.folder }}
-                  </Badge>
-                  <Badge v-else variant="secondary" class="opacity-60" title="未归属任何文件夹（根目录上传的曲目）">未分类</Badge>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="secondary" class="font-mono text-[10px] uppercase">{{ extOf(name) || '—' }}</Badge>
-                </TableCell>
-                <TableCell class="text-xs tabular-nums text-muted-foreground">
-                  {{ formatDuration(tr.duration) }}
-                </TableCell>
-                <TableCell class="text-xs tabular-nums text-muted-foreground">{{ fileSize(tr.size_bytes) }}</TableCell>
-                <TableCell class="text-xs tabular-nums text-muted-foreground">
-                  {{ tr.use_count == null ? '—' : tr.use_count }}
-                </TableCell>
-                <TableCell class="w-28">
-                  <div
-                    v-if="CATEGORIES.some((c) => tr.tags?.[c]?.length)"
-                    class="group relative flex min-h-8 w-32 flex-wrap items-center gap-1 focus:outline-none"
-                    tabindex="0"
-                    :aria-label="`查看 ${name} 的全部标签`"
-                  >
-                    <span
-                      v-for="t in CATEGORIES.flatMap((c) => (tr.tags?.[c] ?? []).map((x) => [c, x])).slice(0, 3)"
-                      :key="`${t[0]}-${t[1]}`"
-                      class="inline-flex max-w-16 truncate rounded border px-1.5 py-0.5 text-[11px] font-medium"
-                      :class="CAT_BADGE[t[0] as MusicTagCategory]"
-                      :title="String(t[1])"
-                    >
-                      {{ String(t[1]) }}
-                    </span>
-                    <span
-                      v-if="CATEGORIES.flatMap((c) => tr.tags?.[c] ?? []).length > 3"
-                      class="ml-1 text-xs font-medium tabular-nums text-muted-foreground"
-                    >
-                      +{{ CATEGORIES.flatMap((c) => tr.tags?.[c] ?? []).length - 3 }}
-                    </span>
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </Button>
+                </span>
+              </div>
+            </div>
 
-                    <div
-                      class="pointer-events-none absolute left-0 top-full z-30 mt-2 hidden w-64 rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg group-hover:block group-focus:block"
+            <!-- 批量操作条（选中 ≥1） -->
+            <div
+              v-if="selectedNames.length"
+              class="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 p-2"
+            >
+              <span class="text-xs font-medium">已选 {{ selectedNames.length }} 首</span>
+              <div class="flex items-center gap-1.5">
+                <select
+                  v-model="batchCat"
+                  class="h-7 rounded-md border border-input bg-background px-1.5 text-xs"
+                >
+                  <option v-for="c in CATEGORIES" :key="c" :value="c">{{ CAT_LABEL[c] }}</option>
+                </select>
+                <select v-model="batchTag" class="h-7 max-w-40 rounded-md border border-input bg-background px-1.5 text-xs">
+                  <option value="">选择标签…</option>
+                  <option v-for="t in lib!.tags[batchCat]" :key="t" :value="t">{{ t }}</option>
+                </select>
+              </div>
+              <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchTag('add')">
+                <Plus class="h-3.5 w-3.5" />加标签
+              </Button>
+              <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchTag('remove')">
+                <X class="h-3.5 w-3.5" />删标签
+              </Button>
+              <span class="h-4 w-px bg-border" />
+              <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchEnable(true)">
+                启用
+              </Button>
+              <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchEnable(false)">
+                禁用
+              </Button>
+              <span class="h-4 w-px bg-border" />
+              <Button variant="destructive" size="sm" :disabled="batchBusy" @click="doBatchDelete">
+                <Trash2 class="h-3.5 w-3.5" />批量删除
+              </Button>
+              <span class="h-4 w-px bg-border" />
+              <div class="flex items-center gap-1.5">
+                <FolderInput class="h-3.5 w-3.5 text-muted-foreground" />
+                <select
+                  v-model="batchMoveTo"
+                  class="h-7 max-w-32 rounded-md border border-input bg-background px-1.5 text-xs"
+                  title="移动目标（全部文件夹 + 未分类）"
+                >
+                  <option v-for="o in folderOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+                </select>
+                <Button variant="outline" size="sm" :disabled="batchBusy" @click="doBatchMove">
+                  移到这里
+                </Button>
+              </div>
+              <span class="h-4 w-px bg-border" />
+              <Button variant="outline" size="sm" :disabled="aiBatchBusy" @click="doAiSuggestBatch">
+                <Sparkles class="h-3.5 w-3.5" />AI 推荐（{{ selectedNames.length }} 首）
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="aiApplyBusy || !adoptableNames.length"
+                :title="adoptableNames.length ? '采用「有 AI 候选 且 未打标签」的选中曲目（不覆盖手动标签）' : '选中曲目里没有可采用的 AI 候选（需有候选且未打任何标签）'"
+                @click="doAiApply"
+              >
+                <BadgeCheck class="h-3.5 w-3.5" />AI 推荐采用（{{ adoptableNames.length }} 首）
+              </Button>
+              <Button variant="ghost" size="sm" @click="clearSelection">清空选择</Button>
+            </div>
+
+            <!-- 行 = 曲目表 -->
+            <Table class="music-data-table rounded-lg border" tabindex="0" role="region" aria-label="音乐列表，可横向滚动">
+              <TableHeader>
+                <TableRow>
+                  <TableHead class="w-8">
+                    <input
+                      type="checkbox"
+                      class="h-4 w-4 accent-primary"
+                      aria-label="选择当前视图所有音乐" :checked="allVisibleSelected"
+                      :disabled="!visibleNames.length || uploading"
+                      @change="toggleSelectAll"
+                    />
+                  </TableHead>
+                  <TableHead class="music-name-cell">文件名 / 试听</TableHead>
+                  <TableHead class="w-24">文件夹</TableHead>
+                  <TableHead class="w-14">格式</TableHead>
+                  <TableHead class="w-14">时长</TableHead>
+                  <TableHead class="w-20">大小</TableHead>
+                  <TableHead class="w-24" title="全部工作空间已保存的章节指派数">章节使用</TableHead>
+                  <TableHead>标签</TableHead>
+                  <TableHead class="w-40">AI 识别</TableHead>
+                  <TableHead class="w-16">启用</TableHead>
+                  <TableHead class="w-40 text-right user-actions">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                <TableRow v-for="[name, tr] in trackList" :key="name">
+                  <TableCell>
+                    <input
+                      type="checkbox"
+                      class="h-4 w-4 accent-primary"
+                      :aria-label="`选择音乐 ${name}`" :checked="!!selected[name]"
+                      @change="
+                        (e) => {
+                          if ((e.target as HTMLInputElement).checked) selected[name] = true
+                          else delete selected[name]
+                        }
+                      "
+                    />
+                  </TableCell>
+                  <TableCell class="music-name-cell">
+                    <div class="flex flex-col items-start gap-2">
+                      <span class="music-filename truncate text-sm font-medium" :title="name">{{ name }}</span>
+                      <MiniAudioPlayer :src="musicPreviewUrl(name)" />
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      v-if="tr.folder"
+                      variant="secondary"
+                      class="max-w-20 truncate"
+                      :title="`所属文件夹：${tr.folder}`"
                     >
-                      <p class="mb-2 text-[11px] font-semibold text-muted-foreground">全部标签</p>
-                      <div class="flex flex-wrap gap-1.5">
-                        <Badge
-                          v-for="t in CATEGORIES.flatMap((c) => (tr.tags?.[c] ?? []).map((x) => [c, x]))"
-                          :key="`${t[0]}-${t[1]}`"
-                          variant="secondary"
-                          :class="CAT_BADGE[t[0] as MusicTagCategory]"
-                        >
-                          {{ t[1] }}
-                        </Badge>
+                      {{ tr.folder }}
+                    </Badge>
+                    <WorkbenchStatus variant="secondary" title="未归属任何文件夹（根目录上传的曲目）">未分类</WorkbenchStatus>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary" class="font-mono text-[10px] uppercase">{{ extOf(name) || '—' }}</Badge>
+                  </TableCell>
+                  <TableCell class="text-xs tabular-nums text-muted-foreground">
+                    {{ formatDuration(tr.duration) }}
+                  </TableCell>
+                  <TableCell class="text-xs tabular-nums text-muted-foreground">{{ fileSize(tr.size_bytes) }}</TableCell>
+                  <TableCell class="text-xs tabular-nums text-muted-foreground">
+                    {{ tr.use_count == null ? '—' : tr.use_count }}
+                  </TableCell>
+                  <TableCell class="w-28">
+                    <div
+                      v-if="CATEGORIES.some((c) => tr.tags?.[c]?.length)"
+                      class="group relative flex min-h-8 w-32 flex-wrap items-center gap-1 focus:outline-none"
+                      tabindex="0"
+                      :aria-label="`查看 ${name} 的全部标签`"
+                    >
+                      <span
+                        v-for="t in CATEGORIES.flatMap((c) => (tr.tags?.[c] ?? []).map((x) => [c, x])).slice(0, 3)"
+                        :key="`${t[0]}-${t[1]}`"
+                        class="inline-flex max-w-16 truncate rounded border px-1.5 py-0.5 text-[11px] font-medium"
+                        :class="CAT_BADGE[t[0] as MusicTagCategory]"
+                        :title="String(t[1])"
+                      >
+                        {{ String(t[1]) }}
+                      </span>
+                      <span
+                        v-if="CATEGORIES.flatMap((c) => tr.tags?.[c] ?? []).length > 3"
+                        class="ml-1 text-xs font-medium tabular-nums text-muted-foreground"
+                      >
+                        +{{ CATEGORIES.flatMap((c) => tr.tags?.[c] ?? []).length - 3 }}
+                      </span>
+
+                      <div
+                        class="pointer-events-none absolute left-0 top-full z-30 mt-2 hidden w-64 rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg group-hover:block group-focus:block"
+                      >
+                        <p class="mb-2 text-[11px] font-semibold text-muted-foreground">全部标签</p>
+                        <div class="flex flex-wrap gap-1.5">
+                          <Badge
+                            v-for="t in CATEGORIES.flatMap((c) => (tr.tags?.[c] ?? []).map((x) => [c, x]))"
+                            :key="`${t[0]}-${t[1]}`"
+                            variant="secondary"
+                            :class="CAT_BADGE[t[0] as MusicTagCategory]"
+                          >
+                            {{ t[1] }}
+                          </Badge>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <Badge v-else variant="secondary" class="whitespace-nowrap opacity-60">未打标</Badge>
-                </TableCell>
-                <TableCell>
-                  <!-- AI 识别行状态：识别中（在途任务）> 识别失败（可重试）> AI 已推荐（候选待确认）> — -->
-                  <div
-                    v-if="aiTasks.active.has(name)"
-                    class="flex items-center gap-1.5 text-xs text-primary"
-                  >
-                    <Loader2 class="h-3.5 w-3.5 animate-spin" />
-                    <span class="truncate" :title="aiTasks.active.get(name)!.current || '识别中…'">
-                      {{ aiTasks.active.get(name)!.current || '识别中…' }}
-                    </span>
-                    <Button variant="ghost" size="sm" class="h-6 px-1.5 text-xs" @click="cancelAiTask(name)">
-                      取消
-                    </Button>
-                  </div>
-                  <div v-else-if="aiTasks.failed.get(name)" class="flex items-center gap-1.5">
-                    <Badge
-                      variant="destructive"
-                      class="text-xs"
-                      :title="aiTasks.failed.get(name)!.error || 'AI 识别失败'"
+                    <WorkbenchStatus variant="secondary" class="whitespace-nowrap">未打标</WorkbenchStatus>
+                  </TableCell>
+                  <TableCell>
+                    <!-- AI 识别行状态：识别中（在途任务）> 识别失败（可重试）> AI 已推荐（候选待确认）> — -->
+                    <div
+                      v-if="aiTasks.active.has(name)"
+                      class="flex items-center gap-1.5 text-xs text-primary"
                     >
-                      识别失败
-                    </Badge>
-                    <Button variant="ghost" size="sm" class="h-6 px-1.5 text-xs" @click="retryAiTask(name)">
-                      重试
-                    </Button>
-                  </div>
-                  <Badge
-                    v-else-if="suggestionHasTags(name)"
-                    variant="secondary"
-                    class="border-amber-500/30 bg-amber-500/15 text-amber-600 text-xs dark:text-amber-400"
-                    :title="`AI 候选（未自动采用——曲目已有手动标签）：${suggestionSummary(name)}（「AI 推荐采用」一键采用，或编辑标签确认）`"
-                  >
-                    <Sparkles class="mr-1 h-3 w-3" />AI 已推荐
-                  </Badge>
-                  <span
-                    v-else-if="suggestionOf(name)"
-                    class="text-xs text-muted-foreground"
-                  >AI 未推荐到标签</span>
-                </TableCell>
-                <TableCell>
-                  <Switch
-                    :model-value="tr.enabled" :aria-label="`启用音乐 ${name}`"
-                    :class="tr.enabled ? '' : 'opacity-60'"
-                    @update:model-value="(v) => toggleEnabled(name, v as boolean)"
-                  />
-                </TableCell>
-                <TableCell class="user-actions">
-                  <!-- 移动展开态：目标文件夹 select（全部文件夹 + 未分类）+ 确认/取消 -->
-                  <div v-if="moveOpenFor === name" class="flex flex-col items-end gap-1">
-                    <select
-                      v-model="moveTo"
-                      class="h-7 w-32 rounded-md border border-input bg-background px-1.5 text-xs"
-                      title="移动目标（全部文件夹 + 未分类）"
-                    >
-                      <option v-for="o in folderOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
-                    </select>
-                    <div class="flex items-center gap-1">
-                      <Button variant="outline" size="sm" class="h-6 px-1.5" @click="doMoveOne(name)">移动</Button>
-                      <Button variant="ghost" size="sm" class="h-6 px-1.5" title="取消" @click="closeMove">
-                        <X class="h-3 w-3" />
+                      <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                      <span class="truncate" :title="aiTasks.active.get(name)!.current || '识别中…'">
+                        {{ aiTasks.active.get(name)!.current || '识别中…' }}
+                      </span>
+                      <Button variant="ghost" size="sm" class="h-6 px-1.5 text-xs" @click="cancelAiTask(name)">
+                        取消
                       </Button>
                     </div>
-                  </div>
-                  <div v-else class="flex justify-end gap-1">
-                    <Button variant="outline" size="sm" title="编辑标签 / 描述" @click="openEditor(name)">
-                      <Pencil class="h-3.5 w-3.5" />编辑
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      class="h-8 w-8 p-0"
-                      :title="`移动「${name}」到其他文件夹或未分类`"
-                      @click="openMove(name)"
+                    <div v-else-if="aiTasks.failed.get(name)" class="flex items-center gap-1.5">
+                      <WorkbenchStatus
+                        variant="destructive"
+                        class="text-xs"
+                        :title="aiTasks.failed.get(name)!.error || 'AI 识别失败'"
+                      >
+                        识别失败
+                      </WorkbenchStatus>
+                      <Button variant="ghost" size="sm" class="h-6 px-1.5 text-xs" @click="retryAiTask(name)">
+                        重试
+                      </Button>
+                    </div>
+                    <WorkbenchStatus
+                      v-else-if="suggestionHasTags(name)"
+                      variant="warning"
+                      class="inline-flex items-center"
+                      :title="`AI 候选（未自动采用——曲目已有手动标签）：${suggestionSummary(name)}（「AI 推荐采用」一键采用，或编辑标签确认）`"
                     >
-                      <FolderInput class="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      class="h-8 w-8 p-0 text-destructive hover:text-destructive"
-                      title="删除（被锁定引用的曲目会跳过）"
-                      @click="doDeleteOne(name)"
-                    >
-                      <Trash2 class="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
+                      <Sparkles class="mr-1 h-3 w-3" />AI 已推荐
+                    </WorkbenchStatus>
+                    <span
+                      v-else-if="suggestionOf(name)"
+                      class="text-xs text-muted-foreground"
+                    >AI 未推荐到标签</span>
+                  </TableCell>
+                  <TableCell>
+                    <Switch
+                      :model-value="tr.enabled" :aria-label="`启用音乐 ${name}`"
+                      :class="tr.enabled ? '' : 'opacity-60'"
+                      @update:model-value="(v) => toggleEnabled(name, v as boolean)"
+                    />
+                  </TableCell>
+                  <TableCell class="user-actions">
+                    <!-- 移动展开态：目标文件夹 select（全部文件夹 + 未分类）+ 确认/取消 -->
+                    <div v-if="moveOpenFor === name" class="flex flex-col items-end gap-1">
+                      <select
+                        v-model="moveTo"
+                        class="h-7 w-32 rounded-md border border-input bg-background px-1.5 text-xs"
+                        title="移动目标（全部文件夹 + 未分类）"
+                      >
+                        <option v-for="o in folderOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+                      </select>
+                      <div class="flex items-center gap-1">
+                        <Button variant="outline" size="sm" class="h-6 px-1.5" @click="doMoveOne(name)">移动</Button>
+                        <Button variant="ghost" size="sm" class="h-6 px-1.5" title="取消" @click="closeMove">
+                          <X class="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div v-else class="flex justify-end gap-1">
+                      <Button variant="outline" size="sm" title="编辑标签 / 描述" @click="openEditor(name)">
+                        <Pencil class="h-3.5 w-3.5" />编辑
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        class="h-8 w-8 p-0"
+                        :title="`移动「${name}」到其他文件夹或未分类`"
+                        @click="openMove(name)"
+                      >
+                        <FolderInput class="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        class="h-8 w-8 p-0 text-destructive hover:text-destructive"
+                        title="删除（被锁定引用的曲目会跳过）"
+                        @click="doDeleteOne(name)"
+                      >
+                        <Trash2 class="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
 
-          <p v-if="!trackList.length" class="text-sm text-muted-foreground">
-            <template v-if="view.kind === 'folder'">
-              「{{ view.name }}」下没有曲目——点「批量上传」，或把 mp3 / wav / flac 直接拖入本卡片（文件将归属该文件夹）。
-            </template>
-            <template v-else-if="view.kind === 'root'">
-              根目录下没有未分类的曲目——点「批量上传」，或把 mp3 / wav / flac 直接拖入本卡片（将归属「未分类」）；进入上方文件夹可查看其中曲目。
-            </template>
-            <template v-else>当前筛选下没有曲目。</template>
-          </p>
+            <p v-if="!trackList.length" class="text-sm text-muted-foreground">
+              <template v-if="view.kind === 'folder'">
+                「{{ view.name }}」下没有曲目——点「批量上传」，或把 mp3 / wav / flac 直接拖入本卡片（文件将归属该文件夹）。
+              </template>
+              <template v-else-if="view.kind === 'root'">
+                根目录下没有未分类的曲目——点「批量上传」，或把 mp3 / wav / flac 直接拖入本卡片（将归属「未分类」）；进入上方文件夹可查看其中曲目。
+              </template>
+              <template v-else>当前筛选下没有曲目。</template>
+            </p>
+            </div>
           </div>
-        </div>
-        <div v-else-if="!loading" class="space-y-2 py-6 text-center">
-          <p class="text-sm text-muted-foreground">音乐库为空——上传 mp3 / wav / flac 开始（也可直接拖入文件）。</p>
-          <Button class="mx-auto" :disabled="uploading" @click="doUpload()">
-            <Loader2 v-if="uploading" class="h-4 w-4 animate-spin" />
-            <Upload v-else class="h-4 w-4" />
-            批量上传
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
+          <div v-else-if="!loading" class="space-y-2 py-6 text-center">
+            <p class="text-sm text-muted-foreground">音乐库为空——上传 mp3 / wav / flac 开始（也可直接拖入文件）。</p>
+            <Button class="mx-auto" :disabled="uploading" @click="doUpload()">
+              <Loader2 v-if="uploading" class="h-4 w-4 animate-spin" />
+              <Upload v-else class="h-4 w-4" />
+              批量上传
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
-    <!-- 标签管理（注册表） -->
-    <Card>
-      <CardHeader>
-        <CardTitle class="flex items-center gap-2"><Tags class="h-5 w-5" />标签管理</CardTitle>
-        <CardDescription>
-          管理四类标签词表；修改或删除标签会影响使用它的曲目。
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <div v-if="tagInfo" class="admin-tag-selection">
-          <span>「{{ CAT_LABEL[tagInfo.cat] }} · {{ tagInfo.name }}」· {{ tagInfo.count }} 首音乐使用</span>
-          <Button variant="outline" size="sm" @click="doRenameTag(tagInfo.cat, tagInfo.name)">重命名</Button>
-          <Button variant="ghost" size="sm" class="text-destructive" @click="doDeleteTag(tagInfo.cat, tagInfo.name)">删除标签</Button>
-          <Button variant="ghost" size="sm" aria-label="取消标签选择" @click="tagInfo = null"><X class="h-4 w-4" /></Button>
-        </div>
-        <div v-for="cat in CATEGORIES" :key="cat" class="space-y-2">
-          <div class="text-xs font-semibold text-muted-foreground">{{ CAT_LABEL[cat] }}</div>
-          <div class="flex flex-wrap items-center gap-1.5">
-            <button
-              v-for="t in lib?.tags[cat] ?? []"
-              :key="t"
-              type="button"
-              class="admin-tag-chip inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium transition-colors" :aria-pressed="tagInfo?.cat === cat && tagInfo?.name === t"
-              :class="CAT_BADGE[cat]"
-              :title="`${CAT_LABEL[cat]} · ${t}（${usageCount(cat, t)} 首音乐使用）`"
-              @click="showTagInfo(cat, t)"
-            >
-              {{ t }}
-              <span class="text-[10px] opacity-70">{{ usageCount(cat, t) }}</span>
-            </button>
-            <form
-              class="flex items-center gap-1"
-              @submit.prevent="doAddTag(cat)"
-            >
-              <Input
-                v-model="newTag[cat]" :aria-label="`新增${CAT_LABEL[cat]}标签`"
-                class="h-6 w-24 px-1.5 py-0 text-xs"
-                :placeholder="`新增${CAT_LABEL[cat]}标签`"
-              />
-              <Button variant="outline" size="sm" class="h-6 px-1.5" type="submit" :aria-label="`添加${CAT_LABEL[cat]}标签`">
-                <Plus class="h-3 w-3" />
-              </Button>
-            </form>
+      <!-- 标签管理（注册表） -->
+      <Card>
+        <CardHeader>
+          <CardTitle class="flex items-center gap-2"><Tags class="h-5 w-5" />标签管理</CardTitle>
+          <CardDescription>
+            管理四类标签词表；修改或删除标签会影响使用它的曲目。
+          </CardDescription>
+        </CardHeader>
+        <CardContent class="space-y-4">
+          <div v-if="tagInfo" class="admin-tag-selection">
+            <span>「{{ CAT_LABEL[tagInfo.cat] }} · {{ tagInfo.name }}」· {{ tagInfo.count }} 首音乐使用</span>
+            <Button variant="outline" size="sm" @click="doRenameTag(tagInfo.cat, tagInfo.name)">重命名</Button>
+            <Button variant="ghost" size="sm" class="text-destructive" @click="doDeleteTag(tagInfo.cat, tagInfo.name)">删除标签</Button>
+            <Button variant="ghost" size="sm" aria-label="取消标签选择" @click="tagInfo = null"><X class="h-4 w-4" /></Button>
           </div>
-        </div>
-      </CardContent>
-    </Card>
+          <div v-for="cat in CATEGORIES" :key="cat" class="space-y-2">
+            <div class="text-xs font-semibold text-muted-foreground">{{ CAT_LABEL[cat] }}</div>
+            <div class="flex flex-wrap items-center gap-1.5">
+              <button
+                v-for="t in lib?.tags[cat] ?? []"
+                :key="t"
+                type="button"
+                class="admin-tag-chip inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium transition-colors" :aria-pressed="tagInfo?.cat === cat && tagInfo?.name === t"
+                :class="CAT_BADGE[cat]"
+                :title="`${CAT_LABEL[cat]} · ${t}（${usageCount(cat, t)} 首音乐使用）`"
+                @click="showTagInfo(cat, t)"
+              >
+                {{ t }}
+                <span class="text-[10px] opacity-70">{{ usageCount(cat, t) }}</span>
+              </button>
+              <form
+                class="flex items-center gap-1"
+                @submit.prevent="doAddTag(cat)"
+              >
+                <Input
+                  v-model="newTag[cat]" :aria-label="`新增${CAT_LABEL[cat]}标签`"
+                  class="h-6 w-24 px-1.5 py-0 text-xs"
+                  :placeholder="`新增${CAT_LABEL[cat]}标签`"
+                />
+                <Button variant="outline" size="sm" class="h-6 px-1.5" type="submit" :aria-label="`添加${CAT_LABEL[cat]}标签`">
+                  <Plus class="h-3 w-3" />
+                </Button>
+              </form>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
 
     <!-- 新建收藏集弹层 -->
     <div

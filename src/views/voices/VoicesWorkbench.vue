@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useTenRowHeight } from '@/composables/useTenRowHeight'
 import type { VoiceItem } from '@/types'
 import Button from '@/components/ui/Button.vue'
 import Input from '@/components/ui/Input.vue'
-import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import Pager from '@/views/textformat/Pager.vue'
@@ -49,8 +48,6 @@ const detailTab = ref('voice')
 const narrow = ref(false)
 const detailOpen = ref(false)
 const detailPanel = ref<HTMLElement | null>(null)
-const voiceTable = ref<HTMLTableElement | null>(null)
-const rowHeight = useTenRowHeight(voiceTable, pageSize)
 let returnFocus: HTMLElement | null = null
 let media: MediaQueryList | null = null
 function updateNarrow() { narrow.value = media?.matches ?? false; if (!narrow.value) detailOpen.value = false }
@@ -118,17 +115,17 @@ function detailKeydown(event: KeyboardEvent) {
         <Button variant="outline" class="mt-2 h-8" :disabled="loading" @click="emit('refresh')">重试加载</Button>
       </div>
       <div class="voice-scroll">
-        <table ref="voiceTable" class="voice-table" :style="{ '--voice-row-height': `${rowHeight}px` }" aria-label="角色状态列表">
+        <table class="voice-table workbench-table" aria-label="角色状态列表">
           <thead><tr><th>角色 / 别名</th><th class="voice-number">台词</th><th>基础</th><th>音色</th></tr></thead>
           <tbody v-if="loading && !speakers.length">
             <tr v-for="i in pageSize" :key="i" aria-hidden="true"><td colspan="4"><Skeleton class="voice-skeleton h-5" /></td></tr>
           </tbody>
           <tbody v-else>
             <tr v-for="v in visible" :key="v.name" :class="{ 'voice-selected': selectedName === v.name }" @click="select(v, $event)">
-              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未标记' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button><span v-if="v.alias_of" class="min-w-0 max-w-[40%] truncate text-[11px] text-muted-foreground" :title="v.alias_of">→ {{ v.alias_of }}</span></div></td>
+              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :title="v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '性别未标记'" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button><span v-if="v.alias_of" class="min-w-0 max-w-[40%] truncate text-[11px] text-muted-foreground" :title="v.alias_of">→ {{ v.alias_of }}</span></div></td>
               <td class="voice-number tabular-nums">{{ v.line_count }}</td>
-              <td><Badge :variant="foundationBadge(v).variant"><Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ foundationBadge(v).label }}</Badge></td>
-              <td><Badge :variant="cloneBadge(v).variant"><Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ cloneBadge(v).label }}</Badge></td>
+              <td><WorkbenchStatus class="inline-flex items-center" :variant="foundationBadge(v).variant"><Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ foundationBadge(v).label }}</WorkbenchStatus></td>
+              <td><WorkbenchStatus class="inline-flex items-center" :variant="cloneBadge(v).variant"><Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ cloneBadge(v).label }}</WorkbenchStatus></td>
             </tr>
           </tbody>
         </table>
@@ -166,7 +163,7 @@ function detailKeydown(event: KeyboardEvent) {
         <div v-show="detailTab === 'voice'" id="voice-sound-panel" role="tabpanel" aria-labelledby="voice-sound-tab">
           <h3 class="text-xs font-medium">声音描述</h3><p class="voice-description" tabindex="0" aria-label="声音描述">{{ selected.description || '尚未生成声音描述，请先生成语音推理基础。' }}</p>
           <div class="mb-2 flex items-center justify-between gap-2"><h3 class="text-xs font-medium">当前音色</h3><span class="text-[11px] text-muted-foreground">{{ pickLabel(selected) }}</span></div>
-          <div class="voice-player"><MiniAudioPlayer v-if="selected.preview" :key="previewUrl(selected)" :src="previewUrl(selected)" /><span v-else class="text-xs text-muted-foreground">暂无试听音频</span></div>
+          <div class="voice-player"><MiniAudioPlayer v-if="selected.preview" :key="previewUrl(selected)" :src="previewUrl(selected)" preload-metadata /><span v-else class="text-xs text-muted-foreground">暂无试听音频</span></div>
         </div>
         <div v-show="detailTab === 'prompt'" id="voice-prompt-panel" role="tabpanel" aria-labelledby="voice-prompt-tab">
           <label for="voice-prompt" class="text-xs font-medium">自定义声音描述</label>
@@ -187,17 +184,15 @@ function detailKeydown(event: KeyboardEvent) {
 </template>
 
 <style scoped>
-.voice-workbench { display:grid; grid-template-columns:minmax(0,1fr) 40%; min-height:390px; border:1px solid hsl(var(--border)); border-radius:12px; background:hsl(var(--card) / .95); overflow:hidden; box-shadow:var(--glass-shadow); }
+.voice-workbench { display:grid; grid-template-columns:minmax(0,1fr) 34%; min-height:390px; border:1px solid hsl(var(--border)); border-radius:12px; background:hsl(var(--card) / .95); overflow:hidden; box-shadow:var(--glass-shadow); }
 .voice-list { min-width:0; display:flex; flex-direction:column; border-right:1px solid hsl(var(--border)); }
 .voice-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:8px 12px; border-bottom:1px solid hsl(var(--border)); }
 .voice-filter { border-radius:999px; padding:5px 9px; font-size:11px; color:hsl(var(--muted-foreground)); background:hsl(var(--muted) / .5); }
 .voice-filter[aria-pressed=true] { color:hsl(var(--primary)); background:hsl(var(--primary) / .1); }
 .voice-scroll { min-height:320px; max-height:440px; overflow:auto; flex:1; }
 .voice-table { width:100%; table-layout:fixed; font-size:12px; line-height:18px; border-collapse:collapse; }
-.voice-table th { position:sticky; top:0; z-index:1; height:28px; padding:5px 12px; text-align:left; font-size:11px; line-height:18px; font-weight:500; background:hsl(var(--card)); color:hsl(var(--muted-foreground)); }
 .voice-table th:first-child { width:40%; }
 .voice-table th:nth-child(2) { width:16%; }
-.voice-table td { height:var(--voice-row-height, 32px); padding:3px 12px; border-bottom:1px solid hsl(var(--border) / .6); }
 .voice-table tbody tr { cursor:pointer; }
 .voice-table tr:hover { background:hsl(var(--muted) / .5); }
 .voice-table .voice-selected { background:hsl(var(--primary) / .08); box-shadow:inset 3px 0 hsl(var(--primary)); }

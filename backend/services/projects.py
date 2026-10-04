@@ -13,8 +13,9 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ..platform.models import (
-    OutboxEvent, Project, ProjectFile, QuotaHold, QuotaTransaction, Task,
-    TaskAttempt, TaskEvent, TaskResult, UserSession, WorkerHeartbeat, new_id, utcnow,
+    ChapterReviewMark, OutboxEvent, Project, ProjectFile, QuotaHold, QuotaTransaction,
+    Task, TaskAttempt, TaskEvent, TaskResult, TextFormatFlow, UserSession,
+    WorkerHeartbeat, new_id, utcnow,
 )
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 
@@ -142,6 +143,14 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
         db.execute(delete(Task).where(Task.id.in_(task_ids)))
         db.execute(delete(ProjectFile).where(
             ProjectFile.project_id == project.id, ProjectFile.owner_id == project.owner_id,
+        ))
+        # These workflow records point directly at the project and have no
+        # database-level cascade. Remove them before deleting the project row.
+        db.execute(delete(ChapterReviewMark).where(
+            ChapterReviewMark.project_id == project.id, ChapterReviewMark.owner_id == project.owner_id,
+        ))
+        db.execute(delete(TextFormatFlow).where(
+            TextFormatFlow.project_id == project.id, TextFormatFlow.owner_id == project.owner_id,
         ))
         db.execute(update(UserSession).where(UserSession.active_project_id == project.id).values(active_project_id=None))
         db.delete(project)

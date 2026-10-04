@@ -17,6 +17,16 @@ from backend.engines.text import apply_punct, format_text, is_chapter_title, nor
 CFG = TextConfig()
 CFG_NOSB = CFG.model_copy(update={"sentence_break": False})
 
+
+def test_format_progress_reports_real_work_without_changing_output():
+    text = "第1章 开篇\n" + "这是正文。\n" * 100
+    values = []
+    result = format_text(text, CFG, on_progress=values.append)
+    assert result == format_text(text, CFG)
+    assert values == sorted(values)
+    assert values[-1] == 1
+    assert len({v for v in values if 0 < v < 1}) > 10
+
 # The sample exactly as authored in TextFormatter/index.html (tabs preserved).
 SAMPLE = (
     "   第一章   雪   夜\n"

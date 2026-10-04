@@ -47,8 +47,8 @@ async function submit() {
 </script>
 
 <template>
-  <main class="flex min-h-dvh items-center justify-center px-4 py-10">
-    <section class="glass-panel w-full max-w-md rounded-2xl p-8" aria-labelledby="auth-title">
+  <main class="flex h-dvh min-h-0 overflow-hidden items-center justify-center px-4 py-10">
+    <section class="max-h-full overflow-y-auto glass-panel w-full max-w-md rounded-2xl p-8" aria-labelledby="auth-title">
       <div class="mb-8">
         <p class="mb-2 text-xs font-bold uppercase tracking-[0.18em] text-primary">NarrifyAudio</p>
         <h1 id="auth-title" class="text-2xl font-bold tracking-tight">{{ isAdminPortal ? '管理员登录' : registerMode ? '创建你的工作空间' : '用户工作台登录' }}</h1>

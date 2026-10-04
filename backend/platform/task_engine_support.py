@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Callable
 
 from ..core import config as core_config
 from ..core.request_context import bind_workspace, reset_workspace
@@ -22,6 +22,7 @@ def write_task_outcome(
     *,
     publish_module: str | None = None,
     additional_outputs: list[tuple[str, str, bytes]] | None = None,
+    on_progress: Callable[[float], None] | None = None,
 ) -> TaskOutcome:
     with SessionLocal() as db:
         user = db.get(User, claim.owner_id)
@@ -30,6 +31,9 @@ def write_task_outcome(
         temp_path = task_attempt_path(db, user.username, claim.project_id, claim.task_id, claim.attempt_id, output_name)
         temp_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path.write_bytes(data)
+        output_count = 1 + len(additional_outputs or [])
+        if on_progress:
+            on_progress(1 / output_count)
         extra: list[TaskFileOutcome] = []
         for index, (extra_name, extra_type, extra_data) in enumerate(additional_outputs or [], 1):
             extra_path = task_attempt_path(
@@ -42,6 +46,8 @@ def write_task_outcome(
             )
             extra_path.parent.mkdir(parents=True, exist_ok=True)
             extra_path.write_bytes(extra_data)
+            if on_progress:
+                on_progress((index + 1) / output_count)
             extra.append(
                 TaskFileOutcome(
                     temp_path=extra_path,

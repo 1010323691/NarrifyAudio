@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import Alert from '@/components/ui/Alert.vue'
-import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Button from '@/components/ui/Button.vue'
 import { AlertTriangle, Check, Loader2, RotateCcw } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
@@ -65,9 +65,9 @@ const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).su
           >
             第{{ padChapterNum(props.chapter.numStr || props.chapter.seq, props.numPad) }}章{{ props.chapter.title ? ` ${props.chapter.title}` : '（无标题）' }}
           </h3>
-          <Badge v-if="props.chapter.pending && !props.marked" variant="warning" class="shrink-0">待核对</Badge>
-          <Badge v-if="props.marked" variant="success" class="shrink-0">已核对</Badge>
-          <Badge v-if="props.chapter.adjusted" variant="outline" class="shrink-0">已调整</Badge>
+          <WorkbenchStatus v-if="props.chapter.pending && !props.marked" variant="warning" class="shrink-0">待核对</WorkbenchStatus>
+          <WorkbenchStatus v-if="props.marked" variant="success" class="shrink-0">已核对</WorkbenchStatus>
+          <WorkbenchStatus v-if="props.chapter.adjusted" variant="outline" class="shrink-0">已调整</WorkbenchStatus>
           <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ formatNumber(props.chapter.chars) }} 字</span>
         </template>
         <span v-else class="flex-1 text-sm text-muted-foreground/60">未选择</span>

@@ -108,7 +108,7 @@ test('whole-book clone request keeps the original batch range and defaults', asy
   const h = harness(async () => result('role'))
   await vue.nextTick()
   await h.doClones({ new_only: true })
-  assert.equal(JSON.stringify(h.calls[0].body), JSON.stringify({ new_only: true, concurrency: 4, script: '__all__', candidate_count: null }))
+  assert.equal(JSON.stringify(h.calls[0].body), JSON.stringify({ new_only: true, script: '__all__' }))
 })
 
 function focusFixture(h, names, initial = names[0]) {

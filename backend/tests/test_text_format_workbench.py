@@ -11,6 +11,7 @@ import hashlib
 import io
 import uuid
 import zipfile
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +20,7 @@ pytest.importorskip("sqlalchemy")
 
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import ChapterReviewMark, Task
+from backend.platform.models import ChapterReviewMark, ProjectFile, Task, TaskEvent
 from backend.platform.task_worker import process_task_message
 from sqlalchemy import select
 
@@ -84,6 +85,46 @@ CHAPTERED_BODY = (
 ).encode("utf-8")
 
 
+@pytest.mark.parametrize("explicit_name", [False, True])
+def test_upload_preserves_original_name_through_flow_recovery(client: TestClient, explicit_name: bool):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    name = "《九转仙逆》1-8[搜书吧].txt"
+    response = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": (name, CHAPTERED_BODY, "text/plain")},
+        data={"filename": name} if explicit_name else {},
+    )
+    assert response.status_code == 200, response.text
+    uploaded = response.json()
+    assert uploaded["name"] == name
+    assert Path(uploaded["path"]).read_bytes() == CHAPTERED_BODY
+    with SessionLocal() as db:
+        record = db.get(ProjectFile, uploaded["file_id"])
+        assert record.original_name == name
+        assert record.object_key.endswith("/" + Path(uploaded["path"]).name)
+    project_id = uploaded["project_id"]
+    _drive_to_ready(client, csrf, project_id, {"source_file_id": uploaded["file_id"]})
+    recovered = client.get(f"/api/v1/projects/{project_id}/text-format/state")
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["flow"]["source_file_name"] == name
+
+
+@pytest.mark.parametrize("name", ["../../《九转仙逆》1-8[搜书吧].txt", r"C:\fakepath\《九转仙逆》1-8[搜书吧].txt"])
+def test_upload_preserves_only_basename_not_client_path(client: TestClient, name: str):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    response = client.post(
+        "/api/files/upload",
+        headers={"X-CSRF-Token": first["csrf_token"]},
+        files={"file": ("source.txt", CHAPTERED_BODY, "text/plain")},
+        data={"filename": name},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "《九转仙逆》1-8[搜书吧].txt"
+    assert Path(response.json()["path"]).read_bytes() == CHAPTERED_BODY
+
+
 def test_state_is_empty_for_a_fresh_project(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.test")
     project_id = client.get("/api/v1/projects/active").json()["project_id"]
@@ -95,6 +136,49 @@ def test_state_is_empty_for_a_fresh_project(client: TestClient):
     assert body["version"] is None
     assert body["next_task"] is None
     assert body["active_tasks"] == []
+
+
+def test_reprocess_same_source_preserves_uploaded_inputs(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    source = _upload(client, csrf, "《九转仙逆》1-8[搜书吧].txt", CHAPTERED_BODY)
+    unrelated = _upload(client, csrf, "另一份原稿.txt", b"unrelated original")
+    first_state = _drive_to_ready(client, csrf, project_id, {"source_file_id": source["file_id"]})
+    for uploaded, content in [(source, CHAPTERED_BODY), (unrelated, b"unrelated original")]:
+        with SessionLocal() as db:
+            record = db.get(ProjectFile, uploaded["file_id"])
+            assert record.deleted_at is None
+            assert record.kind == "input"
+        assert Path(uploaded["path"]).read_bytes() == content
+    second_state = _drive_to_ready(client, csrf, project_id, {
+        "source_file_id": source["file_id"], "restart": True,
+    })
+    assert second_state["flow"]["id"] != first_state["flow"]["id"]
+    assert second_state["flow"]["source_file_name"] == source["name"]
+    assert len(second_state["version"]["chapters"]) == 2
+    assert Path(source["path"]).read_bytes() == CHAPTERED_BODY
+
+
+def test_pipeline_progress_is_persisted_and_visible_to_task_polling(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    source = _upload(client, csrf, "progress.txt", CHAPTERED_BODY)
+    state = _drive_to_ready(client, csrf, project_id, {"source_file_id": source["file_id"]})
+    for stage in ["format", "analyze", "split"]:
+        task_id = state["flow"][f"{stage}_task_id"]
+        with SessionLocal() as db:
+            events = db.scalars(select(TaskEvent).where(
+                TaskEvent.task_id == task_id, TaskEvent.event_type == "progress",
+            ).order_by(TaskEvent.sequence)).all()
+            values = [event.payload["progress"] for event in events]
+        assert len(set(values)) >= 4, (stage, values)
+        assert values == sorted(values)
+        assert values[-1] == 95  # 100 only after successful publication.
+        polled = client.get(f"/api/v1/tasks/{task_id}").json()
+        assert polled["progress"] == 100
+        assert polled["status"] == "succeeded"
 
 
 def test_flow_runs_pipeline_and_recovers_without_resubmitting(client: TestClient):

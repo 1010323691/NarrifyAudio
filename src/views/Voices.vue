@@ -11,6 +11,7 @@ import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations,
 import { downloadUrl } from '@/utils/fileops'
 import type { MakeClonesResult, PrepareFoundationsResult, TTSStatus, VoiceItem } from '@/types'
 
+import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
@@ -18,9 +19,7 @@ import CardTitle from '@/components/ui/CardTitle.vue'
 import CardDescription from '@/components/ui/CardDescription.vue'
 import CardContent from '@/components/ui/CardContent.vue'
 import Input from '@/components/ui/Input.vue'
-import Select from '@/components/ui/Select.vue'
-import Badge from '@/components/ui/Badge.vue'
-import StatusPill from '@/components/ui/StatusPill.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Alert from '@/components/ui/Alert.vue'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
@@ -34,7 +33,6 @@ import {
   X,
   XCircle,
   CheckCircle2,
-  RefreshCw,
   ArrowRight,
   Search,
   HelpCircle,
@@ -71,15 +69,6 @@ const cloneBusy = ref(false)
 const cloneTaskId = ref<string | null>(null)
 const cloneResult = ref<MakeClonesResult | null>(null)
 const cloneTask = computed(() => taskStore.projectTasks.find((t) => t.id === cloneTaskId.value) ?? null)
-
-// Phase 2 rows-per-batch cap (ONE long-lived worker process, tensor batches; VRAM scales
-// with it). Seeded from config — shares tts.batch_concurrency with 音频合成.
-const cloneConcurrency = ref(4)
-
-// Per-character clone-candidate count for Phase 2: 'auto' (absolute log-scale ladder on each
-// character's OWN line count — a 20k-line 旁白 can't demote the leads) or a fixed 2/4/6/8.
-// Page-local (not persisted to config) — a per-run choice.
-const candidateCount = ref('auto')
 
 // 选择音色 overlay state: which character's candidates are shown, and which candidate the
 // user staged (null = no explicit pick → the default first candidate stays active).
@@ -314,7 +303,6 @@ function reattachTasks() {
 
 onMounted(async () => {
   if (!settings.loaded) await settings.load()
-  cloneConcurrency.value = Math.min(64, Math.max(1, settings.config?.tts.batch_concurrency ?? 4))
   try {
     status.value = await ttsStatus()
   } catch {
@@ -370,9 +358,7 @@ async function doClones(opts: {
   try {
     const { task_id } = await generateVoiceCandidates({
       ...opts,
-      concurrency: cloneConcurrency.value,
       script: script,
-      candidate_count: candidateCount.value === 'auto' ? null : Number(candidateCount.value),
     })
     cloneTaskId.value = task_id
     await taskStore.refresh()
@@ -383,12 +369,7 @@ async function doClones(opts: {
   }
 }
 
-// Coerce the rows-per-batch input (the Input component emits a string) to an integer in
-// [1, 64] — the backend's clamp_concurrency is the final guard.
-function onConcurrency(v: string | number) {
-  const n = Math.trunc(Number(v))
-  cloneConcurrency.value = Number.isFinite(n) ? Math.min(64, Math.max(1, n)) : 1
-}
+
 
 // Phase 1: re-call the LLM for this character's foundation (honours the per-row prompt override).
 function regenFoundation(v: VoiceItem) {
@@ -580,17 +561,12 @@ watch(
 </script>
 
 <template>
-  <div class="voices-page space-y-2" @keydown="overlayKeydown">
+  <div class="voices-page  viewport-workbench" @keydown="overlayKeydown">
     <header class="page-header mb-3">
       <div>
         <p class="eyebrow">Pipeline · Voices</p>
         <h1 class="page-title flex items-center gap-3">
           角色配音
-          <StatusPill
-            :label="(status?.ready ?? status?.implemented) ? '可用' : '引擎未就绪'"
-            :tone="(status?.ready ?? status?.implemented) ? 'positive' : 'neutral'"
-            :aria-label="(status?.ready ?? status?.implemented) ? '引擎可用' : '引擎未就绪'"
-          />
         </h1>
         <p class="page-description">为角色生成候选音色，并选择每个角色使用的最终音色。</p>
       </div>
@@ -604,15 +580,15 @@ watch(
     </Alert>
 
     <template v-else>
-      <Card class="voices-summary">
-        <CardContent class="flex flex-wrap items-center justify-between gap-3 p-3">
-          <div class="flex items-center gap-5 text-[11px] text-muted-foreground">
-            <div><strong class="block text-xl font-semibold tabular-nums text-foreground">{{ speakers.length }}</strong>角色总数</div>
-            <div><strong class="block text-xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">{{ readyCount }}</strong>音色已就绪</div>
-            <div><strong class="block text-xl font-semibold tabular-nums text-amber-600 dark:text-amber-400">{{ speakers.length - readyCount }}</strong>待完善</div>
-          </div>
-        </CardContent>
-      </Card>
+      <WorkbenchContextBar>
+        <template #icon><Users /></template>
+        <template #title>角色声音核对</template>
+        <template #description>选择角色检查声音，使用底部操作生成基础与候选音色。</template>
+        <template #metrics>
+          <div class="workbench-context-metric"><strong>{{ speakers.length }}</strong>角色总数</div>
+          <div class="workbench-context-metric"><strong class="!text-emerald-600 dark:!text-emerald-400">{{ readyCount }}</strong>音色已就绪</div>
+        </template>
+      </WorkbenchContextBar>
       <VoicesWorkbench
         :speakers="speakers" :prompts="prompts" :loading="voicesLoading" :load-error="voicesLoadError" :has-script="hasScript"
         :foundation-blocked="foundationBlocked" :clone-blocked="cloneBlocked" :foundation-busy="foundationBusy"
@@ -640,9 +616,6 @@ watch(
               </Button>
               <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
                 <Users class="h-4 w-4" />仅新增角色
-              </Button>
-              <Button variant="outline" size="sm" @click="loadVoices">
-                <RefreshCw class="h-4 w-4" />刷新
               </Button>
               <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
             </div>
@@ -680,33 +653,6 @@ watch(
                 <AudioWaveform v-else class="h-4 w-4" />
                 {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
               </Button>
-              <label class="flex items-center gap-2 text-sm text-muted-foreground">
-                批内行数（上限）
-                <Input
-                  :modelValue="cloneConcurrency"
-                  type="number"
-                  min="1"
-                  max="64"
-                  class="h-8 w-20"
-                  :disabled="cloneBlocked"
-                  @update:modelValue="onConcurrency"
-                />
-              </label>
-              <label class="flex items-center gap-2 text-sm text-muted-foreground">
-                备选音频数
-                <Select
-                  :modelValue="candidateCount"
-                  class="h-8 w-28"
-                  :disabled="cloneBlocked"
-                  @update:modelValue="candidateCount = String($event)"
-                >
-                  <option value="auto">自动</option>
-                  <option value="2">2</option>
-                  <option value="4">4</option>
-                  <option value="6">6</option>
-                  <option value="8">8</option>
-                </Select>
-              </label>
               <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
             </div>
 
@@ -778,7 +724,7 @@ watch(
               候选 #{{ c.id }}
               <span v-if="c.id === '1'" class="ml-1 text-xs text-muted-foreground">（默认）</span>
             </span>
-            <Badge v-if="c.id === activeCandidateId(pickerTarget)" variant="success" class="shrink-0">当前</Badge>
+            <WorkbenchStatus v-if="c.id === activeCandidateId(pickerTarget)" variant="success" class="shrink-0">当前</WorkbenchStatus>
             <MiniAudioPlayer v-if="c.preview" :src="candidateUrl(c)" class="shrink-0" />
           </label>
           <p v-if="!pickerTarget.candidates.length" class="px-2 py-1.5 text-sm text-muted-foreground">
@@ -949,7 +895,7 @@ watch(
 .voices-stage + .voices-stage { position:relative; }
 .voices-stage + .voices-stage::before { position:absolute; top:0; right:12px; left:12px; height:1px; background:hsl(var(--border) / .65); content:''; }
 @media(min-width:881px) and (min-height:700px) {
-  .voices-page { display:flex; flex-direction:column; height:calc(100dvh - clamp(28px, 4vw, 52px) - 8px); margin-bottom:-64px; }
+  .voices-page { display:flex; flex-direction:column; height:100%; }
   .voices-page > :not(.voice-workbench) { flex-shrink:0; }
   .voices-page :deep(.voice-workbench) { flex:1; min-height:180px; }
   .voices-page :deep(.voice-list), .voices-page :deep(.voice-detail) { min-height:0; }
@@ -960,7 +906,7 @@ watch(
 }
 .voices-stage :deep(button), .voices-footer :deep(button) { min-height:32px; height:32px; font-size:12px; }
 .voices-stage :deep(label), .voices-stage :deep(.text-sm) { font-size:12px; }
-.voices-summary :deep(.text-sm) { font-size:12px; }
+
 .voices-stage :deep(h3) { font-size:12px; }
 @media(min-width:1200px) { .voices-stage { display:grid; grid-template-columns:200px minmax(0,1fr); align-items:center; } .voices-stage-content { padding-top:12px; } }
 @media(pointer:coarse) { .voices-stage :deep(button), .voices-footer :deep(button) { min-height:44px; height:auto; } }

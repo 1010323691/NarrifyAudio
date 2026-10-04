@@ -62,22 +62,12 @@ export type RowStatus =
 
 export type RowTone = 'primary' | 'amber' | 'red' | 'emerald' | 'muted'
 
-/** 状态 tone → 表格/详情头软 chip 类（StatusPill lineage：tint 底 + 彩字 + dot；
- *  状态色固定 emerald/amber/red + 身份色 primary，不引入新固定 hex）。 */
-export const TONE_CHIP: Record<RowTone, { chip: string; dot: string }> = {
-  primary: { chip: 'border-primary/35 bg-primary/10 text-primary', dot: 'bg-primary' },
-  amber: { chip: 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400', dot: 'bg-amber-500 dark:bg-amber-400' },
-  red: { chip: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400', dot: 'bg-red-500 dark:bg-red-400' },
-  emerald: { chip: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400', dot: 'bg-emerald-500 dark:bg-emerald-400' },
-  muted: { chip: 'border-border bg-muted/60 text-muted-foreground', dot: 'bg-muted-foreground/60' },
-}
-
-/** 状态 tone → 纯文字色（详情头「圆点 + 文字」状态用，与 TONE_CHIP 的 text 档同源）。 */
+/** 列表与详情共用的紧凑状态文字色。 */
 export const TONE_TEXT: Record<RowTone, string> = {
   primary: 'text-primary',
-  amber: 'text-amber-700 dark:text-amber-400',
-  red: 'text-red-700 dark:text-red-400',
-  emerald: 'text-emerald-700 dark:text-emerald-400',
+  amber: 'text-amber-600 dark:text-amber-400',
+  red: 'text-destructive',
+  emerald: 'text-teal-600 dark:text-teal-400',
   muted: 'text-muted-foreground',
 }
 

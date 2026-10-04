@@ -4,9 +4,10 @@ import { useRouter } from 'vue-router'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { useScriptParseWorkbench } from '@/composables/useScriptParseWorkbench'
 
+import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
-import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useClientDisplayStore } from '@/stores/clientDisplay'
 import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
@@ -14,7 +15,6 @@ import LiveStreamPanel from '@/components/ui/LiveStreamPanel.vue'
 import {
   AlertTriangle,
   ArrowRight,
-  BookOpenText,
   ChevronDown,
   ChevronUp,
   Eraser,
@@ -87,10 +87,6 @@ function onScopeChange(e: Event) {
   if (v === 'all' || v === 'done' || v === 'failed') selectScope(v)
 }
 
-function goTextFormat() {
-  router.push('/text')
-}
-
 // --- narrow layout (drawer) ----------------------------------------------------
 const isNarrow = ref(false)
 const drawerOpen = ref(false)
@@ -157,104 +153,52 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="wb-page space-y-2">
+  <div class="wb-page viewport-workbench">
     <header class="page-header shrink-0">
       <p class="eyebrow">Pipeline · LLM</p>
       <h1 class="page-title">文本解析</h1>
       <p class="page-description">按章节解析出角色与台词数据；可离开页面，稍后回来自动继续。</p>
     </header>
 
-    <ProjectGateAlert />
+    <div class="workbench-controls" tabindex="0" role="region" aria-label="制作条件与流程">
+      <ProjectGateAlert />
 
-    <!-- 状态警示 -->
-    <Alert v-if="stateError" variant="destructive">
-      <AlertTriangle class="h-4 w-4 shrink-0" />
-      <p>状态待确认：{{ stateError }}（当前显示的是上次已知状态，勾选/提交前建议先刷新）</p>
-    </Alert>
-    <Alert v-if="state && state.text_format_busy" variant="warning">
-      <AlertTriangle class="h-4 w-4 shrink-0" />
-      <p>排版与分册任务正在进行，完成后即可提交解析（提交被临时禁用）。</p>
-    </Alert>
-    <Alert v-if="staleVersion" variant="destructive">
-      <AlertTriangle class="h-4 w-4 shrink-0" />
-      <p>该版本分册文本已被后续处理覆盖，请先到「排版与分册」重新处理后再解析。</p>
-    </Alert>
+      <!-- 状态警示 -->
+      <Alert v-if="stateError" variant="destructive">
+        <AlertTriangle class="h-4 w-4 shrink-0" />
+        <p>状态待确认：{{ stateError }}（当前显示的是上次已知状态，勾选/提交前建议先刷新）</p>
+      </Alert>
+      <Alert v-if="state && state.text_format_busy" variant="warning">
+        <AlertTriangle class="h-4 w-4 shrink-0" />
+        <p>排版与分册任务正在进行，完成后即可提交解析（提交被临时禁用）。</p>
+      </Alert>
+      <Alert v-if="staleVersion" variant="destructive">
+        <AlertTriangle class="h-4 w-4 shrink-0" />
+        <p>该版本分册文本已被后续处理覆盖，请先到「排版与分册」重新处理后再解析。</p>
+      </Alert>
 
-    <!-- 统计栏 -->
-    <div v-if="state && total > 0" class="glass-panel p-4 shrink-0">
-      <div class="flex flex-wrap items-center gap-x-8 gap-y-3">
-        <div class="flex shrink-0 items-center gap-3">
-          <div
-            class="flex h-9 w-9 items-center justify-center rounded-full"
-            :class="busy
-              ? 'bg-primary/10 text-primary'
-              : pendingCount > 0
-                ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400'
-                : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400'"
-          >
-            <Loader2 v-if="busy" class="h-5 w-5 animate-spin" />
-            <ScanText v-else class="h-5 w-5" />
-          </div>
-          <div>
-            <p class="text-sm font-semibold">
-              {{ busy ? '解析进行中' : pendingCount > 0 ? '部分章节待解析' : '全部章节已解析' }}
-            </p>
-            <p class="text-xs text-muted-foreground">
-              {{ busy ? '可离开页面，回来自动继续' : '勾选章节后点击底部「开始解析」' }}
-            </p>
-          </div>
-        </div>
-        <div class="flex flex-wrap items-center gap-y-2">
-          <div class="px-6">
-            <div class="text-2xl font-bold tabular-nums">{{ total }}</div>
-            <div class="text-xs text-muted-foreground">全部章节</div>
-          </div>
-          <div class="border-l px-6">
-            <div class="text-2xl font-bold tabular-nums" :class="{ 'text-amber-600 dark:text-amber-400': pendingCount > 0 }">
-              {{ pendingCount }}
-            </div>
-            <div class="text-xs text-muted-foreground">待解析</div>
-          </div>
-          <div class="border-l px-6">
-            <div class="text-2xl font-bold tabular-nums">{{ doneCount }}</div>
-            <div class="text-xs text-muted-foreground">已完成</div>
-          </div>
-        </div>
-        <div class="ml-auto flex shrink-0 flex-wrap items-center gap-2">
-          <Badge v-if="state.text_format_busy" variant="warning">排版与分册进行中</Badge>
-          <Badge v-if="staleVersion" variant="destructive">版本已被覆盖</Badge>
-          <!-- 原「来源栏」按钮下沉至此；「解析检查项」从页头移入。 -->
-          <Button variant="outline" size="sm" @click="checksOpen = true">
-            <ListChecks class="h-4 w-4" />解析检查项
-          </Button>
-          <Button variant="outline" size="sm" @click="goTextFormat">
-            <BookOpenText class="h-4 w-4" />排版与分册
-          </Button>
-          <Button variant="outline" size="sm" :disabled="loading || !projectSet" aria-label="刷新章节状态" @click="refreshState()">
-            <RefreshCw class="h-4 w-4" :class="loading ? 'animate-spin' : ''" />刷新
-          </Button>
-        </div>
-      </div>
-    </div>
+      <!-- 统计栏 -->
+      <WorkbenchContextBar v-if="state">
+        <template #icon><Loader2 v-if="busy" class="animate-spin" /><ScanText v-else /></template>
+        <template #title>{{ busy ? '解析进行中' : total === 0 ? '尚无可解析章节' : pendingCount > 0 ? '部分章节待解析' : '全部章节已解析' }}</template>
+        <template #description>{{ busy ? '可离开页面，回来自动继续' : total === 0 ? '请先在「排版与分册」生成章节' : '勾选章节后点击底部「开始解析」' }}</template>
+        <template #metrics>
+          <div class="workbench-context-metric"><strong>{{ total }}</strong>全部章节</div>
+          <div class="workbench-context-metric"><strong :class="{ '!text-amber-600 dark:!text-amber-400': pendingCount > 0 }">{{ pendingCount }}</strong>待解析</div>
+          <div class="workbench-context-metric"><strong>{{ doneCount }}</strong>已完成</div>
+        </template>
+        <template #actions>
+          <WorkbenchStatus v-if="state.text_format_busy" variant="warning">排版与分册进行中</WorkbenchStatus>
+          <WorkbenchStatus v-if="staleVersion" variant="destructive">版本已被覆盖</WorkbenchStatus>
+          <Button variant="outline" size="sm" @click="checksOpen = true"><ListChecks class="h-4 w-4" />解析检查项</Button>
+        </template>
+      </WorkbenchContextBar>
 
-    <!-- 空态 -->
-    <div v-if="state && total === 0" class="glass-panel p-8 text-center shrink-0">
-      <p class="text-sm text-muted-foreground">
-        尚未生成分册文本。请先到「排版与分册」整理并拆分章节，然后回到本页按章节解析。
-      </p>
-      <div class="mt-4 flex items-center justify-center gap-2">
-        <Button size="sm" @click="goTextFormat">
-          前往排版与分册
-          <ArrowRight class="h-4 w-4" />
-        </Button>
-        <Button variant="outline" size="sm" :disabled="loading || !projectSet" aria-label="刷新章节状态" @click="refreshState()">
-          <RefreshCw class="h-4 w-4" :class="loading ? 'animate-spin' : ''" />刷新
-        </Button>
-      </div>
+
     </div>
 
     <!-- 工作区 -->
-    <div v-if="state && total > 0" class="wb-workspace glass-panel flex min-h-[440px] flex-1 flex-col overflow-hidden">
+    <div v-if="state" class="wb-workspace glass-panel flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="min-h-0 flex-1" :inert="drawerOpen || undefined">
         <div class="wb-grid h-full">
           <div class="wb-main flex min-h-0 flex-col">
@@ -283,6 +227,16 @@ onBeforeUnmount(() => {
                   {{ f[0] === 'all' ? total : f[0] === 'pending' ? pendingCount : doneCount }}
                 </span>
               </button>
+              <Button
+                variant="ghost"
+                class="ml-auto h-8 w-8 shrink-0 p-0"
+                :disabled="loading || !projectSet"
+                aria-label="刷新章节状态"
+                title="刷新章节状态"
+                @click="refreshState()"
+              >
+                <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
+              </Button>
             </div>
             <div class="min-h-0 flex-1 overflow-y-auto">
               <ParseChapterTable
@@ -291,6 +245,7 @@ onBeforeUnmount(() => {
                 :selected-name="selectedName"
                 :num-pad="chapterNumPad"
                 :page-size="pageSize"
+                :empty-message="total === 0 ? '尚未生成分册文本，请先在「排版与分册」生成章节。' : filter === 'pending' ? '当前没有待解析章节' : '没有符合条件的章节'"
                 :select-disabled="busy"
                 @select="onChapterSelect"
                 @toggle="toggleSelect"
@@ -436,8 +391,7 @@ onBeforeUnmount(() => {
 .wb-page {
   display: flex;
   flex-direction: column;
-  margin-bottom: -64px;
-  height: calc(100vh - clamp(28px, 4vw, 52px) - 8px);
+  height: 100%;
 }
 .wb-page .page-header {
   margin-bottom: 8px;
@@ -466,10 +420,10 @@ onBeforeUnmount(() => {
   background: hsl(var(--primary) / 0.1);
   border-color: hsl(var(--primary) / 0.35);
 }
-/* 桌面：左章节表 + 右常驻预览（40%），与排版工作台同骨架。 */
+/* 桌面：与后续制作工作台统一为左 66%、右 34%。 */
 .wb-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40%;
+  grid-template-columns: minmax(0, 1fr) 34%;
   gap: 0;
 }
 </style>

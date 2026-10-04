@@ -31,8 +31,9 @@ import {
   AlertTriangle, Check, Clock3, Eye, FileText, Loader2, Play, RefreshCw, Save, Search, Tag, Trash2, Undo2, X, XCircle,
 } from 'lucide-vue-next'
 
+import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
-import Badge from '@/components/ui/Badge.vue'
+import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Card from '@/components/ui/Card.vue'
 import Alert from '@/components/ui/Alert.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
@@ -613,32 +614,22 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="preview-page flex min-h-0 flex-1 flex-col gap-3">
-    <!-- 顶部：页面标题 + 当前章节状态条（选中章节后才出现） -->
-    <header class="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
-      <div class="min-w-0">
-        <p class="eyebrow">Pipeline · Preview</p>
-        <h1 class="page-title flex items-center gap-2.5">
-          <Eye class="h-6 w-6 shrink-0 text-primary" />整章预览
-        </h1>
-        <p class="page-description">逐句试听、修改角色与语气并单句重新生成；修改后可先试听，保存后才会更新本章。</p>
-      </div>
+    <header class="page-header shrink-0">
+      <p class="eyebrow">Pipeline · Preview</p>
+      <h1 class="page-title">整章预览</h1>
+      <p class="page-description">逐句试听、修改角色与语气并单句重新生成；修改后可先试听，保存后才会更新本章。</p>
+    </header>
 
-      <div
-        v-if="openName"
-        class="flex min-w-0 items-center gap-2.5 rounded-lg border border-border bg-card/75 py-1 pl-3 pr-1 shadow-sm backdrop-blur-sm"
-      >
-        <FileText class="h-4 w-4 shrink-0 text-primary" />
-        <span class="shrink-0 text-[11px] font-bold tracking-wider text-muted-foreground">当前章节</span>
-        <span class="max-w-[14rem] truncate text-sm font-semibold" :title="openName">{{ chapterTitle(openName) }}</span>
-        <span
-          v-if="openRow"
-          class="shrink-0 text-xs tabular-nums text-muted-foreground"
-          :title="`共 ${openRow.total} 句中，${openRow.completed} 句拥有与当前声音配置一致的音频`"
-        >
-          已合成 {{ openRow.completed }}/{{ openRow.total }}
-        </span>
+    <WorkbenchContextBar class="shrink-0" role="region" aria-label="章节预览功能区">
+      <template #icon><FileText /></template>
+      <template #title><p :title="openName || undefined">{{ openName ? chapterTitle(openName) : '选择章节开始预览' }}</p></template>
+      <template #description>
+        <span v-if="openRow" :title="`共 ${openRow.total} 句中，${openRow.completed} 句拥有与当前声音配置一致的音频`">当前章节 · 已合成 {{ openRow.completed }}/{{ openRow.total }}</span>
+        <span v-else>选章节 → 选台词 → 修改与试听 → 保存</span>
+      </template>
+      <template #actions>
         <BadgeAudioButton
-          v-if="detail?.chapter_audio?.path"
+          v-if="openName && detail?.chapter_audio?.path"
           :src="preview.formalAudioUrl(detail.chapter_audio.path, null)"
           label="已合并"
           tone="teal"
@@ -646,21 +637,23 @@ onBeforeUnmount(() => {
           :start-at="selectedStartOffset"
         />
         <BadgeAudioButton
-          v-if="detail?.downstream?.mixed"
+          v-if="openName && detail?.downstream?.mixed"
           :src="bgmPreviewUrl(openName.replace(/\.json$/, ''))"
           label="已混音"
           tone="sky"
           :start-at="selectedStartOffset"
         />
-        <span class="h-4 w-px shrink-0 bg-border" />
-        <Button variant="ghost" size="icon" class="h-7 w-7" title="刷新详情" :disabled="detailLoading" @click="loadDetail()">
+        <Button v-if="openName" variant="ghost" size="icon" class="h-8 w-8" title="刷新详情" aria-label="刷新详情" :disabled="detailLoading" @click="loadDetail()">
           <RefreshCw class="h-3.5 w-3.5" :class="detailLoading ? 'animate-spin' : ''" />
         </Button>
-        <Button variant="ghost" size="icon" class="h-7 w-7" title="关闭章节" @click="close()">
+        <Button v-else variant="ghost" size="icon" class="h-8 w-8" title="刷新章节列表" aria-label="刷新章节列表" :disabled="listLoading || !projectSet" @click="refreshList">
+          <RefreshCw class="h-3.5 w-3.5" :class="listLoading ? 'animate-spin' : ''" />
+        </Button>
+        <Button v-if="openName" variant="ghost" size="icon" class="h-8 w-8" title="关闭章节" aria-label="关闭章节" @click="close()">
           <X class="h-3.5 w-3.5" />
         </Button>
-      </div>
-    </header>
+      </template>
+    </WorkbenchContextBar>
 
     <ProjectGateAlert />
 
@@ -673,7 +666,7 @@ onBeforeUnmount(() => {
             <h2 class="text-xs font-bold tracking-wide">
               章节<span class="ml-1.5 font-medium text-muted-foreground">共 {{ chapterRows.length }} 章</span>
             </h2>
-            <Button variant="ghost" size="icon" class="h-6 w-6" title="刷新章节列表" :disabled="listLoading" @click="refreshList">
+            <Button v-if="openName" variant="ghost" size="icon" class="h-6 w-6" title="刷新章节列表" :disabled="listLoading" @click="refreshList">
               <RefreshCw class="h-3 w-3" :class="listLoading ? 'animate-spin' : ''" />
             </Button>
           </div>
@@ -766,14 +759,14 @@ onBeforeUnmount(() => {
                 :class="{ 'line-clamp-2': selected !== v.index }"
                 :title="v.draft.text"
               >{{ v.draft.text || '（空台词）' }}</span>
-              <Badge :variant="rowBadge(v).variant" class="shrink-0">
+              <WorkbenchStatus :variant="rowBadge(v).variant" class="shrink-0">
                 <Loader2 v-if="v.status === 'rendering'" class="h-3 w-3 animate-spin" />
                 <Check v-else-if="v.status === 'previewReady'" class="h-3 w-3" />
                 <XCircle v-else-if="v.status === 'failed'" class="h-3 w-3" />
                 <Clock3 v-else-if="v.status === 'dirty'" class="h-3 w-3" />
                 <Play v-else-if="v.line.ok" class="h-3 w-3" />
                 {{ rowBadge(v).label }}
-              </Badge>
+              </WorkbenchStatus>
             </div>
             <div class="mt-1.5 flex items-center gap-2 pl-[30px]">
               <span v-if="v.line.instruct" class="min-w-0 max-w-[14rem] truncate text-[11px] italic text-muted-foreground" :title="v.line.instruct">
@@ -785,7 +778,7 @@ onBeforeUnmount(() => {
                   {{ v.staged.reason }}
                 </span>
                 <template v-if="auditionSrc(v)">
-                  <span v-if="v.status === 'previewReady'" class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary">预览</span>
+                  <span v-if="v.status === 'previewReady'" class="text-[10px] font-semibold text-primary">预览</span>
                   <span v-if="rowDuration(v) != null" class="text-[11px] tabular-nums text-muted-foreground">{{ fmtDuration(rowDuration(v)) }}</span>
                   <AudioPlayButton :src="auditionSrc(v)!" />
                 </template>
@@ -962,7 +955,7 @@ onBeforeUnmount(() => {
                 >{{ auditionSourceLabel(selectedView) }}</span>
               </div>
               <div class="rounded-lg border border-border/70 bg-background/50 p-2.5">
-                <MiniAudioPlayer v-if="auditionSrc(selectedView)" :src="auditionSrc(selectedView)!" :known-duration="auditionKnownDuration(selectedView)" />
+                <MiniAudioPlayer v-if="auditionSrc(selectedView)" :src="auditionSrc(selectedView)!" :known-duration="auditionKnownDuration(selectedView)" preload-metadata />
                 <p v-else class="text-xs text-muted-foreground">暂无可播放音频。</p>
                 <p v-if="isChapterFallback(selectedView)" class="mt-1.5 text-[11px] leading-snug text-muted-foreground">
                   本句暂无独立音频，当前播放章节合并音频，不定位到具体台词。
@@ -1041,5 +1034,8 @@ onBeforeUnmount(() => {
 /* 工作台高度：全宽容器（.app-content--full）占满视口，页面自身撑满其高度 → .app-main 不产生页面级滚动。 */
 .preview-page {
   height: 100%;
+}
+.preview-page .page-header {
+  margin-bottom: 0;
 }
 </style>
