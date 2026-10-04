@@ -407,6 +407,55 @@ def test_dead_waiting_owner_is_reaped():
         assert db.scalar(select(GPURequest.id)) is None
 
 
+class RestartManager:
+    """A freshly started coordinator: it owns no in-process LLM service."""
+    def __init__(self, port_open):
+        self.calls = []
+        self.health = self
+        self.port_open_value = port_open
+    def is_llm_running(self):
+        return False
+    def llm_port_open(self, llm=None):
+        return self.port_open_value
+    def llm_ready(self, llm=None):
+        return False
+    def stop_tts(self):
+        self.calls.append("stop_tts")
+    def stop_llm(self, config, pulse):
+        self.calls.append("stop_llm")
+    def wait_gpu_released(self, config, pulse):
+        self.calls.append("release")
+
+
+@pytest.mark.parametrize("llm_process,port_open,clean", [
+    ({"pid": 999999, "created": 0}, False, True),   # proven dead: auto-clean to IDLE
+    ({"pid": 999999, "created": 0}, True, False),   # port still held: stay fail-closed
+    (None, False, False),                            # live identity: stay fail-closed
+])
+def test_coordinator_restart_cleans_verified_llm_exit(tmp_path, monkeypatch, llm_process, port_open, clean):
+    from backend.core.config import LLMConfig
+    from backend.platform.gpu_scheduler import config as config_module, runtime
+    if llm_process is None:
+        llm_process = process_identity(os.getpid())
+    llm = LLMConfig(base_url="http://127.0.0.1:9999/v1", model_name="restarted")
+    for module in (config_module, runtime):
+        monkeypatch.setattr(module, "platform_llm", lambda: llm)
+    config = enabled_config(tmp_path, gpu_release_wait=0)
+    activate(config, side="LLM")
+    with transaction() as (_db, state):
+        state["llm_process"] = llm_process
+        state["llm_runtime"] = llm.model_dump()
+    scheduler = Scheduler(threading.Event(), RestartManager(port_open))
+    if clean:
+        scheduler.tick()
+        assert read_state()["state"] == "IDLE"
+        assert scheduler.manager.calls == ["stop_tts", "stop_llm", "release"]
+    else:
+        with pytest.raises(RuntimeError):
+            scheduler.tick()
+        assert read_state()["state"] == "LLM_ACTIVE"
+
+
 def test_failed_tts_tree_confirmation_retains_permit(tmp_path, monkeypatch):
     from backend.platform.gpu_scheduler.manager import GPUServiceManager
     from types import SimpleNamespace

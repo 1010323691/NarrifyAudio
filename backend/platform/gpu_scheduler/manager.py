@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 from ..models import GPURequest
 from ...core.managed_process import (spawn_owned, terminate_owned, close_owned, tree_exited,
                                      process_identity, identity_alive, script_command)
-from ...engines.llm_transport import llm_server_is_alive
 from .config import GPUConfig, platform_llm
 from .store import transaction
 
@@ -22,6 +21,7 @@ logger = logging.getLogger("audiobook.gpu_scheduler")
 
 class HealthChecker:
     def llm_ready(self, llm=None) -> bool:
+        from ...engines.llm_transport import llm_server_is_alive
         llm = llm or platform_llm()
         return llm_server_is_alive(llm.base_url, llm.api_key, model_name=llm.model_name or None, timeout=2)
 

@@ -58,9 +58,10 @@ def _kill_worker_tree(proc: subprocess.Popen) -> None:
     A plain ``proc.kill()`` (TerminateProcess on Windows) reaches only the worker
     itself; on a cancel mid-encode the worker's ffmpeg child would be orphaned
     and keep running (and holding its temp files) until the encode finished on
-    its own. On Windows this therefore does a process-tree kill
-    (``taskkill /F /T``) and falls back to the plain kill if that fails. POSIX
-    behaviour is unchanged (plain kill of the child).
+    its own. The kill therefore goes through
+    :meth:`GPUServiceManager.cancel_tts`, which terminates the whole owned tree:
+    the Windows Job Object the child was admitted into (``TerminateJobObject``)
+    or, on POSIX, the process group (``killpg`` with SIGKILL).
     """
     GPUServiceManager.cancel_tts(proc)
 
@@ -130,7 +131,7 @@ def run_tts_subprocess(*args, **kwargs) -> deque:
                 pass
 
 
-def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = "TTS 引擎",
+def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "TTS 引擎",
               watchdog_code: int | None = None,
               log_file: Path | None = None, log_line=None,
               interrupt_on_pause: bool = False, gpu_request_id: str | None = None) -> deque:
@@ -140,7 +141,9 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
     spawn the child (UTF-8 forced, project root as cwd), pump stdout/stderr from
     reader threads into the main loop, honour cooperative cancel/pause via
     ``handle.check()`` (the child is killed in ``finally``), mirror stderr into the
-    task log at WARNING level, then clean up the child and any ``temp_files``.
+    task log at WARNING level, then clean up the child. Temporary input files
+    are retained by the caller (``run_tts_subprocess``) across pause restarts
+    and removed only on exit.
 
     Cancel is checked **per line** as the output drains (not only once per drain
     cycle): on a loaded machine (AV scan / disk contention) each line's processing
@@ -216,13 +219,11 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
 
     out_done = err_done = False
     pause_requested = False
-    pause_retry = False
     require_ready = gpu_request_id is not None and load_config().enabled
     ready = not require_ready
     ready_deadline = time.monotonic() + load_config().startup_timeout if require_ready else 0
 
     def check() -> None:
-        nonlocal pause_requested, pause_retry
         if interrupt_on_pause and hasattr(handle, "check_interruptible"):
             def stop_for_pause() -> None:
                 nonlocal pause_requested
@@ -233,7 +234,6 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
                 release_paused_tts(gpu_request_id)
             handle.check_interruptible(stop_for_pause)
             if pause_requested:
-                pause_retry = True
                 raise _SubprocessPaused()
         else:
             handle.check()
@@ -308,12 +308,6 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
                 p.close()
             except Exception:  # noqa: BLE001
                 pass
-        if not pause_retry:
-            for f in temp_files:
-                try:
-                    Path(f).unlink(missing_ok=True)
-                except Exception:  # noqa: BLE001
-                    pass
 
     if proc.returncode != 0:
         tail = " | ".join(stderr_tail)[-500:]

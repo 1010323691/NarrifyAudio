@@ -105,6 +105,14 @@ class Scheduler:
         self.active_config = config
         logger.info("[GPU-SCHEDULER] switch completed target=%s duration=%.2fs", target, time.monotonic() - started)
 
+    def _llm_proven_stopped(self, saved) -> bool:
+        """This coordinator owns no LLM process and the saved one is proven gone."""
+        if self.manager.is_llm_running() or identity_alive(saved.get("llm_process", {})):
+            return False
+        from ...core.config import LLMConfig
+        runtime = LLMConfig.model_validate(saved["llm_runtime"]) if saved.get("llm_runtime") else None
+        return not self.manager.health.llm_port_open(runtime)
+
     def tick(self):
         config = load_config()
         self.pulse()
@@ -143,6 +151,11 @@ class Scheduler:
             self.switch(saved["current"], "service configuration changed", config)
             return
         if saved["current"] == "LLM" and (not self.manager.is_llm_running() or not self.manager.health.llm_ready(getattr(self.manager, "llm_settings", None))):
+            if self._llm_proven_stopped(saved):
+                # A restarted coordinator with a clean handover: the previous LLM tree
+                # is proven gone, so resume scheduling instead of requiring manual recovery.
+                self.switch(None, "coordinator restart", config)
+                return
             raise RuntimeError("LLM 服务异常退出或健康检查失败")
         decision = self.policy.decide(config, saved["current"], snapshot["LLM"], snapshot["TTS"],
                                       runtime=now - saved["active_since"], since_switch=now - saved["last_switch"],

@@ -46,6 +46,7 @@ def gpu_permit(service: str, handle=None):
         yield None
         return
     try:
+        delay = 0.2
         while True:
             if handle is not None:
                 handle.check()
@@ -82,7 +83,10 @@ def gpu_permit(service: str, handle=None):
                         request.process = {**request.process, "llm_runtime": state.get("llm_runtime") or platform_llm().model_dump()}
                     state["served"] = True
                     break
-            time.sleep(0.2)
+            time.sleep(delay)
+            # Bounded backoff: every waiting permit runs this DB-locked poll cycle,
+            # so a deep backlog must not turn the wait into constant 5 Hz polling.
+            delay = min(delay * 2, 2.0)
         yield request_id
     finally:
         with transaction() as (db, _state):
