@@ -67,7 +67,7 @@ Python 使用 4 个空格缩进，TypeScript/Vue 延续现有的 2 个空格缩�
 
 不得提交 API 密钥、本地工作空间路径、生成的音频、日志或虚拟环境。`.env`、`storage/`、`config/`、`logs/`、`.narrify/`、`music_library/`、`.backups/` 和工作空间输出均为本机运行时或用户数据，不作为源码清理，也不提交。
 
-根目录 `setting.json` 作为默认配置模板纳入 Git；提交时保持工作空间路径为空，LLM key 仅使用 `local` 占位值，不提交运行时写入的本机路径或凭据。工作空间内的 `config/app.json` 仍为用户数据。
+根目录 `setting.json` 作为默认配置模板纳入 Git；提交时保持工作空间路径为空，LLM key 仅使用 `local` 占位值，不提交运行时写入的本机路径或凭据。工作空间内的 `config/setting.json` 仍为用户数据。
 
 数据库、队列和初始管理员配置放在本机 `.env`；LLM 凭据和制作参数通过应用设置管理，不写入代码、文档或前端。前端分域部署所需的 `VITE_API_BASE` / `VITE_CSRF_COOKIE_NAME` 在构建时生效，修改后需重新构建。
 

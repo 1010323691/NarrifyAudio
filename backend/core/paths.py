@@ -13,7 +13,7 @@ One root — the user's chosen workspace (``paths.working_dir`` in the root
     07_output/         # final episode files
     08_bgm/            # background-music analysis cache + assignments + final mixes
     logs/              # the project's app.log
-    config/            # the project's config/app.json
+    config/            # the project's config/setting.json
 
 The project root itself holds only ``setting.json`` — the generic default config
 template plus the bootstrap pointer to the active workspace (see

@@ -2,7 +2,7 @@
 stages (``backend/core/config.py``) — the new TTS fields, the persona-prompt block,
 and the pure deep-merge that ``update_config`` relies on.
 
-``update_config`` itself writes the real ``config/app.json`` and is therefore exercised
+``update_config`` itself writes the real ``config/setting.json`` and is therefore exercised
 in the manual run, not here; instead this pins the schema defaults and the pure
 ``_deep_update`` merge in isolation.
 """
@@ -252,13 +252,62 @@ def test_setting_template_and_workspace_config_are_separate(sandbox):
     core_config.update_config({"text": {"live": False}})
     assert _read(sandbox / "setting.json")["paths"]["working_dir"] == str(ws)
     assert _read(sandbox / "setting.json")["text"]["live"] is True
-    assert _read(ws / "config" / "app.json")["text"]["live"] is False
+    assert _read(ws / "config" / "setting.json")["text"]["live"] is False
 
 
 def test_get_config_unset_returns_root_template(sandbox):
     # With no pointer, the config is the (read-only) root template.
     cfg = core_config.get_config()
     assert cfg.paths.working_dir == ""
+
+
+def test_legacy_workspace_config_reads_without_writing_and_saves_new_name(sandbox):
+    ws = sandbox / "Book"
+    legacy = ws / "config" / "app.json"
+    legacy.parent.mkdir(parents=True)
+    original = json.dumps({"text": {"live": False}, "ui": {"theme": "dark"}})
+    legacy.write_text(original, encoding="utf-8")
+    core_config.set_workspace_pointer(str(ws))
+
+    assert core_config.get_config().text.live is False
+    assert not (ws / "config" / "setting.json").exists()
+    core_config.update_config({"ui": {"theme": "light"}})
+
+    saved = _read(ws / "config" / "setting.json")
+    assert saved["text"]["live"] is False
+    assert saved["ui"]["theme"] == "light"
+    assert legacy.read_text("utf-8") == original
+    core_config.reset_config_cache()
+    assert core_config.get_config().ui.theme == "light"
+
+
+def test_init_workspace_config_copies_legacy_verbatim_and_keeps_backup(sandbox):
+    ws = sandbox / "Book"
+    legacy = ws / "config" / "app.json"
+    legacy.parent.mkdir(parents=True)
+    original = b'{"text":{"live":false},"extension":{"custom":123}}'
+    legacy.write_bytes(original)
+
+    core_config.init_workspace_config(ws)
+
+    assert (ws / "config" / "setting.json").read_bytes() == original
+    assert legacy.read_bytes() == original
+
+
+def test_new_workspace_config_takes_precedence_over_legacy(sandbox):
+    ws = sandbox / "Book"
+    directory = ws / "config"
+    directory.mkdir(parents=True)
+    (directory / "app.json").write_text('{"text":{"live":false}}', encoding="utf-8")
+    target = directory / "setting.json"
+    original = '{"text":{"live":true}}'
+    target.write_text(original, encoding="utf-8")
+    core_config.set_workspace_pointer(str(ws))
+
+    core_config.init_workspace_config(ws)
+
+    assert core_config.get_config().text.live is True
+    assert target.read_text("utf-8") == original
 
 
 def test_set_workspace_pointer_updates_only_pointer(sandbox):
@@ -287,7 +336,7 @@ def test_get_config_set_reads_workspace_config(sandbox):
     ws_cfg.paths.working_dir = str(ws)
     ws_cfg.generation.check_batch_size = 777
     (ws / "config").mkdir(parents=True)
-    (ws / "config" / "app.json").write_text(
+    (ws / "config" / "setting.json").write_text(
         json.dumps(ws_cfg.model_dump()), encoding="utf-8"
     )
     core_config.reset_config_cache()
@@ -304,8 +353,8 @@ def test_update_config_requires_workspace(sandbox):
 
 def test_update_config_writes_workspace_and_forces_pointer(sandbox):
     ws = sandbox / "MyBook"
-    core_config.init_workspace_config(ws)  # seeds ws/config/app.json
-    workspace_config = ws / "config" / "app.json"
+    core_config.init_workspace_config(ws)  # seeds ws/config/setting.json
+    workspace_config = ws / "config" / "setting.json"
     old = _read(workspace_config)
     old["tts"].update({
         "api_base": "https://legacy.example/v1",
@@ -335,12 +384,12 @@ def test_update_config_writes_workspace_and_forces_pointer(sandbox):
 def test_update_config_persists_ui_show_parse_logs(sandbox):
     # 设置页保存「解析日志显示」→ 工作空间配置落盘（根模板不动）。
     ws = sandbox / "MyBook"
-    core_config.init_workspace_config(ws)  # seeds ws/config/app.json
+    core_config.init_workspace_config(ws)  # seeds ws/config/setting.json
     core_config.set_workspace_pointer(str(ws))
 
     cfg = core_config.update_config({"ui": {"show_parse_logs": True}})
     assert cfg.ui.show_parse_logs is True
-    assert _read(ws / "config" / "app.json")["ui"]["show_parse_logs"] is True
+    assert _read(ws / "config" / "setting.json")["ui"]["show_parse_logs"] is True
     # 再读（缓存已更新）保持 True。
     assert core_config.get_config().ui.show_parse_logs is True
 
@@ -348,12 +397,12 @@ def test_update_config_persists_ui_show_parse_logs(sandbox):
 def test_update_config_persists_ui_show_audio_split(sandbox):
     # 设置页保存「音频分集导航项」→ 工作空间配置落盘（根模板不动）。
     ws = sandbox / "MyBook"
-    core_config.init_workspace_config(ws)  # seeds ws/config/app.json
+    core_config.init_workspace_config(ws)  # seeds ws/config/setting.json
     core_config.set_workspace_pointer(str(ws))
 
     cfg = core_config.update_config({"ui": {"show_audio_split": True}})
     assert cfg.ui.show_audio_split is True
-    assert _read(ws / "config" / "app.json")["ui"]["show_audio_split"] is True
+    assert _read(ws / "config" / "setting.json")["ui"]["show_audio_split"] is True
     # 再读（缓存已更新）保持 True。
     assert core_config.get_config().ui.show_audio_split is True
 
@@ -361,7 +410,7 @@ def test_update_config_persists_ui_show_audio_split(sandbox):
 def test_init_workspace_config_copies_template_and_sets_pointer(sandbox):
     ws = sandbox / "NewBook"
     core_config.init_workspace_config(ws)
-    target = ws / "config" / "app.json"
+    target = ws / "config" / "setting.json"
     assert target.exists()
     assert _read(target)["paths"]["working_dir"] == str(ws)
 
@@ -372,11 +421,11 @@ def test_init_workspace_config_never_overwrites(sandbox):
     # The legacy ``book`` marker stays on disk (never rewritten here) — it is
     # dropped only by an explicit settings save.
     marker = {"paths": {"working_dir": str(ws)}, "book": {"target_chars": 424242}}
-    (ws / "config" / "app.json").write_text(json.dumps(marker), encoding="utf-8")
+    (ws / "config" / "setting.json").write_text(json.dumps(marker), encoding="utf-8")
 
     core_config.init_workspace_config(ws)  # must NOT overwrite an existing config
 
-    after = _read(ws / "config" / "app.json")
+    after = _read(ws / "config" / "setting.json")
     assert after["paths"]["working_dir"] == str(ws)
     assert after["book"]["target_chars"] == 424242
 
@@ -434,10 +483,10 @@ def test_bgm_params_are_admin_managed_workspace_values_ignored(sandbox):
     # （强制代码默认值，平台默认值由 get_config 的 platform provider 覆盖）。
     ws = sandbox / "MyBook"
     core_config.init_workspace_config(ws)
-    old = _read(ws / "config" / "app.json")
+    old = _read(ws / "config" / "setting.json")
     old["bgm"]["volume"] = 0.42
     old["bgm"]["analysis_chars"] = 9000  # 退役字段残留
-    (ws / "config" / "app.json").write_text(json.dumps(old), encoding="utf-8")
+    (ws / "config" / "setting.json").write_text(json.dumps(old), encoding="utf-8")
     core_config.set_workspace_pointer(str(ws))
     core_config.reset_config_cache()
 
@@ -447,7 +496,7 @@ def test_bgm_params_are_admin_managed_workspace_values_ignored(sandbox):
     cfg = core_config.update_config({"log": {"level": "DEBUG"}, "bgm": {"volume": 0.9}})
     assert cfg.bgm == BGMConfig()
     assert cfg.log.level == "DEBUG"
-    saved = _read(ws / "config" / "app.json")
+    saved = _read(ws / "config" / "setting.json")
     assert saved["log"]["level"] == "DEBUG"
     assert saved["bgm"]["volume"] == BGMConfig().volume
     assert "analysis_chars" not in saved["bgm"]
@@ -491,9 +540,9 @@ def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeyp
     # （强制代码默认值；平台默认值由 get_config 的 platform provider 覆盖）。
     ws = sandbox / "MyBook"
     core_config.init_workspace_config(ws)
-    old = _read(ws / "config" / "app.json")
+    old = _read(ws / "config" / "setting.json")
     old["split"]["length_target"] = 12345
-    (ws / "config" / "app.json").write_text(json.dumps(old), encoding="utf-8")
+    (ws / "config" / "setting.json").write_text(json.dumps(old), encoding="utf-8")
     core_config.set_workspace_pointer(str(ws))
     core_config.reset_config_cache()
 
@@ -507,7 +556,7 @@ def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeyp
     cfg = core_config.update_config({"log": {"level": "DEBUG"}, "split": {"length_target": 777}})
     assert cfg.split == SplitConfig()
     assert cfg.log.level == "DEBUG"
-    saved = _read(ws / "config" / "app.json")
+    saved = _read(ws / "config" / "setting.json")
     assert saved["log"]["level"] == "DEBUG"
     assert saved["split"]["length_target"] == SplitConfig().length_target
 

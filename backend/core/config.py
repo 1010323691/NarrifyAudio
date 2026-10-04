@@ -7,7 +7,7 @@ Two files, one pointer:
   *bootstrap pointer*: ``paths.working_dir`` names the active workspace. The
   pointer is the ONLY field the app ever writes there — all other values are
   read-only at runtime.
-* ``<workspace>/config/app.json`` — the active project's config, created by
+* ``<workspace>/config/setting.json`` — the active project's config, created by
   copying the root template when a workspace is set (never overwritten if it
   already exists). Once a workspace exists, every config read and write targets
   this file, and it is rewritten on each save (requirement #4).
@@ -201,7 +201,7 @@ class GenerationConfig(BaseModel):
     check_chunk_alignment: bool = True
     # 解析内重判阶段的批几何（自已退役的 speaker_check 段迁入）：每次 LLM 调用重判的
     # 目标条目数 / 目标块两侧的上下文条数。角色匹配检查与归属抽样两者都用；
-    # 断句失败校验只用 context_window。设置页不露出（config/app.json 可编辑）。
+    # 断句失败校验只用 context_window。设置页不露出（config/setting.json 可编辑）。
     check_batch_size: int = 20
     check_context_window: int = 4
 
@@ -323,7 +323,12 @@ def _active_config_file() -> Path:
     ws = _workspace_path()
     if ws is None:
         return TEMPLATE_FILE  # unset -> the (read-only) root template
-    return ws / "config" / "app.json"
+    target = ws / "config" / "setting.json"
+    if not target.exists():
+        legacy = ws / "config" / "app.json"
+        if legacy.exists():
+            return legacy
+    return target
 
 
 # -- loading ------------------------------------------------------------------ #
@@ -340,9 +345,11 @@ def _load_config_file(file: Path) -> AppConfig | None:
 def _load_unlocked() -> AppConfig:
     """Resolve the active config without acquiring the lock (callers hold it).
 
-    Workspace set -> the workspace's ``config/app.json``; otherwise the root
+    Workspace set -> the workspace's ``config/setting.json``; otherwise the root
     template (a read-only view). A missing workspace file falls back to the root
-    template's values, then to pure code defaults — reads never write.
+    template's values, then to pure code defaults — reads never write. Existing
+    workspaces with only ``config/app.json`` remain readable until initialized
+    or saved under the new name; ``setting.json`` always takes precedence.
 
     The ``bgm`` and ``split`` sections are forced to code defaults on every
     load: those parameters are managed centrally by administrators
@@ -437,13 +444,25 @@ def set_workspace_pointer(path: str) -> None:
 
 
 def init_workspace_config(ws: Path) -> None:
-    """Give a fresh workspace its own ``config/app.json`` — a copy of the root
+    """Give a fresh workspace its own ``config/setting.json`` — a copy of the root
     template with ``working_dir`` set to the workspace. NEVER overwrites an
     existing workspace config."""
     with _lock:
         _ensure_template()
-        target = ws / "config" / "app.json"
+        target = ws / "config" / "setting.json"
         if target.exists():
+            return
+        legacy = ws / "config" / "app.json"
+        if legacy.exists():
+            # Preserve every legacy field verbatim and retain the original as a
+            # backup. Exclusive creation cannot overwrite another initializer.
+            data = legacy.read_bytes()
+            try:
+                with target.open("xb") as file:
+                    file.write(data)
+            except FileExistsError:
+                return
+            reset_config_cache()
             return
         base = _load_config_file(TEMPLATE_FILE) or AppConfig()
         base.paths.working_dir = str(ws)
@@ -482,5 +501,5 @@ def update_config(patch: dict[str, Any]) -> AppConfig:
         new = AppConfig.model_validate(data)
         new.paths.working_dir = str(ws)
         _config_cache[key] = new
-        _write_config_file(ws / "config" / "app.json", new)
+        _write_config_file(ws / "config" / "setting.json", new)
         return new

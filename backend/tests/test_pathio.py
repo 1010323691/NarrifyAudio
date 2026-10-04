@@ -508,13 +508,13 @@ def test_require_workspace_reports_missing_dir(sandbox):
 
 
 def test_workspace_config_working_dir_self_heals(sandbox):
-    """The workspace's config/app.json keeps a copy of the pointer. After the folder
+    """The workspace's config/setting.json keeps a copy of the pointer. After the folder
     moves and is re-selected, reads report the LIVE pointer (in memory) and the next
     save persists it — the stale value never lingers."""
     ws = sandbox / "OldPlace" / "ws"
     ws.mkdir(parents=True)
     _set_pointer(sandbox, ws)
-    core_config.init_workspace_config(ws)  # seeds ws/config/app.json with working_dir = ws
+    core_config.init_workspace_config(ws)  # seeds ws/config/setting.json with working_dir = ws
     assert core_config.get_config().paths.working_dir == str(ws)
 
     ws_new = sandbox / "NewPlace" / "ws"
@@ -525,9 +525,9 @@ def test_workspace_config_working_dir_self_heals(sandbox):
     # read: the in-memory config reports the live pointer despite the stale file
     assert core_config.get_config().paths.working_dir == str(ws_new)
     # the file on disk still holds the stale value until a save …
-    on_disk = json.loads((ws_new / "config" / "app.json").read_text("utf-8"))
+    on_disk = json.loads((ws_new / "config" / "setting.json").read_text("utf-8"))
     assert on_disk["paths"]["working_dir"] == str(ws)
     # … and the next save (requirement: migrate on save) rewrites it
     core_config.update_config({})
-    on_disk = json.loads((ws_new / "config" / "app.json").read_text("utf-8"))
+    on_disk = json.loads((ws_new / "config" / "setting.json").read_text("utf-8"))
     assert on_disk["paths"]["working_dir"] == str(ws_new)

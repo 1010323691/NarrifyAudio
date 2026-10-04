@@ -310,7 +310,7 @@ winget install --id sox_ng.sox_ng --exact --source winget
 - `tts-engine/`：隔离运行的 TTS 子进程代码。
 - `backend/resources/`：提示词和运行资源。
 - `.env`：本机数据库、队列和初始管理员配置；不要提交。
-- `setting.json`：已跟踪的根目录默认配置模板，也保存运行时工作空间指针；提交前保持路径为空且不含真实凭据。工作空间配置仍使用 `config/app.json`。从旧版本升级时，先备份旧根目录 `app.json`，按需将其内容迁入 `setting.json`。
+- `setting.json`：已跟踪的根目录默认配置模板，也保存运行时工作空间指针；提交前保持路径为空且不含真实凭据。工作空间配置使用 `config/setting.json`。旧工作空间的 `config/app.json` 可继续读取；初始化或保存设置时生成新文件，并保留旧文件作为备份。两个文件并存时优先使用 `setting.json`。从旧版本升级时，先备份旧根目录 `app.json`，按需将其内容迁入 `setting.json`。
 - `storage/`：默认工作空间与任务产物目录；实际根目录以应用存储设置为准。
 - `config/`、`logs/`、`.narrify/`、`.backups/`：本机运行时配置、日志或备份，不提交，也不作为源码清理。
 
