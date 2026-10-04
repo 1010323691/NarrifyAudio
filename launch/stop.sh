@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 require_systemd
 # Honor each unit's graceful shutdown timeout.

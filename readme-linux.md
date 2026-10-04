@@ -46,7 +46,7 @@ bash launch/dev-all.sh
 
 开发脚本需要 Bash 4.3+、curl、util-linux 提供的 `flock` / `setsid`，通过 Linux `.venv/bin/python` 将 `.env` 中的 `NARRIFY_*` 作为数据加载，不执行文件中的 shell 代码。它执行迁移，启动 API、Worker 和 Vite（`127.0.0.1:5173`）；后台日志写入 `logs/dev/`。重复启动会被锁拒绝，任何组件退出会结束整套开发进程。按 `Ctrl+C` 停止脚本启动的进程，最多等待 10 秒后强制结束；数据服务继续运行。`dev-all.sh` 运行期间，数据服务停止脚本会拒绝停止数据库和 Redis。
 
-脚本统一使用 LF 换行，默认通过 `bash launch/脚本名.sh` 调用，也可直接执行。
+脚本统一使用 LF 换行，默认通过 `bash launch/脚本名.sh` 调用，也可直接执行。使用 `sh` 调用入口脚本时会自动切换到 Bash；进入 `launch/` 目录后也可运行 `bash start.sh`。
 
 ## 最终运行链路
 

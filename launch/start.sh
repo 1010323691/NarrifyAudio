@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 require_systemd
 command -v flock >/dev/null || { echo "flock is required." >&2; exit 1; }

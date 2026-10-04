@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 cd -- "$REPO_ROOT"
 PYTHON="$REPO_ROOT/.venv/bin/python"
