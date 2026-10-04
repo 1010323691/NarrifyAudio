@@ -30,8 +30,8 @@ Windows 的 `.ps1` / `.bat` 脚本不适用于 Linux。`launch/` 提供 Bash 启
 ```bash
 bash launch/start-data-services.sh # 启动 PostgreSQL、Redis
 bash launch/start.sh               # 启动数据服务，应用全停时执行迁移，再启动 API、Worker
-bash launch/stop.sh                # 停止 API、Worker，保留数据服务
-bash launch/stop-data-services.sh  # 应用停止后再停止数据服务
+bash launch/stop.sh                # 先停 API、Worker，再停数据服务（整体停机）
+bash launch/stop-data-services.sh  # 仅停数据服务（要求应用已停）
 ```
 
 服务操作按需调用 `sudo`，API 和 Worker 仍由 systemd 以 `narrify` 用户运行，使用 `/etc/narrify-audio/narrify.env`。前端使用构建后的 `dist/` 或 Nginx 入口，正式启动脚本不运行 Vite。日志使用 `journalctl -u narrify-api -u narrify-worker`。默认数据服务名为 `postgresql@16-main.service`、`redis-server.service`；其他发行版可通过 `POSTGRES_SERVICE` / `REDIS_SERVICE` 环境变量覆盖，并同步调整 systemd 单元的依赖。
