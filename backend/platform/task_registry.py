@@ -38,6 +38,8 @@ class TaskTypeSpec:
     # compare equal; a row whose identity keys are all NULL/absent has no
     # subject and is never superseded.
     entry_identity: tuple[str, ...] = ()
+    gpu_initial: str | None = None
+    gpu_stages: tuple[str, ...] = ()
 
 
 _SPECS: tuple[TaskTypeSpec, ...] = (
@@ -45,28 +47,28 @@ _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("text.format", "_execute_text_format"),
     TaskTypeSpec("book.analyze", "_execute_book_analyze"),
     TaskTypeSpec("book.split", "_execute_book_split"),
-    TaskTypeSpec("script.parse", "_execute_script_parse", billable=True,
+    TaskTypeSpec("script.parse", "_execute_script_parse", billable=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  entry_identity=("source_name",)),
     TaskTypeSpec("audio.silences", "_execute_audio_silences",
                  entry_identity=("source_name",)),
     TaskTypeSpec("audio.cut", "_execute_audio_cut", entry_identity=("source_name",)),
     # legacy 引擎（13）：engine_task_executor.ENGINE_BRANCHES
-    TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True,
+    TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  entry_identity=("speakers", "script")),
-    TaskTypeSpec("voices.clone", "_run_voices_clone", billable=True, legacy_engine=True,
+    TaskTypeSpec("voices.clone", "_run_voices_clone", billable=True, legacy_engine=True, gpu_initial="TTS", gpu_stages=("TTS",),
                  entry_identity=("speakers", "script")),
-    TaskTypeSpec("tts.batch", "_run_tts_batch", billable=True, legacy_engine=True,
+    TaskTypeSpec("tts.batch", "_run_tts_batch", billable=True, legacy_engine=True, gpu_initial="TTS", gpu_stages=("TTS",),
                  entry_identity=("scripts", "indices")),
     TaskTypeSpec("tts.merge", "_run_tts_merge", legacy_engine=True, entry_identity=("package",)),
-    TaskTypeSpec("tts.preview_render", "_run_tts_preview_render", billable=True, legacy_engine=True,
+    TaskTypeSpec("tts.preview_render", "_run_tts_preview_render", billable=True, legacy_engine=True, gpu_initial="TTS", gpu_stages=("TTS",),
                  entry_identity=("script", "index")),
-    TaskTypeSpec("bgm.segment", "_run_bgm_segment", billable=True, legacy_engine=True,
+    TaskTypeSpec("bgm.segment", "_run_bgm_segment", billable=True, legacy_engine=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  entry_identity=("stem",)),
     TaskTypeSpec("bgm.mix", "_run_bgm_mix", legacy_engine=True, entry_identity=("stem",)),
     TaskTypeSpec("bgm.match", "_run_bgm_match", legacy_engine=True,
                  entry_identity=("chapters", "mode")),
     TaskTypeSpec("bgm.package", "_run_bgm_package", legacy_engine=True, entry_identity=("base",)),
-    TaskTypeSpec("music.suggest_tags", "_run_music_suggest_tags", billable=True, admin_only=True,
+    TaskTypeSpec("music.suggest_tags", "_run_music_suggest_tags", billable=True, admin_only=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  legacy_engine=True, entry_identity=("name",)),
     TaskTypeSpec("audio.zip", "_run_audio_zip", legacy_engine=True, entry_identity=("base",)),
     TaskTypeSpec("audio.export", "_run_audio_export", legacy_engine=True,

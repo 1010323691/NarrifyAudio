@@ -74,6 +74,50 @@ _FEATURE_CONFIG_SECTIONS = {
     "generation", "ffmpeg", "bgm", "split",
 }
 
+
+@router.get("/settings/gpu-scheduler")
+def get_gpu_scheduler_settings(_: User = Depends(require_admin)) -> dict:
+    from ..platform.gpu_scheduler.config import load_config
+    return {"config": load_config().model_dump()}
+
+
+@router.patch("/settings/gpu-scheduler")
+def update_gpu_scheduler_settings(payload: dict, actor: User = Depends(require_admin_csrf)) -> dict:
+    from ..platform.gpu_scheduler.config import GPUConfig, load_config, validate_enabled
+    from ..platform.gpu_scheduler.store import transaction
+    with transaction() as (db, _state):
+        try:
+            config = GPUConfig.model_validate({**load_config(db).model_dump(), **payload})
+            validate_enabled(config)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        row = db.get(SystemConfig, "gpu_scheduler")
+        if row is None:
+            row = SystemConfig(key="gpu_scheduler", value={})
+            db.add(row)
+        row.value = config.model_dump()
+        db.add(AuditLog(actor_user_id=actor.id, action="admin.gpu_scheduler_changed",
+                        target_type="system_config", target_id="gpu_scheduler", metadata_json={"fields": sorted(payload)}))
+    return {"config": config.model_dump()}
+
+
+@router.get("/gpu-scheduler/status")
+def get_gpu_scheduler_status(_: User = Depends(require_admin)) -> dict:
+    from ..platform.gpu_scheduler.runtime import status_snapshot
+    return status_snapshot()
+
+
+@router.post("/gpu-scheduler/recover", status_code=202)
+def recover_gpu_scheduler(actor: User = Depends(require_admin_csrf)) -> dict:
+    from ..platform.gpu_scheduler.store import transaction
+    with transaction() as (db, state):
+        if state["state"] != "ERROR":
+            raise HTTPException(409, "调度器当前不处于 ERROR 状态")
+        state["recover_requested"] = True
+        db.add(AuditLog(actor_user_id=actor.id, action="admin.gpu_scheduler_recovery_requested",
+                        target_type="gpu_scheduler", target_id="local", metadata_json={}))
+    return {"accepted": True}
+
 # 6 个解析检查开关由用户在「文本解析」页勾选并随任务参数提交（api/script.py 的
 # ParseChecks）——用户专属。不得持久化成平台功能默认：get_config() 会把
 # application.features 深合并**覆盖**工作区值，平台一旦有值就会压掉用户存进项目
@@ -117,6 +161,16 @@ def update_application_settings(payload: dict, actor: User = Depends(require_adm
         merged = core_config.AppConfig.model_validate({**core_config.AppConfig().model_dump(), **patch})
     except Exception as exc:
         raise HTTPException(422, f"Invalid feature configuration: {exc}") from exc
+    if "llm" in patch:
+        from ..platform.gpu_scheduler.config import load_config, validate_enabled
+        from ..platform.gpu_scheduler.store import read_state
+        try:
+            gpu_config = load_config(db)
+            if read_state()["managed"] and not gpu_config.enabled:
+                gpu_config = gpu_config.model_copy(update={"enabled": True})
+            validate_enabled(gpu_config, merged.llm)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
     config = db.get(SystemConfig, "application.features")
     if config is None:
         config = SystemConfig(key="application.features", value={})
