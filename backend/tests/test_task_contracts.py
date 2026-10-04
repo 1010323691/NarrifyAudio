@@ -137,7 +137,7 @@ def test_cancel_queued_task_cancels_immediately_once(monkeypatch):
 
 
 def test_lifecycle_control_events_emit_authoritative_status_snapshot(monkeypatch):
-    monkeypatch.setattr("backend.services.task_views.task_snapshot", lambda _db, task: {"status": task.status})
+    monkeypatch.setattr("backend.services.task_views._fresh_task_snapshot", lambda _db, task: {"status": task.status})
     for event_type, status in (
         ("retry_requested", "pending"),
         ("retry_scheduled", "pending"),

@@ -26,7 +26,7 @@ pytest.importorskip("sqlalchemy")
 from backend.main import app
 from backend.platform.platform_settings import settings
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import Project, Task, TaskEvent, UserSession, utcnow
+from backend.platform.models import Project, Task, TaskEvent, TaskResult, UserSession, utcnow
 from backend.services import task_views
 from backend.services.task_operations import task_module
 
@@ -73,6 +73,111 @@ def _revoke_sessions(user_id: str) -> None:
         for session in db.scalars(select(UserSession).where(UserSession.user_id == user_id)).all():
             session.revoked_at = datetime.now(timezone.utc)
         db.commit()
+
+
+def _commit_parse_completion(task_id: str) -> None:
+    """Commit the terminal row, result and event together, like the worker."""
+    with SessionLocal.begin() as db:
+        task = db.get(Task, task_id)
+        task.status = "succeeded"
+        task.progress = 100
+        task.finished_at = utcnow()
+        db.add(TaskResult(task_id=task_id, result={"name": "parsed.json"}))
+        db.add(TaskEvent(task_id=task_id, sequence=2, event_type="succeeded", payload={}))
+
+
+@pytest.mark.parametrize("initial_replay", [False, True])
+def test_completion_between_task_and_event_reads_uses_fresh_snapshot(initial_replay):
+    task_id = _create_task(str(uuid.uuid4()), task_type="script.parse", progress=100)
+    _add_event(task_id, 1, "progress", {"current": "完成"})
+
+    def racing_rows(db):
+        rows = db.scalars(select(Task).where(Task.id == task_id)).all()
+        assert rows[0].status == "running"
+        # Also cache the absent result: the completion snapshot must refresh it.
+        assert rows[0].result is None
+        _commit_parse_completion(task_id)
+        return rows
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id == task_id)).all()
+
+    if initial_replay:
+        snapshots, seen, _, delivered = task_views.snapshot_payload(racing_rows)
+        snapshot = snapshots[0]
+    else:
+        seen, delivered = {task_id: 1}, {task_id: "running"}
+        frames = task_views._new_frames(racing_rows, seen, delivered)
+        frame = next(frame for frame in frames if frame["type"] == "status")
+        assert frame["status"] == "succeeded"
+        snapshot = frame["task"]
+    assert snapshot["status"] == "succeeded"
+    assert snapshot["progress"] == 1.0
+    assert snapshot["current"] == "完成"
+    assert snapshot["result"] == {"name": "parsed.json"}
+    assert snapshot["finished"] > 0
+    assert seen[task_id] == 2
+    assert delivered[task_id] == "succeeded"
+    assert task_views._new_frames(rows_fn, seen, delivered) == []
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "cancelled", "paused", "retrying"])
+def test_poll_reconciles_status_even_when_transition_event_was_consumed(status):
+    task_id = _create_task(str(uuid.uuid4()), status=status)
+    _add_event(task_id, 1, "log", {"msg": "already consumed"})
+    seen, delivered = {task_id: 1}, {task_id: "running"}
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id == task_id)).all()
+
+    frames = task_views._new_frames(rows_fn, seen, delivered)
+    assert len(frames) == 1
+    assert frames[0]["type"] == "status"
+    assert frames[0]["status"] == task_views.legacy_status(status)
+    assert frames[0]["task"]["status"] == frames[0]["status"]
+    assert task_views._new_frames(rows_fn, seen, delivered) == []
+
+
+def test_initial_snapshot_completion_after_cursor_read_is_replayed(monkeypatch):
+    task_id = _create_task(str(uuid.uuid4()), task_type="script.parse", progress=100)
+    _add_event(task_id, 1, "progress", {"current": "完成"})
+    original_events = task_views.task_events
+    committed = False
+
+    def racing_events(db, current_id):
+        nonlocal committed
+        events = original_events(db, current_id)
+        if not committed:
+            committed = True
+            _commit_parse_completion(task_id)
+        return events
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id == task_id)).all()
+
+    monkeypatch.setattr(task_views, "task_events", racing_events)
+    snapshots, seen, _, delivered = task_views.snapshot_payload(rows_fn)
+    assert snapshots[0]["status"] == "succeeded"
+    assert seen[task_id] == 1
+    frames = task_views._new_frames(rows_fn, seen, delivered)
+    assert len(frames) == 1
+    assert frames[0]["task"]["status"] == "succeeded"
+    assert seen[task_id] == 2
+    assert task_views._new_frames(rows_fn, seen, delivered) == []
+
+
+def test_old_terminal_event_replay_uses_current_retry_status():
+    task_id = _create_task(str(uuid.uuid4()), status="running")
+    _add_event(task_id, 1, "succeeded", {})
+    seen, delivered = {}, {}
+
+    def rows_fn(db):
+        return db.scalars(select(Task).where(Task.id == task_id)).all()
+
+    frames = task_views._new_frames(rows_fn, seen, delivered)
+    assert len(frames) == 1
+    assert frames[0]["status"] == frames[0]["task"]["status"] == "running"
+    assert delivered[task_id] == "running"
 
 
 def _frames(text: str) -> list[dict]:

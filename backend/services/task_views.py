@@ -182,6 +182,15 @@ def task_center_item(db: Session, task: DurableTask, progress_payload: dict | No
     }
 
 
+def _fresh_task_snapshot(db: Session, task: DurableTask) -> dict:
+    # PostgreSQL READ COMMITTED can see a worker's commit in the event query
+    # after rows_fn loaded an older Task into the identity map. Refresh AFTER
+    # reading the events, including a result relationship cached as absent.
+    db.refresh(task)
+    db.expire(task, ["result"])
+    return task_snapshot(db, task)
+
+
 def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None:
     """One durable event -> the legacy UI frame (``task_id`` already embedded),
     or ``None`` for event types the UI does not render."""
@@ -205,23 +214,19 @@ def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None
         }
     if event.event_type == "segments":
         return {"type": "segments", "task_id": task.id, **payload}
-    if event.event_type in {"succeeded", "failed", "cancelled"}:
-        status = legacy_status("cancelled" if event.event_type == "cancelled" else event.event_type)
-        return {"type": "status", "status": status, "task_id": task.id, "task": task_snapshot(db, task)}
     if event.event_type in {
+        "succeeded", "failed", "cancelled",
         "submitted", "cancel_requested", "admin_cancel_requested",
         "retry_requested", "admin_retry_requested",
         "retry_scheduled", "attempt_expired", "dispatch_recovered", "attempt_started",
         "llm_unavailable",
     }:
-        if event.event_type != "submitted":
-            return {
-                "type": "status",
-                "status": legacy_status(task.status),
-                "task_id": task.id,
-                "task": task_snapshot(db, task),
-            }
-        return {"type": "snapshot", "task_id": task.id, "task": task_snapshot(db, task)}
+        snapshot = _fresh_task_snapshot(db, task)
+        if event.event_type == "submitted":
+            return {"type": "snapshot", "task_id": task.id, "task": snapshot}
+        # Use the same authoritative status inside and outside the snapshot;
+        # an old terminal event may be replayed after the task was retried.
+        return {"type": "status", "status": snapshot["status"], "task_id": task.id, "task": snapshot}
     return None
 
 
@@ -241,7 +246,9 @@ def _new_frames(rows_fn, seen: dict[str, int], delivered: dict[str, str]) -> lis
     bounded per row: pruning happens once per window exit (a single ``db.get``,
     plus one full snapshot only when the status actually differs), so even a
     bulk exit — e.g. trashing a project drops up to its 200 visible rows in
-    one 0.5 s tick — costs at most one lookup per row."""
+    one 0.5 s tick — costs at most one lookup per row. Visible rows also
+    reconcile their durable status against ``delivered`` every tick, even
+    when no new event exists, so an already-consumed transition self-heals."""
     emitted: list[dict] = []
     with SessionLocal() as db:
         rows = rows_fn(db)
@@ -263,6 +270,13 @@ def _new_frames(rows_fn, seen: dict[str, int], delivered: dict[str, str]) -> lis
                     if "task" in frame:
                         delivered[task.id] = frame["task"]["status"]
                     emitted.append(frame)
+            if delivered.get(task.id) != legacy_status(task.status):
+                snapshot = _fresh_task_snapshot(db, task)
+                delivered[task.id] = snapshot["status"]
+                emitted.append({
+                    "type": "status", "status": snapshot["status"],
+                    "task_id": task.id, "task": snapshot,
+                })
         pruned = [task_id for task_id in seen if task_id not in current_ids]
         for task_id in pruned:
             row = db.get(DurableTask, task_id)
@@ -297,14 +311,19 @@ def snapshot_payload(rows_fn) -> tuple[list[dict], dict[str, int], set[str], dic
     them from the merged list too."""
     seen: dict[str, int] = {}
     delivered: dict[str, str] = {}
+    snapshots: list[dict] = []
     with SessionLocal() as db:
         rows = rows_fn(db)
         for task in rows:
             events = task_events(db, task.id)
             seen[task.id] = events[-1].sequence if events else 0
-            delivered[task.id] = legacy_status(task.status)
+            # Capture the cursor BEFORE refreshing the snapshot: any commit
+            # after this read remains eligible for the next live poll.
+            snapshot = _fresh_task_snapshot(db, task)
+            snapshots.append(snapshot)
+            delivered[task.id] = snapshot["status"]
         hidden = superseded_ids_hidden_by(db, [task.id for task in rows]) if rows else set()
-        return [task_snapshot(db, t) for t in rows], seen, hidden, delivered
+        return snapshots, seen, hidden, delivered
 
 
 def session_still_valid(auth_token: str, user_id: str) -> bool:
