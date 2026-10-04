@@ -44,7 +44,6 @@ def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> Project
         )
     )
     item_values = {
-        "original_name": safe_display_name(source.name),
         "size_bytes": source.stat().st_size,
         "sha256": sha256_file(source),
     }
@@ -55,11 +54,15 @@ def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> Project
             object_key=object_key,
             content_type=mimetypes.guess_type(source.name)[0] or "application/octet-stream",
             kind="legacy",
+            original_name=safe_display_name(source.name),
             **item_values,
         )
         db.add(item)
         db.flush()
     else:
+        # 与 script_parse_state._catalog_split_file 同款：已有行（尤其 book.split
+        # 发布行）的 original_name 是引擎原始名，撞行登记只更新摘要，不改写名字——
+        # 改写会让同一文件的所有旧名字引用变成「文件不存在」。
         for key, value in item_values.items():
             setattr(item, key, value)
         item.deleted_at = None

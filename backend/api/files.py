@@ -100,6 +100,14 @@ def download_file(module: str, name: str, request: Request):
         raise HTTPException(404, "尚未设置工作空间")
     d = _module_dir(module).resolve()
     p = (d / name).resolve()
+    if (not p.is_relative_to(d) or not p.is_file()) and safe_display_name(name) != name:
+        # 存储侧清洗漂移回退：文件表存引擎原始名（保留 ，/—），磁盘名经
+        # safe_display_name 清洗（→_）——精确名未命中时按清洗名（逐段，与发布
+        # 时逐文件清洗一致）再解析一次。
+        fallback = "/".join(safe_display_name(seg) for seg in name.split("/"))
+        p2 = (d / fallback).resolve()
+        if p2.is_relative_to(d) and p2.is_file():
+            p = p2
     if not p.is_relative_to(d) or not p.is_file():
         raise HTTPException(400, "非法路径")
     return file_response(request, p, media_type="application/octet-stream", filename=p.name)

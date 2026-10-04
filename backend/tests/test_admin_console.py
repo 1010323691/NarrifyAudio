@@ -117,8 +117,11 @@ def test_admin_task_filters_group_failed_and_completed_states(client: TestClient
         db.get(Task, timeout_id).status = "timeout"
         db.get(Task, completed_id).status = "succeeded"
 
-    failed = client.get("/api/v1/admin/tasks?status=failed")
-    completed = client.get("/api/v1/admin/tasks?status=completed")
+    # 套件里 xdist worker 共享一个 sqlite DB（conftest 进程级 URL），其他模块
+    # 会留下自己的 failed/succeeded 任务——按项目收敛（search 服务端过滤
+    # project_id），断言本项目的分组口径，而不是全局精确集。
+    failed = client.get(f"/api/v1/admin/tasks?status=failed&search={project_id}")
+    completed = client.get(f"/api/v1/admin/tasks?status=completed&search={project_id}")
     system_events = client.get("/api/v1/admin/events?module=system")
     assert failed.status_code == 200, failed.text
     assert completed.status_code == 200, completed.text

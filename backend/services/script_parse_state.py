@@ -518,6 +518,8 @@ def submit_run(
     # 存储侧清洗漂移兼容：文件表存引擎原始名，磁盘名经 safe_display_name（，/—→_），
     # 历史补登还可能已把 original_name 改写成磁盘名。名字只差这一层清洗即同一
     # 文件（object_key 相同）——按别名挂进 split_rows，不判成缺失。
+    # 幂等边界：safe_display_name 先截断 180 再 strip，超长名字理论上
+    # safe(safe(x)) != safe(x)；章节名远短于上限，实际不可达。
     disk_index: dict[str, str] = {}
     for key in split_rows:
         disk_index.setdefault(safe_display_name(key), key)
@@ -539,7 +541,21 @@ def submit_run(
     if changed:
         raise ScriptParseError(409, "分册文本已变更，请刷新后重新选择。", {"changed": changed})
 
-    in_flight = _active_parse_names(db, user.id, project.id) & seen
+    # 同一文件可能以别名（原始名/磁盘名）同批出现：按行身份去重、保留首个，
+    # 避免同一 input_file_id 双任务；在途判定同样按清洗名对齐，别名不绕过 409。
+    seen_item_ids: set[str] = set()
+    deduped: list[tuple[str, str | None]] = []
+    for name, sha in wanted:
+        item = split_rows[name]
+        if item.id in seen_item_ids:
+            continue
+        seen_item_ids.add(item.id)
+        deduped.append((name, sha))
+    wanted = deduped
+
+    active = _active_parse_names(db, user.id, project.id)
+    active_disk = {safe_display_name(n) for n in active}
+    in_flight = [name for name, _sha in wanted if safe_display_name(name) in active_disk]
     if in_flight:
         raise ScriptParseError(409, "以下章节已有解析任务在进行：" + "、".join(sorted(in_flight)[:5]))
 
