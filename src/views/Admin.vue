@@ -78,12 +78,20 @@ const error = ref('')
 const actionBusy = ref(false)
 async function runAction(action: () => Promise<void>) {
   if (actionBusy.value) return
+  const actionTab = tab.value
+  const resumeLoad = loading.value
   actionBusy.value = true
+  // A read begun before this mutation must not overwrite its successful response.
+  loadEpoch++
+  loading.value = false
   error.value = ''
   try {
     await action()
     if (error.value) toast({ title: '操作未完成', description: error.value, variant: 'destructive' })
-  } finally { actionBusy.value = false }
+  } finally {
+    actionBusy.value = false
+    if (active && (resumeLoad || tab.value !== actionTab || !loadedTabs.value.has(tab.value))) await load()
+  }
 }
 let timer: ReturnType<typeof setInterval> | null = null
 
@@ -151,6 +159,11 @@ function statusLabel(status: string) {
     failed: '失败', timeout: '超时', cancelled: '已取消', idle: '空闲', offline: '离线' } as Record<string, string>)[status] ?? status
 }
 async function load() {
+  if (actionBusy.value) return
+  await loadData()
+}
+// Mutation handlers may refresh their result while keeping external reads blocked.
+async function loadData() {
   const currentTab = tab.value
   const ticket = ++loadEpoch
   loading.value = true
@@ -211,7 +224,7 @@ watch(tab, () => { selectedUser.value = null; selectedTask.value = null; void lo
 onMounted(() => {
   void load()
   timer = setInterval(() => {
-    if (active && !actionBusy.value && document.visibilityState === 'visible' && ['overview', 'performance', 'tasks'].includes(tab.value)) void load()
+    if (active && !loading.value && !actionBusy.value && document.visibilityState === 'visible' && ['overview', 'performance', 'tasks'].includes(tab.value)) void load()
   }, 15000)
 })
 onActivated(() => { if (!active) { active = true; void load() } })
@@ -267,12 +280,12 @@ async function adjustQuota() {
 }
 async function cancelTask(task: api.AdminTask) {
   if (!await showConfirm(`确认取消任务 ${task.id}？`, { title: '取消任务', destructive: true })) return
-  try { await api.cancelTask(task.id); selectedTask.value = null; await load(); toast({ title: '取消请求已提交', variant: 'success' }) }
+  try { await api.cancelTask(task.id); selectedTask.value = null; await loadData(); toast({ title: '取消请求已提交', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function retryTask(task: api.AdminTask) {
   if (!await showConfirm(`将任务 ${task.id} 重新放入队列。确认重试？`, { title: '重新排入任务' })) return
-  try { await api.retryTask(task.id); selectedTask.value = null; await load(); toast({ title: '任务已重新排队', variant: 'success' }) }
+  try { await api.retryTask(task.id); selectedTask.value = null; await loadData(); toast({ title: '任务已重新排队', variant: 'success' }) }
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function cleanupTemp() {
@@ -281,7 +294,7 @@ async function cleanupTemp() {
   if (!await showConfirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的临时缓存文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`, { title: '清理临时缓存', destructive: true })) return
   try {
     const result = await api.cleanupStaleTemp()
-    await load()
+    await loadData()
     toast({ title: `已清理 ${result.deleted_count} 个文件 · ${bytes(result.deleted_bytes)}`, variant: 'success' })
   } catch (cause: any) { error.value = cause?.message || String(cause) }
 }
@@ -291,7 +304,7 @@ async function cleanupTemp() {
   <div class="admin-console">
     <AdminPageHeader :title="pageMeta[tab][0]" :description="pageMeta[tab][1]">
       <span v-if="lastUpdated[tab]" class="admin-updated">更新于 {{ lastUpdated[tab] }}</span>
-      <Button variant="outline" size="sm" :disabled="loading" @click="load"><RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loading }" />{{ loading ? '刷新中' : '刷新数据' }}</Button>
+      <Button variant="outline" size="sm" :disabled="loading || actionBusy" @click="load"><RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loading }" />{{ loading ? '刷新中' : '刷新数据' }}</Button>
     </AdminPageHeader>
     <p v-if="error" class="admin-error" role="alert"><strong>无法完成请求</strong> · {{ error }} <button @click="load">重新尝试</button></p>
     <AdminLoadingState v-if="loading && !loadedTabs.has(tab)" />

@@ -7,24 +7,26 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const vue = require('vue')
 const source = readFileSync(new URL('../src/views/Admin.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
-const compiled = ts.transpileModule(source + '\nexport { load, users, loading, error, loadedTabs, userRole, userState, userSearch, userSort, matchingUsers, shownUsers, userPage, runAction, actionBusy, lastAdmin };', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+const compiled = ts.transpileModule(source + '\nexport { load, users, loading, error, loadedTabs, userRole, userState, userSearch, userSort, matchingUsers, shownUsers, userPage, runAction, actionBusy, lastAdmin, registration, toggleRegistration };', { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
-function harness(overrides = {}) {
-  const route = vue.reactive({ query: { tab: 'users' } })
+function harness(overrides = {}, initialTab = 'users') {
+  const route = vue.reactive({ query: { tab: initialTab } })
   const deactivated = []
+  const mounted = []
+  let poll = () => {}
   const module = { exports: {} }
   runInNewContext(compiled, {
-    module, exports: module.exports, setInterval() { return 1 }, clearInterval() {}, document: { visibilityState: 'visible' },
+    module, exports: module.exports, setInterval(fn) { poll = fn; return 1 }, clearInterval() {}, document: { visibilityState: 'visible' },
     require(name) {
-      if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onDeactivated(fn) { deactivated.push(fn) }, onBeforeUnmount() {} }
+      if (name === 'vue') return { ...vue, onMounted(fn) { mounted.push(fn) }, onActivated() {}, onDeactivated(fn) { deactivated.push(fn) }, onBeforeUnmount() {} }
       if (name === 'vue-router') return { useRoute: () => route }
-      if (name === '@/stores/clientDisplay') return { useClientDisplayStore: () => ({}) }
+      if (name === '@/stores/clientDisplay') return { useClientDisplayStore: () => ({ load: async () => {} }) }
       if (name === '@/components/ui/toast') return { useToast: () => ({ push() {} }) }
-      if (name === '@/api/admin') return { listUsers: async () => [], ...overrides }
+      if (name === '@/api/admin') return { listUsers: async () => [], getStorageSettings: async () => ({ root_path: '' }), getQuotaSettings: async () => ({ initial_units: 0 }), getRuntimeSettings: async () => ({}), ...overrides }
       return { default: {} }
     },
   })
-  return { ...module.exports, route, deactivate: () => deactivated.forEach(fn => fn()) }
+  return { ...module.exports, route, deactivate: () => deactivated.forEach(fn => fn()), mount: () => mounted.forEach(fn => fn()), poll: () => poll() }
 }
 test('a late refresh cannot overwrite the newest user data', async () => {
   const old = deferred(); let calls = 0
@@ -66,4 +68,46 @@ test('mutations cannot run twice while a confirmation or request is pending', as
 test('the final active administrator remains protected', () => {
   const h=harness(); const admin={role:'admin',is_active:true}; h.users.value=[admin]
   assert.equal(h.lastAdmin(admin),true); h.users.value.push({role:'admin',is_active:true}); assert.equal(h.lastAdmin(admin),false)
+})
+
+test('registration saves block external refreshes and keep the next toggle direction', async () => {
+  const save = deferred(); let enabled = true; let reads = 0
+  const h = harness({
+    getRegistrationSettings: async () => { reads++; return { enabled } },
+    updateRegistrationSettings: async next => { await save.promise; enabled = next; return { enabled } },
+  }, 'settings')
+  await h.load()
+  const pending = h.runAction(h.toggleRegistration)
+  await h.load(); assert.equal(reads, 1)
+  save.resolve(); await pending
+  assert.equal(h.registration.value.enabled, false)
+  await h.runAction(h.toggleRegistration)
+  assert.equal(h.registration.value.enabled, true)
+})
+
+test('a settings read begun before a mutation cannot restore the previous registration value', async () => {
+  const old = deferred(); let enabled = true; let reads = 0
+  const h = harness({
+    getRegistrationSettings: () => ++reads === 2 ? old.promise : Promise.resolve({ enabled }),
+    updateRegistrationSettings: async next => { enabled = next; return { enabled } },
+  }, 'settings')
+  await h.load()
+  const pending = h.load()
+  await vue.nextTick()
+  await h.runAction(h.toggleRegistration)
+  old.resolve({ enabled: true }); await pending
+  assert.equal(h.registration.value.enabled, false)
+  assert.equal(h.loading.value, false)
+})
+
+test('slow monitoring responses survive multiple polling ticks', async () => {
+  const response = deferred(); let calls = 0
+  const h = harness({ getOverview: () => { calls++; return response.promise }, getTaskMetrics: async () => ({}) }, 'overview')
+  h.mount(); h.poll(); h.poll(); h.poll()
+  assert.equal(calls, 1)
+  response.resolve({ services: [] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(h.loadedTabs.value.has('overview'), true)
+  assert.equal(h.loading.value, false)
+  h.poll(); assert.equal(calls, 2)
 })
