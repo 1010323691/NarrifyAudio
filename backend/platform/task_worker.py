@@ -96,6 +96,8 @@ from .task_lifecycle import (
 _write_outcome = write_task_outcome
 
 WORKER_GROUP = os.getenv("NARRIFY_TASK_GROUP", "narrify-workers")
+from .gpu_scheduler.admission import claim_allowed, allowed_task_types, bind_claim, reset_claim
+from .gpu_scheduler.store import guarded_claim
 WORKSPACE_MUTATING_TASK_TYPES = {
     "voices.foundation", "voices.clone", "tts.batch", "tts.merge", "tts.reset",
     "bgm.segment", "bgm.mix", "bgm.match", "audio.export",
@@ -147,6 +149,7 @@ def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None
     PublicationJournal.reconcile(shared_root, shared_path, committed=task.status == "succeeded")
 
 
+@guarded_claim
 def claim_task(
     task_id: str,
     worker_id: str,
@@ -166,6 +169,8 @@ def claim_task(
             task_stmt = task_stmt.where(Task.task_type.not_in(excluded_task_types))
         task = db.scalar(task_stmt.with_for_update())
         if task is None or task.status in TERMINAL_TASK_STATUSES or task.status == "paused":
+            return None
+        if not claim_allowed(task.task_type, db):
             return None
         if task.status == "retrying" and _as_utc(task.next_attempt_at) and _as_utc(task.next_attempt_at) > now:
             db.rollback()
@@ -264,6 +269,7 @@ def claim_fair_task(
     with SessionLocal() as db:
         retry_ready = or_(Task.next_attempt_at.is_(None), Task.next_attempt_at <= now)
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
+        eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         if task_types:
             eligible_tasks = eligible_tasks & Task.task_type.in_(task_types)
         if excluded_task_types:
@@ -1119,6 +1125,7 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
     from .worker_registry import heartbeat as worker_heartbeat
 
     quota_token = set_quota_context(claim.owner_id, claim.task_id, claim.attempt_id)
+    gpu_token = bind_claim(claim)
     stop = threading.Event()
 
     def report_worker(status: str, task_id: str | None) -> None:
@@ -1194,6 +1201,7 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         if isinstance(exc, QuotaInsufficientError):
             fail_claim(claim, TaskExecutionError("quota_insufficient", str(exc)))
             return "quota_insufficient"
+        logging.getLogger("audiobook.worker").exception("Task execution failed task=%s type=%s", claim.task_id, claim.task_type)
         fail_claim(claim, TaskExecutionError("worker_error", str(exc), retryable=True))
         return "worker_error"
     finally:
@@ -1201,6 +1209,7 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         heartbeat.join(timeout=2)
         report_worker("idle", None)
         reset_quota_context(quota_token)
+        reset_claim(gpu_token)
 
 
 def process_task_message(
@@ -1348,6 +1357,11 @@ def _resume_llm_config(row: Any, workspace_llm: dict | None) -> dict | None:
 def resume_llm_unavailable_tasks(limit: int = 500) -> int:
     """Probe paused LLM tasks and redispatch them once their configured endpoint responds."""
     from ..engines.llm_transport import llm_server_is_alive
+    from .gpu_scheduler.config import load_config, platform_llm
+    from .gpu_scheduler.store import read_state
+    managed_gpu = load_config().enabled
+    if managed_gpu and read_state()["state"] != "LLM_ACTIVE":
+        return 0
 
     with SessionLocal() as db:
         rows = db.execute(
@@ -1387,7 +1401,7 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
 
     candidates: list[tuple[str, str, str, str]] = []
     for row in rows:
-        llm_config = _resume_llm_config(row, configs.get((row.owner_id, row.project_id)))
+        llm_config = platform_llm().model_dump() if managed_gpu else _resume_llm_config(row, configs.get((row.owner_id, row.project_id)))
         if not llm_config:
             continue
         base_url = str(llm_config.get("base_url") or "").strip()

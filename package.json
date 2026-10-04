@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs",
-    "test:voices-workbench": "node scripts/test-voices-workbench.mjs"
+    "test:voices-workbench": "node scripts/test-voices-workbench.mjs",
+    "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

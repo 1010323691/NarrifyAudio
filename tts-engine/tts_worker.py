@@ -1612,6 +1612,7 @@ def _run_batch(args) -> int:
 
     if not queues:
         # nothing to generate (every segment was an immediate error) — report and finish
+        print("[noop] tts", flush=True)
         progress(1.0, f"完成（成功 {counts['completed']} / 失败 {counts['failed']} / 共 {total}）")
         log(f"批量合成结束：成功 {counts['completed']}，失败 {counts['failed']}，共 {total} 段。"
             f"输出目录：{out_dir}")
@@ -1621,6 +1622,7 @@ def _run_batch(args) -> int:
     first_model = models.get(first_vtype)
     if first_model is not None:
         _warmup(first_model, first_vtype, args.language, device)
+    print("[ready] tts", flush=True)
 
     sub_counter = [0]
     restore_stack = args.restore_stack
@@ -1783,6 +1785,7 @@ def _run_design_batch(args) -> int:
         else:
             report_result(r["index"], False, "空文本/缺输出路径")
     if not gen_rows:
+        print("[noop] tts", flush=True)
         progress(1.0, f"完成（共 {total} 候选，无可渲染）")
         return 0
 
@@ -1793,6 +1796,7 @@ def _run_design_batch(args) -> int:
     model = load_model(args.design_model, device)
     log("VoiceDesign 模型就绪。")
     _warmup(model, "design", args.language, device)
+    print("[ready] tts", flush=True)
 
     max_batch = max(1, min(64, int(args.concurrency)))
     seed = int(args.seed)

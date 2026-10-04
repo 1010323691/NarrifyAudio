@@ -22,6 +22,9 @@ from collections import deque
 from pathlib import Path
 
 from ..core.paths import PROJECT_ROOT
+from ..platform.gpu_scheduler.admission import gpu_permit, release_paused_tts
+from ..platform.gpu_scheduler.config import load_config
+from ..platform.gpu_scheduler.manager import GPUServiceManager
 
 READY = True
 NOT_READY_MSG = "TTS 引擎未就绪：请先运行 install_tts_env.ps1 安装共享的 .venv 环境。"
@@ -59,14 +62,7 @@ def _kill_worker_tree(proc: subprocess.Popen) -> None:
     (``taskkill /F /T``) and falls back to the plain kill if that fails. POSIX
     behaviour is unchanged (plain kill of the child).
     """
-    if os.name != "nt":
-        proc.kill()
-        return
-    try:
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    except Exception:  # noqa: BLE001
-        proc.kill()
+    GPUServiceManager.cancel_tts(proc)
 
 
 def _child_env() -> dict:
@@ -98,19 +94,46 @@ class _SubprocessPaused(Exception):
     """The child was stopped for pause and should be relaunched after resume."""
 
 
+class TTSStartupError(RuntimeError):
+    """No synthesis was admitted; it is safe to retry model initialization."""
+
+
 def run_tts_subprocess(*args, **kwargs) -> deque:
     """Run or restart a child across pauses, retaining its input files until exit."""
-    while True:
-        try:
-            return _run_tts_subprocess_once(*args, **kwargs)
-        except _SubprocessPaused:
-            continue
+    cmd = args[0] if args else kwargs["cmd"]
+    gpu = "--mode" in cmd and cmd[cmd.index("--mode") + 1] in {"batch", "design-batch"}
+    temp_files = kwargs.pop("temp_files", ())
+    startup_attempts = 0
+    try:
+        while True:
+            try:
+                if gpu:
+                    handle = args[1] if len(args) > 1 else kwargs["handle"]
+                    with gpu_permit("TTS", handle) as request_id:
+                        return _run_tts_subprocess_once(*args, **kwargs, gpu_request_id=request_id)
+                return _run_tts_subprocess_once(*args, **kwargs)
+            except _SubprocessPaused:
+                continue
+            except TTSStartupError as exc:
+                startup_attempts += 1
+                config = load_config()
+                if startup_attempts >= config.startup_retry_count:
+                    from ..platform.gpu_scheduler.store import transaction
+                    with transaction() as (_db, state):
+                        state.update(state="ERROR", error=str(exc), reason="TTS startup attempts exhausted")
+                    raise
+    finally:
+        for file in temp_files:
+            try:
+                Path(file).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_prefix: str = "TTS 引擎",
               watchdog_code: int | None = None,
               log_file: Path | None = None, log_line=None,
-              interrupt_on_pause: bool = False) -> deque:
+              interrupt_on_pause: bool = False, gpu_request_id: str | None = None) -> deque:
     """Run a one-shot shared-``.venv`` worker and stream its output into a Task.
 
     Shared orchestration for the TTS-family stages (batch synthesis / merge):
@@ -149,8 +172,8 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
     Returns the rolling stderr tail for post-run validation.
     """
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                cwd=str(PROJECT_ROOT), env=_child_env())
+        proc = GPUServiceManager.spawn_tts(cmd, gpu_request_id, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                          cwd=str(PROJECT_ROOT), env=_child_env())
     except FileNotFoundError:
         raise RuntimeError(f"无法启动 TTS 引擎：{cmd[0]}")
 
@@ -194,6 +217,9 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
     out_done = err_done = False
     pause_requested = False
     pause_retry = False
+    require_ready = gpu_request_id is not None and load_config().enabled
+    ready = not require_ready
+    ready_deadline = time.monotonic() + load_config().startup_timeout if require_ready else 0
 
     def check() -> None:
         nonlocal pause_requested, pause_retry
@@ -203,6 +229,8 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
                 pause_requested = True
                 if proc.poll() is None:
                     _kill_worker_tree(proc)
+                GPUServiceManager.finish_tts(proc)
+                release_paused_tts(gpu_request_id)
             handle.check_interruptible(stop_for_pause)
             if pause_requested:
                 pause_retry = True
@@ -213,6 +241,8 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
     try:
         while True:
             check()  # cooperative cancel/pause
+            if not ready and time.monotonic() >= ready_deadline:
+                raise TTSStartupError("TTS 模型加载及 warmup 就绪检查超时")
             try:
                 while True:
                     raw = out_q.get_nowait()
@@ -228,7 +258,10 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
                     line = raw.decode("utf-8", "replace").strip()
                     if not line:
                         continue
-                    if line.startswith("[progress]"):
+                    if line in {"[ready] tts", "[noop] tts"}:
+                        ready = True
+                        GPUServiceManager.tts_ready(gpu_request_id)
+                    elif line.startswith("[progress]"):
                         parts = line.split(None, 2)
                         try:
                             frac = float(parts[1])
@@ -264,7 +297,7 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
     finally:
         if proc.poll() is None:
             _kill_worker_tree(proc)
-        proc.wait()
+        GPUServiceManager.finish_tts(proc)
         if run_log:
             run_log.write(
                 f"=== attempt ended rc={proc.returncode} "
@@ -286,8 +319,12 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, temp_files=(), fail_
         tail = " | ".join(stderr_tail)[-500:]
         msg = (f"{fail_prefix}失败（退出码 {proc.returncode}）"
                + (f"：{tail}" if tail else "（无错误输出）"))
+        if not ready:
+            raise TTSStartupError(msg)
         if watchdog_code is not None and proc.returncode == watchdog_code:
             raise WorkerWatchdogTimeout(msg)
         raise RuntimeError(msg)
+    if not ready:
+        raise TTSStartupError("TTS 子进程退出前未报告模型就绪")
     return stderr_tail
 

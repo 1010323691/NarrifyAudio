@@ -15,6 +15,7 @@ import * as api from '@/api/admin'
 import { modulePrefixes } from '@/utils/taskTypes'
 import { formatBytes, type BytesFormat } from '@/utils/format'
 import AdminSettings from '@/components/settings/AdminSettings.vue'
+import GpuScheduler from '@/components/settings/GpuScheduler.vue'
 
 type Tab = 'overview' | 'performance' | 'users' | 'resources' | 'settings' | 'tasks' | 'logs'
 type SettingsSection = 'text' | 'models' | 'audio' | 'general' | 'storage' | 'runtime'
@@ -271,6 +272,7 @@ async function cleanupTemp() {
     </section>
 
     <section v-if="tab === 'performance' && performance" class="admin-section">
+      <GpuScheduler mode="status" />
       <div class="admin-title"><div><h2>服务与性能</h2><p>实时快照 · {{ date(performance.generated_at) }}</p></div></div>
       <div class="overview-grid">
         <Card><CardHeader><CardTitle>系统</CardTitle></CardHeader><CardContent class="kv-list">
@@ -383,6 +385,8 @@ async function cleanupTemp() {
         <button v-for="item in ([['text','文本处理'],['models','解析与 LLM'],['audio','TTS 与音频'],['general','通用'],['storage','存储路径'],['runtime','Worker / Queue']] as [SettingsSection,string][])" :key="item[0]" :class="settingsSection === item[0] ? 'active' : ''" @click="settingsSection = item[0]">{{ item[1] }}</button>
       </nav>
       <AdminSettings v-if="settingsSection === 'text' || settingsSection === 'models' || settingsSection === 'audio'" :section="settingsSection" />
+      <GpuScheduler v-if="settingsSection === 'models'" mode="paths" />
+      <GpuScheduler v-if="settingsSection === 'runtime'" mode="parameters" />
       <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>通用</CardTitle></CardHeader><CardContent class="admin-form">
         <label><input v-model="registrationDraft" type="checkbox" /> 允许新用户注册</label><Button :disabled="!registration" @click="saveRegistration">保存注册设置</Button>
         <label for="initial-quota">新用户初始额度</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>

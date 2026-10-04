@@ -168,6 +168,10 @@ def build_chat_body(model, messages, temperature, top_p, presence_penalty,
     return body
 
 
+from ..platform.gpu_scheduler.admission import llm_admitted
+
+
+@llm_admitted
 def request_chat_completion(base_url, api_key, model, messages,
                             temperature, top_p, presence_penalty, max_tokens,
                             top_k=0, min_p=0, banned_tokens=None,
@@ -240,6 +244,7 @@ def request_chat_completion(base_url, api_key, model, messages,
     return content, finish_reason, usage
 
 
+@llm_admitted
 def request_chat_completion_stream(base_url, api_key, model, messages,
                                    temperature, top_p, presence_penalty, max_tokens,
                                    top_k=0, min_p=0, banned_tokens=None, handle=None):

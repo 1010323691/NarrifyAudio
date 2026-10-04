@@ -1,5 +1,55 @@
 import { http } from './client'
 
+export interface GpuSchedulerConfig {
+  enabled: boolean
+  scheduler_interval: number
+  min_service_runtime: number
+  switch_cooldown: number
+  queue_difference_threshold: number
+  max_wait_time: number
+  shutdown_when_idle: boolean
+  idle_shutdown_timeout: number
+  startup_timeout: number
+  service_stop_timeout: number
+  drain_timeout: number
+  health_check_interval: number
+  gpu_release_wait: number
+  startup_retry_count: number
+  llm_start_script_path: string
+  llm_stop_script_path: string
+}
+
+export interface GpuSchedulerStatus {
+  enabled: boolean
+  state: string
+  phase: string
+  current: 'LLM' | 'TTS' | null
+  llm: { waiting: number; running: number; oldest_wait: number; pressure: number }
+  tts: { waiting: number; running: number; oldest_wait: number; pressure: number }
+  runtime: number
+  last_switch: number | null
+  reason: string
+  error: string
+  heartbeat_age: number | null
+  stale: boolean
+}
+
+export function getGpuSchedulerConfig(): Promise<{ config: GpuSchedulerConfig }> {
+  return http.get('/api/v1/admin/settings/gpu-scheduler')
+}
+
+export function updateGpuSchedulerConfig(config: Partial<GpuSchedulerConfig>): Promise<{ config: GpuSchedulerConfig }> {
+  return http.patch('/api/v1/admin/settings/gpu-scheduler', config)
+}
+
+export function getGpuSchedulerStatus(): Promise<GpuSchedulerStatus> {
+  return http.get('/api/v1/admin/gpu-scheduler/status')
+}
+
+export function recoverGpuScheduler(): Promise<{ accepted: boolean }> {
+  return http.post('/api/v1/admin/gpu-scheduler/recover')
+}
+
 export interface AdminUser {
   id: string
   email: string

@@ -23,6 +23,25 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class GPUSchedulerState(Base):
+    __tablename__ = "gpu_scheduler_state"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="local")
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class GPURequest(Base):
+    __tablename__ = "gpu_requests"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(String(36))
+    service: Mapped[str] = mapped_column(String(8), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    owner_pid: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    # Process identity includes creation time: a reused PID must never be killed.
+    process: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class User(TimestampMixin, Base):
     __tablename__ = "users"
 

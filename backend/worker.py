@@ -20,11 +20,37 @@ from .core.concurrency import set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
 from .services.project_retention import purge_expired_projects
+from .platform.gpu_scheduler.runtime import Scheduler
+from .platform.gpu_scheduler.config import load_config as load_gpu_config
+from .platform.gpu_scheduler.store import read_state as read_gpu_state
+from .platform.task_registry import TASK_TYPES
 
 PARSE_LLM_CONCURRENCY_MAX = 32
 PARSE_WORKER_MAX = PARSE_LLM_CONCURRENCY_MAX * 2
 PARSE_WORKER_MULTIPLIER = 2
 PARSE_TASK_TYPES = ("script.parse",)
+GPU_TASK_TYPES = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial)
+
+
+def _gpu_task_loop(worker_id: str, service: str, stop: threading.Event) -> None:
+    """Dedicated channels allow a mixed task to wait without blocking the other side."""
+    types = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial == service and name not in PARSE_TASK_TYPES)
+    slot_id = f"{worker_id}-gpu-{service.lower()}"
+    logger = logging.getLogger("audiobook.worker")
+    try:
+        while not stop.is_set():
+            try:
+                if load_gpu_config().enabled or read_gpu_state()["managed"]:
+                    heartbeat(slot_id, status="idle", capabilities={"task_types": list(types), "slots": 1})
+                    claim = claim_fair_task(slot_id, task_types=types)
+                    if claim:
+                        _run_claim_fenced(claim)
+                        continue
+            except Exception:
+                logger.exception("GPU task channel failed service=%s", service)
+            stop.wait(0.5)
+    finally:
+        mark_offline(slot_id)
 
 
 def parse_worker_slot_count(llm_concurrency: int, parked_worker_count: int = 0) -> int:
@@ -153,7 +179,16 @@ def main() -> None:
     stop = threading.Event()
     parse_workers: list[threading.Thread] = []
     retention_worker: threading.Thread | None = None
+    gpu_workers: list[threading.Thread] = []
+    scheduler_thread: threading.Thread | None = None
     if not args.once:
+        scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
+        scheduler_thread.start()
+        for service in ("LLM", "TTS"):
+            thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, service, stop),
+                                      name=f"gpu-task-{service.lower()}", daemon=True)
+            thread.start()
+            gpu_workers.append(thread)
         retention_worker = threading.Thread(
             target=_project_retention_loop,
             args=(stop,),
@@ -181,7 +216,7 @@ def main() -> None:
                 client,
                 worker_id=args.worker_id,
                 block_ms=100 if args.once else int(max(100, args.interval * 1000)),
-                excluded_task_types=() if args.once else PARSE_TASK_TYPES,
+                excluded_task_types=() if args.once else (GPU_TASK_TYPES if load_gpu_config().enabled or read_gpu_state()["managed"] else PARSE_TASK_TYPES),
             )
             if result not in {"idle", "skipped"}:
                 heartbeat(args.worker_id, status="idle", capabilities=capabilities)
@@ -197,6 +232,10 @@ def main() -> None:
             retention_worker.join(timeout=5)
         for thread in parse_workers:
             thread.join(timeout=2)
+        for thread in gpu_workers:
+            thread.join(timeout=2)
+        if scheduler_thread:
+            scheduler_thread.join(timeout=5)
         mark_offline(args.worker_id)
 
 
