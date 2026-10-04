@@ -33,7 +33,7 @@ install_tts_env.log
 # 0015 migration backup dumps (contain user data — never commit)
 .backups/
 
-# 运行时日志目录（本机产物；scripts/dev-all.ps1 写入 logs/dev/）
+# 运行时日志目录（本机产物；launch/dev-all.ps1 写入 logs/dev/）
 logs/
 
 # --- 系统 / 编辑器 ---

@@ -14,14 +14,14 @@
 | Node.js | Node.js 24 LTS MSI / winget | NodeSource APT 仓库安装 Node.js 24 |
 | 数据库 | PostgreSQL 16 Windows 服务 | APT 安装 PostgreSQL 16，systemd 管理 |
 | Redis 协议队列 | Memurai Windows 服务 | APT 安装 Redis，服务名 `redis-server` |
-| API / Worker | `start.ps1` 启动本地进程 | 两个独立 systemd 服务 |
+| API / Worker | `launch/start.ps1` 启动本地进程 | 两个独立 systemd 服务 |
 | 前端 | 日常使用 Vite `:5173` | 构建 `dist/`，由 API 提供，Nginx 统一入口 |
-| 环境变量 | `start.ps1` 读取 `.env` | systemd `EnvironmentFile` 给迁移、API 和 Worker 加载同一配置 |
+| 环境变量 | `launch/start.ps1` 读取 `.env` | systemd `EnvironmentFile` 给迁移、API 和 Worker 加载同一配置 |
 | TTS | `install_tts_env.ps1` | 在 `.venv` 中安装依赖和 CUDA 版 PyTorch |
 | 音频工具 | winget FFmpeg / SoX_ng | APT FFmpeg / SoX，无需 `sox.exe` 兼容副本 |
 | 日志 | 进程控制台及应用日志 | journald 加应用 / 任务日志 |
 
-Windows 的 `start.ps1`、`start-data-services.ps1`、`stop-data-services.ps1` 和 `install_tts_env.ps1` 不适用于 Linux。当前仓库没有 Linux 一键安装脚本；下面给出可按步骤保存的服务配置。
+Windows 的 `launch/start.ps1`、`launch/start-data-services.ps1`、`launch/stop-data-services.ps1` 和 `install_tts_env.ps1` 不适用于 Linux。当前仓库没有 Linux 一键安装脚本；下面给出可按步骤保存的服务配置。
 
 ## 最终运行链路
 

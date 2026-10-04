@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = Split-Path -Parent $PSScriptRoot
+Set-Location -LiteralPath $root
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $nodeModules = Join-Path $root 'node_modules'
 $dotenvPath = Join-Path $root '.env'

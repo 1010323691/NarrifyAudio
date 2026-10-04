@@ -23,9 +23,9 @@ npm.cmd install
 npm.cmd run dev                                  # Vite 前端（5173，/api 代理到 8642）
 .\.venv\Scripts\python.exe -m backend.main       # FastAPI（127.0.0.1:8642，同时托管 dist/ 静态产物）
 .\.venv\Scripts\python.exe -m backend.worker     # Worker（outbox → Redis Streams）
-.\start-data-services.ps1                         # 启动 PostgreSQL + Memurai Windows 服务
-.\start.ps1                                       # 全栈：检查数据服务 → 跑迁移 → 启动 API/Worker/Vite
-.\stop-data-services.ps1                          # 先停 API/Worker 再停数据服务
+.\launch\start-data-services.ps1                         # 启动 PostgreSQL + Memurai Windows 服务
+.\launch\start.ps1                                       # 全栈：检查数据服务 → 跑迁移 → 启动 API/Worker/Vite
+.\launch\stop-data-services.ps1                          # 先停 API/Worker 再停数据服务
 ```
 
 ```powershell

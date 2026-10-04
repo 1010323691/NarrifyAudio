@@ -1,7 +1,7 @@
 @echo off
 setlocal
-cd /d "%~dp0"
-set "elevateScript=%TEMP%\narrify-start-elevated-%RANDOM%.vbs"
+cd /d "%~dp0.."
+set "elevateScript=%TEMP%\narrify-stop-elevated-%RANDOM%.vbs"
 
 fltmc >nul 2>&1
 if errorlevel 1 (
@@ -13,15 +13,15 @@ if errorlevel 1 (
   exit /b
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-data-services.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-data-services.ps1"
 if errorlevel 1 (
   echo.
-  echo Could not start PostgreSQL and Memurai. Review the error above.
+  echo Could not stop PostgreSQL and Memurai. Review the error above.
   pause
   exit /b 1
 )
 
 echo.
-echo PostgreSQL and Memurai are ready. You can now run start.bat to launch NarrifyAudio.
+echo PostgreSQL and Memurai are stopped.
 pause
 endlocal

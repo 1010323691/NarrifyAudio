@@ -15,7 +15,7 @@
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-Command",
-        "& .\\start.ps1; Read-Host '全栈已拉起（Backend/Worker/Frontend 各自独立窗口运行）；本窗口只是启动器，关掉不影响服务'"
+        "& .\\launch\\start.ps1; Read-Host '全栈已拉起（Backend/Worker/Frontend 各自独立窗口运行）；本窗口只是启动器，关掉不影响服务'"
       ],
       "port": 5173,
       "autoPort": true

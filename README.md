@@ -100,11 +100,11 @@ Memurai 安装器应启用 Windows 服务，保持服务名称 **`Memurai`** 和
 Get-Service postgresql-x64-16, Memurai
 ```
 
-`start.ps1` 使用上述固定服务名称和本机端口；改成其他名称或端口，不能直接按默认启动流程运行。只有文件目录存在、没有注册 Windows 服务，也不能满足启动条件。
+`launch/start.ps1` 使用上述固定服务名称和本机端口；改成其他名称或端口，不能直接按默认启动流程运行。只有文件目录存在、没有注册 Windows 服务，也不能满足启动条件。
 
 ### 3. 获取源码并启用 Windows 长路径
 
-通过 Git 克隆项目，进入含有 `package.json`、`alembic.ini`、`start.ps1` 的仓库根目录。后面的项目命令都从这里执行。选择较短、当前用户可写的目录，不放在 `Program Files` 下。
+通过 Git 克隆项目，进入含有 `package.json`、`alembic.ini`、`launch/` 的仓库根目录。后面的项目命令都从这里执行。选择较短、当前用户可写的目录，不放在 `Program Files` 下。
 
 工作空间按用户、项目、任务和尝试多层组织，产物路径可能超过 260 字符。在**管理员 PowerShell** 中按 [Windows 长路径说明](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)开启支持：
 
@@ -147,10 +147,10 @@ $basePackages = @(
 
 ### 5. 启动数据服务，创建应用用户与数据库
 
-双击仓库内的 `start-data-services.bat`，确认 UAC 提示；或在管理员 PowerShell 的仓库根目录执行：
+双击仓库内的 `launch/start-data-services.bat`，确认 UAC 提示；或在管理员 PowerShell 的仓库根目录执行：
 
 ```powershell
-.\start-data-services.ps1
+.\launch\start-data-services.ps1
 ```
 
 脚本等待 PostgreSQL 的 5432 和 Memurai 的 6379 端口就绪。随后回到普通 PowerShell，用正式 PostgreSQL 的 `psql` 创建应用用户：
@@ -205,19 +205,19 @@ NARRIFY_BOOTSTRAP_ADMIN_PASSWORD=<另设的应用管理员登录密码>
 
 数据库 URL 中的密码按 URL 编码，例如 `@` 写成 `%40`；psql 的密码提示中仍输入原始密码。bootstrap 邮箱使用有效邮箱格式，密码另设，不能保留示例占位符。`.env` 已被 Git 忽略，不提交真实凭据。
 
-API 和 Worker 本身不自动读取 `.env`；`start.ps1` 统一注入其中的 `NARRIFY_*`。修改配置后需停止旧 API / Worker，再重新启动。
+API 和 Worker 本身不自动读取 `.env`；`launch/start.ps1` 统一注入其中的 `NARRIFY_*`。修改配置后需停止旧 API / Worker，再重新启动。
 
 ### 7. 迁移数据库并启动应用
 
-在仓库根目录双击 `start.bat`，或从普通 PowerShell 执行：
+在仓库的 `launch/` 目录双击 `start.bat`，或从普通 PowerShell 执行：
 
 ```powershell
-.\start.ps1
+.\launch\start.ps1
 ```
 
 数据服务应已启动，此时普通用户无需再次控制服务。脚本会先检查服务与端口，导入 `.env`，在 API 尚未启动时运行 `alembic upgrade head`，然后按需打开 API、Worker、Vite 三个控制台，等待 API / 前端就绪后打开浏览器。
 
-`start.ps1` **不会自动安装软件、创建 `.venv`、安装 npm 包或创建数据库用户与数据库**。缺少 Python 环境时回到第 4 步，不必按脚本提示安装完整 TTS 环境。
+`launch/start.ps1` **不会自动安装软件、创建 `.venv`、安装 npm 包或创建数据库用户与数据库**。缺少 Python 环境时回到第 4 步，不必按脚本提示安装完整 TTS 环境。
 
 API 首次启动会根据 bootstrap 配置创建管理员及默认项目。账号已经存在时不会重置密码；之后修改 `.env` 的 bootstrap 密码不能用来给旧账号改密。
 
@@ -242,8 +242,8 @@ Invoke-RestMethod 'http://127.0.0.1:5173/api/health'
 
 ### 启动
 
-1. 双击 `start-data-services.bat`，确认 UAC 授权，等待 PostgreSQL 与 Memurai 就绪。
-2. 双击 `start.bat`，等待 API、Worker 和 Vite 启动，浏览器会打开登录页。
+1. 双击 `launch/start-data-services.bat`，确认 UAC 授权，等待 PostgreSQL 与 Memurai 就绪。
+2. 双击 `launch/start.bat`，等待 API、Worker 和 Vite 启动，浏览器会打开登录页。
 
 启动脚本会复用已运行的进程。数据服务已经运行时，可直接执行第 2 步；修改 `.env` 或更新代码后，应先停止旧应用进程。
 
@@ -257,13 +257,13 @@ Invoke-RestMethod 'http://127.0.0.1:5173/api/health'
 ### 停止
 
 1. 等待制作任务结束，在 Backend、Worker、Frontend 控制台中分别按 `Ctrl+C`，确认进程退出后关闭窗口。
-2. 需要关闭数据服务时，再双击 `stop-data-services.bat` 并确认 UAC 授权。也可以保留数据服务，便于下次启动。
+2. 需要关闭数据服务时，再双击 `launch/stop-data-services.bat` 并确认 UAC 授权。也可以保留数据服务，便于下次启动。
 
 | PowerShell 命令 | 所需权限 |
 | --- | --- |
-| `.\start-data-services.ps1` | 管理员，启动数据服务 |
-| `.\start.ps1` | 普通用户，数据服务须已运行 |
-| `.\stop-data-services.ps1` | 管理员，应用进程须已退出 |
+| `.\launch\start-data-services.ps1` | 管理员，启动数据服务 |
+| `.\launch\start.ps1` | 普通用户，数据服务须已运行 |
+| `.\launch\stop-data-services.ps1` | 管理员，应用进程须已退出 |
 
 ## 可选制作能力
 
@@ -307,6 +307,7 @@ winget install --id sox_ng.sox_ng --exact --source winget
 
 - `src/`：Vue 页面、组件、API 客户端和状态管理。
 - `backend/`：FastAPI 路由、业务逻辑、数据库模型和 Worker。
+- `launch/`：Windows 启动、停止及开发预览脚本；从任意当前目录调用时均定位仓库根目录。
 - `tts-engine/`：隔离运行的 TTS 子进程代码。
 - `backend/resources/`：提示词和运行资源。
 - `.env`：本机数据库、队列和初始管理员配置；不要提交。
@@ -332,9 +333,9 @@ winget install --id sox_ng.sox_ng --exact --source winget
 | 现象 | 优先检查与处理 |
 | --- | --- |
 | 命令不存在或指向旧环境 | 重开 PowerShell，用 `Get-Command` 核对路径；重启应用以更新其 PATH。`psql` 未加入 PATH 时用正式安装目录下的完整路径 |
-| PowerShell 拒绝执行脚本 | 使用仓库的 `.bat` 入口；或单次执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1`。服务控制仍需管理员权限 |
+| PowerShell 拒绝执行脚本 | 使用仓库的 `.bat` 入口；或单次执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\launch\start.ps1`。服务控制仍需管理员权限 |
 | 找不到 PostgreSQL / Memurai 服务 | 确认安装器注册了 `postgresql-x64-16` 和 `Memurai`，仅解包工具文件不能满足启动条件 |
-| 数据服务已安装但未运行 | 双击 `start-data-services.bat` 并确认 UAC；失败时查看服务日志与 Windows 事件查看器 |
+| 数据服务已安装但未运行 | 双击 `launch/start-data-services.bat` 并确认 UAC；失败时查看服务日志与 Windows 事件查看器 |
 | 数据库认证失败 | 按首次安装第 5 步用 `narrify` 用户独立连接；核对原始密码、URL 编码、数据库名。修改 `.env` 后重启 API / Worker |
 | 页面能打开，任务一直待处理 | 查看 Worker 是否在线、Memurai 是否可连接及 Worker 控制台错误；先用不依赖 LLM / TTS 的排版任务验收 |
 | 排版正常，剧本解析失败 | 核对 LLM 地址、模型、凭据和用户额度 |
@@ -356,7 +357,7 @@ Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem
 
 ### 开发命令
 
-单独启动 API / Worker 或执行 Alembic 前，必须在对应终端导入与 `.env` 一致的 `NARRIFY_*` 环境变量；默认使用 `start.bat` 统一注入。以下后端启动命令不会自行读取 `.env`。
+单独启动 API / Worker 或执行 Alembic 前，必须在对应终端导入与 `.env` 一致的 `NARRIFY_*` 环境变量；默认使用 `launch/start.bat` 统一注入。以下后端启动命令不会自行读取 `.env`。
 
 开发回归所需工具与基础运行依赖分开安装；不必因此安装 TTS：
 
@@ -378,7 +379,7 @@ npm.cmd run build:all           # 前端构建 + 后端编译检查 + 分层门�
 
 ### 构建前端
 
-`npm.cmd run build` 生成 `dist/`。FastAPI 可直接提供其中的静态页面，构建后也可从 `http://127.0.0.1:8642` 访问工作台；此模式仍需 PostgreSQL、Memurai 和独立 Worker，只是不再需要 Vite。默认 `start.bat` 仍会启动 Vite。
+`npm.cmd run build` 生成 `dist/`。FastAPI 可直接提供其中的静态页面，构建后也可从 `http://127.0.0.1:8642` 访问工作台；此模式仍需 PostgreSQL、Memurai 和独立 Worker，只是不再需要 Vite。默认 `launch/start.bat` 仍会启动 Vite。
 
 生产前端默认向当前页面的同源 `/api` 发请求，适用于由 FastAPI 提供构建文件或反向代理统一入口的部署。若前端与 API 分域，在构建前设置 `VITE_API_BASE`；若后端修改了 `NARRIFY_CSRF_COOKIE`，同时设置 `VITE_CSRF_COOKIE_NAME`。这些 `VITE_` 值会写入前端构建结果，变更后需要重新构建；分域部署还需配置后端允许的来源和 Cookie 策略。
 
@@ -387,7 +388,7 @@ npm.cmd run build:all           # 前端构建 + 后端编译检查 + 分层门�
 1. 等待制作任务结束，停止 API、Worker 和 Vite，暂时保留数据服务。
 2. 备份应用数据库、实际工作空间目录以及 `.env` 和本机配置。数据库备份示例见下方。
 3. 更新源码，执行 `npm.cmd ci`；基础 Python 依赖有变化时按首次安装第 4 步同步安装，使用 TTS 的电脑再核对对应依赖。
-4. 运行 `start.bat`，由启动脚本迁移数据库并启动应用，再完成登录与任务验收。
+4. 运行 `launch/start.bat`，由启动脚本迁移数据库并启动应用，再完成登录与任务验收。
 
 数据库备份命令在仓库根目录执行，提示时输入 `narrify` 的原始密码；数据库 dump 不包含工作空间文件：
 

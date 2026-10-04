@@ -1,4 +1,4 @@
-﻿# scripts/dev-all.ps1
+﻿# launch/dev-all.ps1
 # 一键 dev 栈（供 .claude/launch.json 的 narrify-dev 条目调用，预览面板 Play 按钮入口）：
 #   1) 注入 .env（应用不读 .env，缺它后端起不来）
 #   2) FastAPI（8642）：已起则复用，未起则常驻后台启动（pid 落 logs\dev\api.pid）
@@ -12,13 +12,13 @@
 # 常驻粒度是「会话级」：会话内预览面板 Stop 拖不垮后端；整个会话结束时宿主会把孤儿一并回收
 # （同日实测）。因此「Vite 活 + 后端死」的半死态（历史页面 500 的根因）不再出现——两者同生共死。
 # 停止后端：按 logs\dev\api.pid / worker.pid 里的 pid 精确 Stop-Process（脚本本身不提供停止逻辑）。
-# 注意：.\stop-data-services.ps1 只停 PostgreSQL/Memurai 数据服务（且需管理员），不停 API/Worker；
+# 注意：.\launch\stop-data-services.ps1 只停 PostgreSQL/Memurai 数据服务（且需管理员），不停 API/Worker；
 # 任务管理器「结束 python 进程」会误伤你手工跑的其他 python 进程，优先按 pidfile 停。
 # 兼容 Windows PowerShell 5.1。
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
-Set-Location $Root
+Set-Location -LiteralPath $Root
 
 # --- .env 注入 ---
 $envFile = Join-Path $Root '.env'
@@ -72,7 +72,7 @@ function Test-PortOpen([int]$port) {
 # --- 数据服务探测（只警告，不阻塞）---
 foreach ($p in 5432, 6379) {
     if (-not (Test-PortOpen $p)) {
-        Write-Warning "端口 ${p} 未监听（PostgreSQL=5432 / Memurai=6379）——先跑 .\start-data-services.ps1，否则后端起不来"
+        Write-Warning "端口 ${p} 未监听（PostgreSQL=5432 / Memurai=6379）——先跑 .\launch\start-data-services.ps1，否则后端起不来"
     }
 }
 

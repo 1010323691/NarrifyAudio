@@ -10,6 +10,7 @@ Narrify Audio 是 Windows 本地有声书制作工作台，由 Vue 3 + TypeScrip
 - `backend/migrations/`：Alembic 数据库迁移；pytest 测试位于 `backend/tests/`。
 - `tts-engine/`：独立的 TTS 工作进程代码；大型模型依赖安装到共享 `.venv`，但仍通过子进程运行，不在 FastAPI 进程内导入。
 - `backend/resources/`：提示词及其他运行时资源。`dist/` 是构建产物，不应手动编辑。
+- `launch/`：Windows 应用、数据服务的启动与停止入口，以及开发预览启动脚本。
 - `scripts/`：构建、分层检查与前端回归脚本；`docs/`：项目和架构设计文档。
 
 ## 架构约束
@@ -27,12 +28,12 @@ Narrify Audio 是 Windows 本地有声书制作工作台，由 Vue 3 + TypeScrip
 ```powershell
 npm.cmd install
 .\.venv\Scripts\python.exe -m pip install -r .\backend\requirements.txt
-.\start-data-services.ps1                    # 启动 PostgreSQL + Memurai Windows 服务
-.\start.ps1                                  # 检查数据服务、按需迁移并启动 API + Worker + Vite
+.\launch\start-data-services.ps1                    # 启动 PostgreSQL + Memurai Windows 服务
+.\launch\start.ps1                                  # 检查数据服务、按需迁移并启动 API + Worker + Vite
 npm.cmd run dev                              # 启动 Vite（127.0.0.1:5173）
 .\.venv\Scripts\python.exe -m backend.main    # 启动 FastAPI（127.0.0.1:8642）
 .\.venv\Scripts\python.exe -m backend.worker  # 启动后台任务 Worker
-.\stop-data-services.ps1                     # 先停止 API/Worker，再停止数据服务
+.\launch\stop-data-services.ps1                     # 先停止 API/Worker，再停止数据服务
 npm.cmd run typecheck                        # 前端 TypeScript/Vue 类型检查
 npm.cmd run build                            # 类型检查 + 前端生产构建
 npm.cmd run build:all                        # 前端构建 + backend/tts-engine 编译检查 + 分层门禁
@@ -43,7 +44,7 @@ npm.cmd run test:script-parse-workbench       # 文本解析工作台回归
 .\.venv\Scripts\python.exe -m pytest backend/tests -n 4 --dist loadscope
 ```
 
-首次启动前按 `README.md` 配置本机 `.env`、应用数据库用户与数据库。`start.ps1` 将 `.env` 中的 `NARRIFY_*` 设置导入进程环境；单独启动 API、Worker 或执行迁移时，需先在当前环境中设置相应变量。
+首次启动前按 `README.md` 配置本机 `.env`、应用数据库用户与数据库。`launch/start.ps1` 将 `.env` 中的 `NARRIFY_*` 设置导入进程环境；单独启动 API、Worker 或执行迁移时，需先在当前环境中设置相应变量。
 
 首次使用音频合成、合并或角色配音前运行 `.\install_tts_env.ps1`，该脚本会把体积较大的 TTS 依赖安装到共享 `.venv`；默认目标为 Python 3.14，若真实 TTS 冒烟测试失败可用 `-PythonVersion 3.10 -Recreate` 回退。FFmpeg 和 ffprobe 应可从 PATH 找到；检测到 winget 安装的 SoX_ng 时，启动脚本会创建本地 `sox.exe` 兼容副本。
 
