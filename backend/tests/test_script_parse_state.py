@@ -469,6 +469,94 @@ def test_run_catalogs_legacy_disk_file_without_table_row(client: TestClient):
     assert "legacy-chapter.txt" in listed
 
 
+def test_run_catalog_preserves_published_original_name(client: TestClient):
+    """补登撞到发布行（object_key 撞车）：只更新摘要，不得把 original_name
+    改写成磁盘名。发布行留引擎原始名（带全角标点），磁盘名经
+    safe_display_name 已把「，」换成「_」。"""
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    raw_name = "第 005 章 九州，欢族.txt"
+    disk_name = "第 005 章 九州_欢族.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        path = split_dir / disk_name
+        path.write_text("章节内容", encoding="utf-8")
+        disk_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        item = ProjectFile(
+            project_id=project_id,
+            owner_id=user_id,
+            original_name=raw_name,
+            object_key=f"{user.username}/{project_id}/02_split_text/{disk_name}",
+            content_type="text/plain",
+            kind="artifact",
+            size_bytes=4,
+            sha256=_sha("旧摘要"),
+        )
+        db.add(item)
+        db.commit()
+        item_id = item.id
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": disk_name}]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["files"][0]["input_sha256"] == disk_sha
+    with SessionLocal() as db:
+        row = db.get(ProjectFile, item_id)
+        assert row.original_name == raw_name
+        assert row.sha256 == disk_sha
+        task = db.get(Task, body["files"][0]["task_id"])
+        assert task.payload["input_file_id"] == item_id
+
+
+def test_run_accepts_name_differing_only_by_storage_sanitization(client: TestClient):
+    """行的 original_name 已是磁盘名（历史补登改写过），页面仍按引擎原始名
+    引用：名字只差一层 safe_display_name 即同一文件，不得判「分册文本不存在」。"""
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    raw_name = "第 010 章 夜阑，柔情.txt"
+    disk_name = "第 010 章 夜阑_柔情.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        item = _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        db.commit()
+        item_id = item.id
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": raw_name, "sha256": _sha("s")}]},
+    )
+    assert response.status_code == 200, response.text
+    with SessionLocal() as db:
+        task = db.get(Task, response.json()["files"][0]["task_id"])
+        assert task.payload["input_file_id"] == item_id
+
+
+def test_state_legacy_disk_only_aligns_with_storage_sanitization(client: TestClient):
+    """legacy 模式下，表名与磁盘名只差 safe_display_name 的章节只按表名出现
+    一次，不再以磁盘名双列。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 016 章 都城—燕云.txt"
+    disk_name = "第 016 章 都城_燕云.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, raw_name, _sha("s"))
+        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        (split_dir / disk_name).write_text("章节内容", encoding="utf-8")
+        db.commit()
+    state = _state(client, email, csrf, project_id)
+    assert state["source"]["mode"] == "legacy"
+    names = [f["name"] for f in state["files"]]
+    assert raw_name in names
+    assert disk_name not in names
+    assert disk_name not in state["source"]["disk_only"]
+
+
 def test_results_endpoint_serves_project_bound_artifact(client: TestClient):
     email, csrf, user_id, project_id = _register(client)
     payload = {"chapters": [{"speaker": "旁白", "text": "你好"}]}

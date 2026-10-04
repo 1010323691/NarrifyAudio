@@ -117,7 +117,6 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
         f"{safe_display_name(user.username)}/{project.id}/{_SPLIT_MODULE}/{safe_display_name(path.name)}"
     )
     values = {
-        "original_name": safe_display_name(path.name),
         "size_bytes": path.stat().st_size,
         "sha256": sha256_file(path),
     }
@@ -135,10 +134,14 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
             object_key=object_key,
             content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
             kind="legacy",
+            original_name=safe_display_name(path.name),
             **values,
         )
         db.add(item)
     else:
+        # 已有行（尤其 book.split 发布行）的 original_name 是引擎原始名，版本
+        # 列表 / 排版页仍按它引用；补登只更新摘要，绝不能把它改写成磁盘名——
+        # 改写会让同一文件的所有旧名字引用变成「分册文本不存在」。
         for key, value in values.items():
             setattr(item, key, value)
         item.deleted_at = None
@@ -191,6 +194,9 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
     )
     if not split_rows and not disk_names:
         return {"mode": "empty"}
+    # 磁盘名与表名只差一层 safe_display_name（发布落盘走存储侧清洗，，/—→_）；
+    # 判定 disk_only 必须对齐两种口径，否则含符号的章节会按表名与磁盘名各出现一次。
+    known_disk_names = {name for name in split_rows} | {safe_display_name(name) for name in split_rows}
     return {
         "mode": "legacy",
         "legacy_files": [
@@ -202,7 +208,7 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
             }
             for name, item in sorted(split_rows.items())
         ],
-        "disk_only": [name for name in disk_names if name not in split_rows],
+        "disk_only": [name for name in disk_names if name not in known_disk_names],
     }
 
 
@@ -335,6 +341,10 @@ def _build_file_states(
 
     split_rows = _split_files(db, user, project.id)
     split_rows_by_id = {item.id: item for item in split_rows.values()}
+    # 与 submit_run 同款别名索引：名字经 safe_display_name 后命中同一行。
+    disk_index: dict[str, str] = {}
+    for key in split_rows:
+        disk_index.setdefault(safe_display_name(key), key)
     storage_root = configured_storage_root(db)
 
     success_lookup = _latest_success_results(db, [task.id for task in latest_success.values()])
@@ -352,7 +362,7 @@ def _build_file_states(
 
     states: list[dict] = []
     for name in names:
-        input_item = split_rows.get(name)
+        input_item = split_rows.get(name) or split_rows.get(disk_index.get(safe_display_name(name), ""))
         input_sha = input_item.sha256 if input_item is not None else None
 
         task = latest_task.get(name)
@@ -504,6 +514,18 @@ def submit_run(
         wanted.append((name, entry.get("sha256")))
     if not wanted:
         raise ScriptParseError(422, "请选择要解析的章节。")
+
+    # 存储侧清洗漂移兼容：文件表存引擎原始名，磁盘名经 safe_display_name（，/—→_），
+    # 历史补登还可能已把 original_name 改写成磁盘名。名字只差这一层清洗即同一
+    # 文件（object_key 相同）——按别名挂进 split_rows，不判成缺失。
+    disk_index: dict[str, str] = {}
+    for key in split_rows:
+        disk_index.setdefault(safe_display_name(key), key)
+    for name, _sha in wanted:
+        if name not in split_rows:
+            alias = disk_index.get(safe_display_name(name))
+            if alias is not None:
+                split_rows[name] = split_rows[alias]
 
     missing = [name for name, _ in wanted if name not in split_rows]
     if missing:
