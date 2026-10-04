@@ -9,6 +9,7 @@
   --glass-border: hsl(var(--border)); --glass-highlight: none; --glass-shadow: none;
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px; --space-5: 20px; --space-6: 24px; --space-8: 32px;
   --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
+  --admin-row-hover: color-mix(in srgb, hsl(var(--accent)) 55%, hsl(var(--card)));
   background: hsl(var(--background)); font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', sans-serif;
 }
 .dark .admin-shell {
@@ -52,6 +53,17 @@
 .admin-shell input.h-10 { height: 36px; }
 .admin-shell :is(button,a,input,select,textarea):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 .admin-shell button:disabled { opacity: .45; cursor: not-allowed; }
+.admin-shell .ui-switch { width: 40px; height: 24px; padding: 2px; border: 0; box-shadow: none; background: hsl(var(--input)); }
+.admin-shell .ui-switch[aria-checked=true] { background: hsl(var(--primary)); }
+.admin-shell .ui-switch:not(:disabled):hover { box-shadow: inset 0 0 0 1px hsl(var(--foreground)/.15); }
+.admin-shell .ui-switch-thumb { width: 20px; height: 20px; transform: translateX(0); box-shadow: 0 1px 2px hsl(222 24% 16% / .15); transition: transform 150ms; }
+.admin-shell .ui-switch[aria-checked=true] .ui-switch-thumb { transform: translateX(16px); }
+.admin-shell .admin-toggle-grid { column-gap: var(--space-8); row-gap: var(--space-4); }
+.admin-shell .admin-toggle-grid > div { min-height: 32px; gap: var(--space-4); }
+.admin-shell .admin-toggle-grid label { cursor: pointer; }
+.admin-shell .admin-toggle-control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); }
+.admin-shell .admin-toggle-feedback { flex: 0 0 5em; text-align: right; white-space: nowrap; line-height: 20px; font-size: 11px; color: hsl(var(--muted-foreground)); }
+.admin-shell .admin-quota-save { min-width: 80px; }
 .admin-shell .metric-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 0; border: 1px solid hsl(var(--border)); border-radius: var(--radius-md); background: hsl(var(--card)); overflow: hidden; }
 .admin-shell .metric { min-width: 0; padding: var(--space-4) var(--space-5); border-right: 1px solid hsl(var(--border)); }
 .admin-shell .metric:nth-child(4n) { border-right: 0; }
@@ -82,11 +94,17 @@
 .admin-shell .admin-table .compact-table { min-width: 440px; }
 .admin-shell th { text-align: left; font-size: 11px; font-weight: 600; color: hsl(var(--muted-foreground)); white-space: nowrap; background: hsl(var(--muted)); }
 .admin-shell th, .admin-shell td { padding: var(--space-3); border-bottom: 1px solid hsl(var(--border)); vertical-align: middle; }
-.admin-shell tbody tr:hover { background: hsl(var(--accent)/.55); }
+.admin-shell tbody tr { background: hsl(var(--card)); transition: background-color 150ms; }
+.admin-shell tbody tr:is(:hover,:focus-within) { background: var(--admin-row-hover); }
 .admin-shell tr:last-child td { border-bottom: 0; }
 .admin-shell td small { display: block; margin-top: var(--space-1); font-size: 11px; color: hsl(var(--muted-foreground)); }
 .admin-shell td strong { font-weight: 600; }
-.admin-shell .user-actions { position: sticky; right: 0; background: hsl(var(--card)); box-shadow: -1px 0 hsl(var(--border)); }
+.admin-shell .user-actions { position: sticky; right: 0; background: hsl(var(--card)); }
+.admin-shell th.user-actions { background: hsl(var(--muted)); }
+.admin-shell tbody .user-actions { background: inherit; }
+.admin-shell .glass-panel > .admin-table-content { padding: 0; }
+.admin-shell .admin-table-content > .admin-table { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+.admin-shell .admin-table-content .pager { margin-top: 0; padding: var(--space-3) var(--space-5); }
 .admin-shell .clip { max-width: 260px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .admin-shell .mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
 .admin-shell .badge-stack { display: flex; flex-wrap: wrap; gap: var(--space-1); }
@@ -157,8 +175,9 @@
 .admin-feedback .glass-strong { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: var(--radius-lg); box-shadow: 0 16px 48px hsl(222 25% 10% / .15); backdrop-filter: none; }
 .admin-feedback.fixed.bottom-4 { z-index: 110; }
 .admin-feedback .shadow-lg { box-shadow: 0 4px 16px hsl(222 25% 10% / .12); }
-.admin-shell .resource-category-table { min-width: 320px; }
-.admin-shell .resource-users-table { min-width: 480px; }
+.admin-shell .admin-table :is(.resource-category-table,.resource-users-table) { min-width: 0; table-layout: fixed; }
+.admin-shell :is(.resource-category-table,.resource-users-table) :is(th,td) { white-space: normal; overflow-wrap: anywhere; }
+.admin-shell .resource-category-table :is(th,td):first-child { width: 50%; }
 .admin-shell :is(.resource-category-table,.resource-users-table) :is(th,td):not(:first-child) { text-align: right; }
 .admin-shell .admin-tag-selection { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-3); background: hsl(var(--muted)); border-radius: var(--radius-md); font-size: 12px; }
 .admin-shell .admin-tag-selection > span { margin-right: auto; }
@@ -167,7 +186,7 @@
 .admin-shell .music-data-table table { min-width: 1200px; }
 .admin-shell .music-name-cell { min-width: 280px; width: 280px; }
 .admin-shell .music-filename { max-width: 256px; font-size: 12px; }
-.admin-shell tr[aria-selected=true] { background: hsl(var(--accent)); }
+.admin-shell tbody tr[aria-selected=true] { background: hsl(var(--accent)); }
 .admin-shell .admin-library > .admin-drawer-backdrop { margin: 0; }
 .admin-shell .admin-config { max-width: 1040px; }
 .admin-shell .admin-config input[type=number] { max-width: 180px; }

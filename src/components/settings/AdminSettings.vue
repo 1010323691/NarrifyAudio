@@ -213,10 +213,10 @@ watch(
           <CardTitle class="flex items-center gap-2"><Type class="h-5 w-5" />文本排版</CardTitle>
         </CardHeader>
         <CardContent>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div class="admin-toggle-grid grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div v-for="t in TOGGLES" :key="t.key" class="flex items-center justify-between">
-              <Label class="font-normal">{{ t.label }}</Label>
-              <Switch :aria-label="t.label" v-model="draft.text[t.key]" />
+              <Label :for="`admin-text-${t.key}`" class="font-normal">{{ t.label }}</Label>
+              <Switch :id="`admin-text-${t.key}`" :aria-label="t.label" v-model="draft.text[t.key]" :disabled="saving" />
             </div>
           </div>
         </CardContent>
@@ -389,7 +389,7 @@ watch(
               <div class="flex flex-wrap items-center gap-3">
                 <Input id="tts-batch-limit" v-model.number="draft.tts.batch_concurrency" type="number" min="1" max="128" step="1" class="max-w-[120px]" :disabled="draft.tts.batch_auto" />
                 <label class="flex items-center gap-2 text-sm text-muted-foreground" title="按同批最长文本字数向上匹配已测安全档位">
-                  <input v-model="draft.tts.batch_auto" type="checkbox" class="h-4 w-4 rounded border-input accent-primary" />
+                  <Switch v-model="draft.tts.batch_auto" aria-label="自动匹配批内并发上限" :disabled="saving" />
                   自动
                 </label>
               </div>
