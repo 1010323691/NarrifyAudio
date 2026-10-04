@@ -30,11 +30,11 @@ Windows 的 `.ps1` / `.bat` 脚本不适用于 Linux。`launch/` 提供 Bash 启
 ```bash
 bash launch/start-data-services.sh # 启动 PostgreSQL、Redis
 bash launch/start.sh               # 启动数据服务，应用全停时执行迁移，再启动 API、Worker
-bash launch/stop.sh                # 停止 API、Worker，保留数据服务
-bash launch/stop-data-services.sh  # 应用停止后再停止数据服务
+bash launch/stop.sh                # 先停 API、Worker，再停数据服务（整体停机）
+bash launch/stop-data-services.sh  # 仅停数据服务（要求应用已停）
 ```
 
-服务操作按需调用 `sudo`，API 和 Worker 仍由 systemd 以 `narrify` 用户运行，使用 `/etc/narrify-audio/narrify.env`。前端使用构建后的 `dist/` 或 Nginx 入口，正式启动脚本不运行 Vite。日志使用 `journalctl -u narrify-api -u narrify-worker`。默认数据服务名为 `postgresql@16-main.service`、`redis-server.service`；其他发行版可通过 `POSTGRES_SERVICE` / `REDIS_SERVICE` 环境变量覆盖，并同步调整 systemd 单元的依赖。
+系统级部署中服务操作按需调用 `sudo`，API 和 Worker 仍由 systemd 以 `narrify` 用户运行，使用 `/etc/narrify-audio/narrify.env`；默认数据服务名为 `postgresql@16-main.service`、`redis-server.service`。user 级部署（见下节）不需要 sudo：`launch/` 脚本检测到 `~/.config/systemd/user/` 下五个 `narrify-*.service` 单元齐备后自动改用 `systemctl --user`，数据服务默认名随之变为 `narrify-postgresql.service`、`narrify-redis.service`，日志改用 `journalctl --user -u narrify-api -u narrify-worker` 查看。其他部署形态可通过 `POSTGRES_SERVICE` / `REDIS_SERVICE` 环境变量覆盖数据服务名，并同步调整 systemd 单元的依赖。前端使用构建后的 `dist/` 或 Nginx 入口，正式启动脚本不运行 Vite。
 
 本地开发可使用独立的前台启动器：
 
@@ -47,6 +47,15 @@ bash launch/dev-all.sh
 开发脚本需要 Bash 4.3+、curl、util-linux 提供的 `flock` / `setsid`，通过 Linux `.venv/bin/python` 将 `.env` 中的 `NARRIFY_*` 作为数据加载，不执行文件中的 shell 代码。它执行迁移，启动 API、Worker 和 Vite（`127.0.0.1:5173`）；后台日志写入 `logs/dev/`。重复启动会被锁拒绝，任何组件退出会结束整套开发进程。按 `Ctrl+C` 停止脚本启动的进程，最多等待 10 秒后强制结束；数据服务继续运行。`dev-all.sh` 运行期间，数据服务停止脚本会拒绝停止数据库和 Redis。
 
 脚本统一使用 LF 换行，默认通过 `bash launch/脚本名.sh` 调用，也可直接执行。使用 `sh` 调用入口脚本时会自动切换到 Bash；进入 `launch/` 目录后也可运行 `bash start.sh`。
+
+## 用户级部署（无 sudo / 无系统软件包）
+
+无 sudo 权限、或不希望安装系统软件包时，可在 `~/.local` 下自编译安装 PostgreSQL 16 与 Redis，并在 `~/.config/systemd/user/` 安装五个 user 级单元：`narrify-postgresql`、`narrify-redis`、`narrify-migrate`（oneshot 迁移）、`narrify-api`、`narrify-worker`。
+
+- `launch/` 脚本自动检测该形态：五个单元**全部存在**时，所有单元操作走 `systemctl --user`（不 sudo），数据服务默认名切换为 `narrify-postgresql.service` / `narrify-redis.service`；任一缺失则回退系统级行为（`sudo systemctl` + 发行版默认服务名）。
+- 环境变量仍由单元的 `EnvironmentFile` 供给（如仓库根目录 `.env`），脚本不 source `.env`。
+- 日志：`journalctl --user -u narrify-api -u narrify-worker`。
+- user 级服务随用户会话存活：登出且所有会话结束即停止；需要登出后保活时执行 `sudo loginctl enable-linger <用户>`（需有 sudo）。
 
 ## 最终运行链路
 
