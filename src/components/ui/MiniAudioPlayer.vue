@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import { Pause, Play } from 'lucide-vue-next'
 import { cn } from '@/lib/utils'
 import { useAudioBus, type AudioPlayer } from '@/composables/useAudioBus'
@@ -10,20 +10,18 @@ import { useAudioBus, type AudioPlayer } from '@/composables/useAudioBus'
  * played in place (no "click → scroll to the bottom" round-trip). All instances share
  * the `useAudioBus` bus, so starting one pauses whichever was playing.
  *
- * The `<audio>` element is created lazily on the FIRST play. Bulk row lists (BGM/Merge)
- * render dozens–hundreds of these players, and eager `preload="metadata"` per row queued
- * one metadata request per row on the ~6 shared same-origin connections — starving
- * SSE/API traffic and piling up media pipelines for rows nobody previews. The time
- * readout shows 0:00 until first play; the fetch itself is unchanged, it just starts
- * when the user asks for it. A resource that 404s / fails to decode shows an explicit
- * red「加载失败，重试」state instead of a silent dead 0:00/0:00.
+ * Lists create audio on first play to avoid queuing metadata requests for every row.
+ * Selected-file details can preload metadata to show duration before playback.
+ * A resource that fails to load or decode exposes an explicit retry state.
  */
 const props = withDefaults(defineProps<{
   src: string
   /** 已知时长（秒，如后端 ffprobe）：未播放前先显示真实时长而不是 0:00；
    *  loadedmetadata 后以真实值为准。缺省 = 未知（显示 --:--）。 */
   knownDuration?: number | null
-}>(), { knownDuration: null })
+  /** 详情中的少量播放器预读真实时长；批量列表保持按需加载。 */
+  preloadMetadata?: boolean
+}>(), { knownDuration: null, preloadMetadata: false })
 
 const { claim, release } = useAudioBus()
 
@@ -44,6 +42,15 @@ const shownDuration = computed(() => {
 function stop(): void {
   audioEl.value?.pause()
 }
+onDeactivated(() => {
+  stop()
+  playing.value = false
+  release(self)
+  audioReady.value = false
+})
+onActivated(() => {
+  if (props.preloadMetadata && props.src) audioReady.value = true
+})
 const self: AudioPlayer = { stop }
 
 async function toggle(): Promise<void> {
@@ -57,6 +64,7 @@ async function toggle(): Promise<void> {
   }
   const el = audioEl.value
   if (!el) return
+  if (loadError.value) el.load()
   loadError.value = false
   claim(self)
   void el.play().catch(() => {
@@ -97,7 +105,8 @@ function onTimeUpdate(): void {
   if (audioEl.value) current.value = audioEl.value.currentTime
 }
 function onMeta(): void {
-  if (audioEl.value) duration.value = audioEl.value.duration || 0
+  const value = audioEl.value?.duration
+  duration.value = value && Number.isFinite(value) && value > 0 ? value : 0
   loadError.value = false
 }
 
@@ -113,7 +122,7 @@ function seek(e: MouseEvent): void {
 
 // A regenerated character gets a fresh preview file; pause and reset the state to match.
 watch(
-  () => props.src,
+  () => [props.src, props.preloadMetadata],
   () => {
     audioEl.value?.pause()
     playing.value = false
@@ -121,7 +130,9 @@ watch(
     duration.value = 0
     loadError.value = false
     release(self)
+    audioReady.value = props.preloadMetadata && !!props.src
   },
+  { immediate: true },
 )
 
 onBeforeUnmount(() => {
@@ -134,6 +145,7 @@ onBeforeUnmount(() => {
   <div class="flex items-center gap-2">
     <audio
       v-if="audioReady"
+      :key="src"
       ref="audioEl"
       :src="src"
       preload="metadata"

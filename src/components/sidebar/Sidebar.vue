@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
-  Combine, Music4, ShieldCheck, FolderOpen, LogOut, Monitor, Sun, Moon, ListTodo, Trash2, Eye,
+  Combine, Music4, ShieldCheck, FolderOpen, ChevronRight, LogOut, Monitor, Sun, Moon, ListTodo, Trash2, Eye,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -137,8 +137,12 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
       </div>
 
       <div v-if="project.hasActiveProject" class="app-nav__group app-nav__project-nav">
-        <RouterLink :to="`/projects/${project.activeProjectId}`" class="app-nav__label app-nav__project-title">
-          <FolderOpen class="h-3.5 w-3.5" /><span class="app-nav__project-name">{{ project.activeProjectName || '当前项目' }}</span>
+        <RouterLink :to="`/projects/${project.activeProjectId}`" class="app-nav__project-title" :class="{ 'is-active': isActive(`/projects/${project.activeProjectId}`) }" :aria-current="isActive(`/projects/${project.activeProjectId}`) ? 'page' : undefined" :aria-label="`${project.activeProjectName || '当前项目'}，制作总览`" :title="project.activeProjectName || '当前项目'">
+          <span class="app-nav__project-identity">
+            <span class="app-nav__project-mark" aria-hidden="true"><FolderOpen /></span>
+            <span class="app-nav__project-copy"><span class="app-nav__project-eyebrow">当前项目 · 制作总览</span><strong class="app-nav__project-name">{{ project.activeProjectName || '当前项目' }}</strong></span>
+          </span>
+          <ChevronRight class="app-nav__project-chevron" aria-hidden="true" />
         </RouterLink>
         <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
           <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>

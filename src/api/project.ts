@@ -39,6 +39,7 @@ export interface ProjectProgressSummary {
   project_id: string
   name: string
   updated_at: string
+  stage_completion?: Record<string, { completed: number; total: number; unit: string; percent: number | null }>
   stage_keys: string[]
   split_volume_count: number
 }

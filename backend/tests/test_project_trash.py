@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import (
+    ChapterReviewMark,
     OutboxEvent,
     Project,
     ProjectFile,
@@ -22,6 +23,7 @@ from backend.platform.models import (
     TaskAttempt,
     TaskEvent,
     TaskResult,
+    TextFormatFlow,
     User,
     WorkerHeartbeat,
     utcnow,
@@ -226,6 +228,14 @@ def test_expired_project_purge_removes_database_rows_and_resumes_staged_cleanup(
                 worker_id=f"trash-test-{uuid.uuid4()}", current_task_id=task.id,
                 status="idle", capabilities={},
             ),
+            TextFormatFlow(
+                project_id=project["id"], owner_id=user_id,
+                source_file_id=str(uuid.uuid4()), config_snapshot={},
+            ),
+            ChapterReviewMark(
+                project_id=project["id"], owner_id=user_id,
+                task_id=task.id, chapter_key="chapter-1",
+            ),
         ])
 
     real_rmtree = shutil.rmtree
@@ -257,6 +267,8 @@ def test_expired_project_purge_removes_database_rows_and_resumes_staged_cleanup(
         assert db.scalar(select(func.count()).select_from(TaskAttempt).where(TaskAttempt.task_id == task.id)) == 0
         assert db.scalar(select(func.count()).select_from(TaskEvent).where(TaskEvent.task_id == task.id)) == 0
         assert db.scalar(select(func.count()).select_from(TaskResult).where(TaskResult.task_id == task.id)) == 0
+        assert db.scalar(select(func.count()).select_from(TextFormatFlow).where(TextFormatFlow.project_id == project["id"])) == 0
+        assert db.scalar(select(func.count()).select_from(ChapterReviewMark).where(ChapterReviewMark.project_id == project["id"])) == 0
 
 
 def test_project_retention_check_runs_from_worker_loop(monkeypatch: pytest.MonkeyPatch):
@@ -272,3 +284,30 @@ def test_project_retention_check_runs_from_worker_loop(monkeypatch: pytest.Monke
     monkeypatch.setattr("backend.worker.purge_expired_projects", purge_once)
     _project_retention_loop(stop)
     assert calls == [True]
+
+
+def test_project_retention_retries_once_after_startup_skip(monkeypatch: pytest.MonkeyPatch):
+    class ImmediateStop:
+        waits: list[float] = []
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            return self.stopped
+
+    stop = ImmediateStop()
+    calls = []
+
+    def skip_then_complete():
+        calls.append(True)
+        if len(calls) == 2:
+            stop.stopped = True
+        return 0
+
+    monkeypatch.setattr("backend.worker.purge_expired_projects", skip_then_complete)
+    _project_retention_loop(stop)
+    assert len(calls) == 2
+    assert stop.waits == [60, 24 * 60 * 60]

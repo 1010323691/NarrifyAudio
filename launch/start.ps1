@@ -154,7 +154,7 @@ if ($backendReady) {
   $quotedRoot = [char]34 + $root + [char]34
   $quotedPython = [char]34 + $python + [char]34
   $backendCommand = "cd /d $quotedRoot && $quotedPython -m backend.main"
-  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $backendCommand) -WorkingDirectory $root
+  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $backendCommand) -WorkingDirectory $root -WindowStyle Normal
   Write-Host 'Backend starting on http://127.0.0.1:8642 ...'
 }
 
@@ -167,7 +167,7 @@ if (-not $workerProcesses) {
   $quotedRoot = [char]34 + $root + [char]34
   $quotedPython = [char]34 + $python + [char]34
   $workerCommand = "cd /d $quotedRoot && $quotedPython -m backend.worker"
-  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $workerCommand) -WorkingDirectory $root
+  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $workerCommand) -WorkingDirectory $root -WindowStyle Normal
   Write-Host 'Windows task worker starting ...'
 } else {
   Write-Host 'Windows task worker is already running.'
@@ -181,7 +181,7 @@ if (-not $frontendReady) {
 
   $quotedRoot = [char]34 + $root + [char]34
   $frontendCommand = "cd /d $quotedRoot && npm.cmd run dev -- --host 127.0.0.1"
-  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $frontendCommand) -WorkingDirectory $root
+  Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $frontendCommand) -WorkingDirectory $root -WindowStyle Normal
   Write-Host 'Frontend starting on http://localhost:5173 ...'
 } else {
   Write-Host 'Frontend is already running.'
@@ -191,11 +191,17 @@ $backendReady = Wait-HttpReady -Uri $backendUrl
 $frontendReady = Wait-HttpReady -Uri $frontendHealthUrl
 
 if (-not $backendReady) {
-  Write-Warning 'Backend did not become ready within 30 seconds. Check its console window.'
+  throw 'Backend did not become ready within 30 seconds. Check its console window and logs\startup.'
 }
 
 if (-not $frontendReady) {
-  Write-Warning 'Frontend did not become ready within 30 seconds. Check its console window.'
+  throw 'Frontend did not become ready within 30 seconds. Check its console window and logs\startup.'
+}
+
+$workerProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -like "*$python*" -and $_.CommandLine -like '*-m backend.worker*' }
+if (-not $workerProcesses) {
+  throw 'The task worker exited during startup. Check its console window and logs\startup.'
 }
 
 Write-Host ''
@@ -204,7 +210,7 @@ Write-Host "Backend:  $backendUrl"
 Write-Host "Frontend: $frontendUrl"
 Write-Host 'Worker:   Windows Python task worker'
 Write-Host 'Admin login: http://127.0.0.1:5173/#/admin/login'
-Write-Host 'Close the Backend, Worker and Frontend console windows to stop processes started by this script. PostgreSQL and Memurai remain Windows services.'
+Write-Host 'Close the Backend, Worker and Frontend console windows to stop processes started by this script. PostgreSQL and Memurai remain Windows services. Startup logs are stored in logs\startup.'
 
 if ($backendReady -and $frontendReady) {
   Write-Host 'Opening NarrifyAudio in your browser in 5 seconds...'

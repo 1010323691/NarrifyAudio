@@ -38,7 +38,7 @@ function harness(overrides = {}) {
       http: { get: async () => ({}), post: async () => ({}), del: async () => ({}) },
     },
     '@/components/ui/toast': { useToast: () => ({ push: () => {} }) },
-    '@/composables/useDurableTaskWait': { useDurableTaskWait: () => ({ wait: async () => ({}) }) },
+    '@/composables/useDurableTaskWait': { useDurableTaskWait: () => ({ track: async () => ({}) }) },
     '@/api/durableTasks': {
       listProjectDurableTasks: async () => [],
       retryDurableTask: async () => ({}),
@@ -113,7 +113,7 @@ function setupWorkbench({ getState, postFlow, extra } = {}) {
   const load = harness({
     '@/api/textFormat': workbenchApi({ getState, postFlow, calls }),
     '@/composables/useDurableTaskWait': {
-      useDurableTaskWait: () => ({ wait: async () => { calls.wait += 1; return {} } }),
+      useDurableTaskWait: () => ({ track: async () => { calls.wait += 1; return {} } }),
     },
     ...extra,
   })
@@ -173,6 +173,63 @@ test('a failed flow stops the pump without submitting anything', async () => {
   assert.equal(calls.post, 0)
   assert.equal(wb.canEnterParse.value, false)
   assert.equal(wb.enterParseReason.value, '流程失败，请先重试')
+})
+
+test('live task ticks update stage progress and the whole pipeline uses 0–100 task units', async () => {
+  const stages = ['format', 'analyze', 'split']
+  let stageIndex = 0
+  let wb
+  const state = () => ({
+    flow: { id: 'flow-1', status: stageIndex === 3 ? 'ready' : 'running', config_snapshot: {} },
+    version: stageIndex === 3 ? readyVersion(makeChapters(2)) : null,
+    next_task: stageIndex === 3 ? null : { stage: stages[stageIndex], task_id: `t${stageIndex}`, status: 'running', progress: 0 },
+    active_tasks: stageIndex === 3 ? [] : [{ id: `t${stageIndex}`, status: 'running', progress: 0 }],
+  })
+  const setup = setupWorkbench({
+    getState: async () => state(),
+    postFlow: async () => { stageIndex += 1; return state() },
+    extra: {
+      '@/composables/useDurableTaskWait': { useDurableTaskWait: () => ({ track: async (id, onTick) => {
+        for (const percent of [10, 40, 75, 100]) {
+          onTick({ id, status: percent === 100 ? 'succeeded' : 'running', progress: percent })
+          assert.equal(wb.nextTask.value.progress, percent)
+          assert.equal(wb.activeTasks.value[0].progress, percent)
+          assert.equal(wb.pipelineProgress.value, (stageIndex + percent / 100) / 3)
+        }
+      } }) },
+    },
+  })
+  wb = setup.wb
+  await wb.resume()
+  assert.equal(wb.pipelineProgress.value, 1)
+  assert.equal(setup.calls.post, 3)
+})
+
+test('late progress ticks cannot update the next project', async () => {
+  const pending = deferred()
+  let tick
+  const running = {
+    flow: { id: 'flow-1', status: 'running', config_snapshot: {} }, version: null,
+    next_task: { stage: 'format', task_id: 't1', status: 'running', progress: 0 }, active_tasks: [],
+  }
+  const { wb, project, calls } = setupWorkbench({
+    getState: async (projectId) => projectId === 'P1' ? running : {
+      flow: null, version: null, next_task: null, active_tasks: [],
+    },
+    extra: { '@/composables/useDurableTaskWait': { useDurableTaskWait: () => ({ track: async (_id, onTick) => {
+      tick = onTick
+      await pending.promise
+    } }) } },
+  })
+  const resuming = wb.resume()
+  while (!tick) await nextTick()
+  project.setCurrent({ set: true, project_id: 'P2', project_name: 'Next project' })
+  await nextTick()
+  assert.equal(tick({ id: 't1', status: 'running', progress: 75 }), false)
+  assert.equal(wb.nextTask.value, null)
+  pending.resolve()
+  await resuming
+  assert.equal(calls.post, 0)
 })
 
 test('stale versions and active tasks block entering the parser with a reason', async () => {
@@ -385,7 +442,7 @@ test('a late state response from the previous project cannot overwrite the new p
       },
     }),
     '@/composables/useDurableTaskWait': {
-      useDurableTaskWait: () => ({ wait: async () => (calls.wait += 1, {}) }),
+      useDurableTaskWait: () => ({ track: async () => (calls.wait += 1, {}) }),
     },
   })
   const project = load('@/stores/project').useProjectStore()

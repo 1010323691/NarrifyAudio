@@ -97,6 +97,18 @@ def isolated_postgres(tmp_path):
     if executable is None:
         pytest.skip("PostgreSQL binaries are not installed")
     binary = Path(executable).parent
+    postgres = binary / ("postgres.exe" if os.name == "nt" else "postgres")
+    if not postgres.is_file():
+        pytest.skip("PostgreSQL server binary is not installed")
+    try:
+        probe = subprocess.run(
+            [str(postgres), "--version"], capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        pytest.skip("PostgreSQL server binary cannot run in this environment")
+    if probe.returncode != 0:
+        pytest.skip("PostgreSQL server binary cannot run in this environment")
     data = tmp_path / "postgres"
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

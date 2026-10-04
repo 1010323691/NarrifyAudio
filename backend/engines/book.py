@@ -25,7 +25,7 @@ import hashlib
 import math
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 # ============================ Encoding ============================
@@ -843,17 +843,25 @@ def make_whole_book_filename(base: str) -> str:
 
 # ======================= Analysis =======================
 
-def analyze_text(text: str) -> dict:
+def analyze_text(text: str, *, on_progress: Callable[[float], None] | None = None) -> dict:
     """Decoded text -> ``{text, newline_positions, chapters, totalChars}``."""
     newline_positions = build_newline_positions(text)
+    if on_progress:
+        on_progress(0.2)
 
     def char_count(a: int, b: int) -> int:
         return range_char_count(newline_positions, a, b)
 
     chapters = detect_chapters(text)
-    for c in chapters:
+    if on_progress:
+        on_progress(0.6)
+    for index, c in enumerate(chapters, 1):
         c["chars"] = char_count(c["start"], c["end"])
+        if on_progress:
+            on_progress(0.6 + 0.35 * index / max(1, len(chapters)))
     total_chars = char_count(0, len(text))
+    if on_progress:
+        on_progress(1.0)
     return {
         "text": text,
         "newline_positions": newline_positions,

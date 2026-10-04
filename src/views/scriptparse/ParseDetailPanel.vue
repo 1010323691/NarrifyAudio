@@ -5,7 +5,6 @@ import { Loader2, AlertTriangle, ScanText, Maximize2, Shrink } from 'lucide-vue-
 import { distinctSpeakerHues } from '@/utils/speakerColor'
 import { padChapterNum } from '@/utils/bookLabels'
 import {
-  TONE_CHIP,
   TONE_TEXT,
   type ParseRow,
   type ResultPreview,
@@ -73,7 +72,7 @@ const emptyHint = computed(() => {
 
 <template>
   <div class="flex h-full min-h-0 flex-col">
-    <!-- 页头：大号章号 + 右侧「圆点 + 文字」状态；
+    <!-- 页头：大号章号 + 右侧文字状态；
          44px（h-11）压缩档：章号 leading-none，把高度让给正文；
          页头本身不画分割线，分割只由 tab 行的下划线行提供。 -->
     <header class="flex h-11 shrink-0 items-center gap-3 px-4">
@@ -93,8 +92,7 @@ const emptyHint = computed(() => {
         </span>
       </div>
       <span v-if="row" class="flex shrink-0 items-center gap-1.5" :class="TONE_TEXT[row.tone]">
-        <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="TONE_CHIP[row.tone].dot" aria-hidden="true" />
-        <span class="text-xs font-medium">{{ row.label }}</span>
+        <span class="text-xs font-semibold">{{ row.label }}</span>
       </span>
     </header>
 
@@ -274,16 +272,14 @@ const emptyHint = computed(() => {
 .spk-entry.spk-neutral .spk-quote {
   border-left-color: hsl(var(--border));
 }
-/* 切章/切 tab 时内容容器随 :key 重挂载播一次；keep-alive 再激活 DOM 保留不重播；
-   reduced-motion 由 style.css 全局兜底。 */
+/* Only fade: translating a full-height empty panel expands the scrollable
+   overflow during entry and briefly shows a scrollbar. */
 @keyframes panel-in {
   from {
     opacity: 0;
-    transform: translateY(2px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 .panel-enter {

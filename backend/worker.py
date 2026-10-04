@@ -81,13 +81,23 @@ def _paused_parse_worker_count(worker_id: str) -> int:
 
 
 def _project_retention_loop(stop: threading.Event) -> None:
-    """Keep expired project cleanup in the dedicated worker process."""
+    """Check expiry immediately, retry startup contention, then run daily."""
     logger = logging.getLogger("audiobook.worker")
+    startup_check = True
     while not stop.is_set():
+        purged = 0
         try:
-            purge_expired_projects()
+            purged = purge_expired_projects()
         except Exception:
             logger.exception("Daily project trash cleanup failed")
+        # The worker can start alongside recovery/migration activity. A second
+        # near-startup pass ensures an initial lock/migration skip is not delayed
+        # until tomorrow. A successful purge proceeds directly to the daily cadence.
+        if startup_check and purged == 0:
+            startup_check = False
+            stop.wait(60)
+            continue
+        startup_check = False
         stop.wait(24 * 60 * 60)
 
 

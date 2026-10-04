@@ -159,7 +159,7 @@
   .admin-shell .app-nav__item { flex-shrink: 0; white-space: nowrap; }
   .admin-shell .app-account { position: absolute; top: var(--space-2); right: var(--space-3); width: auto; margin: 0; border: 0; padding: 0; }
   .admin-shell .app-account__menu { bottom: auto; top: 48px; right: 0; left: auto; width: 280px; }
-  .admin-shell .app-main { min-height: 0; overflow: auto; }
+  .admin-shell .app-main { min-height: 0; overflow: hidden; }
   .admin-shell .app-content--admin { padding: var(--space-5) var(--space-4) var(--space-8); }
   .admin-shell .admin-page-header { align-items: flex-start; flex-direction: column; }
   .admin-shell .admin-page-header h1 { font-size: 22px; }

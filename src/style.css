@@ -27,12 +27,17 @@
     --input: 240 15% 84%;
     --ring: 239 84% 67%;
     --radius: 1rem;
+    --list-header-height: 32px;
+    --list-row-height: 40px;
+    --list-cell-x: 12px;
 
     /* Glass surfaces */
     --glass-blur: 12px;
     --glass-tint: rgba(255, 255, 255, 0.68);
     --glass-tint-strong: rgba(255, 255, 255, 0.88);
-    --glass-border: rgba(255, 255, 255, 0.8);
+    /* Panels share the neutral outline used by workbench controls. A white
+       glass edge disappears against light cards and makes sections unbounded. */
+    --glass-border: hsl(var(--border));
     --glass-edge: rgba(99, 102, 241, 0.16);
     --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.6);
     --glass-shadow: 0 2px 10px rgba(56, 64, 120, 0.05);
@@ -69,7 +74,7 @@
     --glass-blur: 14px;
     --glass-tint: rgba(30, 33, 48, 0.55);
     --glass-tint-strong: rgba(26, 28, 42, 0.85);
-    --glass-border: rgba(255, 255, 255, 0.14);
+    --glass-border: hsl(var(--border));
     --glass-edge: rgba(129, 140, 248, 0.22);
     --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.08);
     --glass-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
@@ -232,8 +237,8 @@
 
   .app-shell {
     display: flex;
-    min-height: 100dvh;
-    height: 100%;
+    min-height: 0;
+    height: 100dvh;
     overflow: hidden;
   }
 
@@ -375,29 +380,51 @@
   }
 
   .app-nav__project-title {
+    position: relative;
     display: flex;
-    min-height: 36px;
-    align-items: center;
+    align-items:center;
+    justify-content:space-between;
     gap: 8px;
     overflow: hidden;
-    padding: 0 10px 8px;
+    margin: 0 0 10px;
+    padding: 11px 10px;
+    border-radius: 10px;
     color: hsl(var(--foreground));
-    font-size: 12px;
-    letter-spacing: 0;
     text-decoration: none;
-    text-transform: none;
+    transition: background-color 160ms, color 160ms;
   }
-
-  .app-nav__project-title svg {
-    flex: 0 0 15px;
+  .app-nav__project-title:hover,
+  .app-nav__project-title.is-active {
+    background: hsl(var(--primary) / .065);
+  }
+  .app-nav__project-title:focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 3px;
+  }
+  .app-nav__project-identity { display:flex;align-items:center;gap:10px;min-width:0; }
+  .app-nav__project-mark {
+    display:grid;
+    place-items:center;
+    width:17px;
+    height:24px;
+    flex:none;
     color: hsl(var(--primary));
   }
-
+  .app-nav__project-mark svg { width:17px;height:17px;stroke-width:1.8; }
+  .app-nav__project-copy { display:grid;gap:5px;min-width:0; }
+  .app-nav__project-eyebrow { color:hsl(var(--muted-foreground));font-size:10px;font-weight:500; }
   .app-nav__project-name {
+    display:-webkit-box;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap:anywhere;
+    font-size:12px;
+    font-weight:650;
+    line-height:1.55;
   }
+  .app-nav__project-chevron { width:13px;height:13px;flex:none;color:hsl(var(--muted-foreground)/.55); }
+  .app-nav__project-title.is-active .app-nav__project-name,.app-nav__project-title:hover .app-nav__project-chevron { color:hsl(var(--primary)); }
 
   .app-status {
     border-top: 1px solid hsl(var(--border));
@@ -667,14 +694,17 @@
 
   .app-main {
     min-width: 0;
+    min-height: 0;
     flex: 1;
-    overflow: auto;
+    overflow: hidden;
   }
 
   .app-content {
     width: min(100%, 1440px);
+    height: 100%;
+    min-height: 0;
     margin: 0 auto;
-    padding: clamp(28px, 4vw, 52px) clamp(20px, 4vw, 48px) 64px;
+    padding: 20px clamp(20px, 4vw, 48px) 16px;
   }
 
   .app-content--admin {
@@ -687,7 +717,7 @@
     width: 100%;
     max-width: none;
     height: 100%;
-    padding: 18px 20px 20px;
+    padding: 20px clamp(20px, 4vw, 48px) 16px;
   }
 
   .page-header {
@@ -983,10 +1013,7 @@
 
   @media (max-width: 880px) {
     .app-shell {
-      display: block;
-      min-height: 100dvh;
-      height: auto;
-      overflow: visible;
+      flex-direction: column;
     }
 
     .app-sidebar {
@@ -995,6 +1022,9 @@
       z-index: 40;
       width: 100%;
       min-height: 0;
+      flex: none;
+      max-height: 35dvh;
+      overflow: auto;
       border-right: 0;
       border-bottom: 1px solid hsl(var(--border));
     }
@@ -1052,8 +1082,14 @@
       display: flex;
       min-height: 38px;
       flex: 0 0 auto;
+      max-width:240px;
+      margin:0;
       padding: 8px 11px;
     }
+    .app-nav__project-mark { width:17px;height:24px; }
+    .app-nav__project-copy { gap:0; }
+    .app-nav__project-eyebrow,.app-nav__project-chevron { display:none; }
+    .app-nav__project-name { -webkit-line-clamp:1; }
 
     .app-nav__item {
       min-height: 38px;
@@ -1075,11 +1111,11 @@
     }
 
     .app-main {
-      overflow: visible;
+      overflow: hidden;
     }
 
     .app-content {
-      padding: 28px 16px 48px;
+      padding: 16px;
     }
   }
 
@@ -1136,4 +1172,109 @@
   .account-popover-leave-active {
     transform-origin: right bottom;
   }
+}
+
+/* Every route owns a bounded viewport. Only named content regions scroll;
+   async results, expanded controls and keep-alive views cannot grow the shell. */
+html, body, #app { overflow: hidden; }
+.app-shell .app-content { overflow: hidden; }
+.app-shell .app-content > :is(.viewport-page, .viewport-workbench) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  gap: 10px;
+  margin-bottom: 0;
+  padding-bottom: 0;
+  overflow: hidden;
+}
+.app-shell .app-content > :is(.viewport-page, .viewport-workbench) > * {
+  min-width: 0;
+  flex-shrink: 0;
+  margin-top: 0;
+}
+.app-shell .app-content :is(.viewport-page, .viewport-workbench) > .page-header {
+  margin-bottom: 2px;
+}
+.app-shell .app-content > .viewport-page > .page-region {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 2px 4px 8px 0;
+}
+.page-region > * { flex-shrink: 0; min-width: 0; }
+.page-region:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
+.app-shell .app-content > .viewport-workbench > :is(.production-workbench, .voice-workbench, .wb-workspace) {
+  flex: 1 1 0;
+  min-height: 0;
+}
+/* Empty workbenches occupy the same bounded content region as chapter tables. */
+.workbench-empty {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 32px;
+  text-align: center;
+  overflow: hidden;
+}
+.workbench-empty > p { max-width: 640px; line-height: 1.8; }
+.workbench-empty > .mt-4 { margin-top: 0; }
+.app-shell .viewport-workbench > .workbench-controls,
+.app-shell .viewport-workbench > .workbench-feedback {
+  min-height: 0;
+  flex: 0 1 auto;
+  max-height: 24dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.workbench-controls > *, .workbench-feedback > * { flex-shrink: 0; }
+.app-shell .app-content > .viewport-workbench > :is([role="alert"], details) {
+  max-height: 20dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.app-shell .viewport-workbench .voice-list,
+.app-shell .viewport-workbench .voice-detail { min-height: 0; }
+.app-shell .viewport-workbench .voice-scroll { min-height: 0; max-height: none; }
+.app-shell .viewport-workbench .voice-detail { max-height: none; }
+.app-shell .viewport-workbench .voices-production { max-height: 26dvh; overflow: auto; }
+.app-shell .viewport-workbench > .glass-panel:has([aria-expanded]) { max-height: 22dvh; overflow: auto; }
+.app-shell .viewport-workbench .filter-seg { height: auto; min-height: 45px; flex-shrink: 0; padding-top: 6px; padding-bottom: 6px; }
+@media (max-width: 1100px) {
+  .app-shell .viewport-workbench .wb-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.app-shell .preview-page { height: 100%; min-width: 0; overflow: hidden; }
+.app-shell .preview-page > header { flex-shrink: 0; }
+.app-shell .preview-page > .grid { grid-template-rows: minmax(0, 1fr); }
+@media (max-width: 1023px) {
+  .app-shell .preview-page > .grid { grid-template-columns: minmax(150px, 28%) minmax(0, 1fr); }
+  .app-shell .preview-page > .grid > :last-child { grid-column: 2; }
+  .app-shell .preview-page > .grid { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .app-shell .preview-page > .grid > :first-child { grid-row: 1 / 3; }
+}
+/* Shared list density: table rows never stretch to fill the work area. */
+.app-shell table.workbench-table { font-size:12px;line-height:18px;border-collapse:collapse; }
+.app-shell table.workbench-table th {
+  position:sticky;top:0;z-index:1;box-sizing:border-box;
+  height:var(--list-header-height);padding:6px var(--list-cell-x);
+  font-size:11px;line-height:18px;font-weight:500;text-align:left;
+  color:hsl(var(--muted-foreground));background:hsl(var(--muted)/.35);
+  border-bottom:1px solid hsl(var(--border));
+}
+.app-shell table.workbench-table td:not([colspan]) {
+  box-sizing:border-box;height:var(--list-row-height);padding:5px var(--list-cell-x);
+  vertical-align:middle;border-bottom:1px solid hsl(var(--border)/.6);
+}
+@media(pointer:coarse) {
+  .app-shell { --list-row-height:48px; }
 }

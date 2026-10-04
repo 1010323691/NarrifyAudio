@@ -12,6 +12,9 @@ export const LABEL_TASK_TERMINAL_STATUSES = new Set(['cancelled', 'succeeded', '
 
 /** label 第一个「：」之后的 key；口径与后端 re.search(r"：(.+)$") 相同。 */
 export function labelKeyOf(label: string): string {
+  // The merge API submits this English prefix before the Worker starts.
+  // Parse it before the full-width separator: chapter names may contain 「：」.
+  if (label.startsWith('merge-audio: ')) return label.slice('merge-audio: '.length)
   const i = label.indexOf('：')
   return i >= 0 ? label.slice(i + 1) : ''
 }

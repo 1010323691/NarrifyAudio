@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, ArrowRight, AudioLines, CircleAlert, FileAudio2, FileText, LoaderCircle, RefreshCw, Upload } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, AudioLines, CheckCircle2, CircleAlert, FileAudio2, FileText, LoaderCircle, RefreshCw, Upload } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
+import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
-import { listDir } from '@/api/files'
+import { getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
 import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { modulePrefixes } from '@/utils/taskTypes'
+import { previewCompletion, stageProgressColor } from '@/utils/projectStageProgress'
+import { useTaskStore } from '@/stores/task'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,10 +22,13 @@ const settings = useSettingsStore()
 const projectId = computed(() => String(route.params.projectId || ''))
 const loading = ref(true)
 const error = ref('')
-const artifactCounts = ref<Record<string, number>>({})
+const summary = ref<ProjectProgressSummary | null>(null)
 const tasks = ref<DurableTask[]>([])
 const refreshing = ref(false)
-const SPLIT_VOLUME_NAME = /^第\s+\d+\s+章(?:\s|\.|$)/
+const taskStore = useTaskStore()
+let loadGeneration = 0
+let progressTimer: ReturnType<typeof setTimeout> | undefined
+let viewActive = false
 
 const STAGE_DEFS = [
   { key: 'text', label: '排版与分册', path: '/text', dir: '02_split_text', icon: FileText, taskTypes: modulePrefixes('text', 'book') },
@@ -49,47 +55,78 @@ function stageStatus(stage: typeof STAGE_DEFS[number]) {
     if (task.status === 'paused') return { label: '等待 LLM 恢复', tone: 'warning' as const }
     return { label: task.status === 'running' ? '处理中' : '排队中', tone: 'warning' as const }
   }
-  if ((artifactCounts.value[stage.dir] || 0) > 0) return { label: '已有产物', tone: 'positive' as const }
+  const value = completionFor(stage)
+  if (value?.percent === 100) return { label: '已完成', tone: 'positive' as const }
+  if (value?.percent === null) return { label: '总量待确定', tone: 'neutral' as const }
+  if (value && value.completed > 0) return { label: '部分完成', tone: 'warning' as const }
   return { label: '待开始', tone: 'neutral' as const }
 }
 
-const doneStages = computed(() => STAGES.value.filter((stage) => (artifactCounts.value[stage.dir] || 0) > 0).length)
-const nextStage = computed(() => STAGES.value.find((stage) => ['待开始', '需处理'].includes(stageStatus(stage).label)) || STAGES.value[STAGES.value.length - 1])
+function completionFor(stage: typeof STAGE_DEFS[number]) {
+  const value = summary.value?.stage_completion?.[stage.dir]
+  return stage.key === 'preview' && value ? previewCompletion(value) : value
+}
+const productionStages = computed(() => STAGES.value.filter(stage => stage.key !== 'preview'))
+const doneStages = computed(() => STAGES.value.filter(stage => completionFor(stage)?.percent === 100).length)
+const unknownStages = computed(() => productionStages.value.filter(stage => completionFor(stage)?.percent == null).length)
+const nextStage = computed(() => productionStages.value.find(stage => stageStatus(stage).tone === 'negative')
+  || productionStages.value.find(stage => completionFor(stage)?.percent !== 100)
+  || productionStages.value[productionStages.value.length - 1]!)
+function completionNote(stage: typeof STAGE_DEFS[number]) {
+  const value = completionFor(stage)
+  if (!value) return '进度暂时无法读取'
+  if (stage.key === 'preview') return `${value.completed.toLocaleString()} / ${value.total.toLocaleString()} 段 · 已解析台词`
+  if (value.percent === null) return stage.key === 'audio' ? '确定分集计划后统计' : `当前 ${value.completed} / ${value.total} ${value.unit} · 总量待解析`
+  return `${value.completed.toLocaleString()} / ${value.total.toLocaleString()} ${value.unit}`
+}
+function nextStageReason() {
+  const stage = nextStage.value
+  if (stageStatus(stage).tone === 'negative') return '此阶段有失败任务，请先检查并处理。'
+  const value = completionFor(stage)
+  if (value?.percent == null) return completionNote(stage)
+  if (value.percent === 100) return '制作已完成，可进入阶段继续调整。'
+  return `已完成 ${value.completed} / ${value.total} ${value.unit}，继续完成剩余内容。`
+}
+const stageDescriptions: Record<string, string> = {
+  text: '整理原稿，核对章节与分册',
+  script: '解析台词，识别角色与语气',
+  voices: '制作候选音色，确定角色声音',
+  batch: '按章节生成台词音频',
+  preview: '逐句试听，修订台词与声音',
+  merge: '将台词音频合并为整章',
+  audio: '按时长切分发布音频',
+  bgm: '匹配音乐，混音与试听',
+}
 const recentFailures = computed(() => tasks.value.filter((task) => ['failed', 'timeout'].includes(task.status)).slice(0, 3))
 
 async function load() {
-  // 首帧骨架由 loading（初始 true）驱动：任务列表与各阶段文件数到达前不渲染
-  // 「待开始 / 0 个文件」的假状态；刷新按钮在 refreshing 期间禁用，数据落定后
-  // finally 统一收尾，后续「刷新进度」保留现值并用底部 spinner 提示。
+  const generation = ++loadGeneration
+  const id = projectId.value
   refreshing.value = true
   error.value = ''
   try {
-    if (project.activeProjectId !== projectId.value) await project.select(projectId.value)
+    if (project.activeProjectId !== id) await project.select(id)
     else if (!project.loaded) await project.refresh()
-    const [taskResult, ...fileResults] = await Promise.allSettled([
+    if (generation !== loadGeneration || !viewActive) return
+    const [taskResult, progressResult] = await Promise.allSettled([
       listDurableTasks(),
-      ...STAGES.value.map((stage) => listDir(stage.dir, true)),
+      getProjectProgressSummary(id),
     ])
+    if (generation !== loadGeneration || id !== projectId.value || !viewActive) return
     tasks.value = taskResult.status === 'fulfilled'
-      ? taskResult.value.filter((task) => task.project_id === projectId.value)
+      ? taskResult.value.filter((task) => task.project_id === id)
       : []
-    const counts: Record<string, number> = {}
-    fileResults.forEach((result, index) => {
-      const stage = STAGES.value[index]
-      const files = result.status === 'fulfilled' ? result.value.items.filter((item) => !item.is_dir) : []
-      counts[stage.dir] = stage.key === 'text'
-        ? files.filter((item) => SPLIT_VOLUME_NAME.test(item.name.split('/').pop() || '')).length
-        : files.length
-    })
-    artifactCounts.value = counts
-    if (taskResult.status === 'rejected' && fileResults.every((result) => result.status === 'rejected')) {
+    if (progressResult.status === 'fulfilled') summary.value = progressResult.value
+    else {
       error.value = '项目进度暂时无法读取，请检查连接后重试。'
     }
   } catch (cause: any) {
-    error.value = cause?.message || '无法打开此项目。'
+    if (generation === loadGeneration && viewActive) error.value = cause?.message || '无法打开此项目。'
   } finally {
-    refreshing.value = false
-    loading.value = false
+    if (generation === loadGeneration && viewActive) {
+      refreshing.value = false
+      loading.value = false
+    }
   }
 }
 
@@ -97,74 +134,172 @@ function openStage(path: string) {
   void router.push(path)
 }
 
-onMounted(load)
+watch(projectId, () => {
+  summary.value = null
+  tasks.value = []
+  loading.value = true
+  if (viewActive) void load()
+})
+watch(() => taskStore.tasks.filter(task => task.project_id === projectId.value)
+  .map(task => `${task.id}:${task.status}:${task.progress}`).join('|'), () => {
+  if (!viewActive) return
+  clearTimeout(progressTimer)
+  progressTimer = setTimeout(() => { void load() }, 500)
+})
+onActivated(() => {
+  viewActive = true
+  taskStore.setTaskCenterOpen(true)
+  void load()
+})
+function deactivate() {
+  viewActive = false
+  loadGeneration += 1
+  clearTimeout(progressTimer)
+  taskStore.setTaskCenterOpen(false)
+}
+onDeactivated(deactivate)
+onUnmounted(deactivate)
 </script>
 
 <template>
-  <div class="project-overview">
-    <header class="project-overview__head">
-      <div>
-        <RouterLink class="back-link" to="/dashboard"><ArrowLeft class="h-3.5 w-3.5" />所有项目</RouterLink>
-        <p class="eyebrow">项目工作台</p>
-        <h1>{{ project.activeProjectName || project.activeProject?.name || '项目' }}</h1>
-        <p class="muted">查看进度，继续下一步制作。</p>
-      </div>
-      <div class="project-overview__actions">
-        <Button variant="outline" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" />刷新进度</Button>
-        <Button @click="openStage('/text')"><Upload class="h-4 w-4" />导入原文</Button>
+  <div class="project-overview viewport-page">
+    <header class="page-header">
+      <div class="overview-heading">
+        <div class="min-w-0">
+          <p class="eyebrow">PROJECT · WORKSPACE</p>
+          <h1 class="page-title">{{ project.activeProjectName || project.activeProject?.name || '项目' }}</h1>
+          <p class="page-description">查看制作状态，进入阶段继续制作。</p>
+        </div>
+        <RouterLink class="back-link" to="/dashboard"><ArrowLeft class="h-4 w-4" />所有项目</RouterLink>
       </div>
     </header>
 
     <div v-if="error" class="project-alert" role="alert"><span>{{ error }}</span><Button variant="outline" size="sm" @click="load">重试</Button></div>
 
-    <Card class="project-progress">
-      <div class="project-progress__top">
-        <div><span class="muted">制作进度</span><strong>{{ doneStages }} / {{ STAGES.length }} 阶段已有产物</strong></div>
-        <StatusPill v-if="loading" label="正在加载…" tone="neutral" />
-        <StatusPill v-else-if="recentFailures.length" label="有任务需处理" tone="negative" />
-        <StatusPill v-else label="项目可继续制作" tone="positive" />
-      </div>
-      <div class="project-progress__bar"><span :style="{ width: `${(doneStages / STAGES.length) * 100}%` }" /></div>
-      <div class="project-progress__next">
-        <div><span class="muted">建议下一步</span><strong>{{ nextStage.label }}</strong></div>
-        <Button size="sm" @click="openStage(nextStage.path)">继续制作<ArrowRight class="h-4 w-4" /></Button>
-      </div>
-    </Card>
+    <WorkbenchContextBar class="overview-context" :aria-busy="refreshing">
+      <template #icon><FileAudio2 /></template>
+      <template #title>制作总览</template>
+      <template #description>按实际完成量统计，文件存在不等于制作完成</template>
+      <template #metrics>
+        <div class="workbench-context-metric"><strong>{{ loading ? '—' : doneStages }} / {{ STAGES.length }}</strong>已完成阶段</div>
+        <div class="workbench-context-metric"><strong class="!text-amber-600 dark:!text-amber-400">{{ loading ? '—' : STAGES.length - doneStages }}</strong>待推进</div>
+        <div class="workbench-context-metric"><strong>{{ loading ? '—' : unknownStages }}</strong>总量待确定</div>
+      </template>
+      <template #actions><Button variant="ghost" size="sm" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" :class="{ 'animate-spin': refreshing }" />刷新</Button></template>
+    </WorkbenchContextBar>
 
-    <section class="stage-section">
-      <div class="section-title"><div><h2>制作流程</h2><p>阶段完成后可以直接进入任意步骤继续调整。</p></div></div>
-      <div v-if="loading" class="stage-grid" aria-label="正在加载项目进度">
-        <Card v-for="n in 4" :key="n" class="stage-skeleton"><div class="skeleton-line w-1/3" /><div class="skeleton-line w-2/3" /></Card>
-      </div>
-      <div v-else class="stage-grid">
-        <button v-for="(stage, index) in STAGES" :key="stage.key" type="button" class="stage-card" @click="openStage(stage.path)">
-          <div class="stage-card__top"><span class="stage-number">{{ String(index + 1).padStart(2, '0') }}</span><component :is="stage.icon" class="h-4 w-4" /></div>
-          <strong>{{ stage.label }}</strong>
-          <div class="stage-card__status"><StatusPill :label="stageStatus(stage).label" :tone="stageStatus(stage).tone" /><span>{{ artifactCounts[stage.dir] || 0 }} {{ stage.key === 'text' ? '个分册' : '个文件' }}</span></div>
-          <ArrowRight class="stage-card__arrow h-4 w-4" />
-        </button>
-      </div>
-    </section>
-
-    <section class="project-bottom">
-      <Card class="next-action">
-        <div class="next-action__icon"><ArrowRight class="h-5 w-5" /></div>
-        <div><p class="muted">从这里继续</p><h2>{{ nextStage.label }}</h2><p class="muted">阶段内部设置和工具保持原样。</p></div>
-        <Button @click="openStage(nextStage.path)">打开阶段<ArrowRight class="h-4 w-4" /></Button>
-      </Card>
-      <Card class="attention-card">
-        <div class="section-title section-title--compact"><div><h2>最近需要处理</h2><p>仅包含此项目的失败任务。</p></div><CircleAlert class="h-4 w-4" /></div>
-        <div v-if="loading" class="stage-skeleton" aria-label="正在读取任务状态"><div class="skeleton-line w-2/3" /></div>
-        <div v-else-if="recentFailures.length" class="failure-list">
-          <div v-for="task in recentFailures" :key="task.id" class="failure-row"><div><strong>{{ taskTypeLabel(task.task_type) }}</strong><small>{{ task.error_message || '任务失败，请重试或检查输入。' }}</small></div><StatusPill label="失败" tone="negative" /></div>
+    <div class="overview-workspace">
+      <Card class="stage-panel">
+        <div class="panel-heading"><div><h2>制作流程</h2><p>点击阶段进入工作台</p></div><span>{{ STAGES.length }} 个阶段</span></div>
+        <div class="stage-columns" aria-hidden="true"><span>阶段 / 功能</span><span>状态</span><span>完成进度 / 数量</span></div>
+        <div class="stage-list">
+          <div v-if="loading" class="stage-loading" role="status"><LoaderCircle class="h-5 w-5 animate-spin" />正在读取制作进度</div>
+          <template v-else>
+            <button v-for="(stage, index) in STAGES" :key="stage.key" type="button" class="stage-row" :class="{ 'is-next': stage.key === nextStage.key }" @click="openStage(stage.path)">
+              <span class="stage-row__identity"><span class="stage-number">{{ String(index + 1).padStart(2, '0') }}</span><span class="stage-icon"><component :is="stage.icon" class="h-4 w-4" /></span><span class="stage-copy"><strong>{{ stage.label }}<small v-if="stage.key === nextStage.key">建议下一步</small></strong><span>{{ stageDescriptions[stage.key] }}</span></span></span>
+              <StatusPill :label="stageStatus(stage).label" :tone="stageStatus(stage).tone" />
+              <span class="stage-completion" :style="{ '--progress-color': stageProgressColor(completionFor(stage)?.percent ?? 0) }">
+                <span class="stage-completion__heading"><span>{{ stage.key === 'preview' ? '可预览比例' : completionFor(stage)?.percent == null ? '总量待确定' : '完成比例' }}</span><strong>{{ completionFor(stage)?.percent == null ? '—' : `${completionFor(stage)!.percent}%` }}</strong></span>
+                <span class="stage-progress" :class="{ 'is-unknown': completionFor(stage)?.percent == null }" role="progressbar" :aria-label="`${stage.label}：${completionNote(stage)}`" :aria-valuenow="completionFor(stage)?.percent ?? undefined" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${completionFor(stage)?.percent ?? 0}%` }" /></span>
+                <span class="stage-completion__note">{{ completionNote(stage) }}</span>
+              </span>
+            </button>
+          </template>
         </div>
-        <p v-else class="empty-inline">目前没有失败任务。</p>
+        <p class="stage-footnote">红色 → 紫色表示完成比例；整章预览按已解析台词的有效音频统计，试听为可选操作。</p>
       </Card>
-    </section>
-    <div v-if="refreshing && !loading" class="refreshing-note"><LoaderCircle class="h-3.5 w-3.5 animate-spin" />正在更新项目状态</div>
+
+      <aside class="overview-sidebar" aria-label="项目操作与任务">
+        <Card class="next-action">
+          <span class="section-eyebrow">建议下一步</span>
+          <div v-if="loading" class="stage-loading"><LoaderCircle class="h-4 w-4 animate-spin" />正在读取</div>
+          <template v-else>
+            <span class="next-action__icon"><component :is="nextStage.icon" class="h-6 w-6" /></span>
+            <h2>{{ nextStage.label }}</h2>
+            <p>{{ stageDescriptions[nextStage.key] }}</p>
+            <p class="next-action__reason">{{ nextStageReason() }}</p>
+            <Button class="next-action__button" @click="openStage(nextStage.path)">进入{{ nextStage.label }}<ArrowRight class="h-4 w-4" /></Button>
+          </template>
+          <div class="import-action"><span>添加或更换原稿</span><Button variant="ghost" size="sm" @click="openStage('/text')"><Upload class="h-4 w-4" />导入原文</Button></div>
+        </Card>
+
+        <Card class="attention-card">
+          <div class="attention-heading"><h2>需要处理</h2><span v-if="!loading">{{ tasks.filter(task => ['failed', 'timeout'].includes(task.status)).length }}</span></div>
+          <div v-if="loading" class="stage-loading" role="status"><LoaderCircle class="h-4 w-4 animate-spin" />正在读取任务</div>
+          <div v-else-if="recentFailures.length" class="failure-list">
+            <div v-for="task in recentFailures" :key="task.id" class="failure-row"><CircleAlert class="h-4 w-4" /><div><strong>{{ taskTypeLabel(task.task_type) }}</strong><p>{{ task.error_message || '任务失败，请重试或检查输入。' }}</p></div></div>
+          </div>
+          <div v-else class="attention-empty"><CheckCircle2 class="h-5 w-5" /><div><strong>暂无失败任务</strong><p>可继续进入阶段制作</p></div></div>
+          <Button variant="ghost" size="sm" class="task-link" @click="openStage('/tasks')">查看任务中心<ArrowRight class="h-3.5 w-3.5" /></Button>
+        </Card>
+      </aside>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.project-overview{display:grid;gap:22px;max-width:1320px;margin:0 auto;padding-bottom:30px}.project-overview__head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap}.back-link{display:inline-flex;align-items:center;gap:4px;color:hsl(var(--muted-foreground));font-size:11px;font-weight:600}.back-link:hover{color:hsl(var(--primary))}.eyebrow{margin-top:13px;font-size:10px;font-weight:800;letter-spacing:.14em;color:hsl(var(--primary))}.project-overview__head h1{margin-top:3px;font-size:26px;font-weight:750}.muted,.section-title p,.empty-inline{color:hsl(var(--muted-foreground));font-size:12px}.project-overview__head .muted{margin-top:4px}.project-overview__actions{display:flex;gap:8px;flex-wrap:wrap}.project-progress{padding:16px 18px}.project-progress__top,.project-progress__next{display:flex;align-items:center;justify-content:space-between;gap:12px}.project-progress__top>div,.project-progress__next>div{display:grid;gap:4px}.project-progress__top strong,.project-progress__next strong{font-size:14px}.project-progress__bar{height:6px;margin:14px 0;border-radius:99px;background:hsl(var(--muted));overflow:hidden}.project-progress__bar span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,hsl(var(--primary)),hsl(199 89% 48%));transition:width .2s}.project-progress__next{border-top:1px solid hsl(var(--border));padding-top:13px}.stage-section{display:grid;gap:12px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.section-title h2{font-size:16px;font-weight:750}.section-title p{margin-top:3px}.stage-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.stage-card{position:relative;display:grid;gap:12px;min-height:128px;border:1px solid var(--glass-border);border-radius:11px;background:var(--glass-tint);box-shadow:var(--glass-highlight),var(--glass-shadow);padding:14px;text-align:left;transition:border-color .14s,transform .14s,box-shadow .14s}.stage-card:hover{transform:translateY(-1px);border-color:hsl(var(--primary)/.45);box-shadow:var(--glass-highlight),0 6px 16px hsl(var(--foreground)/.07)}.stage-card__top{display:flex;justify-content:space-between;align-items:center;color:hsl(var(--primary))}.stage-number{font-size:10px;font-weight:800;letter-spacing:.1em;color:hsl(var(--muted-foreground))}.stage-card>strong{font-size:13px}.stage-card__status{display:flex;align-items:center;justify-content:space-between;gap:8px}.stage-card__status>span{color:hsl(var(--muted-foreground));font-size:10px}.stage-card__arrow{position:absolute;right:13px;top:44px;color:hsl(var(--muted-foreground));opacity:0;transition:opacity .15s}.stage-card:hover .stage-card__arrow{opacity:1}.project-bottom{display:grid;grid-template-columns:1fr 1fr;gap:12px}.next-action{display:flex;align-items:center;gap:13px;padding:16px}.next-action__icon{display:grid;place-items:center;width:40px;height:40px;flex:none;border-radius:11px;background:hsl(var(--primary)/.09);color:hsl(var(--primary))}.next-action>div:nth-child(2){min-width:0;flex:1}.next-action h2{margin:2px 0;font-size:14px;font-weight:700}.next-action>div:nth-child(2) p:last-child{font-size:10px}.attention-card{padding:15px}.section-title--compact{margin-bottom:12px}.section-title--compact svg{color:hsl(var(--muted-foreground))}.failure-list{display:grid;gap:7px}.failure-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;border-top:1px solid hsl(var(--border));padding-top:9px}.failure-row strong,.failure-row small{display:block}.failure-row strong{font-size:11px}.failure-row small{max-width:360px;margin-top:3px;color:hsl(var(--muted-foreground));font-size:10px;overflow-wrap:anywhere}.stage-skeleton{display:grid;gap:14px;padding:15px}.skeleton-line{height:11px;border-radius:6px;background:hsl(var(--muted));animation:pulse 1.4s ease-in-out infinite}.stage-skeleton .w-1\/3{width:33%}.stage-skeleton .w-2\/3{width:66%}.refreshing-note{display:flex;align-items:center;gap:5px;color:hsl(var(--muted-foreground));font-size:10px}.project-alert{display:flex;justify-content:space-between;align-items:center;gap:12px;border:1px solid hsl(var(--destructive)/.25);border-radius:10px;background:hsl(var(--destructive)/.06);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}@keyframes pulse{50%{opacity:.4}}@media(max-width:900px){.stage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.project-bottom{grid-template-columns:1fr}}@media(max-width:600px){.project-overview__head h1{font-size:22px}.project-overview__actions{width:100%}.project-overview__actions>*{flex:1}.stage-grid{grid-template-columns:1fr}.project-progress__top{align-items:flex-start}.next-action{flex-wrap:wrap}.next-action>div:nth-child(2){min-width:calc(100% - 55px)}.next-action>button{width:100%}}
+.project-overview{width:100%;min-width:0}
+.overview-heading{display:flex;justify-content:space-between;align-items:center;gap:24px}
+.back-link{display:inline-flex;align-items:center;gap:6px;flex:none;color:hsl(var(--muted-foreground));font-size:12px;font-weight:600;padding:8px 0}
+.back-link:hover{color:hsl(var(--primary))}
+.overview-context{flex:none}
+.stage-icon,.next-action__icon{display:grid;place-items:center;flex:none;color:hsl(var(--primary));background:hsl(var(--primary)/.08);border-radius:9px}
+.overview-workspace{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:14px;flex:1;min-height:0;min-width:0}
+.stage-panel{display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+.panel-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 18px;flex:none}
+.panel-heading h2,.attention-heading h2{font-size:14px;font-weight:700}
+.panel-heading>span{font-size:11px;color:hsl(var(--muted-foreground))}
+.stage-columns{display:grid;grid-template-columns:minmax(0,1fr) 90px 220px;gap:18px;padding:8px 18px;background:hsl(var(--muted)/.3);border-top:1px solid hsl(var(--border));border-bottom:1px solid hsl(var(--border));font-size:10px;color:hsl(var(--muted-foreground));flex:none}
+.stage-list{display:flex;flex-direction:column;flex:1;min-height:0;overflow:auto}
+.stage-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 220px;gap:18px;align-items:center;text-align:left;padding:8px 18px;flex:1 0 62px;min-height:62px;border-bottom:1px solid hsl(var(--border)/.7);transition:background .15s}
+.stage-row:last-child{border-bottom:0}
+.stage-row:hover{background:hsl(var(--primary)/.04)}
+.stage-row:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:-2px}
+.stage-row.is-next{background:hsl(var(--primary)/.045);box-shadow:inset 3px 0 hsl(var(--primary))}
+.stage-row__identity{display:flex;align-items:center;gap:12px;min-width:0}
+.stage-number{font-size:11px;font-weight:500;color:hsl(var(--muted-foreground));font-variant-numeric:tabular-nums;flex:none;width:18px}
+.stage-icon{width:30px;height:30px}
+.stage-copy{min-width:0;display:grid;gap:4px}
+.stage-copy>strong{font-size:13px;font-weight:650;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.stage-copy small{font-size:9px;color:hsl(var(--primary));font-weight:500}
+.stage-copy>span{font-size:11px;color:hsl(var(--muted-foreground))}
+.stage-completion{display:grid;gap:6px;min-width:0;font-variant-numeric:tabular-nums}
+.stage-completion__heading{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.stage-completion__heading>span{font-size:10px;color:hsl(var(--muted-foreground))}
+.stage-completion__heading strong{font-size:15px;line-height:1;font-weight:700}
+.stage-progress{display:block;height:5px;border-radius:5px;background:rgb(var(--progress-color)/.16);overflow:hidden}
+.stage-progress>span{display:block;height:100%;min-width:2px;border-radius:inherit;background:rgb(var(--progress-color));transition:width .45s,background-color .45s}
+.stage-progress.is-unknown{background:hsl(var(--muted))}
+.stage-progress.is-unknown>span{display:none}
+.stage-completion__note{font-size:10px;line-height:1.4;color:hsl(var(--muted-foreground))}
+.next-action>p.next-action__reason{padding:9px 10px;background:hsl(var(--primary)/.05);border-radius:8px;color:hsl(var(--foreground));font-size:11px;margin-top:12px}
+@media(prefers-reduced-motion:reduce){.stage-progress>span{transition:none}}
+.stage-footnote{font-size:10px;color:hsl(var(--muted-foreground));padding:10px 18px;border-top:1px solid hsl(var(--border));flex:none}
+.overview-sidebar{display:flex;flex-direction:column;gap:14px;min-width:0;min-height:0;overflow:auto}
+.next-action{padding:16px;flex:none}
+.section-eyebrow{display:block;font-size:11px;color:hsl(var(--muted-foreground));font-weight:600}
+.next-action__icon{width:38px;height:38px;margin-top:14px}
+.next-action h2{font-size:20px;line-height:1.3;font-weight:750;margin-top:14px}
+.next-action>p{font-size:12px;line-height:1.7;color:hsl(var(--muted-foreground));margin-top:6px}
+.next-action__button{width:100%;margin-top:14px;justify-content:space-between}
+.import-action{display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid hsl(var(--border));padding-top:10px;margin-top:14px;font-size:10px;color:hsl(var(--muted-foreground))}
+.attention-card{padding:18px;flex:1;display:flex;flex-direction:column;min-height:180px}
+.attention-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.attention-heading>span{font-size:11px;color:hsl(var(--muted-foreground));font-variant-numeric:tabular-nums}
+.attention-empty{display:flex;align-items:flex-start;gap:10px;margin:22px 0;color:hsl(var(--muted-foreground))}
+.attention-empty>svg{flex:none;color:hsl(var(--success))}
+.attention-empty strong{font-size:12px;font-weight:600;color:hsl(var(--foreground))}
+.attention-empty p{font-size:11px;margin-top:5px;line-height:1.6}
+.task-link{margin-top:auto;align-self:flex-start}
+.failure-list{display:grid;gap:12px;margin:18px 0}
+.failure-row{display:flex;align-items:flex-start;gap:8px}
+.failure-row>svg{flex:none;color:hsl(var(--destructive));margin-top:2px}
+.failure-row strong{font-size:12px;font-weight:600}
+.failure-row p{font-size:11px;line-height:1.6;color:hsl(var(--muted-foreground));margin-top:4px;overflow-wrap:anywhere}
+.stage-loading{display:flex;align-items:center;justify-content:center;gap:8px;flex:1;padding:24px;font-size:12px;color:hsl(var(--muted-foreground))}
+.project-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;border:1px solid hsl(var(--destructive)/.3);border-radius:12px;color:hsl(var(--destructive));font-size:12px;flex:none}
+@media(max-height:780px) and (min-width:761px){.stage-row{flex-basis:48px;min-height:48px;padding-top:5px;padding-bottom:5px}.stage-completion{gap:3px}.stage-progress{height:4px}.stage-completion__note{font-size:9px}.next-action__icon{display:none}.next-action h2{margin-top:10px}.next-action__button{margin-top:10px}.next-action>p.next-action__reason{margin-top:8px}.import-action{margin-top:10px;padding-top:8px}.attention-card{min-height:150px}.stage-copy{gap:3px}}
+@media(max-width:1200px){.overview-workspace{grid-template-columns:minmax(0,1fr) 240px}.stage-columns,.stage-row{grid-template-columns:minmax(0,1fr) 76px minmax(145px,30%);gap:12px;padding-left:14px;padding-right:14px}.stage-row__identity{gap:8px}.stage-icon{display:none}.next-action{padding:16px}.stage-copy small{display:none}}
+@media(max-width:760px){.overview-workspace{display:flex;flex-direction:column;overflow:auto}.stage-panel{flex:none;min-height:560px}.overview-sidebar{overflow:visible;flex:none;display:grid;grid-template-columns:1fr 1fr}.overview-heading{gap:10px}.back-link{font-size:10px}.stage-copy small{display:none}.attention-card{min-height:0}}
+@media(max-width:520px){.overview-sidebar{grid-template-columns:1fr}.stage-copy>span{display:none}.stage-row,.stage-columns{grid-template-columns:minmax(0,1fr) 68px 125px;gap:8px}.stage-number{display:none}.stage-copy>strong{font-size:12px}.stage-completion__note{font-size:9px}}
 </style>

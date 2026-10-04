@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs",
+    "test:production-workbench": "node scripts/test-production-workbench.mjs",
     "test:voices-workbench": "node scripts/test-voices-workbench.mjs",
     "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs",
     "test:admin-console": "node scripts/test-admin-console.mjs"

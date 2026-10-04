@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useTenRowHeight } from '@/composables/useTenRowHeight'
+import { computed } from 'vue'
 import Progress from '@/components/ui/Progress.vue'
 import Button from '@/components/ui/Button.vue'
 import { RefreshCw, XCircle } from 'lucide-vue-next'
 import { formatNumber } from '@/utils/format'
 import { padChapterNum } from '@/utils/bookLabels'
-import { TONE_CHIP, type ParseRow } from '@/composables/useScriptParseWorkbench'
+import { TONE_TEXT, type ParseRow } from '@/composables/useScriptParseWorkbench'
 
 const props = defineProps<{
   rows: ParseRow[]
@@ -17,6 +16,7 @@ const props = defineProps<{
   pageSize?: number
   /** 提交/批量取消在途时禁用勾选（在跑批次中改动会触发 409）。 */
   selectDisabled?: boolean
+  emptyMessage?: string
 }>()
 const emit = defineEmits<{
   (e: 'select', name: string): void
@@ -25,8 +25,6 @@ const emit = defineEmits<{
   (e: 'cancel', row: ParseRow): void
 }>()
 
-const table = ref<HTMLTableElement | null>(null)
-const rowHeight = useTenRowHeight(table, () => props.pageSize ?? 10)
 const chapterColClass = computed(() => ['w-20', 'w-24', 'w-28', 'w-32'][Math.min((props.numPad ?? 3) - 1, 3)] ?? 'w-32')
 function chapterLabel(row: ParseRow): string {
   return padChapterNum(row.chapter.numStr, props.numPad ?? 3)
@@ -38,7 +36,7 @@ function failText(row: ParseRow): string {
 </script>
 
 <template>
-  <table ref="table" class="wb-chapter-table" :style="{ '--chapter-row-height': `${rowHeight}px` }" aria-label="章节解析列表">
+  <table class="wb-chapter-table workbench-table" :class="{ 'wb-chapter-table--empty': !rows.length }" aria-label="章节解析列表">
     <thead>
       <tr>
         <th class="w-10" aria-label="选择" />
@@ -76,15 +74,14 @@ function failText(row: ParseRow): string {
           {{ row.chapter.chars ? formatNumber(row.chapter.chars) : '—' }}
         </td>
         <td>
-          <!-- 状态单元格单行布局：chip + 进度 + 原因（截断）+ 操作按钮。
-               提示文字与 chip 同行（truncate + title 全文），不占独立行高。 -->
+          <!-- 状态单元格单行布局：状态文字 + 进度 + 原因（截断）+ 操作按钮。
+               提示文字与状态同行（truncate + title 全文），不占独立行高。 -->
           <div class="flex min-w-0 items-center gap-2">
             <span
-              class="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold leading-none tracking-wide"
-              :class="TONE_CHIP[row.tone].chip"
+              class="shrink-0 text-xs font-semibold leading-normal"
+              :class="TONE_TEXT[row.tone]"
               :title="row.error || undefined"
             >
-              <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="TONE_CHIP[row.tone].dot" aria-hidden="true" />
               {{ row.label }}
             </span>
             <template v-if="row.status === 'active'">
@@ -126,7 +123,7 @@ function failText(row: ParseRow): string {
       </tr>
       <tr v-if="!rows.length">
         <td :colspan="5" class="h-20 text-center text-sm text-muted-foreground">
-          没有符合条件的章节
+          {{ emptyMessage ?? '没有符合条件的章节' }}
         </td>
       </tr>
     </tbody>
@@ -136,12 +133,12 @@ function failText(row: ParseRow): string {
 <style scoped>
 /* Match the voices list: native table, one outer scroller, no row component wrappers. */
 .wb-chapter-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:12px; line-height:18px; }
-.wb-chapter-table th { position:sticky; top:0; z-index:1; height:28px; padding:5px 12px; text-align:left; font-size:11px; line-height:18px; font-weight:500; color:hsl(var(--muted-foreground)); background:hsl(var(--card)); }
-.wb-chapter-table td { height:var(--chapter-row-height, 32px); padding:3px 12px; vertical-align:middle; border-bottom:1px solid hsl(var(--border) / .6); }
 .wb-chapter-table th.text-right { text-align:right; }
 .wb-chapter-table tbody tr:hover { background:hsl(var(--muted) / .5); }
 .wb-chapter-table tr[data-state='selected'] { background:hsl(var(--primary) / .08); box-shadow:inset 3px 0 hsl(var(--primary)); }
 .wb-chapter-table td[colspan] { height:80px; }
+.wb-chapter-table--empty { height:100%; }
+.wb-chapter-table--empty td[colspan] { height:auto; border-bottom:0; }
 .chapter-select { text-align:left; }
 .chapter-select:focus-visible { outline:2px solid hsl(var(--ring)); outline-offset:2px; border-radius:3px; }
 @media(pointer:coarse) { .chapter-select { min-height:44px; } }

@@ -363,8 +363,8 @@ def _display_chapters(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return displayed
 
 
-def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[str, Any]:
-    raw = analyze_text(text)
+def _book_analysis_result(text: str, encoding: str, source_name: str, *, on_progress: Callable[[float], None] | None = None) -> dict[str, Any]:
+    raw = analyze_text(text, on_progress=(lambda value: on_progress(value * 0.7)) if on_progress else None)
     raw_chapters = raw["chapters"]
     raw_sequence = check_chapter_sequence(raw_chapters)
     chapters = raw_chapters
@@ -376,6 +376,8 @@ def _book_analysis_result(text: str, encoding: str, source_name: str) -> dict[st
             chapters = _display_chapters(repair["chapters"])
             filenames = make_smart_filenames(repair["chapters"])
             repair_status = repair["status"]
+    if on_progress:
+        on_progress(1.0)
     result = {
         "source": source_name,
         "encoding": encoding,
@@ -688,10 +690,29 @@ def _prepare_text_claim(claim: TaskClaim) -> tuple[ProjectFile, str, str, Path]:
     return item, source_text, encoding, source_path
 
 
+def _text_progress_reporter(claim: TaskClaim, start: int, end: int, label: str) -> Callable[[float], None]:
+    """Report actual work without writing one database event per input line."""
+    last_value = start - 1
+    last_time = 0.0
+
+    def report(fraction: float) -> None:
+        nonlocal last_value, last_time
+        value = start + int(max(0.0, min(1.0, fraction)) * (end - start))
+        now = time.monotonic()
+        if value <= last_value or (value != end and value - last_value < 5 and now - last_time < 0.5):
+            return
+        if cancellation_requested(claim):
+            raise TaskCancelledError()
+        update_progress(claim, value, label)
+        last_value, last_time = value, now
+
+    return report
+
+
 def _execute_text_format(claim: TaskClaim) -> TaskOutcome:
     item, source_text, _encoding, _source_path = _prepare_text_claim(claim)
     config = TextConfig.model_validate(claim.payload.get("config") or {})
-    result = format_text(source_text, config)
+    result = format_text(source_text, config, on_progress=_text_progress_reporter(claim, 10, 75, "排版文本"))
     update_progress(claim, 75, "完成排版")
     output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_formatted.txt")
     return write_task_outcome(
@@ -707,12 +728,13 @@ def _execute_text_format(claim: TaskClaim) -> TaskOutcome:
             "full_length": len(result["text"]),
         },
         publish_module=str(claim.payload.get("publish_module") or "") or None,
+        on_progress=_text_progress_reporter(claim, 75, 95, "写入排版结果"),
     )
 
 
 def _execute_book_analyze(claim: TaskClaim) -> TaskOutcome:
     item, source_text, encoding, source_path = _prepare_text_claim(claim)
-    analysis = _book_analysis_result(source_text, encoding, str(source_path))
+    analysis = _book_analysis_result(source_text, encoding, str(source_path), on_progress=_text_progress_reporter(claim, 10, 75, "分析章节"))
     update_progress(claim, 75, "完成章节分析")
     output_name = str(claim.payload.get("output_name") or f"{Path(item.original_name).stem}_analysis.json")
     return write_task_outcome(
@@ -722,6 +744,7 @@ def _execute_book_analyze(claim: TaskClaim) -> TaskOutcome:
         json.dumps(analysis, ensure_ascii=False, indent=2).encode("utf-8"),
         {"engine": "book.analyze", "source_file_id": item.id, "analysis": analysis},
         publish_module=str(claim.payload.get("publish_module") or "") or None,
+        on_progress=_text_progress_reporter(claim, 75, 95, "写入章节分析"),
     )
 
 
@@ -748,7 +771,7 @@ def _length_target_from_payload(payload: dict[str, Any]) -> int:
 
 def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
     item, source_text, _encoding, _source_path = _prepare_text_claim(claim)
-    raw = analyze_text(source_text)
+    raw = analyze_text(source_text, on_progress=_text_progress_reporter(claim, 10, 40, "识别分册章节"))
     chapters = raw["chapters"]
     base = str(claim.payload.get("base") or base_name(item.original_name)).strip() or base_name(item.original_name)
     outputs: list[tuple[str, str, bytes]] = []
@@ -863,6 +886,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
         },
         publish_module="02_split_text",
         additional_outputs=outputs[1:],
+        on_progress=_text_progress_reporter(claim, 75, 95, "写入分册文件"),
     )
 
 
@@ -944,6 +968,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 select(ProjectFile).where(
                     ProjectFile.owner_id == task.owner_id,
                     ProjectFile.project_id == task.project_id,
+                    ProjectFile.kind == "artifact",
                     ProjectFile.object_key.like(module_prefix + "%"),
                 )
             ).all():
