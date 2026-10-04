@@ -16,15 +16,18 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
 pytest.importorskip("sqlalchemy")
 
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import ProjectFile, Task, TaskResult, User, UserQuotaAccount, utcnow
+from backend.platform.deps import AuthContext
+from backend.platform.file_catalog import catalog_managed_file
+from backend.platform.models import Project, ProjectFile, Task, TaskResult, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path
 from backend.platform.task_submission import task_dict
-from backend.services.script_parse_state import get_state
+from backend.services.script_parse_state import _build_file_states, get_state
 from sqlalchemy import select
 
 
@@ -467,6 +470,234 @@ def test_run_catalogs_legacy_disk_file_without_table_row(client: TestClient):
     body = _state(client, email, csrf, project_id)
     listed = {f["name"] for f in body["files"]}
     assert "legacy-chapter.txt" in listed
+
+
+def test_run_catalog_preserves_published_original_name(client: TestClient):
+    """补登撞到发布行（object_key 撞车）：只更新摘要，不得把 original_name
+    改写成磁盘名。发布行留引擎原始名（带全角标点），磁盘名经
+    safe_display_name 已把「，」换成「_」。"""
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    raw_name = "第 005 章 九州，欢族.txt"
+    disk_name = "第 005 章 九州_欢族.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        path = split_dir / disk_name
+        path.write_text("章节内容", encoding="utf-8")
+        disk_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        item = ProjectFile(
+            project_id=project_id,
+            owner_id=user_id,
+            original_name=raw_name,
+            object_key=f"{user.username}/{project_id}/02_split_text/{disk_name}",
+            content_type="text/plain",
+            kind="artifact",
+            size_bytes=4,
+            sha256=_sha("旧摘要"),
+        )
+        db.add(item)
+        db.commit()
+        item_id = item.id
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": disk_name}]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["files"][0]["input_sha256"] == disk_sha
+    with SessionLocal() as db:
+        row = db.get(ProjectFile, item_id)
+        assert row.original_name == raw_name
+        assert row.sha256 == disk_sha
+        task = db.get(Task, body["files"][0]["task_id"])
+        assert task.payload["input_file_id"] == item_id
+
+
+def test_run_accepts_name_differing_only_by_storage_sanitization(client: TestClient):
+    """行的 original_name 已是磁盘名（历史补登改写过），页面仍按引擎原始名
+    引用：名字只差一层 safe_display_name 即同一文件，不得判「分册文本不存在」。"""
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    raw_name = "第 010 章 夜阑，柔情.txt"
+    disk_name = "第 010 章 夜阑_柔情.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        item = _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        db.commit()
+        item_id = item.id
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": raw_name, "sha256": _sha("s")}]},
+    )
+    assert response.status_code == 200, response.text
+    with SessionLocal() as db:
+        task = db.get(Task, response.json()["files"][0]["task_id"])
+        assert task.payload["input_file_id"] == item_id
+
+
+def test_state_legacy_disk_only_aligns_with_storage_sanitization(client: TestClient):
+    """legacy 模式下，表名与磁盘名只差 safe_display_name 的章节只按表名出现
+    一次，不再以磁盘名双列。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 016 章 都城—燕云.txt"
+    disk_name = "第 016 章 都城_燕云.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, raw_name, _sha("s"))
+        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        (split_dir / disk_name).write_text("章节内容", encoding="utf-8")
+        db.commit()
+    state = _state(client, email, csrf, project_id)
+    assert state["source"]["mode"] == "legacy"
+    names = [f["name"] for f in state["files"]]
+    assert raw_name in names
+    assert disk_name not in names
+    assert disk_name not in state["source"]["disk_only"]
+
+
+def test_download_falls_back_to_storage_sanitized_name(client: TestClient):
+    """legacy 预览/下载：按表名（引擎原始名，含，）请求，磁盘名经清洗（→_）——
+    精确名未命中时按清洗名回退解析，而不是 400 非法路径。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 005 章 九州，欢族.txt"
+    disk_name = "第 005 章 九州_欢族.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        (split_dir / disk_name).write_text("章节内容", encoding="utf-8")
+        db.commit()
+    response = client.get(f"/api/files/download/02_split_text/{raw_name}")
+    assert response.status_code == 200, response.text
+    assert response.content == "章节内容".encode("utf-8")
+    # 真实存在的磁盘名直取不受影响。
+    assert client.get(f"/api/files/download/02_split_text/{disk_name}").status_code == 200
+    # 两者都不存在仍是 400。
+    assert client.get("/api/files/download/02_split_text/不存在_章节.txt").status_code == 400
+
+
+def test_catalog_managed_file_collision_keeps_original_name(client: TestClient):
+    """catalog_managed_file 撞已有行（与解析补登同款根因）：只更新摘要，
+    不把 original_name 改写成磁盘名。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 007 章 清明，故人.txt"
+    disk_name = "第 007 章 清明_故人.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir.mkdir(parents=True, exist_ok=True)
+        path = split_dir / disk_name
+        path.write_text("章节内容", encoding="utf-8")
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        item = ProjectFile(
+            project_id=project_id,
+            owner_id=user_id,
+            original_name=raw_name,
+            object_key=f"{user.username}/{project_id}/02_split_text/{disk_name}",
+            content_type="text/plain",
+            kind="artifact",
+            size_bytes=4,
+            sha256=_sha("旧摘要"),
+        )
+        db.add(item)
+        db.commit()
+        item_id = item.id
+        ctx = AuthContext(user=user, session=SimpleNamespace(active_project_id=project_id))
+        row = catalog_managed_file(path, ctx, db)
+        db.commit()
+    assert row.id == item_id
+    assert row.original_name == raw_name
+    assert row.sha256 == sha
+
+
+def test_build_file_states_resolves_storage_sanitized_alias(client: TestClient):
+    """version 列表按引擎原始名（含，）引用、行 original_name 已是磁盘名
+    （历史改写过）：input 经别名索引解析到该行，而不是显示成无输入。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 011 章 破晓，秋水.txt"
+    disk_name = "第 011 章 破晓_秋水.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        db.commit()
+        project = db.get(Project, project_id)
+        states = _build_file_states(db, user, project, [raw_name])
+    assert len(states) == 1
+    assert states[0]["input"] is not None
+    assert states[0]["input"]["name"] == disk_name
+    assert states[0]["input"]["sha256"] == _sha("s")
+
+
+def test_build_file_states_resolves_task_and_result_alias(client: TestClient):
+    """状态名按版本清单（引擎原始名，含，）引用；任务 source_name 是提交时
+    的表名（发布行即清洗名）。latest_task / 结果两轴必须按别名对齐——否则
+    提交成功后行永远「待解析」、成功结果不可见、再提交重复烧 LLM。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 013 章 雪夜，围炉.txt"
+    disk_name = "第 013 章 雪夜_围炉.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        artifact = _add_artifact(db, user_id, project_id, user.username, "0013.json", _sha("art-13"))
+        task = _add_parse_task(db, user_id, project_id, disk_name, status="succeeded",
+                               source_sha=_sha("s"), result_name="0013.json", result_file_id=artifact.id)
+        db.commit()
+        project = db.get(Project, project_id)
+        states = _build_file_states(db, user, project, [raw_name])
+    assert states[0]["latest_task"] is not None
+    assert states[0]["latest_task"]["id"] == task.id
+    assert states[0]["latest_task"]["status"] == "succeeded"
+    assert states[0]["result_status"] == "usable"
+    assert states[0]["result"]["verified"] is True
+    assert states[0]["result"]["file_id"] == artifact.id
+
+
+def test_run_response_uses_submitted_name(client: TestClient):
+    """run 响应 files[].name = 页面提交的名字（状态/清单名）：前端按它建
+    submittedTasks 映射；名字漂移时回表名会断掉该行提交后的本会话活跃态。"""
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    raw_name = "第 014 章 渡河，晨雾.txt"
+    disk_name = "第 014 章 渡河_晨雾.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        db.commit()
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": raw_name, "sha256": _sha("s")}]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["files"][0]["name"] == raw_name
+
+
+def test_run_rejects_in_flight_parse_renamed_by_alias(client: TestClient):
+    """在途章节按别名（原始名 vs 磁盘名）重提：在途判定按清洗名对齐，
+    不绕过「已有解析任务在进行」409。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 012 章 长夜，灯尽.txt"
+    disk_name = "第 012 章 长夜_灯尽.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        db.add(Task(
+            owner_id=user_id, project_id=project_id, task_type="script.parse",
+            status="running", payload={"source_name": disk_name, "input_file_id": "x"},
+        ))
+        db.commit()
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": raw_name, "sha256": _sha("s")}]},
+    )
+    assert response.status_code == 409, response.text
+    assert "在进行" in response.json()["detail"]["message"]
 
 
 def test_results_endpoint_serves_project_bound_artifact(client: TestClient):
