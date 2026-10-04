@@ -43,7 +43,7 @@ exec 9>.narrify/dev-launch.lock
 flock -n 9 || { echo "A development launcher is already running." >&2; exit 1; }
 if command -v systemctl >/dev/null; then
   for unit in narrify-api.service narrify-worker.service; do
-    if systemctl is-active --quiet "$unit"; then
+    if unitctl is-active --quiet "$unit"; then
       echo "Stop the systemd application first: bash launch/stop.sh" >&2
       exit 1
     fi
