@@ -25,6 +25,40 @@ from backend.platform.task_worker import process_task_message
 from sqlalchemy import select
 
 
+@pytest.mark.parametrize("reason", ["long_chapter_split", "long_chapter_split_skipped", "long_chapter_split_reduced"])
+def test_long_chapter_matters_are_pending_and_keep_source_details(reason):
+    from backend.services.text_format_workbench import build_review_matters
+
+    result = {"chapters": [
+        {"seq": i, "final_num": i, "orig_num": 2, "orig_numStr": "2",
+         "source_chapter_id": "2", "chars": 6500, "reasons": [reason],
+         "long_split": {"source_chars": 26000, "target_chars": 6000,
+                        "segment_index": i, "segment_count": 4, "wanted_count": 5}}
+        for i in range(1, 5)
+    ]}
+    chapters, matters = build_review_matters(result)
+    assert all(c["pending"] for c in chapters)
+    assert all(m["advisory"] and m["chapter_key"] for m in matters)
+    assert all("重复" not in m["text"] for m in matters)
+    assert all(m["reason"] == reason for m in matters)
+    if reason == "long_chapter_split":
+        assert all("26000" in m["text"] and "6000" in m["text"] and "4 册" in m["text"] for m in matters)
+
+
+def test_real_duplicate_counts_exclude_balanced_siblings():
+    from backend.services.text_format_workbench import build_review_matters
+
+    result = {"chapters": [
+        {"seq": i, "final_num": i, "orig_num": 2, "orig_numStr": "2",
+         "source_chapter_id": "first" if i < 3 else "second", "reasons": ["duplicate_number"]}
+        for i in range(1, 4)
+    ]}
+    _, matters = build_review_matters(result)
+    assert all("2 次" in m["text"] for m in matters)
+    assert "第 1 处" in matters[1]["text"]
+    assert "第 2 处" in matters[2]["text"]
+
+
 @pytest.fixture(scope="module")
 def client():
     initialize_schema()

@@ -165,9 +165,12 @@ export function useTextFormatWorkbench() {
   const dupInfo = computed(() => {
     const ch = currentChapter.value
     if (!ch || ch.orig_num == null) return null
-    const group = chapters.value.filter((c) => c.orig_num === ch.orig_num)
+    const sameNumber = chapters.value.filter((c) => c.orig_num === ch.orig_num)
+    const group = sameNumber.filter((c, index) => c.source_chapter_id == null
+      || sameNumber.findIndex((other) => other.source_chapter_id === c.source_chapter_id) === index)
     if (group.length < 2) return null
-    return { count: group.length, index: group.findIndex((c) => c.key === ch.key) + 1 }
+    return { count: group.length, index: group.findIndex((c) => c.key === ch.key
+      || (ch.source_chapter_id != null && c.source_chapter_id === ch.source_chapter_id)) + 1 }
   })
   function chapterMatters(chapter: WorkbenchChapter): WorkbenchMatter[] {
     return (chapter.matters ?? []).map((id) => matterById.value.get(id)).filter((m): m is WorkbenchMatter => !!m)

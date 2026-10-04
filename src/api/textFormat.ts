@@ -26,6 +26,14 @@ export interface WorkbenchChapter {
   chars: number
   orig_num: number | null
   orig_numStr: string
+  source_chapter_id?: string
+  long_split?: {
+    source_chars: number
+    target_chars: number
+    segment_index: number
+    segment_count: number
+    wanted_count: number
+  }
   final_num: number | null
   actions: string[]
   reasons: string[]
@@ -57,6 +65,14 @@ export interface WorkbenchVersion {
   baseline_chars: number | null
   original_count: number | null
   length_target: number | null
+  split_policy?: {
+    enabled: boolean
+    target_chars?: number
+    threshold_chars?: number
+    target_source?: 'normal_average' | 'length_target'
+    normal_sample_count?: number
+    length_target?: number
+  } | null
   review_marks: string[]
 }
 

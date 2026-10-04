@@ -799,6 +799,84 @@ def test_durable_worker_splits_chapterless_text_by_length(client: TestClient):
     assert len(split_files) == 2
 
 
+def test_smart_split_admin_policy_snapshot_idempotency_retry_and_legacy(client: TestClient):
+    account = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = {"X-CSRF-Token": account["csrf_token"]}
+    settings_url = "/api/v1/admin/settings/application"
+    assert client.patch(settings_url, headers=csrf, json={"split": {"smart_split_long_chapters": False}}).status_code == 403
+    with SessionLocal.begin() as db:
+        db.get(User, account["user"]["id"]).role = "admin"
+        previous = db.get(SystemConfig, "application.features")
+        previous_value = dict(previous.value) if previous else None
+    try:
+        response = client.patch(settings_url, headers=csrf, json={"split": {"length_target": 2000, "smart_split_long_chapters": True}})
+        assert response.status_code == 200, response.text
+        assert response.json()["config"]["split"]["smart_split_long_chapters"] is True
+        saved = client.put("/api/config", headers=csrf, json={"split": {"smart_split_long_chapters": False}})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["split"]["smart_split_long_chapters"] is True
+
+        text = "\n\n".join(
+            f"第{i}章 标题{i}\n\n" + (chr(ord("甲") + i) * 99 + "。") * (150 if i == 2 else 30)
+            for i in range(1, 6)
+        )
+        upload = client.post("/api/files/upload", headers=csrf, files={"file": ("long-novel.txt", text.encode(), "text/plain")})
+        assert upload.status_code == 200, upload.text
+        source = upload.json()
+        request = {
+            "project_id": source["project_id"], "task_type": "book.split",
+            "payload": {"input_file_id": source["file_id"], "smart": True,
+                        "split_policy": {"smart_split_long_chapters": False, "length_target": 100}},
+            "idempotency_key": f"smart-policy-{uuid.uuid4()}",
+        }
+        submitted = client.post("/api/v1/tasks", headers=csrf, json=request)
+        assert submitted.status_code == 201, submitted.text
+        task_id = submitted.json()["id"]
+        with SessionLocal() as db:
+            snapshot = db.get(Task, task_id).payload["split_policy"]
+            assert snapshot == {"smart_split_long_chapters": True, "length_target": 2000}
+        response = client.patch(settings_url, headers=csrf, json={"split": {"length_target": 5000, "smart_split_long_chapters": False}})
+        assert response.status_code == 200, response.text
+        replay = client.post("/api/v1/tasks", headers=csrf, json=request)
+        assert replay.status_code == 201 and replay.json()["id"] == task_id
+        # Retry retains the original server snapshot even after defaults change.
+        with SessionLocal.begin() as db:
+            db.get(Task, task_id).status = "failed"
+        retried = client.post(f"/api/v1/tasks/{task_id}/retry", headers=csrf)
+        assert retried.status_code == 200, retried.text
+        assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-smart-policy") == "succeeded"
+        result = client.get(f"/api/v1/tasks/{task_id}").json()["result"]
+        assert result["split_policy"]["enabled"] is True
+        assert result["split_policy"]["length_target"] == 2000
+        parts = [c for c in result["chapters"] if "long_chapter_split" in c["actions"]]
+        assert len(parts) == 5
+        assert all(c["orig_num"] == 2 and c["long_split"]["segment_count"] == 5 for c in parts)
+
+        # New disabled tasks and pre-upgrade tasks both preserve the middle chapter.
+        for legacy in (False, True):
+            request["idempotency_key"] = f"smart-policy-{uuid.uuid4()}"
+            submitted = client.post("/api/v1/tasks", headers=csrf, json=request)
+            assert submitted.status_code == 201, submitted.text
+            new_id = submitted.json()["id"]
+            if legacy:
+                with SessionLocal.begin() as db:
+                    task = db.get(Task, new_id)
+                    task.payload = {k: v for k, v in task.payload.items() if k != "split_policy"}
+            assert process_task_message({"payload": {"task_id": new_id}}, worker_id="test-smart-policy-old") == "succeeded"
+            old_result = client.get(f"/api/v1/tasks/{new_id}").json()["result"]
+            assert old_result["file_count"] == 5
+            assert old_result["split_policy"]["enabled"] is False
+    finally:
+        with SessionLocal.begin() as db:
+            row = db.get(SystemConfig, "application.features")
+            if previous_value is None:
+                if row:
+                    db.delete(row)
+            elif row:
+                row.value = previous_value
+        update_feature_defaults_cache(previous_value or {})
+
+
 def test_durable_worker_by_length_uses_admin_configured_split_target(client: TestClient):
     # 分册目标字数在管理员后台配置（application.features 的 split 段，100~200000）：
     # by_length 任务未显式带 length_target 时用配置值，payload 仍可逐任务覆盖。

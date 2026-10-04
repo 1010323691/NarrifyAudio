@@ -112,6 +112,7 @@ async function save() {
   for (const key of USER_OWNED_CHECKS) delete generation[key]
   const split = {
     length_target: Math.max(100, Math.min(200000, Math.trunc(Number(config.split?.length_target) || 3000))),
+    smart_split_long_chapters: config.split?.smart_split_long_chapters ?? true,
   }
   try {
     const patch: Record<string, unknown> = {
@@ -222,19 +223,26 @@ watch(
         </CardContent>
       </Card>
 
-      <!-- 分册（零章节兜底） -->
+      <!-- 分册 -->
       <Card v-if="active === 'text'">
         <CardHeader>
           <CardTitle class="flex items-center gap-2"><Scissors class="h-5 w-5" />分册</CardTitle>
-          <CardDescription>未识别出章节时的兜底拆分参数。</CardDescription>
+          <CardDescription>智能分册与按字数分册参数，新提交的任务生效。</CardDescription>
         </CardHeader>
         <CardContent class="space-y-3">
+          <div class="flex items-start justify-between gap-4">
+            <div class="space-y-1.5">
+              <Label for="split-long-chapters">智能分册拆分超长章节</Label>
+              <p class="text-xs text-muted-foreground">达到正常章节平均字数两倍时，按平均字数均衡拆分；样本不足时使用按字数分册目标字数。仅影响新提交的智能分册任务。</p>
+            </div>
+            <Switch id="split-long-chapters" v-model="draft.split.smart_split_long_chapters" />
+          </div>
           <div class="space-y-1.5">
             <Label for="split-length-target">按字数分册目标字数</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input id="split-length-target" v-model.number="draft.split.length_target" type="number" min="100" max="200000" step="50" class="max-w-[120px]" />
               <span class="text-xs text-muted-foreground">
-                未识别出章节时，按字数平均分册的每册目标字数（100~200000，默认 3000）。新启动的分册任务生效。
+                按字数分册的每册目标字数，也是智能分册正常样本不足时的目标字数（100~200000，默认 3000）。
               </span>
             </div>
           </div>

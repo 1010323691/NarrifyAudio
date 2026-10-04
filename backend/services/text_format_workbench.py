@@ -155,6 +155,7 @@ def _manifest_consistent(db: Session, user: User, project: Project, flow: TextFo
 _ADVISORY_LABELS = {
     "duplicate_number", "duplicate_split", "duplicate_kept",
     "inferred", "mechanical", "truncated", "range_mid",
+    "long_chapter_split", "long_chapter_split_skipped", "long_chapter_split_reduced",
 }
 _ACTION_TO_REASON = {
     "duplicate_kept": "duplicate_kept",
@@ -165,6 +166,9 @@ _ACTION_TO_REASON = {
     "renumbered": "renumbered",
     "gap_absorbed": "gap_absorbed",
     "length_split": "length_split",
+    "long_chapter_split": "long_chapter_split",
+    "long_chapter_split_skipped": "long_chapter_split_skipped",
+    "long_chapter_split_reduced": "long_chapter_split_reduced",
     "kept": "kept",
 }
 
@@ -193,7 +197,9 @@ def _chapter_matter_text(label: str, ch: dict, group: list[dict]) -> tuple[str, 
             "处置方式：请逐段核对拆分边界；若某段实为误标标题的正文，请在源 TXT 中修正后点击「重新处理」。",
         )
     if label in ("duplicate_number", "duplicate_kept") and len(group) >= 2:
-        idx = next(i for i, c in enumerate(group) if c is ch) + 1
+        idx = next(i for i, c in enumerate(group) if c is ch or (
+            ch.get("source_chapter_id") is not None and c.get("source_chapter_id") == ch["source_chapter_id"]
+        )) + 1
         return (
             f"原第 {orig} 章的编号在原文中出现 {len(group)} 次，本章为第 {idx} 处，已按原文顺序编为第 {final} 章",
             "处置方式：各章正文均原样保留。若其中一章确属重复内容，请在源 TXT 中删去多余章节后点击「重新处理」；"
@@ -232,6 +238,16 @@ def _chapter_matter_text(label: str, ch: dict, group: list[dict]) -> tuple[str, 
         return ("范围标题已按段落边界补齐", None)
     if label == "length_split":
         return ("本册按字数目标拆分生成", None)
+    if label.startswith("long_chapter_split"):
+        info = ch.get("long_split") or {}
+        source_chars = info.get("source_chars", ch.get("chars", 0))
+        target = round(info.get("target_chars", 0))
+        count = info.get("segment_count", 1)
+        if label == "long_chapter_split_skipped":
+            return (f"原第 {orig} 章共 {source_chars} 字，目标约 {target} 字；没有足够安全切点，已保留原章", "请核对原文，必要时补充分段后重新处理；引擎未截断句子。")
+        if label == "long_chapter_split_reduced":
+            return (f"原第 {orig} 章安全切点不足，计划 {info.get('wanted_count')} 册，实际拆为 {count} 册", "部分册可能仍偏长，请逐段核对拆分边界。")
+        return (f"原第 {orig} 章共 {source_chars} 字，按目标约 {target} 字均衡拆为 {count} 册，本册为第 {info.get('segment_index')} 册", "正文完整保留，切点优先段落边界，必要时使用句末边界；请核对本册起止位置。")
     if label == "whole_book":
         return ("按整本继续，未做章节拆分", None)
     return (f"引擎标记了该章（{label}），建议人工核对", "处置方式：请对照原文核对该章，无误后标记已核对。")
@@ -266,7 +282,10 @@ def build_review_matters(split_result: dict) -> tuple[list[dict], list[dict]]:
     # behind duplicate-family matters (count, partner final numbers).
     by_orig: dict[object, list[dict]] = {}
     for ch in split_result.get("chapters") or []:
-        by_orig.setdefault(ch.get("orig_num"), []).append(ch)
+        group = by_orig.setdefault(ch.get("orig_num"), [])
+        source_id = ch.get("source_chapter_id")
+        if source_id is None or not any(c.get("source_chapter_id") == source_id for c in group):
+            group.append(ch)
 
     chapters: list[dict] = []
     for ch in split_result.get("chapters") or []:
@@ -327,6 +346,7 @@ def _version_from_flow(db: Session, user: User, project: Project, flow: TextForm
         "baseline_chars": result.get("baseline_chars"),
         "original_count": result.get("original_count"),
         "length_target": result.get("length_target"),
+        "split_policy": result.get("split_policy"),
         "review_marks": sorted(m.chapter_key for m in db.scalars(
             select(ChapterReviewMark).where(ChapterReviewMark.task_id == flow.split_task_id)
         )),

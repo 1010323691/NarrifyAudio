@@ -1091,7 +1091,59 @@ def _mechanical_cut_points(
     return cuts, len(cuts) + 1
 
 
-def smart_repair(text: str, chapters: list[dict]) -> dict:
+def _balance_long_chapters(text: str, chapters: list[dict], fallback_target: int) -> tuple[list[dict], dict, list[dict]]:
+    """Balance remaining long chapters once, after structural repair.
+
+    Source ids identify pre-balance chapters, so siblings are never interpreted
+    as additional occurrences of a repeated original chapter number.
+    """
+    lengths = sorted(c["chars"] for c in chapters if c["chars"] > 0)
+    mid = len(lengths) // 2
+    median = (lengths[mid] if len(lengths) % 2 else (lengths[mid - 1] + lengths[mid]) / 2) if lengths else 0
+    normal = [n for n in lengths if n < median * LONG_CHAPTER_RATIO]
+    use_average = median >= MIN_BASELINE_CHARS and len(normal) >= 3
+    target = sum(normal) / len(normal) if use_average else float(fallback_target)
+    summary = {
+        "enabled": True, "target_chars": target, "threshold_chars": target * LONG_CHAPTER_RATIO,
+        "target_source": "normal_average" if use_average else "length_target",
+        "normal_sample_count": len(normal), "length_target": fallback_target,
+    }
+    out: list[dict] = []
+    warnings: list[dict] = []
+    for index, chapter in enumerate(chapters, 1):
+        source = {**chapter, "source_chapter_id": str(index)}
+        if chapter["chars"] < target * LONG_CHAPTER_RATIO:
+            out.append(source)
+            continue
+        wanted = max(2, int(chapter["chars"] / target + 0.5))
+        content = text[chapter["start"]:chapter["end"]]
+        result = split_by_length(content, round(target), segment_count=wanted)
+        segments = result["segments"]
+        count = len(segments)
+        for part, segment in enumerate(segments, 1):
+            child = dict(source)
+            child["start"] = chapter["start"] + segment["start"]
+            child["end"] = chapter["start"] + segment["end"]
+            child["chars"] = segment["chars"]
+            child["fingerprint"] = _normalized_fingerprint(text[child["start"]:child["end"]])
+            child["long_split"] = {
+                "source_chars": chapter["chars"], "target_chars": target,
+                "segment_index": part, "segment_count": count, "wanted_count": wanted,
+            }
+            out.append(child)
+        if count < wanted:
+            warnings.append({
+                "type": "long_chapter_split_reduced" if count > 1 else "long_chapter_split_skipped",
+                "source_chapter_id": str(index),
+                "detail": f"原第{chapter['numStr']}章安全切点不足，计划 {wanted} 册，实际 {count} 册；未截断句子，请核对",
+            })
+    return out, summary, warnings
+
+
+def smart_repair(
+    text: str, chapters: list[dict], *, split_long_chapters: bool = False,
+    length_target: int = 3_000,
+) -> dict:
     """Mechanically repair the chapter structure of ``chapters`` (as produced
     by ``analyze_text``) and renumber 1..N in physical order. Pure function:
     inputs are not mutated.
@@ -1555,6 +1607,13 @@ def smart_repair(text: str, chapters: list[dict]) -> dict:
             seg["_seg_index"] = j
             new_work.append(seg)
 
+    # A production task opts in through its server-owned policy snapshot;
+    # historical callers retain the original structural repair behavior.
+    split_policy = {"enabled": False}
+    if split_long_chapters:
+        new_work, split_policy, long_warnings = _balance_long_chapters(text, new_work, length_target)
+        warnings.extend(long_warnings)
+
     # -- step 5: renumber 1..N in physical order + repair records ----------
     for pos, c in enumerate(new_work):
         c["seq"] = pos + 1
@@ -1581,6 +1640,11 @@ def smart_repair(text: str, chapters: list[dict]) -> dict:
             add_action("mechanical_split", "low")
         elif c.get("_split_kind") == "duplicate_split":
             add_action("duplicate_kept", "medium")
+        long_split = c.get("long_split")
+        if long_split:
+            add_action("long_chapter_split" if long_split["segment_count"] > 1 else "long_chapter_split_skipped", "low")
+            if 1 < long_split["segment_count"] < long_split["wanted_count"]:
+                add_action("long_chapter_split_reduced", "low")
         if c.get("_truncated"):
             add_action("duplicate_truncated", "medium")
         if c["num"] in dup_nums:
@@ -1611,6 +1675,10 @@ def smart_repair(text: str, chapters: list[dict]) -> dict:
             reasons.append("mechanical")
         elif c.get("_split_kind") == "duplicate_split":
             reasons.append("duplicate_split")
+        if long_split:
+            reasons.append("long_chapter_split" if long_split["segment_count"] > 1 else "long_chapter_split_skipped")
+            if 1 < long_split["segment_count"] < long_split["wanted_count"]:
+                reasons.append("long_chapter_split_reduced")
         if c.get("_truncated"):
             reasons.append("truncated")
         if c["num"] in dup_nums:
@@ -1696,6 +1764,7 @@ def smart_repair(text: str, chapters: list[dict]) -> dict:
         "report": {"actions": actions, "warnings": warnings, "removed": removed},
         "baseline_chars": baseline,
         "original_count": len(chapters),
+        "split_policy": split_policy,
     }
 
 
@@ -1776,7 +1845,7 @@ def _sentence_end_boundaries(text: str, nl: list[int], a: int, b: int) -> list[i
     return out
 
 
-def split_by_length(text: str, target_chars: Optional[int] = None) -> dict:
+def split_by_length(text: str, target_chars: Optional[int] = None, *, segment_count: Optional[int] = None) -> dict:
     """Split chapter-less text into near-equal segments of about ``target_chars``
     (default :data:`DEFAULT_LENGTH_TARGET_CHARS`), cut only at paragraph or
     sentence boundaries — paragraph breaks are preferred inside the snap
@@ -1814,7 +1883,7 @@ def split_by_length(text: str, target_chars: Optional[int] = None) -> dict:
     warnings: list[dict] = []
     # Even division: round(total / target) segments, each exactly total / n —
     # a floor division would leave a short tail segment (3000 + 200).
-    wanted = max(1, int(total / target + 0.5))
+    wanted = max(1, segment_count if segment_count is not None else int(total / target + 0.5))
     paragraph_bounds = [
         b for b in _paragraph_boundaries(text, 0, len(text)) if char_count(b, len(text)) > 0
     ]

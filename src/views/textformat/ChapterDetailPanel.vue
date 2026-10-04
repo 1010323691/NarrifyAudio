@@ -48,7 +48,8 @@ const toggleExpand = (id: string) => {
 const isExpanded = (id: string) => expanded.value.includes(id)
 const showSameNumber = computed(() => !!props.dupInfo && props.chapter != null && props.chapter.orig_num != null)
 const briefTitle = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).title
-const briefSub = (m: WorkbenchMatter) => matterBrief(m.reason, props.dupInfo).sub
+const briefSub = (m: WorkbenchMatter) => m.reason.startsWith('long_chapter_split')
+  ? m.text : matterBrief(m.reason, props.dupInfo).sub
 </script>
 
 <template>

@@ -9,6 +9,8 @@ the chapter-sequence report and the exact output-file naming.
 """
 from __future__ import annotations
 
+import pytest
+
 from backend.engines import book as B
 
 
@@ -312,6 +314,101 @@ def smart_run(text, chapters=None):
     if chapters is None:
         chapters = B.analyze_text(text)["chapters"]
     return B.smart_repair(text, chapters)
+
+
+def balanced_fixture(lengths, *, separator="\n\n", numbers=None, sentence_chars=100):
+    """Exact character counts, independent of title detection and formatting."""
+    blocks, chapters, offset = [], [], 0
+    for i, length in enumerate(lengths):
+        char = chr(ord("甲") + i)
+        sentences = [char * (min(sentence_chars, length - j) - 1) + "。"
+                     for j in range(0, length, sentence_chars)]
+        block = separator.join(sentences) + separator
+        num = numbers[i] if numbers else i + 1
+        chapters.append({"seq": i + 1, "start": offset, "end": offset + len(block),
+                         "num": num, "numStr": str(num) if num is not None else "楔子", "title": f"标题{i}"})
+        blocks.append(block)
+        offset += len(block)
+    return "".join(blocks), chapters
+
+
+@pytest.mark.parametrize("separator", ["\n\n", "\r\n\r\n", ""])
+def test_long_chapter_balance_average_lossless_and_no_short_tail(separator):
+    text, chapters = balanced_fixture([6000, 26000, 6000, 6000, 6000], separator=separator)
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    parts = [c for c in result["chapters"] if "long_split" in c]
+    assert result["split_policy"]["target_chars"] == 6000
+    assert result["split_policy"]["normal_sample_count"] == 4
+    assert [p["chars"] for p in parts] == [6500] * 4
+    assert [p["long_split"]["segment_index"] for p in parts] == [1, 2, 3, 4]
+    assert all(p["num"] == 2 and p["title"] == "标题1" for p in parts)
+    assert all("duplicate_kept" not in p["repair"]["actions"] for p in parts)
+    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+    assert len(set(B.make_smart_filenames(result["chapters"]))) == len(result["chapters"])
+    # Sentence fallback also cuts on full sentence ends.
+    if not separator:
+        assert all(text[p["end"] - 1] == "。" for p in parts)
+
+
+@pytest.mark.parametrize("length, expected", [(11999, 0), (12000, 2)])
+def test_long_chapter_balance_two_times_threshold(length, expected):
+    text, chapters = balanced_fixture([6000, length, 6000, 6000, 6000])
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    assert sum("long_split" in c for c in result["chapters"]) == expected
+
+
+def test_long_chapter_balance_multiple_and_unparseable_numbers():
+    text, chapters = balanced_fixture([3000, 15000, 3000, 9000, 3000, 3000], numbers=[1, None, 3, 4, 5, 6])
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    parts = [c for c in result["chapters"] if "long_split" in c]
+    assert len(parts) == 8
+    assert {c["source_chapter_id"] for c in parts} == {"2", "4"}
+    assert result["split_policy"]["target_chars"] == 3000
+    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+
+
+@pytest.mark.parametrize("lengths", [[500, 5000], [100, 5000, 100, 100, 100]])
+def test_long_chapter_balance_uses_fallback_when_baseline_unreliable(lengths):
+    text, chapters = balanced_fixture(lengths)
+    result = B.smart_repair(text, chapters, split_long_chapters=True, length_target=2000)
+    assert result["split_policy"]["target_source"] == "length_target"
+    assert result["split_policy"]["target_chars"] == 2000
+    assert any("long_chapter_split" in c["repair"]["actions"] for c in result["chapters"])
+
+
+def test_long_chapter_balance_no_safe_boundaries_is_reported_on_chapter():
+    text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], separator="")
+    text = text[:chapters[1]["start"]] + text[chapters[1]["start"]:chapters[1]["end"]].replace("。", "乙") + text[chapters[1]["end"]:]
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    kept = result["chapters"][1]
+    assert kept["chars"] == 15000
+    assert "long_chapter_split_skipped" in kept["repair"]["reasons"]
+    assert any(w["type"] == "long_chapter_split_skipped" for w in result["report"]["warnings"])
+
+
+def test_long_chapter_balance_reduces_count_at_safe_boundaries():
+    text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], separator="", sentence_chars=7500)
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    parts = [c for c in result["chapters"] if "long_split" in c]
+    assert [p["chars"] for p in parts] == [7500, 7500]
+    assert all("long_chapter_split_reduced" in p["repair"]["reasons"] for p in parts)
+
+
+@pytest.mark.parametrize("kind", ["gap", "range", "duplicate", "last"])
+def test_long_chapter_balance_composes_with_structural_repair(kind):
+    numbers = [1, 2, 4, 5, 6, 7] if kind == "gap" else [1, 2, 2, 3, 4, 5] if kind == "duplicate" else None
+    lengths = [3000, 30000, 3000, 3000, 3000, 30000 if kind == "last" else 3000]
+    text, chapters = balanced_fixture(lengths, numbers=numbers)
+    if kind == "range":
+        chapters[1]["range_end"] = 3
+    old = B.smart_repair(text, chapters)
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    assert result["status"] == "ok"
+    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+    assert result["final_numbers"] == list(range(1, len(result["chapters"]) + 1))
+    old_actions = {a for c in old["chapters"] for a in c["repair"]["actions"] if a != "kept"}
+    new_actions = {a for c in result["chapters"] for a in c["repair"]["actions"]}
+    assert old_actions <= new_actions
 
 
 def test_smart_clean_novel():

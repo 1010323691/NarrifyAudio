@@ -35,6 +35,9 @@ export const REASON_LABELS: Record<string, string> = {
   inferred: '推断拆分',
   mechanical: '机械拆分',
   length_split: '按字数分册',
+  long_chapter_split: '超长章节均衡拆分',
+  long_chapter_split_skipped: '超长章节未能拆分',
+  long_chapter_split_reduced: '安全切点不足',
   whole_book: '整本处理',
   kept: '保留原样',
 }
@@ -53,10 +56,13 @@ export const REASON_BRIEF: Record<string, string> = {
   renumbered: '编号已规范化',
   gap_absorbed: '跳号已并入',
   length_split: '按字数分册',
+  long_chapter_split: '超长章节均衡拆分',
+  long_chapter_split_skipped: '超长章节未能拆分',
+  long_chapter_split_reduced: '安全切点不足',
   whole_book: '整本处理',
 }
 
-const ADVISORY_REASONS = ['duplicate_number', 'duplicate_kept', 'duplicate_split', 'truncated', 'inferred', 'mechanical', 'range_mid']
+const ADVISORY_REASONS = ['duplicate_number', 'duplicate_kept', 'duplicate_split', 'truncated', 'inferred', 'mechanical', 'range_mid', 'long_chapter_split', 'long_chapter_split_skipped', 'long_chapter_split_reduced']
 
 /** 由 reasons 派生表格用简要原因：advisory 优先；编号重复类附出现次数；无调整 → — */
 export function chapterBriefLabel(reasons: string[], dupCount = 0): string {
@@ -86,6 +92,12 @@ export function matterBrief(
     return { title: `原章节号出现 ${dup.count} 次`, sub: `正文拆分为 ${dup.count} 章，内容全部保留` }
   }
   switch (reason) {
+    case 'long_chapter_split':
+      return { title: '超长章节均衡拆分', sub: '按正常章节平均字数拆分，请核对起止位置' }
+    case 'long_chapter_split_skipped':
+      return { title: '超长章节未能拆分', sub: '安全切点不足，原章完整保留，请核对' }
+    case 'long_chapter_split_reduced':
+      return { title: '安全切点不足', sub: '已减少册数，部分册可能仍偏长，请核对' }
     case 'truncated':
       return { title: '重复正文已截除', sub: '仅保留首次出现，请核对章尾' }
     case 'inferred':

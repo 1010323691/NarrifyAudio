@@ -780,6 +780,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
     repair_report: dict[str, Any] | None = None
     baseline_chars: int | None = None
     length_target: int | None = None
+    split_policy: dict | None = None
     if bool(claim.payload.get("whole_book")):
         name = make_whole_book_filename(base)
         outputs.append((name, "text/plain; charset=utf-8", source_text.encode("utf-8")))
@@ -833,12 +834,18 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
             raise TaskExecutionError("invalid_payload", "分册任务必须启用 smart、by_length 或 whole_book")
         if not chapters:
             raise TaskExecutionError("no_chapters", "未检测到章节，无法分册")
-        repair = smart_repair(source_text, chapters)
+        policy = claim.payload.get("split_policy") or {}
+        repair = smart_repair(
+            source_text, chapters,
+            split_long_chapters=policy.get("smart_split_long_chapters") is True,
+            length_target=policy.get("length_target", DEFAULT_LENGTH_TARGET_CHARS),
+        )
         if repair["status"] == "error":
             raise TaskExecutionError("invalid_structure", repair.get("error") or "章节结构修复失败")
         repair_status = repair["status"]
         repair_report = repair["report"]
         baseline_chars = repair.get("baseline_chars")
+        split_policy = repair.get("split_policy")
         repaired = repair["chapters"]
         names = make_smart_filenames(repaired)
         final_chapters = [
@@ -854,6 +861,8 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
                 "actions": chapter.get("repair", {}).get("actions", ["kept"]),
                 "reasons": chapter.get("repair", {}).get("reasons") or chapter.get("repair", {}).get("actions", ["kept"]),
                 "confidence": chapter.get("repair", {}).get("confidence", "high"),
+                **({"source_chapter_id": chapter["source_chapter_id"]} if "source_chapter_id" in chapter else {}),
+                **({"long_split": chapter["long_split"]} if "long_split" in chapter else {}),
             }
             for index, chapter in enumerate(repaired, 1)
         ]
@@ -881,6 +890,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
             "baseline_chars": baseline_chars,
             "original_count": len(chapters),
             "length_target": length_target,
+            "split_policy": split_policy,
             "expected_format": EXPECTED_CHAPTER_FORMAT,
             "files": [{"name": name, "chars": len(data.decode("utf-8").replace("\n", "").replace("\r", ""))} for name, _, data in outputs],
         },
