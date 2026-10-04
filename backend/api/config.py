@@ -1,7 +1,10 @@
 """Config endpoints — read / write the unified persistent config (requirement #4)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from ..platform.database import get_db
+from ..platform.system_config import client_logs_enabled
 
 from ..core import config as core_config
 from ..engines.script_prompts import load_default_prompts
@@ -27,6 +30,11 @@ def _workspace_facing_config_data() -> dict:
     # exposes the section at all.
     data.pop("bgm", None)
     return data
+
+
+@router.get("/client-logs")
+def get_client_logs(db: Session = Depends(get_db)) -> dict:
+    return {"enabled": client_logs_enabled(db)}
 
 
 @router.get("")

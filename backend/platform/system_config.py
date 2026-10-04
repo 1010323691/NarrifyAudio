@@ -76,3 +76,9 @@ def parse_worker_concurrency(default: int = 4, maximum: int = 32) -> int:
 # import platform (S3 direction), so this module registers its loader instead.
 # Both entry points (main/worker) import this module before first use.
 set_platform_defaults_provider(load_feature_defaults)
+
+
+def client_logs_enabled(db: Session) -> bool:
+    """One platform-wide display switch; legacy workspace preferences cannot enable it."""
+    row = db.get(SystemConfig, "client.logs")
+    return bool(row and isinstance(row.value, dict) and row.value.get("enabled") is True)

@@ -120,15 +120,6 @@ async function save() {
           </div>
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <Label class="font-normal">解析日志显示</Label>
-              <Switch v-model="draft.ui.show_parse_logs" />
-            </div>
-            <p class="text-xs text-muted-foreground">
-              开启后，文本解析页显示详细日志。
-            </p>
-          </div>
-          <div class="space-y-1">
-            <div class="flex items-center justify-between">
               <Label class="font-normal">音频分集导航项</Label>
               <Switch v-model="draft.ui.show_audio_split" />
             </div>

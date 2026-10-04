@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ArrowUpRight, RefreshCw, RotateCcw, Trash2 } from 'lucide-vue-next'
+import { useClientDisplayStore } from '@/stores/clientDisplay'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
@@ -20,6 +21,7 @@ import GpuScheduler from '@/components/settings/GpuScheduler.vue'
 type Tab = 'overview' | 'performance' | 'users' | 'resources' | 'settings' | 'tasks' | 'logs'
 type SettingsSection = 'text' | 'models' | 'audio' | 'general' | 'storage' | 'runtime'
 const validTabs = new Set<Tab>(['overview', 'performance', 'users', 'resources', 'settings', 'tasks', 'logs'])
+const clientDisplay = useClientDisplayStore()
 const route = useRoute()
 const tab = computed<Tab>(() => validTabs.has(route.query.tab as Tab) ? route.query.tab as Tab : 'overview')
 const { push: toast } = useToast()
@@ -119,6 +121,7 @@ async function load() {
     else if (tab.value === 'users') users.value = await api.listUsers()
     else if (tab.value === 'resources') resources.value = await api.getResources()
     else if (tab.value === 'settings') {
+      await clientDisplay.load()
       const [s, q, r] = await Promise.all([api.getStorageSettings(), api.getQuotaSettings(), api.getRegistrationSettings()])
       storage.value = s
       quota.value = q
@@ -149,6 +152,12 @@ onMounted(() => {
   }, 15000)
 })
 onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+
+async function toggleClientLogs() {
+  try {
+    if (await clientDisplay.save(!clientDisplay.logsEnabled)) toast({ title: '客户端日志显示设置已保存', variant: 'success' })
+  } catch (cause: any) { error.value = cause?.message || String(cause) }
+}
 
 async function saveRegistration() {
   try { registration.value = await api.updateRegistrationSettings(registrationDraft.value); toast({ title: '注册设置已保存', variant: 'success' }) }
@@ -388,6 +397,11 @@ async function cleanupTemp() {
       <GpuScheduler v-if="settingsSection === 'models'" mode="paths" />
       <GpuScheduler v-if="settingsSection === 'runtime'" mode="parameters" />
       <Card v-if="settingsSection === 'general'"><CardHeader><CardTitle>通用</CardTitle></CardHeader><CardContent class="admin-form">
+        <div class="controls">
+          <span>所有客户端功能日志：{{ clientDisplay.logsEnabled ? '已开启' : '已关闭' }}</span>
+          <Button :disabled="!clientDisplay.loaded || clientDisplay.saving" :aria-pressed="clientDisplay.logsEnabled" @click="toggleClientLogs">{{ clientDisplay.saving ? '保存中…' : clientDisplay.logsEnabled ? '关闭日志显示' : '开启日志显示' }}</Button>
+        </div>
+        <p class="admin-muted">默认关闭，统一控制各功能的实时日志和模型输出；已打开的客户端会自动同步。任务进度与失败提示继续显示。</p>
         <label><input v-model="registrationDraft" type="checkbox" /> 允许新用户注册</label><Button :disabled="!registration" @click="saveRegistration">保存注册设置</Button>
         <label for="initial-quota">新用户初始额度</label><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="search" /><Button :disabled="!quota" @click="saveQuota">保存初始额度</Button>
       </CardContent></Card>

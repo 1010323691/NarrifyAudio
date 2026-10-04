@@ -7,6 +7,8 @@
  * (drop one in the ``#actions`` slot).
  */
 import { computed } from 'vue'
+import { useClientDisplayStore } from '@/stores/clientDisplay'
+const clientDisplay = useClientDisplayStore()
 import type { TaskSnapshot } from '@/types'
 import { cn } from '@/lib/utils'
 import { formatClock } from '@/utils/format'
@@ -58,12 +60,12 @@ function logColor(level: string) {
       <Progress :value="task.progress" />
     </div>
 
-    <div class="flex items-center justify-between gap-2">
-      <span class="text-xs text-muted-foreground">实时日志</span>
+    <div v-if="clientDisplay.logsEnabled || $slots.actions" class="flex items-center justify-between gap-2">
+      <span v-if="clientDisplay.logsEnabled" class="text-xs text-muted-foreground">实时日志</span>
       <slot name="actions" />
     </div>
 
-    <ScrollArea :ref="bindLog" :class="boxClass">
+    <ScrollArea v-if="clientDisplay.logsEnabled" :ref="bindLog" :class="boxClass">
       <div class="space-y-0.5 p-3 font-mono text-xs leading-relaxed">
         <div v-for="(l, i) in logs" :key="i" :class="logColor(l.level)">
           <span class="text-muted-foreground/60">{{ formatClock(l.t) }}</span>

@@ -298,3 +298,57 @@ test('preview line state: previewReady keys off the draft, never the disk line',
   ])
   assert.deepEqual(realm(buildEdits([{ index: 9, disk, draft: disk }])), [])
 })
+
+
+test('client log display defaults off and synchronizes the shared setting', async () => {
+  let enabled = true
+  const load = harness({ '@/api/client': { http: {
+    get: async () => ({ enabled }),
+    patch: async (_url, patch) => { enabled = patch.enabled; return { enabled } },
+  } } })
+  const display = load('@/stores/clientDisplay').useClientDisplayStore()
+  assert.equal(display.logsEnabled, false)
+  await display.load()
+  assert.equal(display.logsEnabled, true)
+  await display.save(false)
+  assert.equal(enabled, false)
+  enabled = true
+  await display.load()
+  assert.equal(display.logsEnabled, true)
+})
+
+test('late log display reads cannot undo an admin save or account reset', async () => {
+  const old = deferred()
+  const load = harness({ '@/api/client': { http: {
+    get: () => old.promise,
+    patch: async () => ({ enabled: false }),
+  } } })
+  const display = load('@/stores/clientDisplay').useClientDisplayStore()
+  const pending = display.load()
+  await display.save(false)
+  old.resolve({ enabled: true })
+  await pending
+  assert.equal(display.logsEnabled, false)
+  const stale = display.load()
+  display.reset()
+  await stale
+  assert.equal(display.logsEnabled, false)
+  assert.equal(display.loaded, false)
+})
+
+test('log display polling does not supersede a pending admin save', async () => {
+  const pending = deferred()
+  let reads = 0
+  const load = harness({ '@/api/client': { http: {
+    get: async () => { reads++; return { enabled: false } },
+    patch: () => pending.promise,
+  } } })
+  const display = load('@/stores/clientDisplay').useClientDisplayStore()
+  const saving = display.save(true)
+  await display.load()
+  assert.equal(reads, 0)
+  pending.resolve({ enabled: true })
+  assert.equal(await saving, true)
+  assert.equal(display.logsEnabled, true)
+  assert.equal(display.saving, false)
+})
