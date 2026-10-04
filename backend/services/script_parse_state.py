@@ -139,9 +139,9 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
         )
         db.add(item)
     else:
-        # 已有行（尤其 book.split 发布行）的 original_name 是引擎原始名，版本
-        # 列表 / 排版页仍按它引用；补登只更新摘要，绝不能把它改写成磁盘名——
-        # 改写会让同一文件的所有旧名字引用变成「分册文本不存在」。
+        # 已有行的 original_name 可能是引擎原始名（legacy/历史数据，版本列表
+        # 与排版页仍按它引用）；补登只更新摘要，绝不能改写名字——改写会让
+        # 同一文件的所有旧名字引用变成「分册文本不存在」。
         for key, value in values.items():
             setattr(item, key, value)
         item.deleted_at = None
@@ -328,16 +328,25 @@ def _build_file_states(
     result, judged against the CURRENT input digest. Task execution state and
     result availability are separate axes: a failed re-parse with an older
     still-valid result reports both (status failed + result usable)."""
+    # source_name 是提交时的表名（发布后为清洗名，legacy/历史数据可能是旧
+    # 原始名），状态名是清单名（version = 引擎原始名）——名字只差一层清洗即
+    # 同一文件：精确名与清洗名双索引，否则提交成功后行永远「待解析」、结果
+    # 不可见（与 submit_run / 在途判定同款对齐）。
     tasks = _parse_tasks(db, user.id, project.id)
     latest_task: dict[str, Task] = {}
+    latest_task_by_disk: dict[str, Task] = {}
     latest_success: dict[str, Task] = {}
+    latest_success_by_disk: dict[str, Task] = {}
     for task in tasks:
         name = str((task.payload or {}).get("source_name") or "")
         if not name:
             continue
+        disk_name = safe_display_name(name)
         latest_task.setdefault(name, task)
+        latest_task_by_disk.setdefault(disk_name, task)
         if task.status == "succeeded":
             latest_success.setdefault(name, task)
+            latest_success_by_disk.setdefault(disk_name, task)
 
     split_rows = _split_files(db, user, project.id)
     split_rows_by_id = {item.id: item for item in split_rows.values()}
@@ -365,7 +374,10 @@ def _build_file_states(
         input_item = split_rows.get(name) or split_rows.get(disk_index.get(safe_display_name(name), ""))
         input_sha = input_item.sha256 if input_item is not None else None
 
-        task = latest_task.get(name)
+        # 任务 / 结果查找同样按别名对齐：先精确名，再清洗名（状态名与任务
+        # source_name 只差一层存储清洗时是同一文件）。
+        disk_name = safe_display_name(name)
+        task = latest_task.get(name) or latest_task_by_disk.get(disk_name)
         latest = None
         if task is not None:
             latest = {
@@ -377,7 +389,7 @@ def _build_file_states(
                 "finished_at": _iso(task.finished_at),
             }
 
-        success = latest_success.get(name)
+        success = latest_success.get(name) or latest_success_by_disk.get(disk_name)
         result = None
         result_status: str | None = None
         if success is not None:
@@ -515,11 +527,13 @@ def submit_run(
     if not wanted:
         raise ScriptParseError(422, "请选择要解析的章节。")
 
-    # 存储侧清洗漂移兼容：文件表存引擎原始名，磁盘名经 safe_display_name（，/—→_），
-    # 历史补登还可能已把 original_name 改写成磁盘名。名字只差这一层清洗即同一
-    # 文件（object_key 相同）——按别名挂进 split_rows，不判成缺失。
-    # 幂等边界：safe_display_name 先截断 180 再 strip，超长名字理论上
-    # safe(safe(x)) != safe(x)；章节名远短于上限，实际不可达。
+    # 存储侧清洗漂移兼容：版本列表（manifest）携带引擎原始名（，/— 保留），
+    # 文件表与磁盘则是 safe_display_name 清洗后的名字（，/—→_）——
+    # write_task_outcome 已对产出名做清洗、发布照抄进表与磁盘；legacy 补登 /
+    # 历史数据可能反过来把原始名存进表。名字只差这一层清洗即同一文件
+    # （object_key 相同）——按别名挂进 split_rows，不判成缺失。
+    # 幂等边界：safe_display_name 先 strip 再截断 180，截断尾恰落在空格/点上的
+    # 超长名字 safe(safe(x)) != safe(x)；章节名远短于上限，实际不可达。
     disk_index: dict[str, str] = {}
     for key in split_rows:
         disk_index.setdefault(safe_display_name(key), key)
@@ -591,8 +605,10 @@ def submit_run(
             )
         except TaskSubmissionError as exc:
             raise ScriptParseError(exc.status_code, exc.message) from exc
+        # 回页面提交的名字（状态/清单名）而非表名：前端按它建 submittedTasks
+        # 映射（useScriptParseWorkbench），名字漂移时回表名会断掉该行提交态。
         created.append({
-            "name": item.original_name,
+            "name": name,
             "task_id": task.id,
             "input_sha256": item.sha256,
         })

@@ -633,6 +633,50 @@ def test_build_file_states_resolves_storage_sanitized_alias(client: TestClient):
     assert states[0]["input"]["sha256"] == _sha("s")
 
 
+def test_build_file_states_resolves_task_and_result_alias(client: TestClient):
+    """状态名按版本清单（引擎原始名，含，）引用；任务 source_name 是提交时
+    的表名（发布行即清洗名）。latest_task / 结果两轴必须按别名对齐——否则
+    提交成功后行永远「待解析」、成功结果不可见、再提交重复烧 LLM。"""
+    email, csrf, user_id, project_id = _register(client)
+    raw_name = "第 013 章 雪夜，围炉.txt"
+    disk_name = "第 013 章 雪夜_围炉.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        artifact = _add_artifact(db, user_id, project_id, user.username, "0013.json", _sha("art-13"))
+        task = _add_parse_task(db, user_id, project_id, disk_name, status="succeeded",
+                               source_sha=_sha("s"), result_name="0013.json", result_file_id=artifact.id)
+        db.commit()
+        project = db.get(Project, project_id)
+        states = _build_file_states(db, user, project, [raw_name])
+    assert states[0]["latest_task"] is not None
+    assert states[0]["latest_task"]["id"] == task.id
+    assert states[0]["latest_task"]["status"] == "succeeded"
+    assert states[0]["result_status"] == "usable"
+    assert states[0]["result"]["verified"] is True
+    assert states[0]["result"]["file_id"] == artifact.id
+
+
+def test_run_response_uses_submitted_name(client: TestClient):
+    """run 响应 files[].name = 页面提交的名字（状态/清单名）：前端按它建
+    submittedTasks 映射；名字漂移时回表名会断掉该行提交后的本会话活跃态。"""
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    raw_name = "第 014 章 渡河，晨雾.txt"
+    disk_name = "第 014 章 渡河_晨雾.txt"
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == email))
+        _add_split_file(db, user_id, project_id, user.username, disk_name, _sha("s"))
+        db.commit()
+    response = client.post(
+        f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf},
+        json={"files": [{"name": raw_name, "sha256": _sha("s")}]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["files"][0]["name"] == raw_name
+
+
 def test_run_rejects_in_flight_parse_renamed_by_alias(client: TestClient):
     """在途章节按别名（原始名 vs 磁盘名）重提：在途判定按清洗名对齐，
     不绕过「已有解析任务在进行」409。"""

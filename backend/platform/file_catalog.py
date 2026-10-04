@@ -60,9 +60,10 @@ def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> Project
         db.add(item)
         db.flush()
     else:
-        # 与 script_parse_state._catalog_split_file 同款：已有行（尤其 book.split
-        # 发布行）的 original_name 是引擎原始名，撞行登记只更新摘要，不改写名字——
-        # 改写会让同一文件的所有旧名字引用变成「文件不存在」。
+        # 与 script_parse_state._catalog_split_file 同款：已有行的 original_name
+        # 可能是引擎原始名（legacy/历史数据，版本列表 / 排版页仍按它引用），撞行
+        # 登记只更新摘要，不改写名字——改写会让同一文件的所有旧名字引用变成
+        # 「文件不存在」。
         for key, value in item_values.items():
             setattr(item, key, value)
         item.deleted_at = None
