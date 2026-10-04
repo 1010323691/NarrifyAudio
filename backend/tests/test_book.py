@@ -1125,6 +1125,30 @@ def test_length_split_empty_text_errors():
         assert res["segment_count"] == 0
 
 
+@pytest.mark.parametrize("separator", ["\n\n", "\r\n\r\n", "\n\n\n\n"])
+def test_long_chapter_balance_reserves_later_boundaries(separator):
+    normal = ("甲" * 99 + "。") * 60
+    long_body = separator.join(char * length for char, length in zip("乙丙丁戊", [1000, 1000, 23000, 1000]))
+    text = separator.join(f"第{i}章 标题{i}{separator}{long_body if i == 2 else normal}{separator}" for i in range(1, 6))
+    raw = B.analyze_text(text)
+    assert len(raw["chapters"]) == 5
+    result = B.smart_repair(text, raw["chapters"], split_long_chapters=True)
+    parts = [c for c in result["chapters"] if "long_split" in c]
+    assert len(parts) == 4
+    assert all(c["chars"] > 0 and c["long_split"]["segment_count"] == 4 for c in parts)
+    assert all("long_chapter_split_skipped" not in c["repair"]["actions"] for c in parts)
+    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+
+
+@pytest.mark.parametrize("separator", ["\n\n", "。", "\n\n\n\n"])
+def test_length_split_reserves_boundaries_for_shared_by_length_mode(separator):
+    text = separator.join(char * length for char, length in zip("甲乙丙丁戊", [1000, 1000, 1000, 22000, 1000]))
+    result = B.split_by_length(text, 6000)
+    assert result["segment_count"] == 4
+    assert all(c["chars"] > 0 for c in result["segments"])
+    assert "".join(text[c["start"]:c["end"]] for c in result["segments"]) == text
+
+
 def test_length_split_crlf_gap_and_lone_carriage_return():
     # CRLF paragraph gap: recognized as a paragraph boundary; cuts land
     # inside the gap; tiling stays lossless.
