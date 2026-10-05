@@ -7,6 +7,7 @@ Run (whole app):     ``npm run build`` then the same command, and open
 """
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -47,6 +48,9 @@ from .platform.security import load_session
 from .platform.storage import lock_storage_migration, storage_migration, project_workspace_path
 from time import monotonic
 
+# Bind address defaults to loopback; set NARRIFY_API_HOST=0.0.0.0 to accept
+# connections from other machines on the local network.
+HOST = os.environ.get("NARRIFY_API_HOST", "127.0.0.1")
 PORT = 8642
 
 # All module routers (tts drives the isolated local engine; script drives the
@@ -258,4 +262,4 @@ def api_not_found(full_path: str) -> Response:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.main:app", host="127.0.0.1", port=PORT, log_level="warning")
+    uvicorn.run("backend.main:app", host=HOST, port=PORT, log_level="warning")
