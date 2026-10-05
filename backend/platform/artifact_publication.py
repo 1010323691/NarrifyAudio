@@ -20,6 +20,7 @@ class PublicationJournal:
             raise ValueError("Publication journal is outside the storage root")
         self.entries: list[tuple[Path, Path, bool, bool]] = []
         self._published_hashes: dict[int, str] = {}
+        self._checkpoints: set[int] = set()
         self._closed = False
 
     def _under_root(self, relative: str) -> Path:
@@ -34,7 +35,7 @@ class PublicationJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._write([])
 
-    def add(self, final: Path, *, guard: bool = False) -> int:
+    def add(self, final: Path, *, guard: bool = False, checkpoint: bool = False) -> int:
         resolved_final = final.resolve()
         if not resolved_final.is_relative_to(self.root):
             raise ValueError("Publication target is outside the storage root")
@@ -43,6 +44,8 @@ class PublicationJournal:
         if backup.exists():
             raise RuntimeError(f"Publication backup already exists: {backup}")
         entries = [*self.entries, (resolved_final, backup, resolved_final.exists(), guard)]
+        if checkpoint:
+            self._checkpoints.add(index)
         self._write(entries)
         self.entries = entries
         return index
@@ -58,6 +61,8 @@ class PublicationJournal:
             if guard:
                 item["guard"] = True
                 item["published_sha256"] = self._published_hashes.get(index, "")
+            if index in self._checkpoints:
+                item["checkpoint"] = True
             files.append(item)
         data = {"version": 1, "files": files}
         pending = self.path.with_suffix(".tmp")
@@ -96,7 +101,9 @@ class PublicationJournal:
             path.unlink(missing_ok=True)
 
     def rollback(self, guarded_lock=None) -> None:
-        """Undo every publication. UNGUARDED entries keep the old behaviour
+        """Undo transactional publications, retaining incremental checkpoints.
+
+        UNGUARDED entries keep the old behaviour
         (unconditional restore). GUARDED entries are restored ONLY while the
         file still holds exactly what this task published — ``guarded_lock``
         (the writer domain's cross-process lock, e.g. the 08_bgm storage
@@ -107,14 +114,25 @@ class PublicationJournal:
         journal is still cleaned up."""
         if self._closed:
             return
-        for final, backup, had_original, guard in reversed(self.entries):
+        for index in reversed(range(len(self.entries))):
+            final, backup, had_original, guard = self.entries[index]
+            if index in self._checkpoints:
+                # A completed incremental output survives task failure/restart.
+                # If killed between moving the original aside and publishing,
+                # restore that original rather than losing the last checkpoint.
+                if not final.exists() and backup.exists():
+                    os.replace(backup, final)
+                else:
+                    self._remove_backup(backup)
+                continue
             if guard:
                 continue
             if backup.exists():
                 os.replace(backup, final)
             elif not had_original:
                 final.unlink(missing_ok=True)
-        guarded = [(index, entry) for index, entry in enumerate(reversed(self.entries)) if entry[3]]
+        guarded = [(index, self.entries[index]) for index in reversed(range(len(self.entries)))
+                   if self.entries[index][3] and index not in self._checkpoints]
         if guarded:
             try:
                 with (guarded_lock if guarded_lock is not None else nullcontext()):
@@ -167,10 +185,14 @@ class PublicationJournal:
         self._closed = True
 
     @classmethod
-    def reconcile(cls, root: Path, path: Path, *, committed: bool) -> bool:
+    def reconcile(cls, root: Path, path: Path, *, committed: bool,
+                  checkpoint_directory: Path | None = None) -> bool:
         if not path.exists():
             return False
         journal = cls(root, path)
+        checkpoint_root = checkpoint_directory.resolve() if checkpoint_directory is not None else None
+        if checkpoint_root is not None and not checkpoint_root.is_relative_to(journal.root):
+            raise ValueError("Checkpoint directory is outside the storage root")
         data = json.loads(path.read_text("utf-8"))
         if data.get("version") != 1 or not isinstance(data.get("files"), list):
             raise ValueError("Invalid publication journal")
@@ -181,6 +203,12 @@ class PublicationJournal:
                 raise ValueError("Publication backup is outside the attempt directory")
             guard = item.get("guard") is True
             journal.entries.append((final, backup, item["had_original"] is True, guard))
+            # Older TTS attempts did not mark their incremental outputs. The
+            # worker supplies their managed audio directory during recovery.
+            if item.get("checkpoint") is True or (
+                checkpoint_root is not None and final.is_relative_to(checkpoint_root)
+            ):
+                journal._checkpoints.add(index)
             if guard:
                 journal._published_hashes[index] = str(item.get("published_sha256", ""))
         if committed:

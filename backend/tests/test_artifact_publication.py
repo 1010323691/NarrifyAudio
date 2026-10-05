@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from backend.platform.artifact_publication import (
     PublicationJournal,
     PublicationJournalBundle,
@@ -39,6 +41,52 @@ def test_expired_attempt_removes_uncommitted_new_artifact(tmp_path):
     journal.publish(journal.add(final), staged)
     assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
     assert not final.exists()
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_partial_batch_keeps_audio_and_latest_manifest_checkpoint(tmp_path, recover):
+    audio = tmp_path / "05_audio_chunk" / "book" / "0001.mp3"
+    audio.parent.mkdir(parents=True)
+    manifest = audio.parent / "manifest.json"
+    manifest.write_bytes(b"before batch")
+    ordinary = tmp_path / "ordinary.json"
+    ordinary.write_bytes(b"original")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    for index, (final, data, checkpoint) in enumerate([
+        (audio, b"finished audio", True),
+        (manifest, b"first checkpoint", True),
+        (ordinary, b"temporary", False),
+        (manifest, b"latest checkpoint", True),
+    ]):
+        staged = tmp_path / f"staged-{index}"
+        staged.write_bytes(data)
+        journal.publish(journal.add(final, checkpoint=checkpoint), staged)
+
+    if recover:
+        assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    else:
+        journal.rollback()
+    assert audio.read_bytes() == b"finished audio"
+    assert manifest.read_bytes() == b"latest checkpoint"
+    assert ordinary.read_bytes() == b"original"
+    assert not journal.path.exists()
+    assert not list(journal.path.parent.glob("publication-backup-*"))
+
+
+@pytest.mark.parametrize("moved_original", [False, True])
+def test_checkpoint_recovery_during_replacement_retains_previous_progress(tmp_path, moved_original):
+    final = tmp_path / "manifest.json"
+    final.write_bytes(b"previous progress")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    index = journal.add(final, checkpoint=True)
+    if moved_original:
+        # Simulate a kill inside publish(), before the new file is installed.
+        final.replace(journal.entries[index][1])
+    assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert final.read_bytes() == b"previous progress"
+    assert not list(journal.path.parent.glob("publication-backup-*"))
 
 
 def test_committed_attempt_keeps_new_artifact_and_removes_backup(tmp_path):

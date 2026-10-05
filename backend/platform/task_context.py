@@ -40,6 +40,7 @@ class EngineExecutionContext:
         self._staged_workspace_paths: set[Path] = set()
         self._staged_workspace_directories: set[Path] = set()
         self._guarded_workspace_paths: set[Path] = set()
+        self._workspace_checkpoint_directories: set[Path] = set()
         self._rollback_lock: tuple | None = None
 
     @property
@@ -130,6 +131,10 @@ class EngineExecutionContext:
         self._staged_workspace_directories.add(staged)
         return staged
 
+    def mark_workspace_checkpoint_directory(self, directory: Path) -> None:
+        """Keep completed incremental outputs here on failure and crash recovery."""
+        self._workspace_checkpoint_directories.add(directory.resolve())
+
     def discard_workspace_directory(self, staged: Path) -> None:
         resolved = staged.resolve()
         if resolved not in self._staged_workspace_directories:
@@ -152,7 +157,13 @@ class EngineExecutionContext:
         try:
             # Guarded entries (see mark_workspace_guarded) are restored on
             # rollback only if still untouched by a concurrent writer.
-            journal.publish(journal.add(final_path, guard=final_path.resolve() in self._guarded_workspace_paths), staged)
+            resolved = final_path.resolve()
+            checkpoint = any(resolved.is_relative_to(directory)
+                             for directory in self._workspace_checkpoint_directories)
+            journal.publish(journal.add(
+                final_path, guard=resolved in self._guarded_workspace_paths,
+                checkpoint=checkpoint,
+            ), staged)
         except BaseException:
             staged.unlink(missing_ok=True)
             self._staged_workspace_paths.discard(staged)

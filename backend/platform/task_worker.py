@@ -143,7 +143,12 @@ def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None
         raise RuntimeError(f"Task owner is missing: {task.owner_id}")
     root = configured_storage_root(db)
     path = task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json")
-    PublicationJournal.reconcile(root, path, committed=task.status == "succeeded")
+    checkpoint_directory = (
+        project_workspace_path(db, user.username, task.project_id) / "05_audio_chunk"
+        if task.task_type == "tts.batch" else None
+    )
+    PublicationJournal.reconcile(root, path, committed=task.status == "succeeded",
+                                 checkpoint_directory=checkpoint_directory)
     from ..core import paths as core_paths
 
     shared_root = Path(core_paths.MUSIC_LIBRARY_DIR).resolve()

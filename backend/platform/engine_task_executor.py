@@ -73,6 +73,9 @@ def _run_voices_clone(handle, claim: TaskClaim, payload: dict, side_effect_outpu
 
 def _run_tts_batch(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import tts_batch
+    # Audio segments, cached voice versions and manifests are resume checkpoints,
+    # not artifacts that should disappear when the whole batch is interrupted.
+    handle.mark_workspace_checkpoint_directory(get_or_prepare_layout().audio_chunk)
     scripts = payload.get("scripts") or []
     if len(scripts) > 1:
         return tts_batch.synthesize_multi(

@@ -2016,6 +2016,81 @@ def test_expired_attempt_restores_interrupted_publication(client: TestClient):
     assert not journal_path.exists()
 
 
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("recover", [False, True, "legacy"])
+def test_tts_partial_progress_survives_failure_and_worker_recovery(client, monkeypatch, multi, recover):
+    import json
+    from backend.engines import tts_batch
+    from backend.platform import engine_task_executor
+    from backend.platform.task_engine_support import engine_execution_context
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf},
+                          json={"name": "TTS checkpoints"}).json()
+    scripts = ["one.json", "two.json"] if multi else ["one.json"]
+    # Set up the attempt without requiring real TTS quota/model dependencies.
+    task_id = str(uuid.uuid4())
+    with SessionLocal.begin() as db:
+        db.add(Task(id=task_id, owner_id=first["user"]["id"], project_id=project["id"],
+                    task_type="tts.batch", status="pending", payload={"scripts": scripts}))
+    claim = claim_task(task_id, "tts-checkpoint-worker")
+    assert claim is not None
+
+    def interrupted_synthesis(handle, *_args):
+        layout = core_paths.get_or_prepare_layout()
+        for name in scripts:
+            source = [{"speaker": "A", "text": "完成"}, {"speaker": "A", "text": "待合成"}]
+            (layout.parsed_json / name).write_text(json.dumps(source), encoding="utf-8")
+            segments = tts_batch.build_segments(source)
+            out = layout.audio_chunk / tts_batch.package_for(Path(name))
+            stage = handle.allocate_workspace_directory(out)
+            audio = stage / "0001.mp3"
+            audio.write_bytes(b"completed audio")
+            results = {}
+            tts_batch._handle_segment(f"[segment] 0 ok {audio}", {0: segments[0]}, 2,
+                                     results, handle, stage, out)
+            for _ in range(2):
+                # Exercise repeated manifest replacement in the same attempt.
+                tts_batch.write_manifest_file(out / "manifest.json", tts_batch.build_manifest(
+                    segments, {}, results, root=layout.workspace), handle)
+        handle.publish_workspace_bytes(layout.voice_profiles / "temporary.json", b"temporary")
+        raise RuntimeError("simulated interruption")
+
+    monkeypatch.setattr(tts_batch, "synthesize_multi" if multi else "synthesize", interrupted_synthesis)
+    if recover:
+        handle = PersistentTaskHandle(claim)
+        with engine_execution_context(claim), pytest.raises(RuntimeError, match="simulated interruption"):
+            engine_task_executor._run_tts_batch(handle, claim, claim.payload, [], [])
+        if recover == "legacy":
+            journal = handle.publication_journal
+            data = json.loads(journal.path.read_text("utf-8"))
+            for entry in data["files"]:
+                entry.pop("checkpoint", None)
+            journal.path.write_text(json.dumps(data), encoding="utf-8")
+        with SessionLocal.begin() as db:
+            db.get(TaskAttempt, claim.attempt_id).lease_expires_at = utcnow() - timedelta(seconds=1)
+        recover_database_tasks()
+    else:
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            engine_task_executor.execute_engine_task(claim)
+
+    with engine_execution_context(claim):
+        layout = core_paths.get_or_prepare_layout()
+        assert not (layout.voice_profiles / "temporary.json").exists()
+        for name in scripts:
+            out = layout.audio_chunk / tts_batch.package_for(Path(name))
+            entries = tts_batch.read_manifest(out)
+            done = tts_batch.done_indices(entries, out, layout.workspace)
+            assert done == {0}
+            assert tts_batch.plan_to_synthesize([0, 1], done) == {1}
+            assert (out / "0001.mp3").read_bytes() == b"completed audio"
+        # The same read path used by the UI must expose retained completion.
+        from backend.api.tts import batch_status
+        status = batch_status(script=None, scripts=scripts)
+        assert all(row["completed"] == 1 and row["remaining"] == 1 for row in status["files"])
+
+
 @pytest.mark.parametrize(("committed", "should_exist"), [(False, True), (True, False)])
 def test_publication_reconciles_directory_removal(tmp_path, committed, should_exist):
     root = tmp_path / "storage"
