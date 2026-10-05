@@ -502,7 +502,8 @@ def start_or_continue_flow(
     return flow_state(db, user, project_id)
 
 
-def flow_state(db: Session, user: User, project_id: str) -> dict:
+def flow_state(db: Session, user: User, project_id: str, *, recover: bool = True) -> dict:
+    """Read state; recover=False skips both stage advancement and legacy adoption."""
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise WorkbenchError(404, "项目不存在")
@@ -510,7 +511,7 @@ def flow_state(db: Session, user: User, project_id: str) -> dict:
 
     # Upgrade fallback (adopt): no flow rows yet, but a succeeded split task
     # exists — recover it so old data stays restorable.
-    if flow is None:
+    if recover and flow is None:
         split_task = db.scalar(select(Task).where(
             Task.owner_id == user.id, Task.project_id == project.id,
             Task.task_type == "book.split", Task.status == "succeeded",
@@ -535,7 +536,7 @@ def flow_state(db: Session, user: User, project_id: str) -> dict:
     # left before POSTing continue, or the last task finished in the background
     # — is advanced idempotently so a plain read restores progress. Submissions
     # carry stable tflow keys, so concurrent reads cannot duplicate a stage.
-    if flow is not None and flow.status == "running" and not active:
+    if recover and flow is not None and flow.status == "running" and not active:
         _advance(db, user, project, flow)
         db.commit()
         flow = _latest_flow(db, project.id, user.id)

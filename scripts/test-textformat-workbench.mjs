@@ -95,7 +95,7 @@ const readyVersion = (chapters) => ({
 
 function workbenchApi({ getState, postFlow, calls }) {
   return {
-    getWorkbenchState: (projectId) => getState(projectId),
+    getWorkbenchState: (projectId, options) => getState(projectId, options),
     postWorkbenchFlow: async () => {
       calls.post += 1
       return postFlow ? postFlow() : {}
@@ -477,15 +477,32 @@ test('a late state response from the previous project cannot overwrite the new p
 })
 
 
-test('manual state refresh reads progress without advancing or submitting a flow', async () => {
-  const { wb, calls } = setupWorkbench({ getState: async () => ({
-    flow: { id: 'flow-1', status: 'running', config_snapshot: {} },
-    version: null,
-    next_task: { stage: 'format', task_id: 'task-1', status: 'running', progress: 30 },
-    active_tasks: [],
-  }) })
-  assert.equal(await wb.refreshState(), true)
+test('manual state refresh explicitly requests a read-only server snapshot', async () => {
+  let readOptions
+  const { wb, calls } = setupWorkbench({
+    getState: async (_projectId, options) => {
+      readOptions = options
+      return {
+        flow: { id: 'flow-1', status: 'running', config_snapshot: {} },
+        version: null,
+        next_task: { stage: 'format', task_id: 'task-1', status: 'running', progress: 30 },
+        active_tasks: [],
+      }
+    },
+  })
+  assert.equal(await wb.refreshState({ recover: false }), true)
+  assert.deepEqual(readOptions, { recover: false })
   assert.equal(wb.nextTask.value.progress, 30)
   assert.equal(calls.post, 0)
   assert.equal(calls.wait, 0)
+})
+
+
+test('state API keeps lifecycle recovery by default and opts out for manual refresh', async () => {
+  const urls = []
+  const load = harness({ '@/api/client': { http: { get: async url => { urls.push(url); return {} } } } })
+  const { getWorkbenchState } = load('@/api/textFormat')
+  await getWorkbenchState('P1')
+  await getWorkbenchState('P1', { recover: false })
+  assert.deepEqual(urls, ['/api/v1/projects/P1/text-format/state', '/api/v1/projects/P1/text-format/state?recover=false'])
 })

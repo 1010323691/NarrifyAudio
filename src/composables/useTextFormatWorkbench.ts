@@ -198,12 +198,12 @@ export function useTextFormatWorkbench() {
     }
   }
 
-  async function refreshState(): Promise<boolean> {
+  async function refreshState(options?: { recover?: boolean }): Promise<boolean> {
     const projectId = project.activeProjectId
     if (!projectId) return false
     const token = ++loadToken
     try {
-      const state = await getWorkbenchState(projectId)
+      const state = await getWorkbenchState(projectId, options)
       if (token !== loadToken || project.activeProjectId !== projectId) return false
       applyState(state)
       return true
@@ -258,7 +258,7 @@ export function useTextFormatWorkbench() {
     }
   }
 
-  /** Recovery entry point (mount / reactivate / manual refresh). */
+  /** Recovery entry point (mount / reactivate). */
   async function resume() {
     loading.value = true
     try {

@@ -50,7 +50,7 @@ async function refreshChapters() {
   const isCurrent = captureScope()
   refreshing.value = true
   try {
-    const refreshed = await refreshState()
+    const refreshed = await refreshState({ recover: false })
     if (!isCurrent()) return
     if (!refreshed) toast({ title: '刷新章节失败', variant: 'destructive', description: '请稍后重试。' })
   } finally {
