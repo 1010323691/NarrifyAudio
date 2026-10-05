@@ -6,6 +6,7 @@ export const TASK_CENTER_CATEGORIES = [
   { id: 'preview', label: '整章预览', description: '预览章节最终合成并逐句微调' },
   { id: 'merge', label: '音频合并', description: '合并章节音频' },
   { id: 'bgm', label: '背景音乐混音', description: '处理背景音乐并完成混音' },
+  { id: 'resources', label: '资源管理', description: '扫描资源、打包文件和清理过期缓存' },
 ] as const
 
 export type TaskCenterCategoryId = (typeof TASK_CENTER_CATEGORIES)[number]['id']
@@ -18,5 +19,6 @@ export function taskCenterCategoryOf(taskType: string): TaskCenterCategoryId | u
   if (taskType === 'tts.preview_render') return 'preview'
   if (taskType === 'tts.merge') return 'merge'
   if (['bgm.analysis', 'bgm.segment', 'bgm.match', 'bgm.mix', 'bgm.package'].includes(taskType)) return 'bgm'
+  if (taskType.startsWith('resources.')) return 'resources'
   return undefined
 }

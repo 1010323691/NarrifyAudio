@@ -7,10 +7,7 @@ exercised without a running worker.
 """
 from __future__ import annotations
 
-import hashlib
-import io
 import uuid
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -533,8 +530,8 @@ def test_preview_and_zip_are_bound_to_the_explicit_version(client: TestClient):
         f"/api/v1/projects/{project_id}/text-format/file/{first_file['name']}",
         params={"flow_id": flow_id, "download": "true"},
     )
-    assert download.status_code == 200
-    assert "attachment" in download.headers.get("content-disposition", "")
+    assert download.status_code == 403
+    assert "attachment" not in download.headers.get("content-disposition", "")
 
     # A file that does not belong to the flow is rejected.
     foreign = client.get(
@@ -547,18 +544,8 @@ def test_preview_and_zip_are_bound_to_the_explicit_version(client: TestClient):
     zip_response = client.get(
         f"/api/v1/projects/{project_id}/text-format/zip", params={"flow_id": flow_id}
     )
-    assert zip_response.status_code == 200, zip_response.text
-    # The disposition header must stay latin-1 encodable (RFC 5987 filename*).
-    disposition = zip_response.headers["content-disposition"]
-    assert "attachment" in disposition and "filename*=utf-8''" in disposition
-    disposition.encode("latin-1")
-    data = zip_response.content
-    assert zip_response.headers["x-zip-sha256"] == hashlib.sha256(data).hexdigest()
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = set(archive.namelist())
-        assert names == {f["name"] for f in version["files"]}
-        chapter_text = archive.read(version["files"][0]["name"]).decode("utf-8")
-        assert "金陵秦尘" in chapter_text
+    assert zip_response.status_code == 403
+
 
 
 def test_preview_size_limit_is_applied_before_reading(client: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -581,8 +568,8 @@ def test_preview_size_limit_is_applied_before_reading(client: TestClient, monkey
         f"/api/v1/projects/{project_id}/text-format/file/{file_name}",
         params={"flow_id": state["flow"]["id"], "download": "true"},
     )
-    assert downloadable.status_code == 200, downloadable.text
-    assert "attachment" in downloadable.headers.get("content-disposition", "")
+    assert downloadable.status_code == 403, downloadable.text
+    assert "attachment" not in downloadable.headers.get("content-disposition", "")
 
 
 def test_concurrent_flows_are_blocked_server_side(client: TestClient):

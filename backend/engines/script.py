@@ -991,6 +991,37 @@ def merge_adjacent_same_speaker(entries, title_test, max_chars=100, short_cap=10
 # ---------------------------------------------------------------------------
 
 _SAYING_TAG_RE = re.compile("(?:^|[\\u4e00-\\u9fffA-Za-z])道\\s*[:：]")
+# 明确的发声词与修饰词。动作、否定、未知人物不通过自动删文门。
+_PURE_SPEECH_VERBS = (
+    "解释道", "回答道", "追问", "惊呼道", "说道", "问道", "答道", "喊道",
+    "叫道", "喝道", "吼道", "笑道", "哭道", "叹道", "说", "道", "问", "答", "喊",
+)
+_SPEECH_MODIFIER_RE = re.compile(
+    r"(?:(?:继续|又|低声|轻声|大声|沉声|颤声|冷笑|怒|急|放声|轻轻))*"
+)
+_SPEECH_PRONOUNS = ("他", "她", "我", "你", "他们", "她们", "我们", "你们")
+_SPEECH_PUNCT = "。！？…：；、，～—-!?:;,.~"
+
+
+def _is_explicit_saying_tag(text: str, speakers=()) -> bool:
+    """Conservatively recognize a complete pure speech tag; never infer a name."""
+    core = text.strip().rstrip(_SPEECH_PUNCT).strip()
+    if not core or len(core) > PURE_SAY_TAG_MAX_LEN or any(ch in core for ch in "，,；;：:"):
+        return False
+    subjects = set(_SPEECH_PRONOUNS) | {
+        name for name in speakers if isinstance(name, str) and name and name != "NARRATOR"
+    }
+    for verb in _PURE_SPEECH_VERBS:
+        if not core.endswith(verb):
+            continue
+        prefix = core[:-len(verb)]
+        for subject in subjects:
+            if prefix.startswith(subject) and _SPEECH_MODIFIER_RE.fullmatch(prefix[len(subject):]):
+                return True
+        # 明确复合发声词可以省略主语；裸「道/问/答」不据此自动删文。
+        if len(verb) > 1 and _SPEECH_MODIFIER_RE.fullmatch(prefix):
+            return True
+    return False
 # 外层双引号对（弯双 + 直双——「任意形式」的引号对均被接受）。引号字符一律 \uXXXX
 # 转义（同忠实性校验的既有教训：手写引号字符不可靠）；此处是普通字符串
 # 比较（startswith / rfind）而非正则，故用单反斜杠让 Python 解码出真实引号字符。
@@ -1013,7 +1044,12 @@ def is_suspicious_entry_text(text: str) -> bool:
             # ( “又道：“…”” ) close at the very end, so a mid-span tag is still seen.
             end = t.rfind(close_q)
             if end > len(open_q):
-                return bool(_SAYING_TAG_RE.search(t[len(open_q):end]))
+                body = t[len(open_q):end]
+                return any(
+                    not (m.start() > 0 and body[m.start()] in "知难")
+                    and not m.group(0).startswith(("知道", "难道"))
+                    for m in _SAYING_TAG_RE.finditer(body)
+                )
     return False
 
 
@@ -1025,7 +1061,7 @@ def suspicious_entry_indices(entries: list) -> list[int]:
     ]
 
 
-def _strip_leading_saying_tag(text: str) -> str:
+def _strip_leading_saying_tag(text: str, speakers=()) -> str:
     """The entry text with its leading "…道：" tag (inside the outer wrap) removed —
     the pure speech tag the parse prompt's edit (e) lets the model drop. Text without
     a leading tag is returned unchanged."""
@@ -1034,7 +1070,7 @@ def _strip_leading_saying_tag(text: str) -> str:
         if t.startswith(open_q):
             body = t[len(open_q):]
             m = _LEADING_SAYING_TAG_RE.match(body)
-            if m:
+            if m and _is_explicit_saying_tag(body[:m.end()], speakers):
                 return t[: len(open_q)] + body[m.end():]
     return t
 
@@ -1051,15 +1087,17 @@ def _parse_entries_reply(text: str):
     return entries if entries else salvage_json_entries(json_text)
 
 
-def _reparse_vote(parts, entry: dict, roster: frozenset):
+def _reparse_vote(parts, entry: dict, roster: frozenset, *, legacy_budget=False):
     """Gate one re-parse reply for a flagged entry and reduce it to its vote value.
 
     A reply votes only if it is well-formed and faithful to the original entry text:
     the parts' concatenated word-character skeleton (``_skeleton``) must equal the
-    original's skeleton under one of the prompt's permitted edits — tag kept (e.g. as
-    a NARRATOR part), the leading pure tag dropped (edit (e)), or, when the tag
-    carried a descriptive action, only the trailing speech-verb cluster dropped
-    (action retained). The skeleton is immune to the prompt-permitted formatting edits
+    original's skeleton with a confirmed leading pure tag removed, or an isolated
+    trailing speech tag removed after a clause delimiter (action retained).
+    Unknown names, negations and actions cannot be discarded as pure tags.
+    ``legacy_budget`` recognizes the former variants only to retain the former
+    request stopping point; its signatures must never authorize a text edit.
+    The skeleton is immune to the prompt-permitted formatting edits
     (quote / colon / seam-punctuation changes) while any added, dropped, or reordered
     word character is caught. Part speakers must be ``NARRATOR`` or in the file-wide
     roster (no invented names); a multi-part answer needs ≥2 distinct speakers —
@@ -1072,7 +1110,10 @@ def _reparse_vote(parts, entry: dict, roster: frozenset):
     texts = []
     speakers = []
     for p in parts:
-        sp = (p.get("speaker") or "").strip()
+        sp = p.get("speaker")
+        if not isinstance(sp, str):
+            return None
+        sp = sp.strip()
         tx = p.get("text")
         if not sp or sp not in roster:
             return None
@@ -1084,16 +1125,28 @@ def _reparse_vote(parts, entry: dict, roster: frozenset):
         return None
     joined = _skeleton("".join(texts))
     orig = entry.get("text") or ""
-    allowed = {_skeleton(orig), _skeleton(_strip_leading_saying_tag(orig))}
+    allowed = {_skeleton(orig), _skeleton(_strip_leading_saying_tag(orig, roster))}
+    if legacy_budget:
+        # 只用旧门计算原有提前停止点，绝不用于采纳正文修改。
+        for open_q, _close in _OUTER_DQUOTE_PAIRS:
+            if orig.strip().startswith(open_q):
+                body = orig.strip()[len(open_q):]
+                m = _LEADING_SAYING_TAG_RE.match(body)
+                if m:
+                    allowed.add(_skeleton(body[m.end():]))
     # 提示词第三处允许编辑：标签含描述性动作时保留动作、只删说话动词
     # （史蒂夫猛地抓住杜尘的衣领，吼道 → 史蒂夫猛地抓住杜尘的衣领。）——骨架即
     # 原文骨架去掉尾部动词簇，同样计入合法变体（仍保持骨架精确相等，投票语义不变）。
     orig_sk = _skeleton(orig)
-    for tail in _SAY_TAG_TAILS:
+    for tail in _SAY_TAG_TAILS if legacy_budget else ():
         # 与缺口豁免同一守卫：「知道 / 难道」的「道」不是说话动词
         if (len(orig_sk) > len(tail) and orig_sk.endswith(tail)
                 and not (tail == "道" and orig_sk[-2] in _NONSPEAK_BEFORE_DAO)):
             allowed.add(orig_sk[: -len(tail)])
+    # 只允许删除独立的句末发声标签，动作及否定句完整保留。
+    tail_tag = re.fullmatch(r"(.+)[，,：:]\s*([^，,：:]+)", orig.strip().rstrip(_SPEECH_PUNCT))
+    if tail_tag and _is_explicit_saying_tag(tail_tag[2], roster):
+        allowed.add(_skeleton(tail_tag[1]))
     if joined not in allowed:
         return None
     return tuple((p["speaker"].strip(), _skeleton(p["text"])) for p in parts)
@@ -1474,7 +1527,7 @@ def _batch_user_prompt(template: str, context: str, size: int, n: int,
 
 def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, context,
                      roster, stage: str = "断句校验",
-                     single_call: bool = False) -> list | None:
+                     single_call: bool = False, budget_deferred=None) -> list | None:
     """Re-run the parse LLM on one flagged entry and resolve the re-derivation by
     majority vote — the 角色匹配检查 consensus rule: one first call plus two retries
     (three total), early-stopping the instant a strict majority is decided, and one
@@ -1490,7 +1543,10 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
     panel). Each reply is gated by :func:`_reparse_vote`; a failed call, an
     unparseable reply, or a gate failure contributes no vote. Returns the winning
     re-derived entries (the raw reply dicts), or ``None`` when no consensus forms —
-    the caller then keeps the entry unchanged. ``stage`` = the log label（断句校验 /
+    the caller then keeps the entry unchanged. The former gate bounds retries:
+    stricter acceptance cannot turn a former early stop into additional requests.
+    ``budget_deferred`` prevents follow-up length/instruct requests for rejected
+    edits. ``stage`` = the log label（断句校验 /
     超长段落重切 等复用方传各自文案）.
     """
     messages = [
@@ -1499,6 +1555,7 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
          "content": usr_template.format(context=context, chunk=entry.get("text") or "")},
     ]
     votes: list = []
+    budget_votes: list = []
     parts_by_sig: dict = {}
 
     def one_vote(attempt: int, no_vote_note: str = "，本轮无票") -> None:
@@ -1517,6 +1574,9 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
             handle.log(f"  {stage}第 {attempt} 次响应无法解析为条目数组{no_vote_note}",
                        "WARNING")
             return
+        budget_sig = _reparse_vote(parts, entry, roster, legacy_budget=True)
+        if budget_sig is not None:
+            budget_votes.append(budget_sig)
         sig = _reparse_vote(parts, entry, roster)
         if sig is None:
             handle.log(
@@ -1541,22 +1601,24 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
 
     for attempt in range(1, 4):  # 基础一次 + 重试两次 = 合计 3 次
         one_vote(attempt)
-        if _pick_majority(votes) is not None:
+        if _pick_majority(budget_votes) is not None:
             break  # 多数已决（2:0 / 2:1）——剩余调用无法翻盘，省掉
-    if _pick_majority(votes) is None:
+    if _pick_majority(budget_votes) is None:
         # 没决出来（1:1:1 或有效票不足）→ 再跑第四次
         handle.log(f"  {stage}3 次无共识 → 再跑第 4 次")
         handle.check()
         one_vote(4)
     winner = _pick_majority(votes)
     if winner is None:
-        handle.log(f"  {stage}4 次仍无共识，条目保持原样", "WARNING")
+        if budget_deferred is not None and _pick_majority(budget_votes) is not None:
+            budget_deferred[id(entry)] = entry  # 持有引用，防止后续字典的 id 被复用。
+        handle.log(f"  {stage}预算内无可采纳共识，条目保持原样", "WARNING")
         return None
     return parts_by_sig[winner]
 
 
 def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, entries,
-                             context_window=4) -> tuple:
+                             context_window=4, *, budget_deferred=None) -> tuple:
     """Post-parse sentence-split validation (runs in ``generate_file`` BEFORE the
     mechanical NARRATOR merge, so split-off narration parts merge with their
     neighbours as usual).
@@ -1608,8 +1670,9 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
         f"逐条带上下文窗口（±{n} 条）重跑校验…"
     )
     # The mechanical check stages share the [0.9, 1.0) progress band (see
-    # generate_file): re-validation owns [0.9, 0.98), the spot audit [0.98, 0.998).
-    handle.progress(0.9, f"断句校验 {len(flagged)} 条")
+    # generate_file): re-validation owns [0.92, 0.94), followed by length
+    # re-splits and the spot audit.
+    handle.progress(0.92, f"断句校验 {len(flagged)} 条")
 
     updated = None
     fixed = 0
@@ -1617,11 +1680,11 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
     # entry's (already built) window refers to.
     for seq, i in enumerate(sorted(flagged, reverse=True), 1):
         handle.check()
-        handle.progress(0.9 + 0.08 * seq / len(flagged), f"断句校验 {seq}/{len(flagged)}")
+        handle.progress(0.92 + 0.02 * seq / len(flagged), f"断句校验 {seq}/{len(flagged)}")
         snippet = (entries[i].get("text") or "").replace("\n", " ")
         handle.log(f"条目 {i + 1}（疑似断句失败）：{snippet[:60]}{'…' if len(snippet) > 60 else ''}")
         parts = revalidate_entry(handle, llm, generation, sys_prompt, usr_template,
-                                 entries[i], contexts[i], roster)
+                                 entries[i], contexts[i], roster, budget_deferred=budget_deferred)
         if parts is None:
             continue  # 无共识 / 校验未过 → 条目保持原样
         if updated is None:
@@ -1661,19 +1724,32 @@ def _parse_instruct_batch(reply: str, targets: list[int], max_words: int) -> dic
             return {}
     target_set = set(targets)
     result = {}
-    for order, row in enumerate(rows):
+    seen = set()
+    conflicts = set()
+    for row in rows:
         if not isinstance(row, dict):
             continue
         idx = row.get("index")
-        try:
-            idx = int(idx) if idx is not None else targets[order]
-        except (TypeError, ValueError, IndexError):
+        if isinstance(idx, bool) or not isinstance(idx, (int, str)):
+            continue
+        if isinstance(idx, str):
+            if not re.fullmatch(r"\d+", idx):
+                continue
+            idx = int(idx)
+        if idx not in target_set:
+            continue
+        if idx in seen:
+            conflicts.add(idx)
+            result.pop(idx, None)
+            continue
+        seen.add(idx)
+        if set(row) - {"index", "instruct"}:
             continue
         value = row.get("instruct")
-        if idx not in target_set or not isinstance(value, str):
+        if not isinstance(value, str):
             continue
         value = value.strip()
-        if value and instruct_word_count(value) < max_words:
+        if idx not in conflicts and value and instruct_word_count(value) <= max_words:
             result[idx] = value
     return result
 
@@ -1706,7 +1782,7 @@ def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: 
         "\"instruct\": concise_direction}. Keep every index, speaker, and text value "
         "unchanged; do not split, merge, delete, reorder, or repeat entries. Use "
         "nearby directions only for style continuity. "
-        f"Each direction must be non-empty and shorter than {max_words} whitespace words.\n\n"
+        f"Each direction must be non-empty and at most {max_words} whitespace words.\n\n"
         "TARGETS (only these may be changed):\n"
         + json.dumps(target_rows, ensure_ascii=False, indent=2)
         + "\n\nCONTEXT (read-only):\n"
@@ -1716,34 +1792,58 @@ def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: 
     )
 
 
+_SCENE_MARKER_RE = re.compile(
+    r"^(?:[一二三四五六七八九十百两\d]+(?:天|年|月|日|小时|分钟|秒)(?:后|前)"
+    r"|次日|翌日|第二天|与此同时|另一边|片刻后|过了一会儿)[。.!！?？]?$"
+)
+
+
+def _narration_boundary(entry: dict) -> bool:
+    text = (entry.get("text") or "").strip()
+    return is_chapter_title(text) or bool(_SCENE_MARKER_RE.fullmatch(text))
+
+
+def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded=True):
+    """The old contiguous run also supplies a ceiling for LLM repair eligibility."""
+    if str(entries[index].get("speaker") or "").strip().upper() != "NARRATOR":
+        return []
+    if bounded and _narration_boundary(entries[index]):
+        return []
+    left = right = index
+    while left > 0 and str(entries[left - 1].get("speaker") or "").strip().upper() == "NARRATOR":
+        if bounded and _narration_boundary(entries[left - 1]):
+            break
+        left -= 1
+    while right + 1 < len(entries) and str(entries[right + 1].get("speaker") or "").strip().upper() == "NARRATOR":
+        if bounded and _narration_boundary(entries[right + 1]):
+            break
+        right += 1
+    candidates = []
+    for candidate in range(left, right + 1):
+        if candidate in flagged:
+            continue
+        value = entries[candidate].get("instruct")
+        if not bounded:
+            value = str(value or "").strip()
+        limit_ok = instruct_word_count(value) <= max_words if bounded else instruct_word_count(value) < max_words
+        if isinstance(value, str) and value.strip() and limit_ok:
+            candidates.append((abs(candidate - index), candidate, value.strip()))
+    if bounded and len({" ".join(value.split()).casefold() for _, _, value in candidates}) > 1:
+        return []  # 多份不同指导之间不猜测语气连续性。
+    return candidates
+
+
 def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: int) -> tuple:
     """Repair flagged narrator entries from a nearby valid narrator direction.
 
-    Only entries inside the same contiguous NARRATOR run are considered. This
-    keeps narration style stable while avoiding an LLM request for mechanical
-    omissions in a run that already has a usable direction.
+    Stay within a narrator run, stop at headings/time markers and require
+    compatible candidate directions. Ambiguous inheritance stays unresolved.
     """
     updated = list(entries)
     flagged_set = set(flagged)
     inherited = {}
     for index in flagged:
-        if str(entries[index].get("speaker") or "").strip().upper() != "NARRATOR":
-            continue
-
-        left = index
-        while left > 0 and str(entries[left - 1].get("speaker") or "").strip().upper() == "NARRATOR":
-            left -= 1
-        right = index
-        while right + 1 < len(entries) and str(entries[right + 1].get("speaker") or "").strip().upper() == "NARRATOR":
-            right += 1
-
-        candidates = []
-        for candidate in range(left, right + 1):
-            if candidate in flagged_set:
-                continue
-            value = str(entries[candidate].get("instruct") or "").strip()
-            if value and instruct_word_count(value) < max_words:
-                candidates.append((abs(candidate - index), candidate, value))
+        candidates = _narrator_instruct_candidates(entries, index, flagged_set, max_words)
         if not candidates:
             continue
         _, _, value = min(candidates, key=lambda item: (item[0], item[1]))
@@ -1754,7 +1854,8 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: in
 
 
 def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_template, entries,
-                                 context_window=4, max_words=INSTRUCT_MAX_WORDS) -> tuple:
+                                 context_window=4, max_words=INSTRUCT_MAX_WORDS,
+                                 *, budget_deferred=None) -> tuple:
     """Mechanically inherit narration directions, then repair remaining targets once."""
     max_words = max(1, int(max_words))
     flagged = instruct_entry_indices(entries, max_words)
@@ -1762,12 +1863,25 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
         return entries, 0, 0
 
     updated, inherited = _inherit_narrator_instructs(entries, flagged, max_words)
-    targets = [index for index in flagged if index not in inherited]
+    for index in flagged:
+        if not isinstance(entries[index].get("instruct"), str) and index not in inherited:
+            updated[index] = {**updated[index], "instruct": ""}
+    legacy_flagged = {index for index, entry in enumerate(entries)
+                      if not str(entry.get("instruct") or "").strip()
+                      or instruct_word_count(entry.get("instruct")) >= max_words}
+    # 收紧继承边界不能扩充旧版原本需要 LLM 的目标集合。
+    targets = [index for index in flagged if index not in inherited and index in legacy_flagged
+               and (budget_deferred is None or id(entries[index]) not in budget_deferred)
+               and not _narrator_instruct_candidates(
+                   entries, index, legacy_flagged, max_words, bounded=False)]
+    deferred = [index for index in flagged if index not in inherited and index not in targets]
+    if deferred:
+        handle.log(f"语音指导待核对：{len(deferred)} 条无法安全继承，未追加 LLM 请求", "WARNING")
     replacement = {}
     if targets:
         n = max(0, int(context_window))
         handle.log(f"instruct flags={len(flagged)}; narrator inherited={len(inherited)}; LLM targets={len(targets)}")
-        handle.progress(0.94, f"instruct targets={len(targets)}")
+        handle.progress(0.99, f"instruct targets={len(targets)}")
         handle.check()
         messages = [
             {"role": "system", "content": (
@@ -1784,6 +1898,7 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
             raise
         except Exception as e:  # noqa: BLE001
             handle.log(f"instruct batch call failed: {e}", "WARNING")
+            handle.log(f"语音指导待核对：{len(targets)} 条未修复，不追加请求", "WARNING")
             return updated, len(flagged), len(inherited)
         replacement = _parse_instruct_batch(reply, targets, max_words)
         for index, value in replacement.items():
@@ -1798,6 +1913,9 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
         f"instruct repaired={fixed}; narrator inherited={len(inherited)}; "
         f"LLM requests={1 if targets else 0}"
     )
+    unresolved = [index for index in flagged if index not in inherited and index not in replacement]
+    if unresolved:
+        handle.log(f"语音指导待核对：{len(unresolved)} 条仍异常（下标 {unresolved}），不追加请求", "WARNING")
     return updated, len(flagged), fixed
 
 
@@ -1807,14 +1925,26 @@ def instruct_word_count(value) -> int:
 
 
 def instruct_entry_indices(entries: list, max_words: int = INSTRUCT_MAX_WORDS) -> list[int]:
-    """Return entries whose voice direction is missing or at least ``max_words`` long."""
+    """Return entries whose voice direction is missing or exceeds ``max_words``."""
     limit = max(1, int(max_words))
     return [
         i for i, e in enumerate(entries)
         if isinstance(e, dict)
-        and (not str(e.get("instruct") or "").strip()
-             or instruct_word_count(e.get("instruct")) >= limit)
+        and (not isinstance(e.get("instruct"), str)
+             or not e.get("instruct").strip()
+             or instruct_word_count(e.get("instruct")) > limit)
     ]
+
+
+def _log_changed_speaker_instructs(handle, before: list, after: list) -> None:
+    indices = [index for index, (old, new) in enumerate(zip(before, after))
+               if old.get("speaker") != new.get("speaker")
+               and isinstance(new.get("instruct"), str) and new["instruct"].strip()]
+    if indices:
+        handle.log(
+            f"语音指导待核对：角色改判后 {len(indices)} 条已有指导可能失配"
+            f"（下标 {indices}），保留指导，不追加语义重审请求", "WARNING",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1845,8 +1975,8 @@ validate_instructs = _validate_instructs_one_call
 
 
 def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, entries,
-                           max_chars, context_window=4) -> tuple:
-    """超长条目的 LLM 重切（解析内，纯归属标签删除之后、归属抽样之前——重切可能
+                           max_chars, context_window=4, *, budget_deferred=None) -> tuple:
+    """超长条目的 LLM 重切（解析内，断句校验之后、归属抽样之前——重切可能
     产生新归属的台词条目，需要被抽样审计；受 ``generation.check_long_paragraphs``
     门控，由 ``generate_file`` 判断）。
 
@@ -1864,6 +1994,11 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     """
     max_chars = max(10, int(max_chars))
     flagged = long_entry_indices(entries, max_chars)
+    if budget_deferred:
+        skipped = [i for i in flagged if id(entries[i]) in budget_deferred]
+        if skipped:
+            handle.log(f"超长重切待核对：{len(skipped)} 条保留原文，直接机械分段，不追加请求", "WARNING")
+        flagged = [i for i in flagged if i not in skipped]
     if not flagged:
         # 零命中也留一行日志（与其余阶段同一纪律：静默退出会被误读成阶段缺失）
         handle.log(f"超长段落检查：0 条超过 {max_chars} 字条目（无 LLM 重切，零 LLM 调用）")
@@ -1899,15 +2034,15 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         f"逐条带上下文窗口（±{n} 条）重跑 LLM 重切（每条仅 1 次，未过门交机械分段）…"
     )
     # The mechanical check stages share the [0.9, 1.0) progress band (see
-    # generate_file): this stage shares the [0.96, 0.98) band with
-    # sentence-split validation (runs after it in time, no overlap).
+    # generate_file): this stage owns [0.94, 0.96), after sentence-split validation
+    # and before the speaker spot audit.
     updated = None
     fixed = 0
     # Descending index order: applying a re-split (1 → N entries) never shifts the
     # index a LATER (lower) entry's already-built window refers to.
     for seq, i in enumerate(sorted(flagged, reverse=True), 1):
         handle.check()
-        handle.progress(0.96 + 0.02 * seq / len(flagged), f"超长段落重切 {seq}/{len(flagged)}")
+        handle.progress(0.94 + 0.02 * seq / len(flagged), f"超长段落重切 {seq}/{len(flagged)}")
         snippet = (entries[i].get("text") or "").replace("\n", " ")
         text_len = len((entries[i].get("text") or "").strip())
         handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
@@ -1971,16 +2106,18 @@ def split_long_text(text: str, max_chars: int) -> list[str]:
        ``split_into_chunks`` 同一口径，保护 ``3.14`` / ``e.g.``）
     ② 子句界（``[，、；：,;:]``）
     ③ 定宽硬切（最后手段：「绝不出现超长条目」的硬保证高于「不拦腰截句」——
-       切点先查 ±20 字窗内的引号安全位，找不到才裸定宽切）
+       切点先查上限左侧 20 字窗内的引号安全位，找不到才裸定宽切）
 
     ①② 的切点要求**引号安全**（引号奇偶与起点一致，见 :func:`_quote_parity`），
     不安全则让位下一级。
 
     不变量：各段去空白拼接骨架 == 原文骨架（无损）；每段 ≤ ``max_chars``；
     切点严格前进、必然终止。短文本（≤ ``max_chars``）原样单段返回。
-    ``max_chars ≤ 0`` 钳 10（退化值无意义）。
+    ``max_chars ≤ 0`` 使用 10；正数上限均严格遵守。
     """
-    max_chars = max(10, int(max_chars))
+    max_chars = int(max_chars)
+    if max_chars <= 0:
+        max_chars = 10
     text = text.strip()
     if len(text) <= max_chars:
         return [text] if text else []
@@ -2016,9 +2153,9 @@ def split_long_text(text: str, max_chars: int) -> list[str]:
         if best is not None:
             cut = best
         else:
-            # 定宽硬切：±20 字窗内找引号安全位（取离定宽位最近者），找不到裸切。
+            # 定宽硬切：只查上限以内的引号安全位，找不到也不得向右越界。
             cut = start + max_chars
-            lo, hi = max(start + 1, cut - 20), min(len(text), cut + 20)
+            lo, hi = max(start + 1, cut - 20), cut
             safe = [p for p in range(lo, hi + 1) if par[p] == par[start]]
             if safe:
                 cut = min(safe, key=lambda p: (abs(p - cut), p > cut))
@@ -2029,6 +2166,10 @@ def split_long_text(text: str, max_chars: int) -> list[str]:
             piece = text[start:cut].strip()
         out.append(piece)
         start = cut
+    if any(not part or len(part) > max_chars for part in out):
+        raise RuntimeError("机械分段结果为空或超过长度上限")
+    if _skeleton("".join(out)) != _skeleton(text):
+        raise RuntimeError("机械分段未通过内容完整性校验")
     return out
 
 
@@ -2039,7 +2180,7 @@ def split_long_entries(entries: list, max_chars: int, title_test) -> tuple:
     由 ``generate_file`` 在管线末段无条件调用）。
 
     对每条仍超过 ``max_chars`` 的条目调 :func:`split_long_text`：speaker /
-    instruct 继承（instruct 只给首段——声音指导随段重复会重复朗读），**非级联**
+    每个子段均继承原 instruct（独立 TTS 条目需要相同指导），**非级联**
     单遍（切出的段恒 ≤ ``max_chars``，不会再触发）。
 
     与 ``merge_adjacent_same_speaker``（词字符 ≤100 / ≤10 强制合并）的交互：同人合并在
@@ -2052,7 +2193,9 @@ def split_long_entries(entries: list, max_chars: int, title_test) -> tuple:
     被切分的条目数（切出的段总数 = 原条目数 + 各段增量，不在返回值里——日志带
     逐条明细）。
     """
-    max_chars = max(10, int(max_chars))
+    max_chars = int(max_chars)
+    if max_chars <= 0:
+        max_chars = 10
     flagged = long_entry_indices(entries, max_chars)
     if not flagged:
         # 零命中也留一行日志（本半在 generate_file 的日志行之后，此处不重复）
@@ -2069,14 +2212,14 @@ def split_long_entries(entries: list, max_chars: int, title_test) -> tuple:
         speaker = (e.get("speaker") or "").strip()
         instruct = e.get("instruct") or ""
         updated[i:i + 1] = [
-            {"speaker": speaker, "text": p, "instruct": instruct if k == 0 else ""}
-            for k, p in enumerate(parts)
+            {**e, "speaker": speaker, "text": p, "instruct": instruct}
+            for p in parts
         ]
         split_count += 1
     return updated, split_count
 
 
-def absorb_punct_entries(entries: list, title_test) -> tuple:
+def absorb_punct_entries(entries: list, title_test, *, audit=None, budget_deferred=None) -> tuple:
     """纯标点 / 无内容条目的吸收（解析内阶段 B，确定性零 LLM 成本；受
     ``generation.absorb_punct_entries`` 门控，由 ``generate_file`` 判断）。
 
@@ -2084,9 +2227,8 @@ def absorb_punct_entries(entries: list, title_test) -> tuple:
     32 段纯标点 NARRATOR）对 TTS 只是一次停顿 + 两次换人停顿。处置：并入相邻
     NARRATOR 条目（前邻优先，无前邻则后邻；**标题守卫**——``title_test`` 命中的
     邻接条目不吸收：标题两侧是章节分界停顿）；无 NARRATOR 邻接 → 删除。
-    单遍非级联（邻接按删除前列表判定，与纯归属标签删除同一保守口径）；text
-    直接拼接（并入前邻 = 追加到其尾，并入后邻 = 置于其开头）。相邻的纯标点
-    条目链（punct, punct, NARRATOR）逐跳并入同一目标、内容不丢失。
+    连续纯标点作为一个区间处理，只吸收到含正文的邻接旁白；
+    标题与明确时间切换不作为吸收目标。text 按原顺序直接拼接。
 
     返回 ``(entries, absorbed, deleted)`` —— 更新后的列表（无修改时原列表对象）、
     被并入的条目数、被删除的条目数。
@@ -2099,15 +2241,19 @@ def absorb_punct_entries(entries: list, title_test) -> tuple:
         return entries, 0, 0
     texts = {i: (entries[i].get("text") or "").strip() for i in range(len(entries))}
     removed: set = set()
-    consumed: set = set()  # 被吸收成目标的 flagged 条目（留盘、不再处理，防链式丢文本）
     changed: dict = {}  # target index → 合并后的 text（可被多次吸收累加）
     absorbed = deleted = 0
-    for i in sorted(flagged):
-        if i in removed or i in consumed:
+    flagged_set = set(flagged)
+    for i in flagged:
+        if i in removed:
             continue
-        t = texts[i]
+        end = i + 1
+        while end in flagged_set:
+            end += 1
+        group = range(i, end)
+        t = "".join(texts[j] for j in group)
         target = -1
-        for nb in (i - 1, i + 1):
+        for nb in (i - 1, end):
             if nb < 0 or nb >= len(entries) or nb in removed:
                 continue
             nb_e = entries[nb]
@@ -2115,22 +2261,24 @@ def absorb_punct_entries(entries: list, title_test) -> tuple:
                 continue
             if (nb_e.get("speaker") or "").strip() != "NARRATOR":
                 continue
-            if title_test((nb_e.get("text") or "").strip()):
+            if not _skeleton(texts[nb]) or title_test(texts[nb]) or _narration_boundary(nb_e):
                 continue  # 标题两侧不吸收
             target = nb
             break
         if target < 0:
-            removed.add(i)
-            deleted += 1
+            removed.update(group)
+            deleted += end - i
+            if audit is not None:
+                audit.extend({"entry_index": j, "text": texts[j],
+                              "reason": "no_narration_target"} for j in group)
             continue
         cur = changed.get(target, texts[target])
         changed[target] = (cur + t) if target == i - 1 else (t + cur)
-        if target in flagged:
-            # 目标本身也是纯标点条（尚未处理）：标记为已消费——它留在输出里承载
-            # 合并文本，跳过其自身的 flagged 处理（防链式吸收用旧文本覆盖丢内容）。
-            consumed.add(target)
-        removed.add(i)
-        absorbed += 1
+        removed.update(group)
+        absorbed += end - i
+        if audit is not None:
+            audit.extend({"entry_index": j, "text": texts[j], "target_index": target,
+                          "reason": "absorbed_into_narration"} for j in group)
     if not removed:
         return entries, 0, 0
     out = []
@@ -2138,7 +2286,10 @@ def absorb_punct_entries(entries: list, title_test) -> tuple:
         if i in removed:
             continue
         if i in changed:
+            old = e
             e = {**e, "text": changed[i]}
+            if budget_deferred is not None and id(old) in budget_deferred:
+                budget_deferred[id(e)] = e
         out.append(e)
     return out, absorbed, deleted
 
@@ -2253,7 +2404,7 @@ def boundary_check_speakers(handle, llm: LLMConfig, generation: GenerationConfig
     result, rep = _run_rejudge_groups(
         handle, llm, generation, sys_prompt, usr_template,
         original, groups, n, roster,
-        stage="角色匹配检查", progress_base=0.9, progress_span=0.06,
+        stage="角色匹配检查", progress_base=0.9, progress_span=0.02,
     )
     stats["fixed"] = rep["fixed"]
     if rep["fixed"] or rep["unwrapped"]:
@@ -2742,7 +2893,7 @@ def spot_check_speakers(handle, llm: LLMConfig, generation: GenerationConfig,
     result, rep = _run_rejudge_groups(
         handle, llm, generation, sys_prompt, usr_template,
         original, groups, n, roster,
-        stage="归属抽样", progress_base=0.98, progress_span=0.018,
+        stage="归属抽样", progress_base=0.96, progress_span=0.02,
         on_first_map=_gauge,
     )
     fixed, unwrapped = rep["fixed"], rep["unwrapped"]
@@ -2762,28 +2913,25 @@ def spot_check_speakers(handle, llm: LLMConfig, generation: GenerationConfig,
 # ---------------------------------------------------------------------------
 # 纯归属标签条清理（确定性，零 LLM 成本）
 #
-# 信号：NARRATOR 条目整体就是一条纯归属标签（老道瞪眼怒道。/ 杜尘暗喜，急道。/
-# 史蒂夫解释道。）——无引号、无冒号，断句校验看不见；留在结果里会成 TTS 的独立旁白行
-# （多一次同人停顿 + 换人停顿），悬在它引入的台词之前/之后。删除是五条件合取：
-# NARRATOR + 无引号 + ≤10 字 + 末尾（去末尾标点后）为五归属动词 + 非章标题 + 紧邻对白条。
-# 知道/难道 的「道」与归属抽样同一形态守卫（道前一字符 ∈ 知难 → 不是标签）。
-# 位置在归属抽样**之前**：抽样重判可能把标签条翻成角色 speaker，本规则便不再适用
-# （且角色会用自己声音念第三人称标签）。
+# 只清理可确认的纯标签，如「他低声说道。」「林某问道。」。
+# NARRATOR + 无引号 + ≤10 字 + 明确人物/发声词完整匹配 + 非标题 + 紧邻对白。
+# 动作、否定及未知人物默认保留；每次删除可记录阶段输入下标、原文和原因。
+# 标签保留到语义重切与归属抽样之后再清理，为前面的检查提供上下文；
+# 本阶段仍沿用现有标签判定和删除规则。
 # ---------------------------------------------------------------------------
 
-# 纯标签恒短；「叙述 + 标签」的混合条（…一字一顿地说道。）更长——阈值即两者的分界。
+# Length is a screening cap; full tag recognition decides whether deletion is safe.
 PURE_SAY_TAG_MAX_LEN = 10
 # 标签动词之后的末尾标点（句末 / 冒号 / 省略 / 破折号）——全部剥掉后再看末字。
 _SAY_TAG_TRAIL_PUNCT = "。！？…：；、，～—-!??:;,.~"
 
 
-def _is_pure_saying_tag(entry, title_test) -> bool:
-    """Whether an entry is a standalone pure-attribution-tag line: a NARRATOR entry of ≤
-    PURE_SAY_TAG_MAX_LEN quote-free chars that, once trailing punctuation is stripped,
-    ends in one of the five attribution verbs and is not a chapter title. The 知道/难道
-    morphological guard applies to a final 道 (same guard as the spot-check tag
-    detection); ANY quote character disqualifies — a wrapped utterance is content, not
-    a tag, and dropping it would lose the line outright."""
+def _is_pure_saying_tag(entry, title_test, speakers=()) -> bool:
+    """Recognize a short, quote-free, confirmed pure attribution tag.
+
+    Match known speakers/pronouns plus explicit speech verbs and vocal modifiers.
+    Actions, negations, unknown names and quoted content survive.
+    """
     if not isinstance(entry, dict) or entry.get("speaker") != "NARRATOR":
         return False
     t = (entry.get("text") or "").strip()
@@ -2793,42 +2941,30 @@ def _is_pure_saying_tag(entry, title_test) -> bool:
         return False
     if title_test(t):
         return False
-    core = t.rstrip(_SAY_TAG_TRAIL_PUNCT)
-    if not core:
-        return False
-    last = core[-1]
-    if last not in _SAY_VERBS:
-        return False
-    if last == "道" and len(core) >= 2 and core[-2] in _NONSPEAK_BEFORE_DAO:
-        return False  # 知道 / 难道 — ordinary narrative words, never tags
-    return True
+    return _is_explicit_saying_tag(t, speakers)
 
 
-def delete_pure_saying_tags(entries, title_test) -> tuple:
-    """Deterministically drop standalone pure-attribution-tag entries (no LLM calls).
+def delete_pure_saying_tags(entries, title_test, *, audit=None) -> tuple:
+    """Delete confirmed pure tags next to speech, using pre-deletion adjacency.
 
-    Deletion requires ALL of: NARRATOR, quote-free text of ≤ PURE_SAY_TAG_MAX_LEN
-    chars ending in 说/道/问/喊/答 after trailing punctuation is stripped (知道/难道
-    guarded), not a chapter title, and immediately preceded or followed by a
-    dialogue entry (non-empty speaker ≠ NARRATOR). Single pass, non-cascading —
-    adjacency is judged against the pre-deletion list, so a tag two entries away
-    from any line survives (deliberately conservative: code cannot tell a pure
-    tag from a short narration sentence that merely ends in a verb). Deletion can
-    never create a new NARRATOR/NARRATOR adjacency (one side is always a dialogue
-    entry), so the downstream merge is unaffected. Returns
-    ``(kept_entries, deleted_count, deleted_texts)``.
+    Optional audit indices refer to this stage's input, not the final script.
+    Return (entries, deleted_count, deleted_texts); ambiguous narration survives.
     """
     kept = []
     deleted_texts = []
     deleted = 0
     n = len(entries)
+    speakers = build_roster(entries)
     for i, e in enumerate(entries):
-        if _is_pure_saying_tag(e, title_test):
+        if _is_pure_saying_tag(e, title_test, speakers):
             prev_sp = entries[i - 1].get("speaker") if i > 0 else ""
             next_sp = entries[i + 1].get("speaker") if i + 1 < n else ""
             if (prev_sp and prev_sp != "NARRATOR") or (next_sp and next_sp != "NARRATOR"):
                 deleted += 1
                 deleted_texts.append((e.get("text") or "").strip())
+                if audit is not None:
+                    audit.append({"entry_index": i, "text": e["text"],
+                                  "reason": "explicit_attribution_tag"})
                 continue
         kept.append(e)
     return kept, deleted, deleted_texts
@@ -2890,26 +3026,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     skipped with one log line and the ``suspicious`` / ``suspicious_fixed`` result
     fields stay zero.
 
-    Before sentence-split validation, entries with an empty ``instruct`` or an
-    ``instruct`` containing at least 35 whitespace-delimited words are mechanically
-    checked. Contiguous NARRATOR targets inherit a nearby valid narrator direction;
-    remaining targets are repaired in one index-keyed LLM request with a
-    ±``generation.check_context_window`` local context. The ``instruct_checked`` /
-    ``instruct_fixed`` result fields record the flagged and replaced counts.
-    Gated by ``generation.validate_instructs`` (default on): when off the stage is
-    skipped with one log line and both result fields stay zero.
-
-    Before the spot audit, standalone pure-attribution-tag entries are deleted
-    deterministically (no LLM calls): a NARRATOR entry of ≤10 chars, quote-free,
-    ending (after trailing punctuation is stripped) in one of the five attribution
-    verbs, not a chapter title, and immediately adjacent to a dialogue entry (e.g.
-    老道瞪眼怒道。 — the unwrapped form the split validator cannot see) — kept,
-    it would be read aloud as its own narration line with an extra pause.
-    Deletion is non-cascading (adjacency is judged on the pre-deletion list) and
-    can never create a new NARRATOR/NARRATOR adjacency, so the downstream merge
-    is unaffected.
-
-    After that, an attribution spot audit (``spot_check_speakers``,
+    After semantic re-splits, an attribution spot audit (``spot_check_speakers``,
     ``generation.spot_check_rate`` — 0 disables) re-judges a small sample of ALL
     entries (1/3 pure random = the unbiased whole-book error-rate gauge, 2/3
     risk-weighted by feature-count cascade) through the bundled re-judgment prompts
@@ -2921,6 +3038,26 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     (default on): when off it is skipped with one log line, zeroed ``spot_*``
     result fields, and no history write — the rate (admin-controlled) is ignored.
     ``rng`` (tests) injects a seeded ``random.Random`` for deterministic sampling.
+
+    After the spot audit, standalone pure-attribution-tag entries are deleted
+    deterministically (no LLM calls): a NARRATOR entry of ≤10 chars, quote-free,
+    matching a confirmed speaker/pronoun and an explicit speech verb, not a chapter
+    title, and immediately adjacent to a dialogue entry (e.g.
+    老道低声道。 — the unwrapped form the split validator cannot see) — kept,
+    it would be read aloud as its own narration line with an extra pause.
+    Deletion is non-cascading (adjacency is judged on the pre-deletion list) and
+    can never create a new NARRATOR/NARRATOR adjacency, so the downstream merge
+    is unaffected.
+
+    After speaker auditing and tag/punctuation cleanup, entries with an empty
+    ``instruct`` or an ``instruct`` exceeding 35 whitespace-delimited words are
+    checked. Narrator inheritance stops at headings, time markers and incompatible
+    directions. Only targets within the former request eligibility are repaired
+    in one index-keyed LLM request with a
+    ±``generation.check_context_window`` local context. The ``instruct_checked`` /
+    ``instruct_fixed`` result fields record the flagged and replaced counts.
+    Gated by ``generation.validate_instructs`` (default on): when off the stage is
+    skipped with one log line and both result fields stay zero.
     """
     # Fail fast on a misconfigured model *before* doing any work.
     if not (llm.model_name or "").strip():
@@ -3011,69 +3148,46 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         handle.phase("check")
         handle.progress(
             0.9,
-            "机械检查（角色匹配检查 / 断句校验 / 标签删除 / 超长段落检查 / 归属抽样 / 纯标点吸收）",
+            "机械检查（角色匹配检查 / 断句校验 / 超长段落检查 / 归属抽样 / 标签删除 / 纯标点吸收 / 语音指导检查 / 同人合并 / 机械分段）",
         )
 
         # 角色匹配检查（检查段最前——断句校验拆条、标签删除删条都会移动下标，
         # 本阶段窗口必须取自 pristine 列表）：用跨边界窗口重判每个内部 chunk
         # 边界两侧各 n 条的 speaker（上下文仅辅助，只有 target 可被修改）。
+        pre_boundary_splits = set(suspicious_entry_indices(all_entries)) if generation.revalidate_splits else set()
         if generation.check_boundary_speakers:
+            boundary_input = all_entries
             all_entries, boundary_stats = boundary_check_speakers(
                 handle, llm, generation, all_entries, chunk_ends,
             )
+            if generation.validate_instructs:
+                _log_changed_speaker_instructs(handle, boundary_input, all_entries)
         else:
             # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
             handle.log("角色匹配检查已关闭（配置）——本任务跳过该阶段")
             boundary_stats = {"checked": 0, "fixed": 0}
 
-        # instruct 检查（机械旁白合并之前）：空 instruct 或至少 35 words 的 instruct
-        # 可能意味着声音指导生成失败/失控；带同一上下文窗口重跑解析 LLM，多数胜出
-        # 后整体替换目标条目。此阶段不依赖后续机械合并，避免合并或硬切产生的空值被
-        # 错误地再次送入 LLM。
-        if generation.validate_instructs:
-            all_entries, instruct_checked, instruct_fixed = validate_instructs(
-                handle, llm, generation, sys_prompt, usr_template, all_entries,
-                context_window=int(generation.check_context_window or 0),
+        split_review_indices = sorted(pre_boundary_splits - set(suspicious_entry_indices(all_entries)))
+        if split_review_indices:
+            handle.log(
+                f"断句待核对：边界复核后 {len(split_review_indices)} 条原始异常失去引号信号"
+                f"（下标 {split_review_indices}），保留标记，不追加重解析请求", "WARNING",
             )
-        else:
-            # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
-            handle.log("instruct 检查已关闭（配置）——本任务跳过该阶段")
-            instruct_checked, instruct_fixed = 0, 0
 
         # 断句失败校验（机械旁白合并之前——拆出的旁白段随后照常合并）：外层双引号
         # 包裹、引号内含「…道：」标签的条目 = 疑似断句失败 → 带上下文窗口重跑解析
         # LLM，多者胜投票（1+2 次，无共识再第 4 次），胜出者整体替换该条目。
+        budget_deferred = {}
         if generation.revalidate_splits:
             all_entries, suspicious, suspicious_fixed = validate_sentence_splits(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 context_window=int(generation.check_context_window or 0),
+                budget_deferred=budget_deferred,
             )
         else:
             # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
             handle.log("断句失败校验已关闭（配置）——本任务跳过该阶段")
             suspicious, suspicious_fixed = 0, 0
-
-        # 纯归属标签清理（零 LLM 成本；在归属抽样之前——抽样重判可能把标签条改成角色
-        # speaker，使其逃过本规则，且角色会用本人声音念第三人称标签）：整条内容就是
-        # 语气标签（老道瞪眼怒道。——无引号，断句校验不可见）的短 NARRATOR 条，紧邻
-        # 台词条目时删除；标题守卫与机械合并同一 is_chapter_title；知道/难道 形态守卫。
-        if generation.delete_saying_tags:
-            all_entries, tags_deleted, deleted_tag_texts = delete_pure_saying_tags(
-                all_entries, is_chapter_title,
-            )
-            if tags_deleted:
-                handle.log(
-                    f"纯归属标签清理：删除 {tags_deleted} 条独立短标签条（≤10 字 NARRATOR、"
-                    f"末尾「说/道/问/喊/答」、邻接对白）"
-                    + "、".join(f"「{t[:15]}」" for t in deleted_tag_texts[:3])
-                )
-            else:
-                # 零命中也留一行日志：与断句校验同一理由——静默退出会被误读成阶段缺失。
-                handle.log("纯归属标签清理：0 条独立短标签条（无删除，零 LLM 调用）")
-        else:
-            # 开关关闭：整体跳过并留一行日志，结果字段保持 0。
-            handle.log("纯归属标签条删除已关闭（配置）——本任务跳过该阶段")
-            tags_deleted, deleted_tag_texts = 0, []
 
         # 超长段落检查·LLM 重切（归属抽样之前——重切可能产生新归属的台词条目，
         # 需要被抽样审计；同一说话人的长篇独白「拆分」过不了重判忠实性门，
@@ -3086,6 +3200,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             all_entries, long_checked, long_fixed = long_paragraph_resplit(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 max_para, context_window=int(generation.check_context_window or 0),
+                budget_deferred=budget_deferred,
             )
         else:
             # 开关关闭：跳过 LLM 语义重切并留一行日志；机械分段兜底（长度硬上界
@@ -3104,9 +3219,14 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 handle.log(
                     f"归属抽样：历史随机桶反馈将抽样率从 {configured_spot_rate:.1%} 调整为 {spot_rate:.1%}"
                 )
+            spot_input = all_entries
             all_entries, spot_stats = spot_check_speakers(
                 handle, llm, generation, all_entries, spot_rate, rng,
             )
+            budget_deferred.update({id(new): new for old, new in zip(spot_input, all_entries)
+                                    if id(old) in budget_deferred})
+            if generation.validate_instructs:
+                _log_changed_speaker_instructs(handle, spot_input, all_entries)
         else:
             # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段
             # 保持 0（与其余 5 个开关的关闭分支同风格——直接置零值，不经函数调用）。
@@ -3118,13 +3238,36 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 "risk_n": 0, "risk_errors": 0,
             }
 
+        # 纯归属标签清理：标签保留到语义重切与归属抽样之后，
+        # 为前面的检查提供上下文；只删除明确纯标签，保留动作与歧义。
+        tag_cleanup_audit = []
+        if generation.delete_saying_tags:
+            all_entries, tags_deleted, deleted_tag_texts = delete_pure_saying_tags(
+                all_entries, is_chapter_title, audit=tag_cleanup_audit,
+            )
+            if tags_deleted:
+                handle.log(
+                    f"纯归属标签清理：删除 {tags_deleted} 条独立短标签条（≤10 字 NARRATOR、"
+                    f"明确人物/发声标签、邻接对白）"
+                    + "、".join(f"「{t[:15]}」" for t in deleted_tag_texts[:3])
+                )
+            else:
+                # 零命中也留一行日志：与断句校验同一理由——静默退出会被误读成阶段缺失。
+                handle.log("纯归属标签清理：0 条独立短标签条（无删除，零 LLM 调用）")
+        else:
+            # 开关关闭：整体跳过并留一行日志，结果字段保持 0。
+            handle.log("纯归属标签条删除已关闭（配置）——本任务跳过该阶段")
+            tags_deleted, deleted_tag_texts = 0, []
+
         # 纯标点条目吸收（确定性零 LLM 成本；必须在超长机械分段**之前**——吸收把
         # 「……」拼进邻接 NARRATOR 可能把它推过上限，随后的机械分段兜底切回：
         # 顺序反了会产生吸收后的超长条目无人兜底）：整条无词字符的条目（独立
         # 「……」/「？」）并入相邻 NARRATOR（前邻优先，标题守卫），无邻接则删除。
+        punct_cleanup_audit = []
         if generation.absorb_punct_entries:
             all_entries, punct_absorbed, punct_deleted = absorb_punct_entries(
-                all_entries, is_chapter_title,
+                all_entries, is_chapter_title, audit=punct_cleanup_audit,
+                budget_deferred=budget_deferred,
             )
             if punct_absorbed or punct_deleted:
                 handle.log(
@@ -3138,6 +3281,19 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # 开关关闭：整体跳过并留一行日志，结果字段保持 0。
             handle.log("纯标点条目吸收已关闭（配置）——本任务跳过该阶段")
             punct_absorbed, punct_deleted = 0, 0
+
+        # instruct 检查：语义重切、角色复核和清理后，再修复缺失或过长的指导；
+        # 同人合并及机械分段仍在之后执行，沿用现有合并和指导继承规则。
+        if generation.validate_instructs:
+            all_entries, instruct_checked, instruct_fixed = validate_instructs(
+                handle, llm, generation, sys_prompt, usr_template, all_entries,
+                context_window=int(generation.check_context_window or 0),
+                budget_deferred=budget_deferred,
+            )
+        else:
+            # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
+            handle.log("instruct 检查已关闭（配置）——本任务跳过该阶段")
+            instruct_checked, instruct_fixed = 0, 0
 
         # 同人段落合并（确定性零 LLM 成本；必须在超长机械分段**之前**——≤10 强制
         # 合并可造出 > max_paragraph_chars 的同人块，由随后的机械分段切回，保住
@@ -3217,10 +3373,12 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             "boundary_fixed": boundary_stats["fixed"],
             "suspicious": suspicious,
             "suspicious_fixed": suspicious_fixed,
+            "split_review_indices": split_review_indices,
             "instruct_checked": instruct_checked,
             "instruct_fixed": instruct_fixed,
             # 纯归属标签清理：确定性删除的独立短标签条数（零 LLM 成本；开关关闭时为 0）
             "tags_deleted": tags_deleted,
+            "tag_cleanup_audit": tag_cleanup_audit,
             # 超长段落检查 —— long_checked / long_fixed = LLM 重切（check_long_paragraphs
             # 关闭时为 0）、long_split = 机械切分的条目数（机械分段兜底恒执行，
             # 开关关闭时仍可能 > 0）
@@ -3230,6 +3388,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # 纯标点条目吸收（零 LLM 成本；absorb_punct_entries 关闭时为 0）
             "punct_absorbed": punct_absorbed,
             "punct_deleted": punct_deleted,
+            "punct_cleanup_audit": punct_cleanup_audit,
             "speakers": speakers,
             # 归属抽样（解析任务自有的基文件内修正，不违反「检查阶段不改写基文件」）
             "spot_checked": spot_stats["checked"],

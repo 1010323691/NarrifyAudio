@@ -67,6 +67,8 @@ def durable_label(task: DurableTask) -> str:
         return f"停顿检测：{source or '音频'}"
     if task.task_type == "audio.cut":
         return f"音频分集：{source or '音频'}"
+    if task.task_type.startswith("resources."):
+        return {"resources.scan": "资源清单扫描", "resources.package": "资源文件打包", "resources.cleanup": "过期缓存清理"}.get(task.task_type, "资源管理")
     return f"持久化任务：{task.task_type}"
 
 

@@ -20,6 +20,10 @@ const SNAPSHOT_WAIT_TIMEOUT_MS = 10_000
 export const useTaskStore = defineStore('task', () => {
   const tasks = ref<TaskSnapshot[]>([])
   const loading = ref(false)
+  const connectionStatus = ref<'idle' | 'connecting' | 'connected' | 'reconnecting'>('idle')
+  const snapshotVersion = ref(0)
+  const globalConsumers = new Set<symbol>()
+  let connectionEpoch = 0
   // Rows the stream reported as superseded (a re-run of the same entry replaced
   // the terminal row, so the server no longer displays it). The store list is
   // not the task centre's only source — /history rows stay in the view — so the
@@ -48,8 +52,26 @@ export const useTaskStore = defineStore('task', () => {
 
   /** 绑定当前项目 —— 项目切换/登录时由 stores/project.ts 调用（先于 reset/refresh）。 */
   function bindProject(projectId: string | null) {
-    if (boundProjectId !== projectId && allStream && !taskCenterOpen) closeStream()
+    if (boundProjectId !== projectId && allStream && !globalRequested()) closeStream()
     boundProjectId = projectId
+  }
+
+  function globalRequested() {
+    return taskCenterOpen || globalConsumers.size > 0
+  }
+
+  /** A global read-only consumer never changes the workbench's active project. */
+  function acquireGlobalScope() {
+    const token = Symbol('global-task-consumer')
+    const wasGlobal = globalRequested()
+    globalConsumers.add(token)
+    if (!wasGlobal && allStream) closeStream()
+    ensureStream()
+    return () => {
+      if (!globalConsumers.delete(token)) return
+      if (!globalRequested() && allStream) closeStream()
+      if (shouldKeepStream()) ensureStream()
+    }
   }
 
   function wakeSnapshotWaiters() {
@@ -67,7 +89,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function shouldKeepStream() {
-    return taskCenterOpen || hasActive()
+    return globalRequested() || hasActive()
   }
 
   const projectTasks = computed(() => boundProjectId
@@ -101,6 +123,8 @@ export const useTaskStore = defineStore('task', () => {
         tasks.value = tasks.value.filter((task) => visible.has(task.id))
       }
       snapshotReceived = true
+      connectionStatus.value = 'connected'
+      snapshotVersion.value += 1
       wakeSnapshotWaiters()
       if (allStream && !shouldKeepStream()) closeStream()
       return
@@ -118,8 +142,8 @@ export const useTaskStore = defineStore('task', () => {
     const t = tasks.value.find((x) => x.id === id)
     if (!t) {
       // A late snapshot/final carries the full task — add it if unknown.
-      if ((e.type === 'snapshot' || e.type === 'final') && e.task) upsert(e.task)
-      if (allStream && !hasActive()) closeStream()
+      if ((e.type === 'snapshot' || e.type === 'final' || e.type === 'status') && e.task) upsert(e.task)
+      if (allStream && !shouldKeepStream()) closeStream()
       return
     }
     switch (e.type) {
@@ -192,12 +216,14 @@ export const useTaskStore = defineStore('task', () => {
   function ensureStream() {
     if (allStream) return
     const streamGeneration = generation
+    const streamEpoch = connectionEpoch
+    connectionStatus.value = 'connecting'
     allStream = streamAllTasks(
       (e) => {
-        if (streamGeneration === generation) applyEvent(String(e.task_id ?? ''), e)
+        if (streamGeneration === generation && streamEpoch === connectionEpoch) applyEvent(String(e.task_id ?? ''), e)
       },
       () => {
-        if (streamGeneration !== generation) return
+        if (streamGeneration !== generation || streamEpoch !== connectionEpoch) return
         // The connection ended (server closed / abort): settle any refresh()
         // waiting on the replay, and — if work is still in flight — reopen the
         // stream; its snapshot_all self-heals the state.
@@ -206,16 +232,21 @@ export const useTaskStore = defineStore('task', () => {
         wakeSnapshotWaiters()
         if (shouldKeepStream()) ensureStream()
       },
-      taskCenterOpen ? null : boundProjectId,
+      globalRequested() ? null : boundProjectId,
+      (state) => {
+        if (streamGeneration === generation && streamEpoch === connectionEpoch) connectionStatus.value = state
+      },
     )
   }
 
   function closeStream() {
+    connectionEpoch += 1
     if (allStream) {
       allStream()
       allStream = null
       snapshotReceived = false
     }
+    connectionStatus.value = 'idle'
   }
 
   /** List source of truth is the stream's `snapshot_all` replay (the v1 list
@@ -324,10 +355,10 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function setTaskCenterOpen(open: boolean) {
-    if (taskCenterOpen !== open && allStream) closeStream()
+    const wasGlobal = globalRequested()
     taskCenterOpen = open
-    if (open) ensureStream()
-    else if (hasActive()) ensureStream()
+    if (wasGlobal !== globalRequested() && allStream) closeStream()
+    if (shouldKeepStream()) ensureStream()
     else if (allStream) closeStream()
   }
 
@@ -335,6 +366,8 @@ export const useTaskStore = defineStore('task', () => {
     generation += 1
     boundProjectId = null
     taskCenterOpen = false
+    globalConsumers.clear()
+    snapshotVersion.value = 0
     snapshotWaiters = []
     closeStream()
     tasks.value = []
@@ -342,5 +375,5 @@ export const useTaskStore = defineStore('task', () => {
     loading.value = false
   }
 
-  return { tasks, projectTasks, loading, refresh, control, controlCategory, reset, bindProject, activeTasks, setTaskCenterOpen, supersededIds }
+  return { tasks, projectTasks, loading, refresh, control, controlCategory, reset, bindProject, activeTasks, setTaskCenterOpen, supersededIds, acquireGlobalScope, connectionStatus, snapshotVersion }
 })

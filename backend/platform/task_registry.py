@@ -1,4 +1,4 @@
-"""The unified registry of the 19 durable task types (plan S1).
+"""The unified registry of durable task types.
 
 One explicit declaration per type: name, executor binding, billing, permission.
 Both dispatchers (``task_worker.execute_claim`` and
@@ -8,7 +8,7 @@ through :data:`TASK_TYPES`; the policy frozensets that used to live in
 source of truth.
 
 The executor column names the binding entry in the owning dispatcher's
-explicit function map (``task_worker.DIRECT_EXECUTORS`` for the six platform
+explicit function map (``task_worker.DIRECT_EXECUTORS`` for the platform
 direct types, ``engine_task_executor.ENGINE_BRANCHES`` for the thirteen
 legacy engine types). The table deliberately holds names, not live function
 references: a single literal table holding the references would create a
@@ -52,6 +52,9 @@ _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("audio.silences", "_execute_audio_silences",
                  entry_identity=("source_name",)),
     TaskTypeSpec("audio.cut", "_execute_audio_cut", entry_identity=("source_name",)),
+    TaskTypeSpec("resources.scan", "_execute_resource_scan", entry_identity=("scan_scope",)),
+    TaskTypeSpec("resources.package", "_execute_resource_package", entry_identity=("export_id",)),
+    TaskTypeSpec("resources.cleanup", "_execute_resource_cleanup", entry_identity=("cleanup_id",)),
     # legacy 引擎（13）：engine_task_executor.ENGINE_BRANCHES
     TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  entry_identity=("speakers", "script")),

@@ -69,6 +69,8 @@ from .storage import (
     storage_migration,
 )
 from .task_registry import TASK_TYPES
+from .resource_tasks import _execute_resource_scan, _execute_resource_package, _execute_resource_cleanup
+from .resource_inventory import ResourceError
 from .task_context import (
     EngineExecutionContext,
     PersistentTaskHandle,
@@ -535,12 +537,21 @@ def _execute_audio_silences(claim: TaskClaim) -> TaskOutcome:
 
 
 def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
+    from ..core.safe_filesystem import file_identity, safe_regular_path
+    from .resource_delivery import delivery_records
+
     with SessionLocal() as db:
         user, _project, item, source_path = _input_file(db, claim)
         output_dir = task_attempt_path(
             db, user.username, claim.project_id, claim.task_id, claim.attempt_id, "cut"
         )
         workspace = project_workspace_path(db, user.username, claim.project_id)
+        source_relative = source_path.relative_to(workspace).as_posix()
+        source_path = safe_regular_path(workspace, source_relative)
+        source_identity = file_identity(source_path.stat())
+        # Uploaded audio is a valid standalone input. Production intermediates
+        # inherit their source's delivery eligibility rather than gaining it by cutting.
+        source_complete = source_relative.startswith("01_input/") or source_relative in delivery_records(db, user, claim.project_id)
     handle = EngineExecutionContext(claim)
     token = bind_workspace(workspace)
     try:
@@ -596,6 +607,11 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
         raise TaskCancelledError() from exc
     if not files:
         raise TaskExecutionError("missing_output", "音频切割未生成文件")
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        source_complete = source_complete and file_identity(safe_regular_path(workspace, source_relative).stat()) == source_identity
+        if not source_relative.startswith("01_input/"):
+            source_complete = source_complete and source_relative in delivery_records(db, user, claim.project_id)
     outputs = [Path(file["path"]) for file in files]
     metadata_files = [
         {
@@ -627,6 +643,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
         sha256=sha256_file(first),
         metadata={
             "engine": "audio.cut",
+            "complete": source_complete,
             "source_file_id": item.id,
             "output_dir": "07_output",
             "file_count": len(files),
@@ -908,6 +925,9 @@ DIRECT_EXECUTORS: dict[str, Callable[[TaskClaim], TaskOutcome]] = {
     "script.parse": _execute_script_parse,
     "audio.silences": _execute_audio_silences,
     "audio.cut": _execute_audio_cut,
+    "resources.scan": _execute_resource_scan,
+    "resources.package": _execute_resource_package,
+    "resources.cleanup": _execute_resource_cleanup,
 }
 
 
@@ -922,7 +942,10 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         from .engine_task_executor import execute_engine_task
 
         return execute_engine_task(claim)
-    return DIRECT_EXECUTORS[claim.task_type](claim)
+    try:
+        return DIRECT_EXECUTORS[claim.task_type](claim)
+    except ResourceError as exc:
+        raise TaskExecutionError("resource_changed", str(exc)) from exc
 
 
 def _cleanup_outcome(outcome: TaskOutcome) -> None:
@@ -953,7 +976,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             db.rollback()
             _cleanup_outcome(outcome)
             raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
-        outputs = [
+        output_id = None
+        outputs = [] if outcome.result_only else [
             TaskFileOutcome(
                 temp_path=outcome.temp_path,
                 output_name=outcome.output_name,
@@ -1058,7 +1082,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 journal.remove(target)
             for target in stale_book_paths:
                 journal.remove(target)
-            result_payload = {
+            result_payload = dict(outcome.metadata) if outcome.result_only else {
                 "file_id": published[0]["file_id"],
                 "object_key": published[0]["object_key"],
                 "name": published[0]["name"],
@@ -1072,6 +1096,12 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     {**published[index], **(described[index] if index < len(described) and isinstance(described[index], dict) else {})}
                     for index in range(len(published))
                 ]
+            from .resource_delivery import capture_deliveries
+            if task.task_type in {"tts.merge", "bgm.mix", "audio.cut", "audio.export", "audio.zip", "bgm.package"}:
+                result_payload["deliveries"] = capture_deliveries(
+                    db, user, task.project_id, task.task_type, result_payload,
+                    [str(item.final_path) for item in outcome.side_effect_outputs],
+                )
             db.add(TaskResult(task_id=task.id, result=result_payload))
             attempt.status = "succeeded"
             attempt.finished_at = utcnow()
@@ -1098,6 +1128,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 except OSError:
                     break
                 parent = parent.parent
+        if outcome.result_only:
+            outcome.temp_path.unlink(missing_ok=True)
         return True
 
 

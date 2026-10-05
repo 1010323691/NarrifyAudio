@@ -1331,7 +1331,7 @@ def preview_audio(name: str, request: Request):
     if p.suffix.lower() not in {".mp3", ".wav"}:
         raise HTTPException(400, "预览音频仅支持 .mp3 / .wav")
     media_type = "audio/mpeg" if p.suffix.lower() == ".mp3" else "audio/wav"
-    return file_response(request, p, media_type=media_type, filename=p.name)
+    return file_response(request, p, media_type=media_type, filename=p.name, inline=True)
 
 
 class PreviewEdit(BaseModel):

@@ -232,6 +232,98 @@ def test_timeout_demotion_uses_actual_subbatch_size():
     assert tts_batch.timeout_demotion_cap(4, 0) == 2  # fallback when watchdog data is absent
 
 
+@pytest.mark.parametrize("cap,rows,auto,expected", [
+    (340, 224, True, 128), (340, 340, True, 272),
+    (128, 96, True, 80), (80, 80, True, 40),
+    (340, 2, True, 1), (80, 0, True, 40), (128, 80, False, 40),
+])
+def test_oom_demotion_steps_below_actual_batch(cap, rows, auto, expected):
+    assert tts_batch.oom_demotion_cap(cap, rows, auto) == expected
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+@pytest.mark.parametrize("auto", [False, True])
+def test_oom_restart_keeps_completed_segments(workspace, monkeypatch, pooled, auto):
+    if pooled:
+        _seed_second_file(workspace)
+    calls = []
+    pending = []
+
+    def run_worker(cmd, handle, on_line, **kw):
+        assert kw["private_errors"] is True
+        calls.append(cmd)
+        rows = json.loads(Path(_cmd_flag(cmd, "--segments-file")).read_text("utf-8"))
+        pending.append([row["index"] for row in rows])
+        for row in rows[:1] if len(calls) == 1 else rows:
+            out = Path(row.get("out_dir") or _cmd_flag(cmd, "--out-dir"))
+            out.mkdir(parents=True, exist_ok=True)
+            audio = out / f"{row.get('file_index', row['index']) + 1:04d}.mp3"
+            audio.write_bytes(b"fake")
+            on_line(f"[segment] {row['index']} ok {audio}")
+        if len(calls) == 1:
+            raise tts_batch.WorkerOutOfMemory(224)
+        return deque()
+
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("python"), Path("worker")))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
+    handle = _Handle()
+    if pooled:
+        tts_batch.synthesize_multi(handle, ["s.json", "t.json"], 128, auto_concurrency=auto)
+    else:
+        tts_batch.synthesize(handle, None, "s.json", 128, auto_concurrency=auto)
+    assert [_cmd_flag(cmd, "--concurrency") for cmd in calls] == (
+        ["340", "128"] if auto else ["128", "64"]
+    )
+    assert pending[1] == pending[0][1:]
+    assert "--restore-stack" not in calls[1]
+    assert _cmd_flag(calls[1], "--oom-restore-cap") == ("340" if auto else "128")
+    assert any("正在自动重试" in msg for _, msg in handle.logs)
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_second_oom_after_restore_locks_task_to_reduced_cap(workspace, monkeypatch, pooled):
+    calls = []
+    completed = _fake_run_worker_pool([])
+
+    def run_worker(cmd, handle, on_line, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise tts_batch.WorkerOutOfMemory(224)
+        if len(calls) == 2:
+            assert _cmd_flag(cmd, "--oom-restore-cap") == "340"
+            on_line("[oom-restore] cap=340")
+            raise tts_batch.WorkerOutOfMemory(224)
+        assert "--oom-restore-cap" not in cmd
+        return completed(cmd, handle, on_line, **kw)
+
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("python"), Path("worker")))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
+    handle = _Handle()
+    if pooled:
+        _seed_second_file(workspace)
+        tts_batch.synthesize_multi(handle, ["s.json", "t.json"], auto_concurrency=True)
+    else:
+        tts_batch.synthesize(handle, None, "s.json", auto_concurrency=True)
+    assert [_cmd_flag(cmd, "--concurrency") for cmd in calls] == ["340", "128", "128"]
+    assert any("本次任务保持降档执行" in msg for _, msg in handle.logs)
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_oom_at_single_row_stops_with_safe_message(workspace, monkeypatch, pooled):
+    calls = []
+    def run_worker(cmd, handle, on_line, **kw):
+        calls.append(cmd)
+        raise tts_batch.WorkerOutOfMemory(1)
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("python"), Path("worker")))
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
+    with pytest.raises(RuntimeError, match="显存不足，已保留完成进度"):
+        if pooled:
+            tts_batch.synthesize_multi(_Handle(), ["s.json"], auto_concurrency=True)
+        else:
+            tts_batch.synthesize(_Handle(), None, "s.json", auto_concurrency=True)
+    assert len(calls) == 1
+
+
 def test_synthesize_passes_request_concurrency(workspace, monkeypatch):
     captured = {}
     _stub_engine(monkeypatch, captured)

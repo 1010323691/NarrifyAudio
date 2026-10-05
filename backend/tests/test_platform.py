@@ -29,6 +29,7 @@ from backend.platform.task_worker import PersistentTaskHandle, TaskOutcome, _wor
 from backend.platform.task_contracts import TaskExecutionError
 from backend.platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from backend.platform.system_config import update_feature_defaults_cache
+from backend.tests.resource_delivery_helpers import record_delivery
 
 
 @pytest.fixture(scope="module")
@@ -216,6 +217,8 @@ def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient
     bgm_dir.mkdir(parents=True)
     (bgm_dir / "chapter-1.mp3").write_bytes(b"audio-one")
     (bgm_dir / "chapter-2.mp3").write_bytes(b"audio-two")
+    for name in ("chapter-1.mp3", "chapter-2.mp3"):
+        record_delivery(first["user"]["id"], project["id"], f"08_bgm/{name}", "bgm.mix")
     submitted = client.post(
         "/api/v1/tasks",
         headers={"X-CSRF-Token": csrf},
@@ -1008,6 +1011,13 @@ def test_legacy_audio_packaging_route_uses_durable_worker(client: TestClient):
     )
     assert uploaded.status_code == 200, uploaded.text
     source = uploaded.json()
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    with SessionLocal() as db:
+        cut = project_workspace_path(db, first["user"]["username"], project_id) / "07_output" / "cut.mp3"
+    cut.parent.mkdir(parents=True, exist_ok=True)
+    cut.write_bytes(b"completed cut audio")
+    record_delivery(first["user"]["id"], project_id, "07_output/cut.mp3")
+    source["path"] = str(cut)
     submitted = client.post(
         "/api/audio/zip",
         headers={"X-CSRF-Token": csrf},
@@ -1089,11 +1099,12 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
         {"payload": {"task_id": analysis.json()["id"]}}, worker_id="test-book-analysis-worker"
     ) == "succeeded"
     formatted_name = Path(task["result"]["path"]).name
-    downloaded = client.get(f"/api/files/download/01_input/{formatted_name}")
+    assert client.get(f"/api/files/download/01_input/{formatted_name}").status_code == 403
+    downloaded = client.get(f"/api/files/preview/01_input/{formatted_name}")
     assert downloaded.status_code == 200
     assert "第一章" in downloaded.text
     ranged = client.get(
-        f"/api/files/download/01_input/{formatted_name}",
+        f"/api/files/preview/01_input/{formatted_name}",
         headers={"Range": "bytes=0-4"},
     )
     assert ranged.status_code == 206
@@ -2030,6 +2041,12 @@ def test_audio_export_stages_replacement_until_commit(client: TestClient, monkey
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
     project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Export journal"}).json()
+    with SessionLocal() as db:
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
+    source = workspace / "07_output" / "source.wav"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"source audio")
+    record_delivery(first["user"]["id"], project["id"], "07_output/source.wav")
     submitted = client.post(
         "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
         json={
@@ -2047,8 +2064,6 @@ def test_audio_export_stages_replacement_until_commit(client: TestClient, monkey
         workspace = project_workspace_path(db, first["user"]["username"], project["id"])
     source = workspace / "07_output" / "source.wav"
     final = workspace / "07_output" / "分集" / "take.wav"
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(b"source audio")
     final.parent.mkdir(parents=True, exist_ok=True)
     final.write_bytes(b"original export")
 

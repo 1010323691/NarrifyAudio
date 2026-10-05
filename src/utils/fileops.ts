@@ -73,9 +73,9 @@ export function pickFiles(accept = '.mp3,.wav,.flac', multiple = true): Promise<
   })
 }
 
-/** URL to download a module output file. */
-export function downloadUrl(module: string, name: string): string {
-  return `${API_BASE}/api/files/download/${module}/${encodeURIComponent(name)}`
+/** Inline playback/read URL; production materials are never attachments. */
+export function previewUrl(module: string, name: string): string {
+  return `${API_BASE}/api/files/preview/${module}/${encodeURIComponent(name)}`
 }
 
 /**
@@ -93,5 +93,5 @@ export function downloadFile(module: string, path: string): void {
   const marker = `/${module}/`
   const idx = norm.lastIndexOf(marker)
   const name = idx >= 0 ? norm.slice(idx + marker.length) : (norm.split('/').pop() || path)
-  window.location.href = downloadUrl(module, name)
+  window.location.href = `${API_BASE}/api/files/download/${module}/${encodeURIComponent(name)}`
 }

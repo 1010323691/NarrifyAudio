@@ -11,6 +11,7 @@ from typing import Any, Callable
 from ..core import config as core_config
 from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
+from ..core.safe_filesystem import file_identity
 from ..platform.database import SessionLocal
 from ..platform.models import User
 from ..platform.storage import safe_display_name, task_attempt_path
@@ -26,6 +27,26 @@ from .task_contracts import (
 )
 from .task_context import EngineExecutionContext, cancellation_requested, update_progress
 from .task_engine_support import engine_execution_context, engine_result_outcome, write_task_outcome
+from .resource_delivery import POLICY_VERSION
+
+
+def _validate_deliveries(claim, payload):
+    from .resource_delivery import validate_delivery_sources, DeliveryDenied
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        try:
+            return validate_delivery_sources(db, user, claim.project_id, claim.task_type, payload)
+        except DeliveryDenied as exc:
+            raise TaskExecutionError("delivery_denied", str(exc)) from exc
+
+
+def _check_delivery_identity(path, record):
+    try:
+        unchanged = list(file_identity(path.stat())) == record["identity"]
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化，请重新制作或选择成品。")
 
 def _run_voices_foundation(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import voices
@@ -98,8 +119,14 @@ def _run_bgm_segment(handle, claim: TaskClaim, payload: dict, side_effect_output
 
 def _run_bgm_mix(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import bgm as bgm_engine
+    from .resource_delivery import delivery_records
     cfg = core_config.get_config()
-    return bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        source_complete = f"06_audio_merge/{payload['stem']}.mp3" in delivery_records(db, user, claim.project_id)
+    result = bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
+    result["complete"] = source_complete
+    return result
 
 
 def _run_music_suggest_tags(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
@@ -145,6 +172,7 @@ def _run_bgm_match(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
 
 
 def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    deliveries = _validate_deliveries(claim, payload)
     layout = get_or_prepare_layout()
     stems = [str(value) for value in (payload.get("chapters") or [])]
     base = safe_display_name(str(payload.get("base") or "bgm"))
@@ -170,14 +198,17 @@ def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_output
                 inside_bgm = False
             if not inside_bgm or not resolved_source.is_file():
                 raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
+            record = deliveries[f"08_bgm/{stem}.mp3"]
+            _check_delivery_identity(resolved_source, record)
             output.write(resolved_source, arcname=f"{base}/{stem}.mp3")
+            _check_delivery_identity(resolved_source, record)
             update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
     result = write_task_outcome(
         claim,
         f"{base}.zip",
         "application/zip",
         archive.getvalue(),
-        {"engine": "bgm.package", "base": base, "file_count": len(stems)},
+        {"engine": "bgm.package", "base": base, "file_count": len(stems), "delivery_policy": POLICY_VERSION},
         publish_module="08_bgm",
     )
     handle.progress_percent(100, "完成")
@@ -185,6 +216,7 @@ def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_output
 
 
 def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    deliveries = _validate_deliveries(claim, payload)
     workspace = get_or_prepare_layout().workspace
     if workspace is None:
         raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
@@ -202,14 +234,17 @@ def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
             if not source.is_relative_to(workspace.resolve()) or not source.is_file():
                 raise TaskExecutionError("input_missing", "待打包文件不存在")
             name = safe_display_name(str(item.get("name") or source.name))
+            record = deliveries[relative.as_posix()]
+            _check_delivery_identity(source, record)
             output.write(source, arcname=name)
+            _check_delivery_identity(source, record)
             update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
         result = write_task_outcome(
         claim,
         f"{base}.zip",
         "application/zip",
         archive.getvalue(),
-        {"engine": "audio.zip", "file_count": len(files)},
+        {"engine": "audio.zip", "file_count": len(files), "delivery_policy": POLICY_VERSION},
         publish_module="07_output",
     )
     handle.progress_percent(100, "完成")
@@ -217,6 +252,7 @@ def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
 
 
 def _run_audio_export(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
+    deliveries = _validate_deliveries(claim, payload)
     workspace = get_or_prepare_layout().workspace
     if workspace is None:
         raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
@@ -247,7 +283,14 @@ def _run_audio_export(handle, claim: TaskClaim, payload: dict, side_effect_outpu
                 f"audio-export-{index:05d}-{name}",
             )
         staged.parent.mkdir(parents=True, exist_ok=True)
+        record = deliveries[relative.as_posix()]
+        _check_delivery_identity(input_path, record)
         shutil.copy2(input_path, staged)
+        try:
+            _check_delivery_identity(input_path, record)
+        except TaskExecutionError:
+            staged.unlink(missing_ok=True)
+            raise
         side_effect_outputs.append(TaskSideEffectOutput(staged, target))
         written.append({"name": name, "path": str(target)})
         update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")

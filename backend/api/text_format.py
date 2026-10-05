@@ -7,10 +7,8 @@ the live artifacts before serving any content.
 """
 from __future__ import annotations
 
-from urllib.parse import quote
-
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -21,7 +19,6 @@ from ..platform.task_submission import TaskSubmissionError
 from ..services.task_operations import owned_project
 from ..services.text_format_workbench import (
     WorkbenchError,
-    build_split_zip,
     flow_state,
     mark_review,
     preview_path,
@@ -56,15 +53,6 @@ def _raise(error: WorkbenchError) -> None:
     detail: dict = {"message": error.message}
     detail.update(error.detail)
     raise HTTPException(error.status_code, detail=detail)
-
-
-def _attachment_disposition(filename: str) -> str:
-    """RFC 6266 disposition that stays latin-1 encodable: an ASCII fallback
-    plus the RFC 5987 ``filename*`` carrying the real UTF-8 name."""
-    parts = [f"filename*=utf-8''{quote(filename, safe='')}"]
-    if filename.isascii():
-        parts.insert(0, f'filename="{filename}"')
-    return "attachment; " + "; ".join(parts)
 
 
 @router.post("/{project_id}/text-format/flow")
@@ -122,9 +110,10 @@ def delete_review_mark(project_id: str, task_id: str, chapter_key: str, user: Us
 
 @router.get("/{project_id}/text-format/file/{name:path}")
 def get_text_format_file(project_id: str, name: str, flow_id: str, download: bool = False, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)):
-    """Versioned chapter-text read. ``download=1`` serves it as an
-    attachment; otherwise plain text for inline preview (fetch .text())."""
+    """Versioned inline chapter read; attachment requests are refused."""
     item = _owned(db, user, project_id)
+    if download:
+        raise HTTPException(403, "章节文本为制作资料，只提供在线检查，不提供下载。")
     try:
         path = preview_path(db, user, item, flow_id, name, inline=not download)
     except WorkbenchError as error:
@@ -132,31 +121,14 @@ def get_text_format_file(project_id: str, name: str, flow_id: str, download: boo
         raise
     if not path.is_file():
         raise HTTPException(409, {"message": "文件缺失，无法读取"})
-    if download:
-        return FileResponse(path, media_type="text/plain; charset=utf-8", filename=name)
     return StreamingResponse(_iter_text(path), media_type="text/plain; charset=utf-8")
 
 
 @router.get("/{project_id}/text-format/zip")
 def get_text_format_zip(project_id: str, flow_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)):
-    """Whole-version export: the complete zip is built only after every
-    manifest entry is verified against the live artifacts (P0-06)."""
-    item = _owned(db, user, project_id)
-    try:
-        data, digest = build_split_zip(db, user, item, flow_id)
-    except WorkbenchError as error:
-        _raise(error)
-        raise
-    stem = (item.name or "text").strip() or "text"
-    return StreamingResponse(
-        iter([data]),
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": _attachment_disposition(f"{stem}_分册.zip"),
-            "X-Zip-Sha256": digest,
-            "X-Zip-Flow": flow_id,
-        },
-    )
+    """Keep the legacy URL explicit, but refuse production-material export."""
+    _owned(db, user, project_id)
+    raise HTTPException(403, "章节文本为制作资料，不提供打包下载。")
 
 
 def _iter_text(path, chunk_size: int = 1024 * 1024):

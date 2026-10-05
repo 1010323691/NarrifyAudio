@@ -11,15 +11,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
-def _content_disposition(filename: str) -> str:
-    return f"attachment; filename*=UTF-8''{quote(filename)}"
+def _content_disposition(filename: str, inline: bool = False) -> str:
+    return f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(filename)}"
 
 
-def file_response(request: Request, path: Path, *, media_type: str, filename: str):
+def file_response(request: Request, path: Path, *, media_type: str, filename: str, inline: bool = False):
     size = path.stat().st_size
     range_header = request.headers.get("range")
     if not range_header:
-        response = FileResponse(path, media_type=media_type, filename=filename)
+        response = FileResponse(path, media_type=media_type, filename=filename, content_disposition_type="inline" if inline else "attachment")
         response.headers["Accept-Ranges"] = "bytes"
         return response
 
@@ -64,6 +64,6 @@ def file_response(request: Request, path: Path, *, media_type: str, filename: st
             "Accept-Ranges": "bytes",
             "Content-Range": f"bytes {start}-{end}/{size}",
             "Content-Length": str(length),
-            "Content-Disposition": _content_disposition(filename),
+            "Content-Disposition": _content_disposition(filename, inline),
         },
     )

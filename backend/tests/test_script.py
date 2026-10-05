@@ -1505,9 +1505,9 @@ def test_suspicious_indices_skips_non_dicts():
 def test_strip_leading_saying_tag():
     wrapped = f"{LQ}林某冷笑道：{LQ}二哥还没出来吗？{RQ}{RQ}"
     # 内层开引号保留（剥掉的只有标签本身）——该形态只用于忠实性门的骨架，骨架忽略引号
-    assert _strip_leading_saying_tag(wrapped) == f"{LQ}{LQ}二哥还没出来吗？{RQ}{RQ}"
-    # 开头的「知道：」同样可剥（两种骨架都过门，由重判多票裁决）
-    assert _strip_leading_saying_tag(f"{LQ}他知道：这件事。{RQ}") == f"{LQ}这件事。{RQ}"
+    assert _strip_leading_saying_tag(wrapped, ROSTER) == f"{LQ}{LQ}二哥还没出来吗？{RQ}{RQ}"
+    # 「知道：」是正文，不允许删除
+    assert _strip_leading_saying_tag(f"{LQ}他知道：这件事。{RQ}") == f"{LQ}他知道：这件事。{RQ}"
     # 无开头标签 / 未包裹 → 原样返回（中段标签不剥——交给段落混合检查）
     assert _strip_leading_saying_tag(f"{LQ}二哥。{RQ}") == f"{LQ}二哥。{RQ}"
     assert _strip_leading_saying_tag("林某冷笑道：走") == "林某冷笑道：走"
@@ -1738,18 +1738,20 @@ def test_validate_no_consensus_keeps_entries_and_list(monkeypatch):
     assert calls["n"] == 4  # 基础 1 + 重试 2 无共识 → 再跑第 4 次
 
 
-def test_instruct_check_flags_empty_and_35_words_only():
+def test_instruct_check_flags_empty_and_over_35_words():
     exactly_34 = " ".join(f"word{i}" for i in range(34))
     exactly_35 = " ".join(f"word{i}" for i in range(35))
+    exactly_36 = " ".join(f"word{i}" for i in range(36))
     entries = [
         {"speaker": "NARRATOR", "text": "a", "instruct": ""},
         {"speaker": "NARRATOR", "text": "b", "instruct": exactly_34},
         {"speaker": "林某", "text": "c", "instruct": exactly_35},
         {"speaker": "林某", "text": "d"},
+        {"speaker": "林某", "text": "e", "instruct": exactly_36},
     ]
 
     assert instruct_word_count(exactly_35) == 35
-    assert instruct_entry_indices(entries) == [0, 2, 3]
+    assert instruct_entry_indices(entries) == [0, 3, 4]
     assert INSTRUCT_MAX_WORDS == 35
 
 
@@ -1757,7 +1759,7 @@ def test_validate_instructs_reparses_with_context_and_preserves_clean_entries(mo
     entries = [
         {"speaker": "NARRATOR", "text": "夜色渐深。", "instruct": ""},
         {"speaker": "林某", "text": "你来了。", "instruct": "Steady and clear."},
-        {"speaker": "林某", "text": "我们走。", "instruct": " ".join(f"word{i}" for i in range(35))},
+        {"speaker": "林某", "text": "我们走。", "instruct": " ".join(f"word{i}" for i in range(36))},
     ]
     replies = {
         "夜色渐深。": json.dumps([{
@@ -1827,7 +1829,7 @@ def test_validate_instructs_inherits_contiguous_narrator_directions_without_llm(
     entries = [
         {"speaker": "NARRATOR", "text": "before", "instruct": "warm and steady"},
         {"speaker": "NARRATOR", "text": "middle", "instruct": ""},
-        {"speaker": "NARRATOR", "text": "after", "instruct": " ".join(f"word{i}" for i in range(35))},
+        {"speaker": "NARRATOR", "text": "after", "instruct": " ".join(f"word{i}" for i in range(36))},
         {"speaker": "A", "text": "dialogue", "instruct": "clear"},
     ]
 
@@ -2293,12 +2295,12 @@ def test_generate_file_delete_tags_off_keeps_tags(tmp_path, monkeypatch, workspa
     # 日志留一行「已关闭（配置）」。
     source = (
         "老道士坐在堂中，闭目养神。\n"
-        "老道士瞪眼怒道。\n"
+        "老道士怒道。\n"
         f"老道士：{LQ}你敢动我的弟子？{RQ}\n"
     )
     parse_reply = json.dumps([
         {"speaker": "NARRATOR", "text": "老道士坐在堂中，闭目养神。", "instruct": "a"},
-        {"speaker": "NARRATOR", "text": "老道士瞪眼怒道。", "instruct": "b"},
+        {"speaker": "NARRATOR", "text": "老道士怒道。", "instruct": "b"},
         {"speaker": "老道士", "text": f"{LQ}你敢动我的弟子？{RQ}", "instruct": "c"},
     ], ensure_ascii=False)
     calls = {"n": 0}
@@ -2325,7 +2327,7 @@ def test_generate_file_delete_tags_off_keeps_tags(tmp_path, monkeypatch, workspa
     assert any("已关闭（配置）" in msg for _lv, msg in handle.logs)
     out = json.loads((workspace / "03_parsed_json" / "tag3.json").read_text("utf-8"))
     assert [(e["speaker"], e["text"]) for e in out] == [
-        ("NARRATOR", "老道士坐在堂中，闭目养神。老道士瞪眼怒道。"),
+        ("NARRATOR", "老道士坐在堂中，闭目养神。老道士怒道。"),
         ("老道士", f"{LQ}你敢动我的弟子？{RQ}"),
     ]
 
@@ -2338,12 +2340,15 @@ def test_generate_file_delete_tags_off_keeps_tags(tmp_path, monkeypatch, workspa
 def test_pure_tag_predicate_positives():
     # 五归属动词收尾（含末尾标点形态与无标点形态；「，」/「：」/「！」/「……」均剥掉后再判）
     for t in (
-        "老道瞪眼怒道。", "杜尘暗喜，急道。", "史蒂夫解释道。",
+        "老道怒道。", "杜尘急道。", "史蒂夫解释道。",
         "他沉声道：", "胖女人惊呼道！", "她颤声道……",
         "他低声说。", "他追问。", "他放声喊。", "他答道。",
         "他冷笑道",  # 无末尾标点同样命中
     ):
-        assert _is_pure_saying_tag(_entry("NARRATOR", t, ""), is_chapter_title), t
+        assert _is_pure_saying_tag(
+            _entry("NARRATOR", t, ""), is_chapter_title,
+            {"老道", "杜尘", "史蒂夫", "胖女人"},
+        ), t
 
 
 def test_pure_tag_predicate_negatives():
@@ -2402,12 +2407,12 @@ def test_generate_file_e2e_pure_tag_delete(tmp_path, monkeypatch, workspace):
     # 结果 2 条、无合并（删除不会制造新的旁白相邻对）。
     source = (
         "老道士坐在堂中，闭目养神。\n"
-        "老道士瞪眼怒道。\n"
+        "老道士怒道。\n"
         f"老道士：{LQ}你敢动我的弟子？{RQ}\n"
     )
     parse_reply = json.dumps([
         {"speaker": "NARRATOR", "text": "老道士坐在堂中，闭目养神。", "instruct": "a"},
-        {"speaker": "NARRATOR", "text": "老道士瞪眼怒道。", "instruct": "b"},
+        {"speaker": "NARRATOR", "text": "老道士怒道。", "instruct": "b"},
         {"speaker": "老道士", "text": f"{LQ}你敢动我的弟子？{RQ}", "instruct": "c"},
     ], ensure_ascii=False)
     calls = {"n": 0}
@@ -2437,18 +2442,18 @@ def test_generate_file_e2e_pure_tag_delete(tmp_path, monkeypatch, workspace):
     ]
 
 
-def test_generate_file_e2e_pure_tag_gone_before_spot(tmp_path, monkeypatch, workspace):
-    # 标签条必须在归属抽样之前被删除：抽样若先跑，可能把标签条重判成角色 speaker，
-    # 使其逃过纯 NARRATOR 规则。rate=1.0 全量抽样、零分歧 → 每批恰 1 次调用。
+def test_generate_file_e2e_pure_tag_kept_until_after_spot(tmp_path, monkeypatch, workspace):
+    # 标签保留在抽样上下文中，抽样结束后才清理。
+    # rate=1.0 全量抽样、零分歧 → 每批恰 1 次调用。
     source = (
         "老道士坐在堂中，闭目养神。\n"
-        "老道士瞪眼怒道。\n"
+        "老道士怒道。\n"
         f"老道士：{LQ}你敢动我的弟子？{RQ}\n"
         "堂外风声鹤唳。\n"
     )
     parse_reply = json.dumps([
         {"speaker": "NARRATOR", "text": "老道士坐在堂中，闭目养神。", "instruct": "a"},
-        {"speaker": "NARRATOR", "text": "老道士瞪眼怒道。", "instruct": "b"},
+        {"speaker": "NARRATOR", "text": "老道士怒道。", "instruct": "b"},
         {"speaker": "老道士", "text": f"{LQ}你敢动我的弟子？{RQ}", "instruct": "c"},
         {"speaker": "NARRATOR", "text": "堂外风声鹤唳。", "instruct": "d"},
     ], ensure_ascii=False)
@@ -2461,8 +2466,9 @@ def test_generate_file_e2e_pure_tag_gone_before_spot(tmp_path, monkeypatch, work
             return _BodyResp(_chat_payload({
                 "results": [
                     {"index": 0, "speaker": "NARRATOR"},
-                    {"index": 1, "speaker": "老道士"},
-                    {"index": 2, "speaker": "NARRATOR"},
+                    {"index": 1, "speaker": "NARRATOR"},
+                    {"index": 2, "speaker": "老道士"},
+                    {"index": 3, "speaker": "NARRATOR"},
                 ]
             }))
         return _BodyResp(_chat_payload(parse_reply))
@@ -2477,12 +2483,12 @@ def test_generate_file_e2e_pure_tag_gone_before_spot(tmp_path, monkeypatch, work
         GenerationConfig(spot_check_rate=1.0, check_context_window=10),
         rng=random.Random(7),
     )
-    # 标签条在抽样前已删除：抽样窗口里根本没有它
+    # 抽样能看到标签，随后标签仍由原有规则清理。
     assert result["tags_deleted"] == 1
     assert result["count"] == 3
     assert len(spot_payloads) == 1
-    assert "瞪眼怒道" not in spot_payloads[0]
-    assert result["spot_checked"] == 3
+    assert "怒道" in spot_payloads[0]
+    assert result["spot_checked"] == 4
     assert result["spot_fixed"] == 0  # 零分歧 → 无改判
     assert result["merged_same_speaker"] == 0
 
@@ -3307,9 +3313,14 @@ def test_boundary_stage_ordering_before_revalidate(tmp_path, monkeypatch, worksp
         {"speaker": "林某", "text": e2_susp, "instruct": "c"},
     ], ensure_ascii=False)
     rederive = json.dumps([{"speaker": "林某", "text": "我们明天再谈。"}], ensure_ascii=False)
-    boundary_users, revalidate_users = [], []
+    boundary_users, revalidate_users, instruct_users = [], [], []
 
     def rejudge(user, state):
+        if "TARGETS (only these may be changed):" in user:
+            instruct_users.append(user)
+            return json.dumps([
+                {"index": 2, "instruct": "Calm spoken delivery."},
+            ])
         if "SOURCE TEXT:" in user:
             # 断句重推（两次相同回复 → 2:0）
             revalidate_users.append(user)
@@ -3328,8 +3339,8 @@ def test_boundary_stage_ordering_before_revalidate(tmp_path, monkeypatch, worksp
         delete_saying_tags=False, spot_check_rate=0.0, check_context_window=2,
         merge_same_speaker=False)  # 本测锁定边界/断句阶段顺序；合并在其后运行会坍缩
     # 基文件条目数（E0+E1+E2 同为 林某），干扰对 E1/E2 逐条的断言——合并本身有专测
-    # 断句失败校验保持开启（默认）；2 解析 + 边界(首判 + 重试) + 断句(2 次同票)
-    assert calls["n"] == 6
+    # 2 解析 + 边界(首判 + 重试) + 断句(2 次同票) + 新条目的指导修复
+    assert calls["n"] == 7
     assert result["boundary_checked"] == 4 and result["boundary_fixed"] == 1
     assert result["suspicious"] == 1 and result["suspicious_fixed"] == 1
     assert result["count"] == 6 and result["merged_same_speaker"] == 0
@@ -3346,10 +3357,13 @@ def test_boundary_stage_ordering_before_revalidate(tmp_path, monkeypatch, worksp
     # 断句输入 = E2 的原文（边界阶段只改 speaker、不改 text）
     i = revalidate_users[0].index("SOURCE TEXT:\n")
     assert revalidate_users[0][i + len("SOURCE TEXT:\n"):] == e2_susp
-    # 基文件：E1 = 林某（边界修正，instruct 不动）；E2 = 断句重推（instruct 归空）
+    # 断句重推缺失的指导，由后置的指导检查修复。
+    assert len(instruct_users) == 1
+    assert result["instruct_checked"] == result["instruct_fixed"] == 1
+    # 基文件：E1 = 林某（边界修正，instruct 不动）；E2 = 断句重推后修复指导
     out = json.loads((workspace / "03_parsed_json" / "boundary.json").read_text("utf-8"))
     assert out[1] == {"speaker": "林某", "text": "夜色像潮水一样漫进街巷。", "instruct": "b"}
-    assert out[2] == {"speaker": "林某", "text": "我们明天再谈。", "instruct": ""}
+    assert out[2] == {"speaker": "林某", "text": "我们明天再谈。", "instruct": "Calm spoken delivery."}
 
 
 # --------------------------------------------------------------------------- #
@@ -3444,7 +3458,7 @@ def test_split_long_entries_unit():
     assert e[0]["text"] == LONG_SRC  # 输入列表保持原样
     assert len(out) == 3
     assert all(x["speaker"] == "NARRATOR" for x in out[:2])
-    assert out[0]["instruct"] == "calm" and out[1]["instruct"] == ""
+    assert out[0]["instruct"] == "calm" and out[1]["instruct"] == "calm"
     assert all(len(x["text"].strip()) <= 200 for x in out)
     assert _SKEL(out[0]["text"] + out[1]["text"]) == _SKEL(LONG_SRC)
     assert out[2] == {"speaker": "林某", "text": "短。", "instruct": "x"}
@@ -3480,7 +3494,7 @@ def test_split_long_entries_replaces_multiple_long_rows_without_shifting():
         "林某", "林某", "林某", "NARRATOR",
     ]
     assert [entry["instruct"] for entry in out] == [
-        "first", "", "", "middle", "second", "", "", "last",
+        "first", "first", "first", "middle", "second", "second", "second", "last",
     ]
     first_parts = [entry["text"] for entry in out if entry["text"].startswith("甲")]
     second_parts = [entry["text"] for entry in out if entry["text"].startswith("乙")]
@@ -3520,8 +3534,8 @@ def test_absorb_punct_entries_unit():
     assert (a, d) == (1, 0) and out[0]["text"] == "夜色。……"
     # 纯标点链（punct, punct, NARR）：逐跳并入、内容不丢失
     out, a, d = absorb_punct_entries([N("……"), N("？"), N("夜色。")], is_chapter_title)
-    assert (a, d) == (1, 0)
-    assert _SKEL("".join(x["text"] for x in out)) == _SKEL("……？夜色。")
+    assert (a, d) == (2, 0)
+    assert out == [N("……？夜色。")]
     # 同一目标两侧吸收（punct, NARR, punct）→ 累加
     out, a, d = absorb_punct_entries([N("……"), N("夜色。"), N("？")], is_chapter_title)
     assert (a, d) == (2, 0)
@@ -3676,6 +3690,83 @@ def test_generate_file_long_paragraph_llm_resplit(tmp_path, monkeypatch, workspa
     assert out[0]["instruct"] == "g"
 
 
+def test_generate_file_resplit_tags_audited_then_cleaned_before_instructs(
+    tmp_path, monkeypatch, workspace,
+):
+    # 长段重切新建标签及空指导：抽样先看到标签，清理后再按新下标修复指导。
+    parse_reply = [
+        _entry("NARRATOR", LONG_SRC, "a"),
+        _entry("林某", "我先走了。", "c"),
+    ]
+    resplit_reply = [
+        {"speaker": "NARRATOR", "text": LONG_HEAD[:-len("林某说：")]},
+        {"speaker": "NARRATOR", "text": "林某说。"},
+        {"speaker": "林某", "text": "我们明天再谈。"},
+        {"speaker": "NARRATOR", "text": "他点了点头。"},
+    ]
+    stages, audited, repaired = [], [], []
+
+    def urlopen(req, *a, **k):
+        user = json.loads(req.data.decode("utf-8"))["messages"][1]["content"]
+        if "TARGETS (only these may be changed):" in user:
+            stages.append("instruct")
+            targets = json.loads(user.split("TARGETS (only these may be changed):\n", 1)[1]
+                                 .split("\n\nCONTEXT", 1)[0])
+            repaired.extend(targets)
+            reply = [{"index": item["index"], "instruct": "Calm clear delivery."}
+                     for item in targets]
+        elif "SOURCE TEXT:" not in user:
+            stages.append("spot")
+            window = _window_from(user, "\n\nRe-judge")
+            audited.extend(window)
+            reply = {"results": [
+                {"index": item["index"], "speaker": item["speaker"]}
+                for item in window if item.get("target")
+            ]}
+        elif not stages:
+            stages.append("parse")
+            reply = parse_reply
+        else:
+            stages.append("resplit")
+            reply = resplit_reply
+        return _BodyResp(_chat_payload(json.dumps(reply, ensure_ascii=False)))
+
+    class ProgressHandle(_Handle):
+        def __init__(self):
+            super().__init__()
+            self.fractions = []
+
+        def progress(self, fraction, current=""):
+            self.fractions.append(fraction)
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    (workspace / "02_split_text").mkdir(parents=True)
+    src = workspace / "02_split_text" / "resplit_order.txt"
+    src.write_text(LONG_SRC + "\n我先走了。", encoding="utf-8")
+    handle = ProgressHandle()
+    result = generate_file(
+        handle, str(src), _LLM, PromptsConfig(),
+        GenerationConfig(chunk_size=5000, spot_check_rate=1.0,
+                         revalidate_splits=False, merge_same_speaker=False),
+        rng=random.Random(7),
+    )
+
+    assert stages == ["parse", "resplit", "spot", "instruct"]
+    assert any(item["text"] == "林某说。" for item in audited)
+    assert [item["index"] for item in repaired] == [0, 1, 2]
+    assert all(item["text"] != "林某说。" for item in repaired)
+    assert [item["text"] for item in result["entries"]] == [
+        LONG_HEAD[:-len("林某说：")], "我们明天再谈。", "他点了点头。", "我先走了。",
+    ]
+    assert result["spot_checked"] == 5 and result["tags_deleted"] == 1
+    assert result["instruct_checked"] == result["instruct_fixed"] == 3
+    assert all(item["instruct"] for item in result["entries"])
+    assert handle.fractions == sorted(handle.fractions)
+    assert handle.fractions[-1] == 1.0
+    out = json.loads((workspace / "03_parsed_json" / "resplit_order.json").read_text("utf-8"))
+    assert out == result["entries"]
+
+
 def test_generate_file_long_paragraph_mech_fallback(tmp_path, monkeypatch, workspace):
     # A 段机械兜底路径 e2e：单次重切回复 = 原样单条（同人独白过不了多主体门）→
     # 过门采纳（long_fixed=1）后仍 212 字 → 机械分段切开（long_split=1）；硬保证成立。
@@ -3714,7 +3805,7 @@ def test_generate_file_long_paragraph_mech_fallback(tmp_path, monkeypatch, works
     assert all(len(e["text"].strip()) <= 200 for e in out)  # 硬保证
     assert _SKEL(out[0]["text"] + out[1]["text"]) == _SKEL(LONG_SRC)
     assert out[0]["speaker"] == "NARRATOR" and out[1]["speaker"] == "NARRATOR"
-    assert out[0]["instruct"] == "a" and out[1]["instruct"] == ""
+    assert out[0]["instruct"] == "a" and out[1]["instruct"] == "a"
     assert out[2] == {"speaker": "林某", "text": "我先走了。", "instruct": "c"}
     # 同人合并在机械分段**之前**运行：合并时看到的是切分前的 [NARRATOR 长条, 林某 台词]
     # （无连续同 speaker 对），切段是末段产物、合并看不到 → 不会回粘（硬保证由末段守住）
@@ -3764,7 +3855,7 @@ def test_generate_file_merge_before_split_forced_over200(tmp_path, monkeypatch, 
     assert all(len(e["text"].strip()) <= 200 for e in out)  # 硬保证
     assert _SKEL("".join(e["text"] for e in out)) == _SKEL(long_a + short_b)  # 骨架无损
     assert all(e["speaker"] == "NARRATOR" for e in out)
-    assert out[0]["instruct"] == "a" and out[1]["instruct"] == ""
+    assert out[0]["instruct"] == "a" and out[1]["instruct"] == "a"
 
 
 def test_generate_file_long_paragraph_llm_off_still_mechanically_splits(tmp_path, monkeypatch, workspace):
@@ -3951,7 +4042,7 @@ def test_generate_file_slot_scope(tmp_path, monkeypatch, workspace):
     # 源为单段 → 角色匹配检查无内部边界、静默零调用，不产生额外事件。
     check_mark = pos(
         "progress",
-        "机械检查（角色匹配检查 / 断句校验 / 标签删除 / 超长段落检查 / 归属抽样 / 纯标点吸收）",
+        "机械检查（角色匹配检查 / 断句校验 / 超长段落检查 / 归属抽样 / 标签删除 / 纯标点吸收 / 语音指导检查 / 同人合并 / 机械分段）",
     )
     assert pos("release", None) < pos("phase", "check")
     assert pos("release", None) < check_mark

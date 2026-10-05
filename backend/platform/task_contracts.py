@@ -62,3 +62,6 @@ class TaskOutcome:
     side_effect_outputs: tuple[TaskSideEffectOutput, ...] = field(default_factory=tuple)
     side_effect_deletes: tuple[Path, ...] = field(default_factory=tuple)
     publication_journal: PublicationJournal | PublicationJournalBundle | None = None
+    # Resource operations publish managed side effects and metadata, without
+    # inventing a user-facing ProjectFile for an index or cleanup receipt.
+    result_only: bool = False

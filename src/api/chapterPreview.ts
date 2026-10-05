@@ -18,7 +18,7 @@ export function previewAudioUrl(name: string, version?: string | number): string
 export function formalAudioUrl(audio: string, mtimeNs?: number | null): string {
   const [module, ...rest] = audio.split('/')
   const v = mtimeNs ? `?v=${mtimeNs}` : ''
-  return `${API_BASE}/api/files/download/${module}/${rest.map(encodeURIComponent).join('/')}${v}`
+  return `${API_BASE}/api/files/preview/${module}/${rest.map(encodeURIComponent).join('/')}${v}`
 }
 
 /** 单句重渲染（tts.preview_render）：产物落暂存区，正式 05 / manifest / 03 直到 /apply 不动。

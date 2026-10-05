@@ -23,6 +23,7 @@ export const TASK_MODULES: TaskModuleDef[] = [
   { key: 'audio', label: '音频分集', prefixes: ['audio.'] },
   { key: 'bgm', label: '背景音乐', prefixes: ['bgm.'] },
   { key: 'music', label: '音乐库', prefixes: ['music.'] },
+  { key: 'resources', label: '资源管理', prefixes: ['resources.'] },
 ]
 
 /** The module a task type belongs to, or undefined for unknown/other types. */

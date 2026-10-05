@@ -26,7 +26,7 @@ import {
   type ScriptParseInput,
 } from '@/api/script'
 import { previewUrl } from '@/api/textFormat'
-import { downloadUrl } from '@/utils/fileops'
+import { previewUrl as legacyPreviewUrl } from '@/utils/fileops'
 import type { ParseChecks, TaskSnapshot } from '@/types'
 import { padChapterNum } from '@/utils/bookLabels'
 
@@ -425,7 +425,7 @@ export function useScriptParseWorkbench() {
       if (st.source.version.version_status !== 'current') return null
       return previewUrl(project.activeProjectId, st.source.version.flow_id, row.chapter.name)
     }
-    if (st.source.mode === 'legacy') return downloadUrl('02_split_text', row.chapter.name)
+    if (st.source.mode === 'legacy') return legacyPreviewUrl('02_split_text', row.chapter.name)
     return null
   }
 

@@ -13,6 +13,7 @@ threads, progress/log streaming, cooperative cancel/pause, child + temp cleanup)
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
@@ -91,6 +92,22 @@ class WorkerWatchdogTimeout(RuntimeError):
     """
 
 
+class WorkerOutOfMemory(RuntimeError):
+    """A batch exhausted GPU memory; restart it with a lower row ceiling."""
+
+    def __init__(self, rows: int = 0):
+        super().__init__("音频合成显存不足")
+        self.rows = rows
+
+
+def _is_gpu_oom(line: str) -> bool:
+    text = line.lower()
+    return (
+        "out of memory" in text
+        and any(key in text for key in ("cuda", "gpu", "hip", "mps"))
+    ) or "cuda error: memory allocation" in text
+
+
 class _SubprocessPaused(Exception):
     """The child was stopped for pause and should be relaunched after resume."""
 
@@ -134,6 +151,7 @@ def run_tts_subprocess(*args, **kwargs) -> deque:
 def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "TTS 引擎",
               watchdog_code: int | None = None,
               log_file: Path | None = None, log_line=None,
+              private_errors: bool = False,
               interrupt_on_pause: bool = False, gpu_request_id: str | None = None) -> deque:
     """Run a one-shot shared-``.venv`` worker and stream its output into a Task.
 
@@ -167,6 +185,9 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
       ``log_file``; returning ``None`` filters a line. The Task still receives the original
       line through ``on_line`` so a stage can parse structured worker events without exposing
       them in the user-facing log.
+    * ``private_errors`` keeps stderr and failure diagnostics in the run log only.
+      GPU memory failures raise ``WorkerOutOfMemory`` with the last batch's actual
+      row count, even when the error has fallen out of the rolling stderr tail.
     * A non-zero exit raises ``RuntimeError(f"{fail_prefix}失败（退出码 N）…")`` — except that,
       when ``watchdog_code`` is set and the child exits with exactly that code, a
       :class:`WorkerWatchdogTimeout` is raised instead (so a batch stage can shrink the batch
@@ -218,6 +239,8 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
     threading.Thread(target=_pump, args=(proc.stderr, err_q), daemon=True).start()
 
     out_done = err_done = False
+    gpu_oom = False
+    batch_rows = 0
     pause_requested = False
     require_ready = gpu_request_id is not None and load_config().enabled
     ready = not require_ready
@@ -258,6 +281,16 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                     line = raw.decode("utf-8", "replace").strip()
                     if not line:
                         continue
+                    if private_errors and line.startswith("[perf] "):
+                        try:
+                            event = json.loads(line[len("[perf] "):])
+                            if event.get("stage") == "batch":
+                                if event.get("event") == "start":
+                                    batch_rows = max(0, int(event.get("rows", 0)))
+                                elif event.get("event") == "error":
+                                    gpu_oom = gpu_oom or bool(event.get("oom"))
+                        except (ValueError, TypeError, AttributeError):
+                            pass
                     if line in {"[ready] tts", "[noop] tts"}:
                         ready = True
                         GPUServiceManager.tts_ready(gpu_request_id)
@@ -286,7 +319,9 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                     line = raw.decode("utf-8", "replace").strip()
                     if line:
                         stderr_tail.append(line)
-                        handle.log(line, "WARNING")
+                        gpu_oom = gpu_oom or _is_gpu_oom(line)
+                        if not private_errors:
+                            handle.log(line, "WARNING")
                         if run_log:
                             run_log.write(f"[err] {line}\n")
             except queue.Empty:
@@ -310,9 +345,13 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                 pass
 
     if proc.returncode != 0:
-        tail = " | ".join(stderr_tail)[-500:]
-        msg = (f"{fail_prefix}失败（退出码 {proc.returncode}）"
-               + (f"：{tail}" if tail else "（无错误输出）"))
+        if private_errors and gpu_oom:
+            raise WorkerOutOfMemory(batch_rows)
+        tail = "" if private_errors else " | ".join(stderr_tail)[-500:]
+        detail = f"：{tail}" if tail else (
+            "；请查看运行日志" if private_errors else "（无错误输出）"
+        )
+        msg = f"{fail_prefix}失败（退出码 {proc.returncode}）{detail}"
         if not ready:
             raise TTSStartupError(msg)
         if watchdog_code is not None and proc.returncode == watchdog_code:

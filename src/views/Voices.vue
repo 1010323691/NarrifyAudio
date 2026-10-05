@@ -8,7 +8,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations, selectVoice, setGender, ttsStatus } from '@/api/tts'
-import { downloadUrl } from '@/utils/fileops'
+import { previewUrl as resourcePreviewUrl } from '@/utils/fileops'
 import type { MakeClonesResult, PrepareFoundationsResult, TTSStatus, VoiceItem } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
@@ -387,11 +387,11 @@ function remakeClone(v: VoiceItem) {
 }
 
 function previewUrl(v: VoiceItem): string {
-  return v.preview ? downloadUrl('04_voice_profiles', v.preview) : ''
+  return v.preview ? resourcePreviewUrl('04_voice_profiles', v.preview) : ''
 }
 
 function candidateUrl(c: { preview: string }): string {
-  return c.preview ? downloadUrl('04_voice_profiles', c.preview) : ''
+  return c.preview ? resourcePreviewUrl('04_voice_profiles', c.preview) : ''
 }
 
 // The currently ACTIVE candidate id: the explicit pick, or the default first one.

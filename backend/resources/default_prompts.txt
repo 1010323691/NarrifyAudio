@@ -47,7 +47,7 @@ SEGMENTATION
 - Split narration runs exceeding roughly 500 characters at natural sentence boundaries; keep identical instruct across length-only splits. This limit also applies to merged front matter.
 
 INSTRUCT
-Use concise natural English describing the audible delivery, not just emotion or inaudible actions. Normally 1–2 sentences, about 10–35 words; expressive vocalizations may need more detail.
+Use concise natural English describing the audible delivery, not just emotion or inaudible actions. Normally 1–2 sentences, about 10–35 words, and never more than 35 words; prioritize the relevant details for expressive vocalizations within this limit.
 - NARRATOR default: "Neutral, even narration." Change only for a clear narrative tone change.
 - For characters, first identify delivery: normal speech, whisper, shout/scream, crying/sobbing, laughter, breathless/panting speech, groan/moan, broken vocalization, or another mode supported by the line and immediate context.
 - Repeated 啊/嗯/哦/呜, elongated sounds, repeated ellipses, and broken phrases indicating non-lexical/fragmented vocalization must receive specific audible directions, not ordinary-dialogue or generic emotion labels. Distinguish words from vocal sounds and describe their mixture when present.

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from .platform_settings import settings
 from .models import SystemConfig
+from ..core.safe_filesystem import is_link_or_junction
 
 
 _SAFE_NAME = re.compile(r"[^\w.()\- ]+", re.UNICODE)
@@ -58,7 +59,7 @@ def safe_project_workspace_path(db: Session | None, username: str, project_id: s
     root = configured_storage_root(db).resolve()
     user_root = root / safe_display_name(username)
     candidate = user_root / project_id
-    if user_root.is_symlink() or candidate.is_symlink():
+    if is_link_or_junction(user_root) or is_link_or_junction(candidate):
         return None
     try:
         resolved = candidate.resolve()

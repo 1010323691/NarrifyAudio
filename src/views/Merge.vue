@@ -18,7 +18,7 @@ import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { mergeStatusPackages, runMerge, ttsStatus } from '@/api/tts'
 import { listDir } from '@/api/files'
-import { downloadUrl } from '@/utils/fileops'
+import { previewUrl } from '@/utils/fileops'
 import type { MergePackageStatus, MergeResult, TaskSnapshot, TTSStatus } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
@@ -582,7 +582,7 @@ onBeforeUnmount(stopScheduledRefresh)
           <template v-if="row.merged"
             ><p class="mb-3 break-all text-muted-foreground">{{ row.merged }}</p>
             <div class="rounded-lg border p-3">
-              <MiniAudioPlayer :key="row.merged" :src="downloadUrl('06_audio_merge', row.merged)" preload-metadata />
+              <MiniAudioPlayer :key="row.merged" :src="previewUrl('06_audio_merge', row.merged)" preload-metadata />
             </div>
             </template
           >

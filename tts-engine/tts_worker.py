@@ -662,6 +662,14 @@ def next_auto_batch(remaining, max_batch, restore_stack, restore_successes=None)
     return rows, remaining[len(rows):], max_batch, restored
 
 
+def restore_oom_cap_after_success(current_cap, restore_cap, successful):
+    """Probe the pre-OOM ceiling once, after one completed reduced group."""
+    if restore_cap > current_cap and successful > 0:
+        print(f"[oom-restore] cap={restore_cap}", flush=True)
+        return restore_cap, 0
+    return current_cap, restore_cap
+
+
 def order_speaker_groups(classified):
     """Per-key execution queues, ordered most-rows-first (pure, key-generic).
 
@@ -1608,6 +1616,7 @@ def _run_batch(args) -> int:
     # -- the execution queues: roles with more useful rows first, each role shortest first
     # Different roles stay separate until a role's remaining tail is smaller than the current
     # planned concurrency; collect_mergeable_role_tails then permits a same-model tail merge.
+    oom_restore_cap = max(0, int(getattr(args, "oom_restore_cap", 0)))
     queues = order_speaker_groups(classified)  # [((vtype, speaker), rows ascending), ...]
 
     if not queues:
@@ -1667,6 +1676,11 @@ def _run_batch(args) -> int:
                         restore_successes.pop()
                         max_batch = _planned_cap
                         print(f"[restore] cap={_planned_restore}", flush=True)
+                    if oom_restore_cap > max_batch and successful > 0:
+                        restore_stack.clear()
+                        restore_successes.clear()
+                    max_batch, oom_restore_cap = restore_oom_cap_after_success(
+                        max_batch, oom_restore_cap, successful)
                     remaining = planned_remaining
                 queue_pos += 1
                 continue
@@ -1686,6 +1700,11 @@ def _run_batch(args) -> int:
                 report=report_result, pipeline=pipeline)
             if restore_stack and restore_successes:
                 restore_successes[-1] += successful
+            if oom_restore_cap > max_batch and successful > 0:
+                restore_stack.clear()
+                restore_successes.clear()
+            max_batch, oom_restore_cap = restore_oom_cap_after_success(
+                max_batch, oom_restore_cap, successful)
     finally:
         # Drain already-generated audio before the process settles. On an exceptional exit this
         # preserves completed files; the manifest/backend can safely resume anything not queued.
@@ -2229,6 +2248,8 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=4,
                     help="per-batch CEILING: the max rows in one tensor batch (batch / design-batch); "
                          "length-sorted fixed batches with timeout recovery (1 = sequential)")
+    ap.add_argument("--oom-restore-cap", type=int, default=0,
+                    help="probe this original batch ceiling once after one reduced group succeeds")
     ap.add_argument("--auto-batch", action="store_true",
                     help="select each batch cap by upward matching the longest row to measured safety tiers")
     ap.add_argument("--vocoder-batch-size", type=int, default=0, help="opt-in decoder chunk size; 0 keeps native decode")

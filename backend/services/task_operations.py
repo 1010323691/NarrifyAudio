@@ -27,6 +27,7 @@ TASK_CATEGORIES = {
     "tts": ("tts.batch",),
     "merge": ("tts.merge",),
     "bgm": ("bgm.segment", "bgm.match", "bgm.mix", "bgm.package"),
+    "resources": ("resources.scan", "resources.package", "resources.cleanup"),
 }
 
 
@@ -92,6 +93,7 @@ _WORKER_GROUPS = {
     "bgm": "audio",
     "book": "system",
     "text": "system",
+    "resources": "system",
 }
 
 
