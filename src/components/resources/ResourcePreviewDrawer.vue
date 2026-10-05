@@ -29,6 +29,7 @@ async function loadPreview() {
   abort?.abort()
   abort = new AbortController()
   preview.value = null
+  loading.value = false
   error.value = ''
   mediaError.value = ''
   imageScale.value = 1

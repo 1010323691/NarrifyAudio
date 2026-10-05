@@ -225,6 +225,54 @@ def test_mix_delivery_requires_a_complete_narration_source(client, workspace, mo
     assert client.get("/api/v1/resources/entries", params={"category": "deliverables"}).json()["total"] == (2 if source_complete else 0)
 
 
+@pytest.mark.parametrize("module,producer,complete,changed", [
+    ("06_audio_merge", "tts.merge", True, False),
+    ("06_audio_merge", "tts.merge", False, False),
+    ("08_bgm", "bgm.mix", True, False),
+    ("08_bgm", "bgm.mix", False, False),
+    ("05_audio_chunk", None, False, False),
+    ("01_input", None, True, False),
+    ("01_input", None, True, True),
+])
+def test_cut_inherits_delivery_eligibility_and_preserves_uploaded_audio(client, workspace, monkeypatch, module, producer, complete, changed):
+    source = _write(workspace["root"], f"{module}/source.mp3", b"source audio")
+    if producer:
+        source_task = _delivery(workspace, f"{module}/source.mp3", producer)
+        if not complete:
+            with SessionLocal() as db:
+                record = db.get(TaskResult, source_task)
+                record.result = {**record.result, "complete": False, "path": str(source)}
+                db.commit()
+    monkeypatch.setattr("backend.platform.task_worker.audio_engine.probe_duration", lambda *args: (2.0, ""))
+
+    def fake_cut(path, segments, out_dir, *args, **kwargs):
+        output = _write(Path(out_dir), "episode.mp3", b"cut audio")
+        if changed:
+            source.write_bytes(b"replaced while cutting")
+        return [{"name": output.name, "path": str(output), "size": output.stat().st_size, "duration": 2.0}]
+
+    monkeypatch.setattr("backend.platform.task_worker.audio_engine.cut_segments", fake_cut)
+    response = client.post("/api/audio/cut", headers={"X-CSRF-Token": workspace["csrf"]}, json={
+        "path": str(source), "segments": [{"index": 0, "start": 0, "duration": 2}], "smart_align": False,
+    })
+    assert response.status_code == 200, response.text
+    result = _run(response.json()["task_id"])
+    eligible = complete and not changed
+    assert result["complete"] is eligible
+    assert bool(result["deliveries"]) is eligible
+    _scan(client, workspace)
+    assert client.get("/api/files/download/07_output/episode.mp3").status_code == (200 if eligible else 403)
+    assert client.get("/api/files/preview/07_output/episode.mp3").status_code == 200
+    for task_type in ("audio.zip", "audio.export"):
+        packaged = client.post("/api/v1/tasks", headers={"X-CSRF-Token": workspace["csrf"]}, json={
+            "project_id": workspace["project"], "task_type": task_type,
+            "payload": {"base": "book", "source_relative": f"{module}/source.mp3",
+                        "files": [{"name": "episode.mp3", "relative_path": "07_output/episode.mp3"}]},
+            "idempotency_key": uuid.uuid4().hex,
+        })
+        assert packaged.status_code == (201 if eligible else 403), packaged.text
+
+
 def test_inventory_searches_entire_workspace_with_natural_sort_and_no_fake_catalog(client, workspace):
     for index in range(1, 345):
         _write(workspace["root"], f"02_split_text/第{index}章.txt", f"第{index}章内容".encode())

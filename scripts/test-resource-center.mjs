@@ -59,6 +59,36 @@ test('resource page and dialogs compile with Vue template compiler', () => {
   }
 })
 
+test('switching a pending text preview to media clears loading and discards the old result', async () => {
+  const source = readFileSync(new URL('../src/components/resources/ResourcePreviewDrawer.vue', import.meta.url), 'utf8')
+  const { descriptor } = parse(source)
+  for (const kind of ['audio', 'image', null]) {
+    const delayed = deferred()
+    const props = vue.reactive({ entry: { id: 'text', preview_kind: 'text' }, pinned: true })
+    const module = { exports: {} }
+    const mocks = {
+      vue: { ...vue, onBeforeUnmount() {} },
+      '@/api/resources': { getResourcePreview: () => delayed.promise, resourceFileUrl: () => '/preview' },
+      '@/composables/useAudioBus': { useAudioBus: () => ({ claim() {}, release() {} }) },
+    }
+    const code = ts.transpileModule(`${descriptor.scriptSetup.content}\nmodule.exports = { loading, preview };`, {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText
+    runInNewContext(code, {
+      module, exports: module.exports, require: name => mocks[name] || {},
+      defineProps: () => props, defineEmits: () => () => {}, document: { activeElement: null }, AbortController,
+    })
+    assert.equal(module.exports.loading.value, true)
+    props.entry = { id: `next-${kind}`, preview_kind: kind }
+    await flush()
+    assert.equal(module.exports.loading.value, false)
+    delayed.resolve({ content: 'old text' })
+    await flush()
+    assert.equal(module.exports.loading.value, false)
+    assert.equal(module.exports.preview.value, null)
+  }
+})
+
 test('production materials cannot be selected or exported and returning to products resets the scope', async () => {
   const h = harness({ getResourceEntries: async () => ({ ...emptyEntries, items: [{ id: 'middle', kind: 'file', can_package: false }], total: 1 }) }, { project: 'a', view: 'files', tab: 'materials' })
   await flush()
