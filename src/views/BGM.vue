@@ -20,7 +20,7 @@ import {
   packageMixedAudio,
   updateChapter,
 } from '@/api/bgm'
-import { downloadUrl, downloadFile } from '@/utils/fileops'
+import { previewUrl, downloadFile } from '@/utils/fileops'
 import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
 import { listDir } from '@/api/files'
 import { getLibrary, musicPreviewUrl } from '@/api/music'
@@ -1157,7 +1157,7 @@ onBeforeUnmount(() => {
           <MiniAudioPlayer
             v-if="row.data.narration_exists && narrationFiles[row.stem]"
             :key="narrationFiles[row.stem]"
-            :src="downloadUrl('06_audio_merge', narrationFiles[row.stem])"
+            :src="previewUrl('06_audio_merge', narrationFiles[row.stem])"
             preload-metadata
           />
           <p v-else class="text-destructive">人声缺失，请先合并章节。</p>

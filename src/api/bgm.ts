@@ -19,7 +19,7 @@ export function getChapters(): Promise<BgmChaptersResult> {
 /** Preview URL of a finished mix (08_bgm is a workspace dir — the shared
  *  files API serves it for the inline player). */
 export function bgmPreviewUrl(stem: string): string {
-  return `${API_BASE}/api/files/download/08_bgm/${encodeURIComponent(stem + '.mp3')}`
+  return `${API_BASE}/api/files/preview/08_bgm/${encodeURIComponent(stem + '.mp3')}`
 }
 
 /** (Re-)match the selected chapters (empty/omitted = all) through the durable Worker. */

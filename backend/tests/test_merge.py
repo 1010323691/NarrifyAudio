@@ -168,6 +168,7 @@ def test_run_success_result(workspace, monkeypatch):
     assert result["file"] == "pkg.mp3"
     assert result["path"] == str(workspace / "06_audio_merge" / "pkg.mp3")
     assert result["segments"] == 120
+    assert result["complete"] is True
     assert result["size"] == 2048
     assert Path(result["path"]).exists()
     assert handle.progresses and handle.progresses[-1][0] == 1.0
@@ -273,6 +274,7 @@ def test_run_skips_missing_files_with_warning(workspace, monkeypatch):
     handle = _Handle()
     result = merge.merge_audio_package(handle, "pkg")
     assert result["segments"] == 3
+    assert result["complete"] is False
     assert any(level == "WARNING" and "2 段成功记录的文件缺失" in msg
                for level, msg in handle.logs)
 

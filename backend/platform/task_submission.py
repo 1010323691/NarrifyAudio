@@ -71,6 +71,43 @@ def submit_task_record(
         if existing.payload.get("_request_hash") != request_hash:
             raise TaskSubmissionError(409, "幂等键对应的请求内容不同")
         return existing
+    from .resource_delivery import validate_delivery_sources, DeliveryDenied
+    try:
+        validate_delivery_sources(db, user, project_id, task_type, payload)
+    except DeliveryDenied as exc:
+        raise TaskSubmissionError(403, str(exc)) from exc
+    if task_type.startswith("resources."):
+        from .resource_inventory import ResourceError, owned_project, current_snapshot, split_resource_id
+
+        try:
+            references = payload.get("snapshots") or (payload.get("scope") or {}).get("snapshots") or []
+            for reference in references:
+                owned_project(db, user, reference["project_id"])
+                current = current_snapshot(db, user.id, reference["project_id"])
+                if current is None or current[1]["snapshot_id"] != reference["snapshot_id"]:
+                    raise ResourceError("资源清单已变化，请刷新后重试")
+            for item in payload.get("files") or []:
+                selected_project, _ = split_resource_id(item["resource_id"])
+                owned_project(db, user, selected_project)
+                current = current_snapshot(db, user.id, selected_project)
+                if current is None or current[1]["snapshot_id"] != item["snapshot_id"]:
+                    raise ResourceError("资源清单已变化，请刷新后重试")
+            for selected_project in payload.get("project_ids") or []:
+                owned_project(db, user, selected_project)
+            if task_type == "resources.package":
+                from .resource_tasks import package_selection
+                delivery_count = len(package_selection(db, user, payload))
+        except ResourceError as exc:
+            raise TaskSubmissionError(exc.status, str(exc)) from exc
+        if task_type == "resources.scan":
+            from .task_lifecycle import ACTIVE_TASK_STATUSES
+
+            active_scan = db.scalar(select(Task).where(
+                Task.owner_id == user.id, Task.project_id == project_id,
+                Task.task_type == task_type, Task.status.in_(ACTIVE_TASK_STATUSES),
+            ).order_by(Task.created_at.desc()))
+            if active_scan is not None and active_scan.payload.get("project_ids") == payload.get("project_ids") and bool(active_scan.payload.get("include_trash")) == bool(payload.get("include_trash")):
+                return active_scan
     account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
     if account is None:
         account = UserQuotaAccount(user_id=user.id, available_units=0)
@@ -88,6 +125,27 @@ def submit_task_record(
     # Resolve shared policy only for a NEW task, after both idempotency checks.
     # Keep the original request hash independent of changing admin defaults.
     stored_payload = dict(payload)
+    if task_type == "resources.scan":
+        from .task_lifecycle import ACTIVE_TASK_STATUSES
+
+        # The quota-account row serializes scans for this owner on PostgreSQL.
+        # Overlapping scans cannot publish older pointers over newer snapshots.
+        targets = set(payload.get("project_ids") or [project_id])
+        for running in db.scalars(select(Task).where(
+            Task.owner_id == user.id, Task.task_type == task_type,
+            Task.status.in_(ACTIVE_TASK_STATUSES),
+        )).all():
+            running_targets = set(running.payload.get("project_ids") or [running.project_id])
+            if targets & running_targets or payload.get("include_trash") and running.payload.get("include_trash"):
+                if targets <= running_targets and (not payload.get("include_trash") or running.payload.get("include_trash")):
+                    return running
+                raise TaskSubmissionError(409, "部分项目正在更新资源，请在完成后重新读取")
+        stored_payload["scan_scope"] = ",".join(sorted(payload.get("project_ids") or [project_id]))
+    elif task_type == "resources.package":
+        stored_payload["export_id"] = idempotency_key
+        stored_payload["delivery_count"] = delivery_count
+    elif task_type == "resources.cleanup":
+        stored_payload["cleanup_id"] = idempotency_key
     if task_type == "book.split":
         split = get_config().split
         stored_payload["split_policy"] = {

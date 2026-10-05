@@ -572,14 +572,15 @@ def test_download_falls_back_to_storage_sanitized_name(client: TestClient):
         split_dir.mkdir(parents=True, exist_ok=True)
         (split_dir / disk_name).write_text("章节内容", encoding="utf-8")
         db.commit()
-    response = client.get(f"/api/files/download/02_split_text/{raw_name}")
+    response = client.get(f"/api/files/preview/02_split_text/{raw_name}")
     assert response.status_code == 200, response.text
     assert response.content == "章节内容".encode("utf-8")
     # 真实存在的磁盘名直取不受影响。
-    assert client.get(f"/api/files/download/02_split_text/{disk_name}").status_code == 200
+    assert client.get(f"/api/files/preview/02_split_text/{disk_name}").status_code == 200
     # 两者都不存在仍是 400。
-    assert client.get("/api/files/download/02_split_text/不存在_章节.txt").status_code == 400
+    assert client.get("/api/files/preview/02_split_text/不存在_章节.txt").status_code == 400
 
+    assert client.get(f"/api/files/download/02_split_text/{raw_name}").status_code == 403
 
 def test_catalog_managed_file_collision_keeps_original_name(client: TestClient):
     """catalog_managed_file 撞已有行（与解析补登同款根因）：只更新摘要，

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import sys
 import types
@@ -850,6 +851,46 @@ def test_auto_batches_restore_after_two_successes():
     third, remaining, cap, restored = tw.next_auto_batch(remaining, cap, stack, successes)
     assert len(third) == 272 and cap == restored == 340
     assert len(remaining) == 68
+
+
+def test_oom_restore_probes_once_after_first_success(capsys):
+    tw = _load_worker()
+    assert tw.restore_oom_cap_after_success(128, 340, 0) == (128, 340)
+    assert capsys.readouterr().out == ""
+    cap, pending = tw.restore_oom_cap_after_success(128, 340, 1)
+    assert (cap, pending) == (340, 0)
+    assert "[oom-restore] cap=340" in capsys.readouterr().out
+    assert tw.restore_oom_cap_after_success(cap, pending, 1) == (340, 0)
+    assert capsys.readouterr().out == ""
+
+
+def test_batch_restores_original_cap_after_one_reduced_group(tmp_path, monkeypatch, capsys):
+    tw = _load_worker()
+    segments = tmp_path / "segments.json"
+    voices = tmp_path / "voices.json"
+    segments.write_text(json.dumps([
+        {"index": i, "speaker": "A", "text": "hello"} for i in range(600)
+    ]), encoding="utf-8")
+    voices.write_text(json.dumps({"A": {"type": "custom"}}), encoding="utf-8")
+    monkeypatch.setattr(tw, "_add_ffmpeg_to_path", lambda *a: None)
+    monkeypatch.setattr(tw, "resolve_device", lambda *a: "cpu")
+    monkeypatch.setattr(tw, "_load_models_for", lambda *a: {"custom": object()})
+    monkeypatch.setattr(tw, "_warmup", lambda *a: None)
+    monkeypatch.setattr(tw, "_MechanicalPipeline", lambda *a: SimpleNamespace(
+        worker_count=1, queue_size=1, close=lambda **kw: None))
+    sizes = []
+    def run_group(model, vtype, rows, planned_concurrency, **kw):
+        sizes.append(len(rows))
+        return 1
+    monkeypatch.setattr(tw, "run_planned_group", run_group)
+    args = SimpleNamespace(segments_file=str(segments), voice_config=str(voices),
+                           out_dir=str(tmp_path / "audio"), ffmpeg="", device="cpu",
+                           concurrency=128, auto_batch=True, seed=-1, language="chinese",
+                           restore_stack=[(1, 224)], oom_restore_cap=340)
+    assert tw._run_batch(args) == 0
+    assert sizes == [128, 340, 132]
+    assert args.restore_stack == []
+    assert capsys.readouterr().out.count("[oom-restore] cap=340") == 1
 
 
 def test_fixed_batch_oom_does_not_retry_or_shrink(monkeypatch):

@@ -20,6 +20,7 @@ from .core.concurrency import set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
 from .services.project_retention import purge_expired_projects
+from .platform.resource_retention import purge_resource_artifacts
 from .platform.gpu_scheduler.runtime import Scheduler
 from .platform.gpu_scheduler.config import load_config as load_gpu_config
 from .platform.gpu_scheduler.store import read_state as read_gpu_state
@@ -88,6 +89,7 @@ def _project_retention_loop(stop: threading.Event) -> None:
         purged = 0
         try:
             purged = purge_expired_projects()
+            purge_resource_artifacts()
         except Exception:
             logger.exception("Daily project trash cleanup failed")
         # The worker can start alongside recovery/migration activity. A second

@@ -4,19 +4,20 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from ..core.safe_filesystem import is_link_or_junction
 
 
 def iter_regular_project_files(root: Path) -> Iterator[tuple[Path, Path, os.stat_result]]:
     """Yield regular files and root-relative paths without following symlinks."""
-    if root.is_symlink() or not root.is_dir():
+    if is_link_or_junction(root) or not root.is_dir():
         return
     resolved_root = root.resolve()
     for directory, child_dirs, filenames in os.walk(root, topdown=True, followlinks=False):
         parent = Path(directory)
-        child_dirs[:] = [name for name in child_dirs if not (parent / name).is_symlink()]
+        child_dirs[:] = [name for name in child_dirs if not is_link_or_junction(parent / name)]
         for filename in filenames:
             path = parent / filename
-            if path.is_symlink():
+            if is_link_or_junction(path):
                 continue
             try:
                 resolved = path.resolve()

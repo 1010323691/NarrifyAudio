@@ -25,6 +25,7 @@ from .api import files as api_files
 from .api import music as api_music
 from .api import platform_tasks as api_platform_tasks
 from .api import project_resources as api_project_resources
+from .api import resources as api_resources
 from .api import projects as api_projects
 from .api import quota as api_quota
 from .api import script as api_script
@@ -54,6 +55,7 @@ PLATFORM_ROUTERS = [
     api_auth.router,
     api_projects.router,
     api_project_resources.router,
+    api_resources.router,
     api_quota.router,
     api_platform_tasks.router,
     api_text_format.router,

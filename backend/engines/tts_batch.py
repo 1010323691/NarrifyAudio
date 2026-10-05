@@ -28,7 +28,7 @@ from ..core import pathio
 from ..core.config import get_config
 from ..core.paths import get_or_prepare_layout, resolve_parsed_json
 from ..core.task_control import TaskCancelled
-from .tts import DEFAULT_LANGUAGE, WorkerWatchdogTimeout, resolve_engine, run_tts_subprocess
+from .tts import DEFAULT_LANGUAGE, WorkerOutOfMemory, WorkerWatchdogTimeout, resolve_engine, run_tts_subprocess
 from .tts_manifest import (
     voice_params,
     voice_signature,
@@ -99,6 +99,16 @@ def timeout_demotion_cap(current_cap: int, actual_rows: int) -> int:
     return max(MIN_CONCURRENCY, min(cap, rows) // 2)
 
 
+def oom_demotion_cap(current_cap: int, actual_rows: int, auto: bool) -> int:
+    """Step below the actual failed batch, never restoring an OOM ceiling."""
+    ceiling = min(current_cap, actual_rows) if actual_rows > 0 else current_cap
+    if auto:
+        for tier in (340, 272, 224, 128, 96, 80):
+            if tier < ceiling:
+                return tier
+    return max(1, ceiling // 2)
+
+
 def encode_restore_stack(stack) -> str:
     """The pending demotion records as the worker's ``--restore-stack`` value (pure).
 
@@ -127,7 +137,8 @@ def filename_width(full_count: int) -> int:
 def _build_cmd(python, worker, seg_file, vc_path, out_dir, *, language, device,
                model, base_model, design_model, ffmpeg_path, concurrency, seed,
                workspace=None, restore_stack: str = "",
-               width: int = 0, auto_concurrency: bool = False) -> list:
+               width: int = 0, auto_concurrency: bool = False,
+               oom_restore_cap: int = 0) -> list:
     """Fixed row ceiling and decoder groups, with timeout-demotion recovery records."""
     cmd = [
         str(python), str(worker),
@@ -156,6 +167,8 @@ def _build_cmd(python, worker, seg_file, vc_path, out_dir, *, language, device,
         cmd += ["--restore-stack", restore_stack]
     if width:
         cmd += ["--width", str(width)]
+    if oom_restore_cap:
+        cmd += ["--oom-restore-cap", str(oom_restore_cap)]
     if auto_concurrency:
         cmd.append("--auto-batch")
     cmd += ["--vocoder-batch-size", "8"]
@@ -307,7 +320,7 @@ def _format_batch_log_line(line: str) -> str | None:
     if line.startswith("[segment]"):
         return None
     if line.startswith("[perf] "):
-        return _format_batch_performance(line)
+        return _format_batch_performance(line) or line
     return line
 
 
@@ -769,7 +782,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         last_flush[0] = now
 
     def on_line(line: str) -> None:
-        nonlocal workers  # a confirmed restore re-syncs the per-batch cap
+        nonlocal workers, oom_restore_cap  # keep restart caps in sync with the child
         if line.startswith("[segment]"):
             outcome = _handle_segment(
                 line, by_index, run_total, seg_results, handle, stage_out_dir, out_dir,
@@ -791,6 +804,13 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             # indices so a strike at workers==1 targets the right segment(s).
             in_flight.update(_parse_watchdog_indices(line))
             handle.log(line, "WARNING")
+        elif line.startswith("[oom-restore]"):
+            cap = _parse_restore_cap(line)
+            if cap is not None and cap == oom_restore_cap:
+                workers = cap
+                oom_restore_cap = 0
+                restore_stack.clear()
+                handle.log(f"降档批次已完成，尝试恢复批内上限 {workers} 段。")
         elif line.startswith("[restore]"):
             # The child completed two successful batches at the newest demoted cap, restored
             # the pre-demotion cap and popped that record from its mirror
@@ -821,6 +841,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     struck: dict = {}
     restore_stack: list = []  # LIFO demotion records (oldest first), handed to every restart
     attempt = 0
+    oom_seen = False
+    oom_restore_cap = 0
     try:
         while True:
             if attempt > MAX_ATTEMPTS:
@@ -842,6 +864,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 workspace=ws,
                 restore_stack=encode_restore_stack(restore_stack),
                 width=width, auto_concurrency=auto_concurrency,
+                oom_restore_cap=oom_restore_cap,
             )
             in_flight.clear()  # a fresh child starts with an empty in-flight set
             try:
@@ -849,9 +872,21 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 require_quota("TTS", "tts.batch")
                 run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
-                           log_line=_format_batch_log_line, interrupt_on_pause=True)
+                           log_line=_format_batch_log_line, interrupt_on_pause=True, private_errors=True)
                 segment_log.flush()
                 break  # a clean exit (0)
+            except WorkerOutOfMemory as exc:
+                segment_log.flush()
+                if workers <= 1 or exc.rows == 1:
+                    raise RuntimeError("音频合成显存不足，已保留完成进度；请释放显存后重试。") from None
+                oom_restore_cap = workers if not oom_seen else 0
+                oom_seen = True
+                workers = oom_demotion_cap(workers, exc.rows, auto_concurrency)
+                restore_stack.clear()
+                policy = "完成一批后尝试恢复原档位" if oom_restore_cap else "本次任务保持降档执行"
+                handle.log(f"显存不足，批内上限已降为 {workers} 段，正在自动重试；{policy}。", "WARNING")
+                _write_manifest(force=True)
+                continue
             except WorkerWatchdogTimeout:
                 segment_log.flush()
                 attempt += 1
@@ -1375,7 +1410,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     segment_log = _SegmentLogBuffer(handle, pool_total)
 
     def on_line(line: str) -> None:
-        nonlocal workers  # a confirmed restore re-syncs the per-batch cap
+        nonlocal workers, oom_restore_cap  # keep restart caps in sync with the child
         if line.startswith("[segment]"):
             outcome = _handle_segment_pool(line, pool_map, pool_total, handle)
             if outcome and outcome.get("ok"):
@@ -1396,6 +1431,13 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         elif line.startswith("[watchdog]"):
             in_flight.update(_parse_watchdog_indices(line))
             handle.log(line, "WARNING")
+        elif line.startswith("[oom-restore]"):
+            cap = _parse_restore_cap(line)
+            if cap is not None and cap == oom_restore_cap:
+                workers = cap
+                oom_restore_cap = 0
+                restore_stack.clear()
+                handle.log(f"降档批次已完成，尝试恢复批内上限 {workers} 段。")
         elif line.startswith("[restore]"):
             # The child completed two successful batches at the newest demoted cap, restored
             # the pre-demotion cap and popped that record from its mirror
@@ -1478,6 +1520,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     struck: dict = {}
     restore_stack: list = []  # LIFO demotion records (oldest first), handed to every restart
     attempt = 0
+    oom_seen = False
+    oom_restore_cap = 0
     try:
         while True:
             if attempt > MAX_ATTEMPTS:
@@ -1507,6 +1551,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 workspace=ws,
                 restore_stack=encode_restore_stack(restore_stack),
                 width=width, auto_concurrency=auto_concurrency,
+                oom_restore_cap=oom_restore_cap,
             )
             in_flight.clear()  # a fresh child starts with an empty in-flight set
             try:
@@ -1514,9 +1559,21 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 require_quota("TTS", "tts.batch")
                 run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
-                           log_line=_format_batch_log_line, interrupt_on_pause=True)
+                           log_line=_format_batch_log_line, interrupt_on_pause=True, private_errors=True)
                 segment_log.flush()
                 break  # a clean exit (0)
+            except WorkerOutOfMemory as exc:
+                segment_log.flush()
+                if workers <= 1 or exc.rows == 1:
+                    raise RuntimeError("音频合成显存不足，已保留完成进度；请释放显存后重试。") from None
+                oom_restore_cap = workers if not oom_seen else 0
+                oom_seen = True
+                workers = oom_demotion_cap(workers, exc.rows, auto_concurrency)
+                restore_stack.clear()
+                policy = "完成一批后尝试恢复原档位" if oom_restore_cap else "本次任务保持降档执行"
+                handle.log(f"显存不足，批内上限已降为 {workers} 段，正在自动重试；{policy}。", "WARNING")
+                flush_manifests(force=True)
+                continue
             except WorkerWatchdogTimeout:
                 segment_log.flush()
                 attempt += 1

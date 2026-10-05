@@ -69,6 +69,8 @@ from .storage import (
     storage_migration,
 )
 from .task_registry import TASK_TYPES
+from .resource_tasks import _execute_resource_scan, _execute_resource_package, _execute_resource_cleanup
+from .resource_inventory import ResourceError
 from .task_context import (
     EngineExecutionContext,
     PersistentTaskHandle,
@@ -908,6 +910,9 @@ DIRECT_EXECUTORS: dict[str, Callable[[TaskClaim], TaskOutcome]] = {
     "script.parse": _execute_script_parse,
     "audio.silences": _execute_audio_silences,
     "audio.cut": _execute_audio_cut,
+    "resources.scan": _execute_resource_scan,
+    "resources.package": _execute_resource_package,
+    "resources.cleanup": _execute_resource_cleanup,
 }
 
 
@@ -922,7 +927,10 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
         from .engine_task_executor import execute_engine_task
 
         return execute_engine_task(claim)
-    return DIRECT_EXECUTORS[claim.task_type](claim)
+    try:
+        return DIRECT_EXECUTORS[claim.task_type](claim)
+    except ResourceError as exc:
+        raise TaskExecutionError("resource_changed", str(exc)) from exc
 
 
 def _cleanup_outcome(outcome: TaskOutcome) -> None:
@@ -953,7 +961,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             db.rollback()
             _cleanup_outcome(outcome)
             raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
-        outputs = [
+        output_id = None
+        outputs = [] if outcome.result_only else [
             TaskFileOutcome(
                 temp_path=outcome.temp_path,
                 output_name=outcome.output_name,
@@ -1058,7 +1067,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 journal.remove(target)
             for target in stale_book_paths:
                 journal.remove(target)
-            result_payload = {
+            result_payload = dict(outcome.metadata) if outcome.result_only else {
                 "file_id": published[0]["file_id"],
                 "object_key": published[0]["object_key"],
                 "name": published[0]["name"],
@@ -1072,6 +1081,12 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     {**published[index], **(described[index] if index < len(described) and isinstance(described[index], dict) else {})}
                     for index in range(len(published))
                 ]
+            from .resource_delivery import capture_deliveries
+            if task.task_type in {"tts.merge", "bgm.mix", "audio.cut", "audio.export", "audio.zip", "bgm.package"}:
+                result_payload["deliveries"] = capture_deliveries(
+                    db, user, task.project_id, task.task_type, result_payload,
+                    [str(item.final_path) for item in outcome.side_effect_outputs],
+                )
             db.add(TaskResult(task_id=task.id, result=result_payload))
             attempt.status = "succeeded"
             attempt.finished_at = utcnow()
@@ -1098,6 +1113,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 except OSError:
                     break
                 parent = parent.parent
+        if outcome.result_only:
+            outcome.temp_path.unlink(missing_ok=True)
         return True
 
 

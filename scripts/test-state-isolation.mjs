@@ -213,6 +213,69 @@ test('a rerun supersedes its terminal row over the stream and reset clears the m
   assert.equal(store.tasks.map((task) => task.id).join(','), 'task-8')
 })
 
+test('resource subscriptions keep one global stream alive and restore the project scope', () => {
+  const connections = []
+  const load = harness({ '@/api/tasks': {
+    streamAllTasks: (emit, done, project, state) => {
+      const connection = { emit, done, project, state, closed: false }
+      connections.push(connection)
+      return () => { connection.closed = true }
+    },
+  } })
+  const store = load('@/stores/task').useTaskStore()
+  store.bindProject('project-a')
+  const release = store.acquireGlobalScope()
+  const stream = connections[0]
+  assert.equal(stream.project, null)
+  stream.emit({ type: 'snapshot_all', tasks: [] })
+  assert.equal(stream.closed, false)
+  assert.equal(store.connectionStatus, 'connected')
+  stream.state('reconnecting')
+  assert.equal(store.connectionStatus, 'reconnecting')
+  stream.emit({ type: 'snapshot', task: { id: 't', project_id: 'project-b', status: 'running', progress: .25 } })
+  stream.emit({ type: 'progress', task_id: 't', progress: .75, current: '第3章' })
+  assert.equal(store.tasks[0].progress, .75)
+  assert.equal(store.tasks[0].current, '第3章')
+  stream.emit({ type: 'status', task_id: 'newly-discovered', status: 'running', task: { id: 'newly-discovered', project_id: 'project-b', status: 'running', progress: .15 } })
+  assert.equal(store.tasks.find(item => item.id === 'newly-discovered')?.progress, .15)
+  const otherRelease = store.acquireGlobalScope()
+  assert.equal(connections.length, 1)
+  store.bindProject('project-c')
+  assert.equal(connections.length, 1)
+  release()
+  assert.equal(stream.closed, false)
+  otherRelease()
+  assert.equal(stream.closed, true)
+  assert.equal(connections[1].project, 'project-c')
+  // Late callbacks from the old scope cannot overwrite a fresh scope.
+  stream.state('connected')
+  stream.emit({ type: 'snapshot_all', tasks: [{ id: 'stale', status: 'running' }] })
+  assert.equal(store.tasks.some(task => task.id === 'stale'), false)
+  connections[1].emit({ type: 'snapshot_all', tasks: [] })
+  assert.equal(connections[1].closed, true)
+})
+
+test('account reset revokes old resource subscriptions and events', () => {
+  const connections = []
+  const load = harness({ '@/api/tasks': {
+    streamAllTasks: (emit, done, project, state) => {
+      const connection = { emit, state, closed: false }
+      connections.push(connection)
+      return () => { connection.closed = true }
+    },
+  } })
+  const store = load('@/stores/task').useTaskStore()
+  const oldRelease = store.acquireGlobalScope()
+  store.reset()
+  const newRelease = store.acquireGlobalScope()
+  oldRelease()
+  assert.equal(connections[1].closed, false)
+  connections[0].emit({ type: 'snapshot_all', tasks: [{ id: 'old-user', status: 'running' }] })
+  assert.equal(store.tasks.length, 0)
+  assert.equal(store.snapshotVersion, 0)
+  newRelease()
+})
+
 test('a delayed task category control cannot repopulate state after reset', async () => {
   const old = deferred()
   const load = harness({ '@/api/tasks': {

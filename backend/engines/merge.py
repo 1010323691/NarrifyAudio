@@ -339,5 +339,6 @@ def _merge_audio_package_locked(handle, package, layout, manifest_path) -> dict:
         "file": produced.name,
         "path": str(produced),
         "segments": len(segs),
+        "complete": len(segs) == len(manifest) and not missing,
         "size": size,
     }

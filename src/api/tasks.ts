@@ -35,6 +35,7 @@ function openSse(
   url: string,
   onEvent: (e: { type: string; [k: string]: any }) => void,
   onDone?: () => void,
+  onConnection?: (state: 'connected' | 'reconnecting') => void,
 ): () => void {
   const es = new EventSource(url)
 
@@ -54,9 +55,11 @@ function openSse(
   }
 
   es.onmessage = handler
+  es.onopen = () => onConnection?.('connected')
   // EventSource auto-reconnects on transient errors; only a fully-closed stream
   // ends the view, so a dropped connection doesn't silently stop the live feed.
   es.onerror = () => {
+    onConnection?.('reconnecting')
     if (es.readyState === EventSource.CLOSED && !finished) {
       finished = true
       teardown()
@@ -87,9 +90,10 @@ export function streamAllTasks(
   onEvent: (e: { type: string; [k: string]: any }) => void,
   onDone?: () => void,
   projectId: string | null = null,
+  onConnection?: (state: 'connected' | 'reconnecting') => void,
 ): () => void {
   const url = projectId
     ? `${API_BASE}/api/v1/tasks/stream?project_id=${encodeURIComponent(projectId)}`
     : `${API_BASE}/api/v1/tasks/stream`
-  return openSse(url, onEvent, onDone)
+  return openSse(url, onEvent, onDone, onConnection)
 }

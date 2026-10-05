@@ -17,6 +17,8 @@ from ..platform.deps import AuthContext, get_auth_context
 from ..platform.platform_settings import settings
 from ..platform.storage import configured_storage_root, project_input_object_key, safe_display_name
 from . import _common
+from ..platform.resource_delivery import require_delivery, DeliveryDenied
+from ..core.safe_filesystem import safe_regular_path
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -93,7 +95,16 @@ def list_module(
 
 
 @router.get("/download/{module}/{name:path}")
-def download_file(module: str, name: str, request: Request):
+def download_file(module: str, name: str, request: Request, ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)):
+    return _serve_file(module, name, request, ctx, db, download=True)
+
+
+@router.get("/preview/{module}/{name:path}")
+def preview_file(module: str, name: str, request: Request, ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)):
+    return _serve_file(module, name, request, ctx, db, download=False)
+
+
+def _serve_file(module, name, request, ctx, db, *, download):
     if module not in _MODULE_ATTRS:
         raise HTTPException(404, "未知模块")
     if not is_workspace_set():
@@ -110,7 +121,22 @@ def download_file(module: str, name: str, request: Request):
             p = p2
     if not p.is_relative_to(d) or not p.is_file():
         raise HTTPException(400, "非法路径")
-    return file_response(request, p, media_type="application/octet-stream", filename=p.name)
+    try:
+        p = safe_regular_path(_module_dir(module), p.relative_to(d).as_posix())
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(400, "非法路径") from exc
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
+        raise HTTPException(404, "项目不存在")
+    if download:
+        try:
+            require_delivery(db, ctx.user, project.id, module + "/" + p.relative_to(d).as_posix())
+        except DeliveryDenied as exc:
+            raise HTTPException(403, str(exc)) from exc
+    elif p.suffix.lower() not in {".txt", ".md", ".json", ".log", ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+        raise HTTPException(403, "此格式仅提供资料详情，不提供原始文件预览。")
+    import mimetypes
+    return file_response(request, p, media_type=mimetypes.guess_type(p.name)[0] or "application/octet-stream", filename=p.name, inline=not download)
 
 
 @router.post("/upload")
