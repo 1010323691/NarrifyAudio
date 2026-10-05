@@ -30,8 +30,8 @@ install_tts_env.log
 /storage/
 # 本机存储根目录位置（管理控制台选定；per-user 运行时数据，永不提交）
 /workspace/
-# start-context / end-context 交接产物（仅本地，不随 git 追踪；2026-10-03 起按用户指示改回）
-/docs/agent-context/
+# 文档目录不随 Git 跟踪
+/docs/
 
 # 0015 migration backup dumps (contain user data — never commit)
 .backups/
