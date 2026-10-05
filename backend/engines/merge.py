@@ -25,7 +25,7 @@ from pathlib import Path
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.concurrency import merge_gate
+from ..core.concurrency import merge_gate, merge_concurrency_limit
 from ..core.file_lock import exclusive_file_lock
 from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
@@ -45,7 +45,7 @@ def concurrency_limit() -> int:
     Deliberately a constant policy, not a config item (auto-evaluation, per the
     batch-merge requirement).
     """
-    return max(1, min(4, (os.cpu_count() or 4) // 2))
+    return merge_concurrency_limit()
 
 
 def thread_budget(limit: int | None = None, cpu: int | None = None) -> int:
@@ -247,8 +247,7 @@ def _merge_audio_package_locked(handle, package, layout, manifest_path) -> dict:
     if m > 1:
         handle.log(f"两阶段合并：{len(segs)} 段 → {m} 批（每批 {MERGE_BATCH_SIZE} 段）→ 整书")
 
-    # Concurrency gate (process-wide hard cap, fixed at 1 — deliberately
-    # conservative, A4): acquired only AFTER every fast-fail validation
+    # CPU-sized concurrency gate, shared with BGM mixing: acquired AFTER validation
     # (missing/corrupt/empty manifest, no ok segments) and BEFORE any staging
     # file is written — a cancel while queued (cooperative stop_check polling)
     # aborts with zero file residue. Release is balanced in the finally below

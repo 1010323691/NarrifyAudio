@@ -16,7 +16,7 @@ from .platform.worker_registry import heartbeat, mark_offline
 from .platform.database import SessionLocal
 from .platform.models import Task, TaskAttempt
 from .platform.task_types import SUPPORTED_TASK_TYPES
-from .core.concurrency import set_concurrency
+from .core.concurrency import merge_gate, set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
 from .services.project_retention import purge_expired_projects
@@ -30,6 +30,7 @@ PARSE_LLM_CONCURRENCY_MAX = 32
 PARSE_WORKER_MAX = PARSE_LLM_CONCURRENCY_MAX * 2
 PARSE_WORKER_MULTIPLIER = 2
 PARSE_TASK_TYPES = ("script.parse",)
+MERGE_TASK_TYPES = ("tts.merge", "bgm.mix")
 GPU_TASK_TYPES = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial)
 
 
@@ -52,6 +53,37 @@ def _gpu_task_loop(worker_id: str, service: str, stop: threading.Event) -> None:
             stop.wait(0.5)
     finally:
         mark_offline(slot_id)
+
+
+def _merge_worker_loop(worker_id: str, slot: int, stop: threading.Event) -> None:
+    """Execute CPU audio jobs independently of the synchronous general queue."""
+    slot_id = f"{worker_id}-merge-{slot:02d}"
+    logger = logging.getLogger("audiobook.worker")
+    try:
+        while not stop.is_set():
+            try:
+                heartbeat(slot_id, status="idle", capabilities={"task_types": list(MERGE_TASK_TYPES), "slots": 1})
+                claim = claim_fair_task(slot_id, task_types=MERGE_TASK_TYPES)
+                if claim is not None:
+                    _run_claim_fenced(claim)
+                    continue
+            except Exception:
+                logger.exception("Merge worker slot failed; retrying slot=%s", slot)
+            stop.wait(0.5)
+    finally:
+        mark_offline(slot_id)
+
+
+def _start_merge_workers(worker_id: str, stop: threading.Event) -> list[threading.Thread]:
+    workers = []
+    for slot in range(1, merge_gate().limit + 1):
+        thread = threading.Thread(
+            target=_merge_worker_loop, args=(worker_id, slot, stop),
+            name=f"audio-merge-{slot:02d}", daemon=True,
+        )
+        thread.start()
+        workers.append(thread)
+    return workers
 
 
 def parse_worker_slot_count(llm_concurrency: int, parked_worker_count: int = 0) -> int:
@@ -192,8 +224,10 @@ def main() -> None:
     parse_workers: list[threading.Thread] = []
     retention_worker: threading.Thread | None = None
     gpu_workers: list[threading.Thread] = []
+    merge_workers: list[threading.Thread] = []
     scheduler_thread: threading.Thread | None = None
     if not args.once:
+        merge_workers = _start_merge_workers(args.worker_id, stop)
         scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
         scheduler_thread.start()
         for service in ("LLM", "TTS"):
@@ -228,7 +262,9 @@ def main() -> None:
                 client,
                 worker_id=args.worker_id,
                 block_ms=100 if args.once else int(max(100, args.interval * 1000)),
-                excluded_task_types=() if args.once else (GPU_TASK_TYPES if load_gpu_config().enabled or read_gpu_state()["managed"] else PARSE_TASK_TYPES),
+                excluded_task_types=() if args.once else (
+                    MERGE_TASK_TYPES + (GPU_TASK_TYPES if load_gpu_config().enabled or read_gpu_state()["managed"] else PARSE_TASK_TYPES)
+                ),
             )
             if result not in {"idle", "skipped"}:
                 heartbeat(args.worker_id, status="idle", capabilities=capabilities)
@@ -245,6 +281,8 @@ def main() -> None:
         for thread in parse_workers:
             thread.join(timeout=2)
         for thread in gpu_workers:
+            thread.join(timeout=2)
+        for thread in merge_workers:
             thread.join(timeout=2)
         if scheduler_thread:
             scheduler_thread.join(timeout=5)

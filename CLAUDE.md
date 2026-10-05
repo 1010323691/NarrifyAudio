@@ -72,7 +72,7 @@ npm.cmd run test:voices-workbench # 角色音色工作台组合回归（node:tes
 - **配置项**：项目配置随工程存 DB（`/api/config` 读写活动工作区配置，永不写根模板）；LLM 凭据等由管理控制台管（`api/admin.py` + `platform/system_config.py` 的 `SystemConfig`）；`core/config.py` 的功能默认值由 `platform.system_config` 注册的 provider 供给（分层契约要求 core 不反向 import platform）。
 - **额度/计费**：`platform/quota.py`（按操作 `QuotaHold`）。
 - **DB 结构变更**：`backend/migrations/` 加 Alembic 迁移（链从 0001 起，head 须与 `platform/models.py` 一致；不可逆变更先备份）。
-- **并发/并行度**：`core/concurrency.py` 的 `set_merge_concurrency` 已删、`merge_gate()` 恒 limit=1——BGM/合并分析串行；LLM gate 由 Worker 的 parse 协调器每轮按管理端 `parse_worker_concurrency` 配置经 `set_concurrency` 动态调整（默认 4、上限 32，parse worker 池随并发伸缩、上限 64 槽），LLM 解析可并行至 32，并非串行。其余引擎工作的并行度真正确定的是引擎侧的 acquire 点（`engines/bgm.py`、`merge.py`、`music.py`、`script.py`），改并行度从那里入手。
+- **并发/并行度**：`core/concurrency.py` 的 `merge_concurrency_limit()` 按逻辑 CPU 数的一半、限制在 1～4 槽；`merge_gate()` 由音频合并与 BGM 混音共用，Worker 启动等量的专用执行线程领取 `tts.merge` / `bgm.mix`，主循环排除这两类任务。LLM gate 由 Worker 的 parse 协调器每轮按管理端 `parse_worker_concurrency` 配置经 `set_concurrency` 动态调整（默认 4、上限 32，parse worker 池随并发伸缩、上限 64 槽），LLM 解析可并行至 32。调整并行度时同时检查 Worker 调度槽位和引擎侧的 acquire 点（`engines/bgm.py`、`merge.py`、`music.py`、`script.py`）；合并/混音槽位是进程级限制，多个 Worker 进程不会共用该门禁。
 - **工作区路径/文件产物**：布局在 `core/paths.py`，存储对象与安全文件名在 `platform/storage.py`（`safe_display_name` 规则与 `tts_manifest` 内联副本**不等价**——截断与兜底行为不同，合并会改变现网路径，不要顺手统一）。
 
 ## TTS 子进程隔离

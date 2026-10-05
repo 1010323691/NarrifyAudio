@@ -144,6 +144,34 @@ def test_run_cmd_includes_tmp_dir_and_batch_size(workspace, monkeypatch):
     assert int(_cmd_flag(captured["cmd"], "--threads")) == merge.thread_budget()
 
 
+def test_different_packages_merge_concurrently(workspace, monkeypatch, fresh_gate):
+    from concurrent.futures import ThreadPoolExecutor
+
+    for package in ("chapter1", "chapter2"):
+        _seed_manifest(workspace, 2, package=package)
+    fresh_gate.set_limit(2)
+    overlap = threading.Barrier(2)
+    captured = []
+    monkeypatch.setattr(merge, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
+
+    def run_worker(cmd, handle, on_line, **kwargs):
+        captured.append(cmd)
+        overlap.wait(timeout=5)
+        _fake_run_worker({})(cmd, handle, on_line, **kwargs)
+
+    monkeypatch.setattr(merge, "run_tts_subprocess", run_worker)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(merge.merge_audio_package, _Handle(), package)
+                   for package in ("chapter1", "chapter2")]
+        for future in futures:
+            future.result(timeout=10)
+    assert fresh_gate.active == 0
+    assert len({_cmd_flag(cmd, "--tmp-dir") for cmd in captured}) == 2
+    assert (workspace / "06_audio_merge" / "chapter1.mp3").is_file()
+    assert (workspace / "06_audio_merge" / "chapter2.mp3").is_file()
+    assert not list((workspace / "00_temp").glob("merge_tmp_*"))
+
+
 def test_run_logs_two_stage_plan(workspace, monkeypatch):
     _seed_manifest(workspace, 250)
     captured = {}
