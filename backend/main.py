@@ -259,7 +259,16 @@ def api_not_found(full_path: str) -> Response:
     return JSONResponse({"detail": "Not Found"}, status_code=404)
 
 
-if __name__ == "__main__":
+def run_api() -> None:
     import uvicorn
 
-    uvicorn.run("backend.main:app", host=HOST, port=PORT, log_level="warning")
+    # SSE responses can live indefinitely. Bound the drain period so Uvicorn
+    # cancels them and runs application cleanup before systemd's stop timeout.
+    uvicorn.run(
+        "backend.main:app", host=HOST, port=PORT, log_level="warning",
+        timeout_graceful_shutdown=5,
+    )
+
+
+if __name__ == "__main__":
+    run_api()

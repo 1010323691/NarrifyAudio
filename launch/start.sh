@@ -21,7 +21,9 @@ unitctl is-active --quiet narrify-api.service
 unitctl is-active --quiet narrify-worker.service
 command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
 for ((attempt = 0; attempt < 30; attempt++)); do
-  if curl -fsS --max-time 2 http://127.0.0.1:8642/api/health >/dev/null; then
+  # Connection failures are expected while the API is starting; report only
+  # a final timeout below instead of printing errors before a successful retry.
+  if curl -fs --max-time 2 http://127.0.0.1:8642/api/health >/dev/null; then
     echo "API and Worker are ready. Frontend: http://127.0.0.1:8642 (built dist/), or your Nginx address."
     exit 0
   fi
