@@ -11,6 +11,7 @@ import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations,
 import { previewUrl as resourcePreviewUrl } from '@/utils/fileops'
 import type { MakeClonesResult, PrepareFoundationsResult, TTSStatus, VoiceItem } from '@/types'
 
+import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
@@ -608,25 +609,7 @@ watch(
             </CardDescription>
           </CardHeader>
           <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <Button :disabled="foundationBlocked" @click="doFoundations({})">
-                <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
-                <Sparkles v-else class="h-4 w-4" />
-                {{ foundationBusy ? '生成中…' : '批量生成所有角色' }}
-              </Button>
-              <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
-                <Users class="h-4 w-4" />仅新增角色
-              </Button>
-              <span class="ml-auto text-xs text-muted-foreground">语音推理基础：{{ foundationDone }} / {{ nonAlias.length }}</span>
-            </div>
-
-            <LiveLogPanel :task="foundationTask" :max-height-class="'h-40'">
-              <template #actions>
-                <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="outline" size="sm" @click="cancelFoundation">
-                  <XCircle class="h-3.5 w-3.5" />取消
-                </Button>
-              </template>
-            </LiveLogPanel>
+            <LiveLogPanel :task="foundationTask" :max-height-class="'h-40'" />
 
             <div
               v-if="foundationResult"
@@ -647,22 +630,7 @@ watch(
             </CardDescription>
           </CardHeader>
           <CardContent class="voices-stage-content space-y-2 p-3 pt-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
-                <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
-                <AudioWaveform v-else class="h-4 w-4" />
-                {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
-              </Button>
-              <span class="ml-auto text-xs text-muted-foreground">克隆音频：{{ cloneDone }} / {{ nonAlias.length }}</span>
-            </div>
-
-            <LiveLogPanel :task="cloneTask" :max-height-class="'h-40'">
-              <template #actions>
-                <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="outline" size="sm" @click="cancelClone">
-                  <XCircle class="h-3.5 w-3.5" />取消
-                </Button>
-              </template>
-            </LiveLogPanel>
+            <LiveLogPanel :task="cloneTask" :max-height-class="'h-40'" />
 
             <div
               v-if="cloneResult"
@@ -675,9 +643,34 @@ watch(
         </section>
       </Card>
 
-      <div v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" class="voices-footer flex justify-end">
-        <Button v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" size="sm" @click="router.push('/batch')">前往音频合成<ArrowRight class="h-4 w-4" /></Button>
-      </div>
+      <WorkbenchActionBar>
+        <template #summary>
+          <strong>声音就绪 {{ readyCount }} / {{ speakers.length }} 个角色</strong>
+          <p class="mt-1 text-muted-foreground">基础 {{ foundationDone }} / {{ nonAlias.length }} · 克隆音频 {{ cloneDone }} / {{ nonAlias.length }}</p>
+        </template>
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="基础生成">
+          <span class="text-xs text-muted-foreground">基础生成</span>
+          <Button :disabled="foundationBlocked" @click="doFoundations({})">
+            <Loader2 v-if="foundationBusy" class="h-4 w-4 animate-spin" />
+            <Sparkles v-else class="h-4 w-4" />
+            {{ foundationBusy ? '生成中…' : '批量生成所有角色' }}
+          </Button>
+          <Button variant="outline" :disabled="foundationBlocked" @click="doFoundations({ new_only: true })">
+            <Users class="h-4 w-4" />仅新增角色
+          </Button>
+          <Button v-if="foundationTask && ACTIVE.includes(foundationTask.status)" variant="destructive" size="sm" @click="cancelFoundation">取消基础生成</Button>
+        </div>
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="克隆制作">
+          <span class="text-xs text-muted-foreground">克隆制作</span>
+          <Button :disabled="cloneBlocked" @click="doClones({ new_only: true })">
+            <Loader2 v-if="cloneBusy" class="h-4 w-4 animate-spin" />
+            <AudioWaveform v-else class="h-4 w-4" />
+            {{ cloneBusy ? '制作中…' : '批量制作克隆音频' }}
+          </Button>
+          <Button v-if="cloneTask && ACTIVE.includes(cloneTask.status)" variant="destructive" size="sm" @click="cancelClone">取消克隆制作</Button>
+        </div>
+        <Button v-if="hasScript && readyCount >= speakers.length && speakers.length > 0" variant="outline" size="sm" @click="router.push('/batch')">前往音频合成<ArrowRight class="h-4 w-4" /></Button>
+      </WorkbenchActionBar>
     </template>
 
     <Alert v-if="error" variant="destructive">

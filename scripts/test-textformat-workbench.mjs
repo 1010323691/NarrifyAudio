@@ -475,3 +475,17 @@ test('a late state response from the previous project cannot overwrite the new p
   assert.equal(wb.flow.value, null)
   assert.equal(wb.version.value, null)
 })
+
+
+test('manual state refresh reads progress without advancing or submitting a flow', async () => {
+  const { wb, calls } = setupWorkbench({ getState: async () => ({
+    flow: { id: 'flow-1', status: 'running', config_snapshot: {} },
+    version: null,
+    next_task: { stage: 'format', task_id: 'task-1', status: 'running', progress: 30 },
+    active_tasks: [],
+  }) })
+  assert.equal(await wb.refreshState(), true)
+  assert.equal(wb.nextTask.value.progress, 30)
+  assert.equal(calls.post, 0)
+  assert.equal(calls.wait, 0)
+})

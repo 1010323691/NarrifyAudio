@@ -10,7 +10,7 @@ const vue = require('vue')
 const { parse, compileTemplate } = require('@vue/compiler-sfc')
 
 test('production templates compile with the actual Vue template compiler', () => {
-  for (const file of ['components/ProductionWorkbench.vue', 'views/BatchTTS.vue', 'views/Merge.vue', 'views/BGM.vue']) {
+  for (const file of ['components/WorkbenchToolbar.vue', 'components/WorkbenchActionBar.vue', 'components/ProductionWorkbench.vue', 'views/TextFormat.vue', 'views/ScriptParse.vue', 'views/voices/VoicesWorkbench.vue', 'views/Voices.vue', 'views/BatchTTS.vue', 'views/Merge.vue', 'views/BGM.vue']) {
     const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')
     const { descriptor, errors } = parse(source)
     assert.deepEqual(errors, [])

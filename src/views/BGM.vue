@@ -34,6 +34,7 @@ import type {
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
+import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import ProductionWorkbench from '@/components/ProductionWorkbench.vue'
 import Badge from '@/components/ui/Badge.vue'
 import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
@@ -1007,19 +1008,19 @@ onBeforeUnmount(() => {
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="submitting || matching || !pendingAnalysisStems.length"
+          :disabled="loading || !!loadError || submitting || matching || !pendingAnalysisStems.length"
           @click="selectPendingAnalysis"
           >{{ mode === 'segment' ? '选择待分析' : '选择未匹配' }}</Button
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="submitting || matching || !pendingMixStems.length"
+          :disabled="loading || !!loadError || submitting || matching || !pendingMixStems.length"
           @click="selectPendingMix"
           >选择待混音</Button
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="submitting || matching || !selectedNames.length"
+          :disabled="loading || !!loadError || submitting || matching || !selectedNames.length"
           @click="clearSelection"
           >清空</Button
         ></template
@@ -1224,8 +1225,8 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </ProductionWorkbench>
-    <div class="production-actionbar">
-      <div class="mr-auto text-xs">
+    <WorkbenchActionBar>
+      <template #summary>
         <strong
           >已选 {{ selectedNames.length }} 章 · 可混音 {{ selectedMixable.length }} · 可下载
           {{ selectedMixedNames.length }}</strong
@@ -1234,7 +1235,7 @@ onBeforeUnmount(() => {
           匹配跳过锁定章；匹配 / 分析跳过运行中章节；混音仅提交可用输入（跳过
           {{ selectedNames.length - selectedMixable.length }} 章）；下载只打包已完成结果。
         </p>
-      </div>
+      </template>
       <Button
         variant="outline"
         :disabled="!projectSet || submitting || matching || loading || !!loadError || !selectedStageNames.length"
@@ -1258,7 +1259,7 @@ onBeforeUnmount(() => {
       ><Button v-if="bgmActive.length" variant="destructive" @click="cancelAll"
         >取消全部任务</Button
       >
-    </div>
+    </WorkbenchActionBar>
     <div v-if="error" class="workbench-feedback" tabindex="0" role="region" aria-label="制作反馈与报告">
       <Alert v-if="error" variant="destructive">{{ error }}</Alert>
     </div>

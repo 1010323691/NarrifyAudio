@@ -23,16 +23,16 @@ import type { BatchFileStatus, BatchResult, FileItem, TTSStatus } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
+import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import ProductionWorkbench from '@/components/ProductionWorkbench.vue'
 import { useSettingsStore } from '@/stores/settings'
 import Progress from '@/components/ui/Progress.vue'
 import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Alert from '@/components/ui/Alert.vue'
-import LiveLogPanel from '@/components/ui/LiveLogPanel.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { formatNumber } from '@/utils/format'
-import { Layers, Loader2, CheckCircle2, RotateCcw, ArrowRight } from 'lucide-vue-next'
+import { Layers, Loader2, RotateCcw, ArrowRight } from 'lucide-vue-next'
 
 const router = useRouter()
 const pipeline = usePipelineStateStore()
@@ -243,7 +243,6 @@ const noSynthesizable = computed(
 const busy = ref(false)
 const error = ref('')
 const taskId = ref<string | null>(null)
-const result = ref<BatchResult | null>(null)
 
 const task = computed(() => taskStore.projectTasks.find((t) => t.id === taskId.value) ?? null)
 
@@ -275,7 +274,7 @@ function stopStatusPolling(final = true) {
 // ---------------------------------------------------------------------------
 // 刷新恢复：页面重载后本地 taskId 丢失，但后端合成任务仍在跑（store 的 refresh 已拉回全量
 // 任务）。按 module 重新挂接在途任务（后端守卫保证至多一个在途）——每文件行由 refreshRows()
-//（03_parsed_json 目录列表）自行恢复，这里只恢复任务级状态（日志面板 / 取消钮 / 完成 watcher）。
+//（03_parsed_json 目录列表）自行恢复，这里只恢复任务级状态（取消钮 / 完成 watcher）。
 function reattachTask() {
   if (taskId.value) return
   const t = taskStore.activeTasks('tts-batch')[0]
@@ -345,7 +344,6 @@ async function doRun() {
   if (!names.length) return
   busy.value = true
   error.value = ''
-  result.value = null
   try {
     // Default (resume): synthesize only the not-yet-done segments, skipping existing audio
     // (fully-done files contribute no segments to the pool).
@@ -396,7 +394,6 @@ async function doRunAll() {
       return
     }
     error.value = ''
-    result.value = null
     // Clear the completion state (the package folders) first …
     const reset = await withinScope(submitBatchReset(names), isCurrent)
     const resetTask = await withinScope(waitForTask.wait(reset.task_id), isCurrent)
@@ -427,14 +424,14 @@ watch(
     const t = task.value
     if (!st || !t) return
     if (st === 'succeeded') {
-      result.value = t.result as BatchResult
+      const result = t.result as BatchResult | null
       taskId.value = null
       busy.value = false
       stopStatusPolling()
       toast({
         title: '音频合成完成',
-        variant: result.value?.failed.length ? 'default' : 'success',
-        description: `成功 ${result.value?.completed ?? 0} / ${result.value?.total ?? 0} 段`,
+        variant: result?.failed.length ? 'default' : 'success',
+        description: `成功 ${result?.completed ?? 0} / ${result?.total ?? 0} 段`,
       })
     } else if (st === 'failed') {
       error.value = t.error || '音频合成失败'
@@ -569,15 +566,15 @@ async function retryBatch() {
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="busy || !pendingRows.length"
+          :disabled="filesLoading || !!filesError || busy || !pendingRows.length"
           @click="selectPending"
           >选择待合成</Button
-        ><Button variant="ghost" size="sm" :disabled="busy || !rows.length" @click="selectAllFiles"
+        ><Button variant="ghost" size="sm" :disabled="filesLoading || !!filesError || busy || !rows.length" @click="selectAllFiles"
           >选择全部文件</Button
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="busy || !selectedNames.length"
+          :disabled="filesLoading || !!filesError || busy || !selectedNames.length"
           @click="clearSelection"
           >清空</Button
         ></template
@@ -673,13 +670,13 @@ async function retryBatch() {
         /></Button>
       </template>
     </ProductionWorkbench>
-    <div class="production-actionbar">
-      <div class="mr-auto text-xs">
+    <WorkbenchActionBar>
+      <template #summary>
         <strong>已选 {{ selectedNames.length }} 个文件</strong>
         <p class="mt-1 text-muted-foreground">
           增量处理 {{ selectedRemaining }} 段 · 全量重做 {{ selectedTotal }} 段
         </p>
-      </div>
+      </template>
       <Button
         :disabled="busy || filesLoading || !projectSet || !engineReady || !!filesError || !selectedRemaining"
         @click="doRun"
@@ -700,76 +697,16 @@ async function retryBatch() {
         @click="retryBatch"
         >重试失败批次</Button
       >
-    </div>
-    <div v-if="noSynthesizable || error || task || result" class="workbench-feedback" tabindex="0" role="region" aria-label="制作反馈与报告">
+    </WorkbenchActionBar>
+    <div
+      v-if="noSynthesizable || error"
+      class="workbench-feedback"
+      tabindex="0"
+      role="region"
+      aria-label="制作反馈"
+    >
       <Alert v-if="noSynthesizable">没有可合成段落，请先完成文本解析。</Alert>
       <Alert v-if="error" variant="destructive">{{ error }}</Alert>
-      <details v-if="task || result" class="rounded-xl border bg-card p-4" :open="!!result">
-        <summary class="cursor-pointer text-xs font-semibold">任务日志与合成报告</summary>
-        <LiveLogPanel v-if="task" :task="task" :max-height-class="'h-56'" class="mt-3" />
-        <!-- 结果 -->
-        <div v-if="result" class="space-y-3">
-          <Alert variant="default" class="items-center">
-            <template #icon>
-              <CheckCircle2 class="h-4 w-4 shrink-0 text-emerald-500" />
-            </template>
-            <span class="flex-1">
-              本次成功 {{ result.completed }} / 共 {{ result.total }} 段
-              <span v-if="result.failed.length" class="text-amber-600 dark:text-amber-400">
-                ，失败 {{ result.failed.length }}
-              </span>
-              <span v-if="result.done_count != null" class="text-xs text-muted-foreground">
-                · 累计已合成 {{ result.done_count }} / 全部 {{ result.all_count }} 段
-              </span>
-            </span>
-            <Button
-              v-if="(result.done_count ?? result.completed) > 0"
-              size="sm"
-              @click="router.push('/merge')"
-            >
-              前往音频合并<ArrowRight class="h-4 w-4" />
-            </Button>
-          </Alert>
-
-          <div v-if="result.files?.length" class="space-y-1.5">
-            <div class="text-xs font-medium text-muted-foreground">
-              各文件结果（{{ result.files.length }}）
-            </div>
-            <div class="space-y-1 rounded-md border p-2 text-xs">
-              <div v-for="f in result.files" :key="f.script" class="flex items-start gap-2">
-                <span class="min-w-0 flex-1 truncate font-medium" :title="f.script">{{
-                  f.script
-                }}</span>
-                <span v-if="f.error" class="text-destructive">— {{ f.error }}</span>
-                <span
-                  v-else
-                  class="flex shrink-0 items-center gap-1 text-emerald-600 dark:text-emerald-400"
-                >
-                  <CheckCircle2 class="h-3.5 w-3.5" />
-                  {{ f.done_count }} / {{ f.all_count }} 段
-                  <span v-if="f.failed > 0" class="text-amber-600 dark:text-amber-400">
-                    · 失败 {{ f.failed }}
-                  </span>
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="result.failed.length" class="space-y-1.5">
-            <div class="text-xs font-medium text-muted-foreground">
-              失败的段（{{ result.failed.length }}）
-            </div>
-            <div class="space-y-1 rounded-md border p-2 text-xs">
-              <div v-for="(f, i) in result.failed" :key="i" class="flex items-start gap-2">
-                <span v-if="f.script" class="shrink-0 text-muted-foreground">{{ f.script }} · </span>
-                <span class="shrink-0 text-muted-foreground">第 {{ f.index + 1 }} 段</span>
-                <span class="shrink-0 font-medium">{{ f.speaker || '(未知)' }}</span>
-                <span class="text-destructive">— {{ f.reason }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </details>
     </div>
   </div>
 </template>

@@ -484,7 +484,7 @@ export function useTextFormatWorkbench() {
     pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
     isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
     // actions
-    resume, startFlow, retryFailedStage, toggleMark, loadPreview,
+    resume, refreshState, startFlow, retryFailedStage, toggleMark, loadPreview,
     selectChapter: (key: string | null) => { selectedKey.value = key },
   }
 }

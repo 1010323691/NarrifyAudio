@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
 import { useProjectGate } from '@/composables/useProjectGate'
+import { useWorkbenchScope } from '@/composables/useWorkbenchScope'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
 import { pickFile, type PickedFile } from '@/utils/fileops'
 import { formatNumber } from '@/utils/format'
@@ -11,13 +12,15 @@ import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/u
 import type { TextToggles } from '@/types'
 import type { SplitMode } from '@/api/textFormat'
 
+import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
+import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
 import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Progress from '@/components/ui/Progress.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
-import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Search, Settings2, X } from 'lucide-vue-next'
+import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Settings2, X } from 'lucide-vue-next'
 
 import ChapterTable from '@/views/textformat/ChapterTable.vue'
 import ChapterDetailPanel from '@/views/textformat/ChapterDetailPanel.vue'
@@ -37,8 +40,23 @@ const {
   selectedKey, marksBusy, preview,
   pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
   isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
-  retryFailedStage, toggleMark, selectChapter, startFlow,
+  retryFailedStage, toggleMark, selectChapter, startFlow, refreshState,
 } = useTextFormatWorkbench()
+
+const captureScope = useWorkbenchScope()
+const refreshing = ref(false)
+async function refreshChapters() {
+  if (refreshing.value || !projectSet.value) return
+  const isCurrent = captureScope()
+  refreshing.value = true
+  try {
+    const refreshed = await refreshState()
+    if (!isCurrent()) return
+    if (!refreshed) toast({ title: '刷新章节失败', variant: 'destructive', description: '请稍后重试。' })
+  } finally {
+    refreshing.value = false
+  }
+}
 
 // --- file selection --------------------------------------------------------
 const sourceFile = ref<PickedFile | null>(null)
@@ -417,49 +435,37 @@ onBeforeUnmount(() => {
         <!-- 章节结果 -->
         <div class="wb-grid h-full">
           <div class="wb-main flex min-h-0 flex-col">
-            <div class="filter-seg flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
-              <div class="relative">
-                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  v-model="query"
-                  type="search"
-                  placeholder="搜索章节号或标题"
-                  class="h-8 w-56 rounded-md border bg-background pl-8 pr-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                  aria-label="搜索章节"
-                />
-              </div>
-              <button
-                v-for="f in [['all', '全部'], ['pending', '待核对'], ['adjusted', '已调整']] as const"
-                :key="f[0]"
-                type="button"
-                class="filter-pill tabular-nums"
-                :class="{ 'filter-pill-active': filter === f[0] && sameOrigNum == null }"
-                @click="filter = f[0]"
-              >
-                {{ f[1] }}
-                <span class="ml-1">
-                  {{ f[0] === 'all' ? version.chapters.length : f[0] === 'pending' ? pendingCount : adjustedCount }}
-                </span>
-              </button>
-              <select
-                v-model="reasonFilter"
-                class="h-8 rounded-md border bg-background px-1.5 text-xs"
-                aria-label="按核对原因筛选"
-              >
-                <option value="">全部原因</option>
-                <option v-for="r in reasonOptions" :key="r" :value="r">{{ reasonLabel(r) }}</option>
-              </select>
-              <button
-                v-if="sameOrigNum != null"
-                type="button"
-                class="filter-pill filter-pill-active flex items-center gap-1.5"
-                title="点击退出同号章节比较"
-                @click="sameOrigNum = null"
-              >
-                原第{{ sameOrigNum }}章 · {{ sameGroupCount }} 章
-                <X class="h-3 w-3" />
-              </button>
-            </div>
+            <WorkbenchToolbar
+              v-model:query="query"
+              :filter="sameOrigNum == null ? filter : ''"
+              @update:filter="filter = $event as typeof filter"
+              placeholder="搜索章节号或标题"
+              :filters="[{ key: 'all', label: '全部', count: version.chapters.length }, { key: 'pending', label: '待核对', count: pendingCount }, { key: 'adjusted', label: '已调整', count: adjustedCount }]"
+              :loading="loading || refreshing"
+              :refresh-disabled="!projectSet"
+              @refresh="refreshChapters"
+            >
+              <template #filters>
+                <select
+                  v-model="reasonFilter"
+                  class="h-8 rounded-md border bg-background px-1.5 text-xs"
+                  aria-label="按核对原因筛选"
+                >
+                  <option value="">全部原因</option>
+                  <option v-for="r in reasonOptions" :key="r" :value="r">{{ reasonLabel(r) }}</option>
+                </select>
+                <button
+                  v-if="sameOrigNum != null"
+                  type="button"
+                  class="flex h-8 items-center gap-1.5 rounded-full bg-primary/10 px-3 text-xs text-primary"
+                  title="点击退出同号章节比较"
+                  @click="sameOrigNum = null"
+                >
+                  原第{{ sameOrigNum }}章 · {{ sameGroupCount }} 章
+                  <X class="h-3 w-3" />
+                </button>
+              </template>
+            </WorkbenchToolbar>
             <div ref="tableScrollEl" class="min-h-0 flex-1 overflow-y-auto">
               <ChapterTable
                 :chapters="pagedChapters"
@@ -511,42 +517,42 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 底栏 -->
-    <div class="bottom-bar glass-panel flex flex-wrap items-center gap-3 px-4 py-3 shrink-0">
-      <span v-if="phase === 'ready' && version" class="flex items-center gap-2 text-xs">
-        <span class="h-2 w-2 rounded-full bg-emerald-500" />
-        <span class="font-medium">结果已保存</span>
-        <span class="text-muted-foreground">
-          {{ pendingCount > 0 ? `还有 ${pendingCount} 章待核对` : '全部章节已核对' }}
+    <WorkbenchActionBar>
+      <template #summary>
+        <div v-if="phase === 'ready' && version" class="text-xs">
+          <span class="mr-2 inline-block h-2 w-2 rounded-full bg-emerald-500" />
+          <span class="font-medium">结果已保存</span>
+          <span class="mt-1 block text-muted-foreground">
+            {{ pendingCount > 0 ? `还有 ${pendingCount} 章待核对` : '全部章节已核对' }}
+          </span>
+        </div>
+        <span v-else-if="phase === 'processing'" class="flex items-center gap-2 text-xs">
+          <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
+          <span>处理中，可离开页面，回来自动继续</span>
         </span>
-      </span>
-      <span v-else-if="phase === 'processing'" class="flex items-center gap-2 text-xs">
-        <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
-        <span>处理中，可离开页面，回来自动继续</span>
-      </span>
-      <span v-else-if="phase === 'failed'" class="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
-        <span class="h-2 w-2 rounded-full bg-red-500" />
-        <span>处理失败，请重试或重新处理</span>
-      </span>
-      <span v-else class="text-xs text-muted-foreground">
-        选择 TXT 文件后点击「开始处理」
-      </span>
-      <div class="ml-auto flex items-center gap-2">
-        <Button
-          size="sm"
-          :variant="phase === 'empty' ? 'default' : 'outline'"
-          :disabled="startDisabled"
-          @click="start(phase !== 'empty')"
-        >
-          <Loader2 v-if="phase === 'processing'" class="h-4 w-4 animate-spin" />
-          <RefreshCw v-else class="h-4 w-4" />
-          {{ phase === 'processing' ? '处理中…' : startLabel }}
-        </Button>
-        <Button size="sm" :disabled="!canEnterParse" :title="enterParseReason" @click="goNext">
-          进入文本解析
-          <ArrowRight class="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
+        <span v-else-if="phase === 'failed'" class="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
+          <span class="h-2 w-2 rounded-full bg-red-500" />
+          <span>处理失败，请重试或重新处理</span>
+        </span>
+        <span v-else class="text-xs text-muted-foreground">
+          选择 TXT 文件后点击「开始处理」
+        </span>
+      </template>
+      <Button
+        size="sm"
+        :variant="phase === 'empty' ? 'default' : 'outline'"
+        :disabled="startDisabled"
+        @click="start(phase !== 'empty')"
+      >
+        <Loader2 v-if="phase === 'processing'" class="h-4 w-4 animate-spin" />
+        <RefreshCw v-else class="h-4 w-4" />
+        {{ phase === 'processing' ? '处理中…' : startLabel }}
+      </Button>
+      <Button size="sm" :disabled="!canEnterParse" :title="enterParseReason" @click="goNext">
+        进入文本解析
+        <ArrowRight class="h-4 w-4" />
+      </Button>
+    </WorkbenchActionBar>
 
     <!-- 窄屏详情抽屉 -->
     <Teleport to="body">
@@ -620,31 +626,9 @@ onBeforeUnmount(() => {
 .wb-workspace {
   border-radius: 0.75rem;
 }
-.filter-pill {
-  padding: 0.3rem 0.75rem;
-  font-size: 0.75rem;
-  color: var(--muted-foreground);
-  border: 1px solid var(--border);
-  border-radius: 9999px;
-  background: var(--background);
-}
-.filter-pill:hover {
-  color: var(--foreground);
-  border-color: hsl(var(--primary) / 0.4);
-}
-.filter-pill-active {
-  color: hsl(var(--primary));
-  font-weight: 600;
-  background: hsl(var(--primary) / 0.1);
-  border-color: hsl(var(--primary) / 0.35);
-}
-/* 桌面：左章节表 + 右常驻详情（40%）：预览正文与核对说明更好读，左侧标题列相应收窄。 */
 .wb-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34%;
   gap: 0;
-}
-.bottom-bar {
-  border-radius: 0.75rem;
 }
 </style>
