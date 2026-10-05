@@ -134,8 +134,8 @@ export interface FlowRequest {
 
 const base = (projectId: string) => `/api/v1/projects/${projectId}/text-format`
 
-export function getWorkbenchState(projectId: string): Promise<WorkbenchState> {
-  return http.get<WorkbenchState>(base(projectId) + '/state')
+export function getWorkbenchState(projectId: string, options?: { recover?: boolean }): Promise<WorkbenchState> {
+  return http.get<WorkbenchState>(base(projectId) + '/state' + (options?.recover === false ? '?recover=false' : ''))
 }
 
 export function postWorkbenchFlow(projectId: string, body: FlowRequest): Promise<WorkbenchState> {

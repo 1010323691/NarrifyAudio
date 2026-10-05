@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { useScriptParseWorkbench } from '@/composables/useScriptParseWorkbench'
 
+import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
+import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
 import Alert from '@/components/ui/Alert.vue'
@@ -20,9 +22,7 @@ import {
   Eraser,
   ListChecks,
   Loader2,
-  RefreshCw,
   ScanText,
-  Search,
   X,
   XCircle,
 } from 'lucide-vue-next'
@@ -41,7 +41,7 @@ const {
   filter, query, chapterNumPad,
   total, doneCount, pendingCount, busy,
   selected, selectedCount, selectedDoneCount, selectedStaleCount,
-  selectScope, clearSelection, toggleSelect,
+  selectScope, selectFiltered, clearSelection, toggleSelect,
   selectedName, selectChapter, currentRow, tab, setTab,
   resultPreview, sourcePreview,
   canSubmit, startParse, cancelAll, retryRow, cancelRow,
@@ -67,17 +67,18 @@ const bottomHint = computed(() => {
   if (staleVersion.value) return '该版本分册文本已被覆盖，请先到「排版与分册」刷新后重新解析'
   if (state.value?.text_format_busy) return '排版与分册任务进行中，暂不能提交解析'
   if (stateError.value) return '状态待确认，当前显示的是上次已知状态——可尝试刷新'
-  const parts: string[] = [`已选 ${selectedCount.value} 章`]
+  const parts: string[] = []
   if (selectedDoneCount.value) parts.push(`${selectedDoneCount.value} 章已完成将重新解析`)
   if (selectedStaleCount.value) parts.push(`${selectedStaleCount.value} 章输入已变更将按最新内容解析`)
   if (busy.value) parts.push(`${activeRows.value.length} 章解析进行中`)
-  return parts.join(' · ')
+  return parts.join(' · ') || '按所选范围提交解析任务'
 })
 
 const startDisabled = computed(
   () => !projectSet.value || !state.value || busy.value || submitting.value || !selectedCount.value || !canSubmit.value,
 )
-const canSelectScope = computed(() => projectSet.value && !busy.value && total.value > 0)
+const filteredEligibleCount = computed(() => filteredRows.value.filter(row => row.status !== 'active').length)
+const canSelectScope = computed(() => projectSet.value && !busy.value && !loading.value && !stateError.value && total.value > 0)
 
 // 下拉里的其余范围：选完即回空位（原生 select 同值不触发 change）。
 function onScopeChange(e: Event) {
@@ -202,42 +203,38 @@ onBeforeUnmount(() => {
       <div class="min-h-0 flex-1" :inert="drawerOpen || undefined">
         <div class="wb-grid h-full">
           <div class="wb-main flex min-h-0 flex-col">
-            <!-- 筛选行固定 53px（h 含 1px border-b）；右栏章节预览页头现为 44px 压缩档，两侧分割线不再对齐（正文优先）。 -->
-            <div class="filter-seg flex h-[53px] flex-wrap items-center gap-2 border-b px-4">
-              <div class="relative">
-                <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  v-model="query"
-                  type="search"
-                  placeholder="搜索章节号或标题"
-                  class="h-8 w-56 rounded-md border bg-background pl-8 pr-2 text-sm outline-none focus:ring-2 focus:ring-ring"
-                  aria-label="搜索章节"
-                />
-              </div>
-              <button
-                v-for="f in [['all', '全部'], ['pending', '待解析'], ['done', '已完成']] as const"
-                :key="f[0]"
-                type="button"
-                class="filter-pill tabular-nums"
-                :class="{ 'filter-pill-active': filter === f[0] }"
-                @click="filter = f[0]"
-              >
-                {{ f[1] }}
-                <span class="ml-1">
-                  {{ f[0] === 'all' ? total : f[0] === 'pending' ? pendingCount : doneCount }}
-                </span>
-              </button>
-              <Button
-                variant="ghost"
-                class="ml-auto h-8 w-8 shrink-0 p-0"
-                :disabled="loading || !projectSet"
-                aria-label="刷新章节状态"
-                title="刷新章节状态"
-                @click="refreshState()"
-              >
-                <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
-              </Button>
-            </div>
+            <WorkbenchToolbar
+              v-model:query="query"
+              v-model:filter="filter"
+              placeholder="搜索章节号或标题"
+              :filters="[{ key: 'all', label: '全部', count: total }, { key: 'pending', label: '待解析', count: pendingCount }, { key: 'done', label: '已完成', count: doneCount }]"
+              :loading="loading"
+              :refresh-disabled="!projectSet"
+              @refresh="refreshState()"
+            >
+              <template #selection>
+                <Button variant="ghost" size="sm" :disabled="!canSelectScope || loading || !!stateError || !filteredEligibleCount" @click="selectFiltered">
+                  选择筛选结果（{{ filteredEligibleCount }}）
+                </Button>
+                <Button variant="ghost" size="sm" :disabled="!canSelectScope" @click="selectScope('pending')">
+                  <ListChecks class="h-3.5 w-3.5" />选择待解析
+                </Button>
+                <select
+                  class="h-8 cursor-pointer rounded-md border bg-background px-1.5 text-xs"
+                  aria-label="其他选择范围"
+                  :disabled="!canSelectScope"
+                  @change="onScopeChange($event)"
+                >
+                  <option value="" disabled selected>其他范围…</option>
+                  <option value="all">全部章节（含已完成）</option>
+                  <option value="done">仅已完成</option>
+                  <option value="failed">仅失败</option>
+                </select>
+                <Button variant="ghost" size="sm" :disabled="!selectedCount" @click="clearSelection">
+                  <Eraser class="h-3.5 w-3.5" />清空选择
+                </Button>
+              </template>
+            </WorkbenchToolbar>
             <div class="min-h-0 flex-1 overflow-y-auto">
               <ParseChapterTable
                 :rows="pagedRows"
@@ -306,49 +303,31 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 底栏：左侧选择功能（原表上方独立选择行下沉至此），右侧状态提示 + 操作按钮 -->
-    <div class="bottom-bar glass-panel flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 shrink-0">
-      <div class="flex flex-wrap items-center gap-2">
-        <Button size="sm" :disabled="!canSelectScope" @click="selectScope('pending')">
-          <ListChecks class="h-3.5 w-3.5" />选择全部待解析
-        </Button>
-        <select
-          class="h-8 cursor-pointer rounded-md border bg-background px-1.5 text-xs"
-          aria-label="其他选择范围"
-          :disabled="!canSelectScope"
-          @change="onScopeChange($event)"
-        >
-          <option value="" disabled selected>其他范围…</option>
-          <option value="all">全部章节（含已完成）</option>
-          <option value="done">仅已完成</option>
-          <option value="failed">仅失败</option>
-        </select>
-        <Button variant="outline" size="sm" :disabled="!selectedCount" @click="clearSelection">
-          <Eraser class="h-3.5 w-3.5" />清空选择
-        </Button>
-      </div>
-      <div class="ml-auto flex flex-wrap items-center gap-2">
-        <span class="text-xs tabular-nums text-muted-foreground">{{ bottomHint }}</span>
-        <Button v-if="busy" variant="outline" size="sm" class="text-red-600 hover:border-red-500/40 hover:text-red-600 dark:text-red-400 dark:hover:text-red-400" @click="cancelAll">
-          <XCircle class="h-4 w-4" />取消全部
-        </Button>
-        <Button size="sm" :disabled="startDisabled" @click="startParse()">
-          <Loader2 v-if="submitting" class="h-4 w-4 animate-spin" />
-          <ScanText v-else class="h-4 w-4" />
-          {{ submitting ? '提交中…' : selectedCount > 0 ? `开始解析（${selectedCount} 章）` : '开始解析' }}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          :disabled="doneCount === 0"
-          :title="doneCount === 0 ? '还没有可配音的解析结果' : '前往角色配音'"
-          @click="router.push('/voices')"
-        >
-          前往角色配音
-          <ArrowRight class="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
+    <!-- 底栏：选择摘要与执行操作 -->
+    <WorkbenchActionBar>
+      <template #summary>
+        <strong>已选 {{ selectedCount }} 章</strong>
+        <p class="mt-1 text-muted-foreground">{{ bottomHint }}</p>
+      </template>
+      <Button v-if="busy" variant="outline" size="sm" class="text-red-600 hover:border-red-500/40 hover:text-red-600 dark:text-red-400 dark:hover:text-red-400" @click="cancelAll">
+        <XCircle class="h-4 w-4" />取消全部
+      </Button>
+      <Button size="sm" :disabled="startDisabled" @click="startParse()">
+        <Loader2 v-if="submitting" class="h-4 w-4 animate-spin" />
+        <ScanText v-else class="h-4 w-4" />
+        {{ submitting ? '提交中…' : selectedCount > 0 ? `开始解析（${selectedCount} 章）` : '开始解析' }}
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        :disabled="doneCount === 0"
+        :title="doneCount === 0 ? '还没有可配音的解析结果' : '前往角色配音'"
+        @click="router.push('/voices')"
+      >
+        前往角色配音
+        <ArrowRight class="h-4 w-4" />
+      </Button>
+    </WorkbenchActionBar>
 
     <!-- 窄屏详情抽屉 -->
     <Teleport to="body">
@@ -399,28 +378,6 @@ onBeforeUnmount(() => {
 .wb-workspace {
   border-radius: 0.75rem;
 }
-.bottom-bar {
-  border-radius: 0.75rem;
-}
-.filter-pill {
-  padding: 0.3rem 0.75rem;
-  font-size: 0.75rem;
-  color: var(--muted-foreground);
-  border: 1px solid var(--border);
-  border-radius: 9999px;
-  background: var(--background);
-}
-.filter-pill:hover {
-  color: var(--foreground);
-  border-color: hsl(var(--primary) / 0.4);
-}
-.filter-pill-active {
-  color: hsl(var(--primary));
-  font-weight: 600;
-  background: hsl(var(--primary) / 0.1);
-  border-color: hsl(var(--primary) / 0.35);
-}
-/* 桌面：与后续制作工作台统一为左 66%、右 34%。 */
 .wb-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 34%;

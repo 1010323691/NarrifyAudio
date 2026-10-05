@@ -23,6 +23,7 @@ import type { MergePackageStatus, MergeResult, TaskSnapshot, TTSStatus } from '@
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
+import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import ProductionWorkbench from '@/components/ProductionWorkbench.vue'
 import { showConfirm } from '@/components/ui/dialog'
 import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
@@ -477,19 +478,19 @@ onBeforeUnmount(stopScheduledRefresh)
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="submitting || !readyPkgs.length"
+          :disabled="rowsLoading || !!rowsError || submitting || !readyPkgs.length"
           @click="selectReady"
           >选择首次合并</Button
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="submitting || !rows.length"
+          :disabled="rowsLoading || !!rowsError || submitting || !rows.length"
           @click="selectAllIncludingDone"
           >选择全部就绪（含重合并）</Button
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="submitting || !selectedNames.length"
+          :disabled="rowsLoading || !!rowsError || submitting || !selectedNames.length"
           @click="clearAll"
           >清空</Button
         ></template
@@ -596,8 +597,8 @@ onBeforeUnmount(stopScheduledRefresh)
         </div>
       </template>
     </ProductionWorkbench>
-    <div class="production-actionbar">
-      <div class="mr-auto text-xs">
+    <WorkbenchActionBar>
+      <template #summary>
         <strong>已选 {{ selectedNames.length }} 章 · 重新合并 {{ mergedSelectedCount }} 章</strong>
         <p class="mt-1 text-muted-foreground">
           {{
@@ -606,7 +607,7 @@ onBeforeUnmount(stopScheduledRefresh)
               : '首次合并创建 MP3；重新合并会覆盖所选章节已有结果。'
           }}
         </p>
-      </div>
+      </template>
       <Button
         :disabled="!projectSet || !engineReady || submitting || rowsLoading || !!rowsError || !selectionReady"
         @click="doRun"
@@ -622,7 +623,7 @@ onBeforeUnmount(stopScheduledRefresh)
         @click="router.push('/audio')"
         >前往音频分集<ArrowRight class="h-4 w-4"
       /></Button>
-    </div>
+    </WorkbenchActionBar>
     <div v-if="error" class="workbench-feedback" tabindex="0" role="region" aria-label="制作反馈与报告">
       <Alert v-if="error" variant="destructive">{{ error }}</Alert>
     </div>

@@ -434,3 +434,58 @@ test('selection survives a state refresh; names that vanished from the list are 
   assert.equal(wb.selected.value['001.txt'], undefined)
   assert.equal(wb.selectedName.value, null) // 选中的章节已不在列表 → 清除
 })
+
+
+test('filtered selection spans pages, resets pagination and guards unavailable state', async () => {
+  const files = Array.from({ length: 25 }, (_, i) => ({
+    name: `${String(i + 1).padStart(3, '0')}.txt`,
+    input: { name: 'chapter.txt', sha256: 'a', size: 1 },
+    latest_task: null, result: null, result_status: null,
+  }))
+  const { wb, project } = await setup({ stateFor: async () => stateV(files) })
+  await wb.refreshState()
+  wb.page.value = 2
+  wb.selectFiltered()
+  assert.equal(wb.selectedCount.value, 25)
+  wb.query.value = '025'
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(wb.page.value, 1)
+  wb.selectFiltered()
+  assert.deepEqual(Object.keys(wb.selected.value), ['025.txt'])
+  wb.query.value = 'nothing'
+  wb.selectFiltered()
+  assert.equal(wb.selectedCount.value, 0)
+  wb.query.value = ''
+  wb.stateError.value = 'unconfirmed state'
+  wb.selectFiltered()
+  assert.equal(wb.selectedCount.value, 0)
+  wb.stateError.value = ''
+  project.setCurrent({ set: false })
+  wb.selectFiltered()
+  assert.equal(wb.selectedCount.value, 0)
+})
+
+test('filtered selection cannot change scope while a chapter task is active', async () => {
+  const files = [{ name: '001.txt', input: { name: '001.txt', sha256: 'a', size: 1 },
+    latest_task: { id: 'active', status: 'running', progress: 0, error: '', created_at: null, finished_at: null }, result: null, result_status: null }]
+  const { wb } = await setup({ stateFor: async () => stateV(files) })
+  await wb.refreshState()
+  wb.selectFiltered()
+  assert.equal(wb.selectedCount.value, 0)
+})
+
+
+test('filtered selection includes completed chapters only when they match the selected filter', async () => {
+  const done = { name: '001.txt', input: { name: '001.txt', sha256: 'a', size: 1 },
+    latest_task: { id: 'finished', status: 'succeeded', progress: 1, error: '', created_at: null, finished_at: null },
+    result: { task_id: 'finished', file_id: 'result', sha256: 'b', source_sha256: 'a', verified: true }, result_status: 'usable' }
+  const pending = { name: '002.txt', input: { name: '002.txt', sha256: 'a', size: 1 }, latest_task: null, result: null, result_status: null }
+  const { wb } = await setup({ stateFor: async () => stateV([done, pending]) })
+  await wb.refreshState()
+  wb.filter.value = 'done'
+  wb.selectFiltered()
+  assert.deepEqual(Object.keys(wb.selected.value), ['001.txt'])
+  wb.filter.value = 'pending'
+  wb.selectFiltered()
+  assert.deepEqual(Object.keys(wb.selected.value), ['002.txt'])
+})

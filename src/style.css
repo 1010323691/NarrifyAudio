@@ -1247,6 +1247,17 @@ html, body, #app { overflow: hidden; }
 .app-shell .viewport-workbench .voice-detail { min-height: 0; }
 .app-shell .viewport-workbench .voice-scroll { min-height: 0; max-height: none; }
 .app-shell .viewport-workbench .voice-detail { max-height: none; }
+.app-shell .app-content > .voices-page {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+/* Keep the toolbar, several role rows and pagination usable. On short or narrow
+   screens the role page scrolls so its stage panels and action bar stay reachable. */
+.app-shell .app-content > .voices-page > .voice-workbench {
+  flex: 1 0 300px;
+  min-height: 300px;
+}
 .app-shell .viewport-workbench .voices-production { max-height: 26dvh; overflow: auto; }
 .app-shell .viewport-workbench > .glass-panel:has([aria-expanded]) { max-height: 22dvh; overflow: auto; }
 .app-shell .viewport-workbench .filter-seg { height: auto; min-height: 45px; flex-shrink: 0; padding-top: 6px; padding-bottom: 6px; }

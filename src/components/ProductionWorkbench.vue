@@ -5,9 +5,9 @@
 >
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import Button from '@/components/ui/Button.vue'
-import Input from '@/components/ui/Input.vue'
+import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
 import Pager from '@/views/textformat/Pager.vue'
-import { Search, RefreshCw, X } from 'lucide-vue-next'
+import { X } from 'lucide-vue-next'
 import { useWorkbenchDialog } from '@/composables/useWorkbenchDialog'
 
 const props = defineProps<{
@@ -124,47 +124,29 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
 <template>
   <section ref="shell" class="production-workbench" :aria-label="label" :aria-busy="loading">
     <div class="production-list" :inert="narrow && detailOpen ? true : undefined">
-      <div class="production-toolbar">
-        <label class="relative min-w-0 flex-1">
-          <span class="sr-only">搜索文件或章节</span>
-          <Search
-            class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
-          />
-          <Input v-model="query" class="h-8 pl-8 text-xs" placeholder="搜索文件或章节…" />
-        </label>
-        <label
-          ><span class="sr-only">筛选业务状态</span
-          ><select v-model="filter" class="production-select">
-            <option value="all">全部 {{ rows.length }}</option>
-            <option v-for="item in filters" :key="item.key" :value="item.key">
-              {{ item.label }} {{ rows.filter((row) => row.workState === item.key).length }}
-            </option>
-          </select></label
-        >
-        <Button
-          variant="ghost"
-          class="h-8 w-8 p-0"
-          aria-label="刷新列表"
-          :disabled="loading"
-          @click="emit('refresh')"
-          ><RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }"
-        /></Button>
-      </div>
-      <div class="production-selection">
-        <Button
-          variant="ghost"
-          size="sm"
-          :disabled="disabled || loading || !!loadError || !eligible.length"
-          @click="
-            emit(
-              'selectFiltered',
-              eligible.map((row) => row.workKey),
-            )
-          "
-          >选择筛选结果（{{ eligible.length }}）</Button
-        >
-        <slot name="selection" />
-      </div>
+      <WorkbenchToolbar
+        v-model:query="query"
+        v-model:filter="filter"
+        :filters="[{ key: 'all', label: '全部', count: rows.length }, ...filters.map(item => ({ ...item, count: rows.filter(row => row.workState === item.key).length }))]"
+        :loading="loading"
+        @refresh="emit('refresh')"
+      >
+        <template #selection>
+          <Button
+            variant="ghost"
+            size="sm"
+            :disabled="disabled || loading || !!loadError || !eligible.length"
+            @click="
+              emit(
+                'selectFiltered',
+                eligible.map((row) => row.workKey),
+              )
+            "
+            >选择筛选结果（{{ eligible.length }}）</Button
+          >
+          <slot name="selection" />
+        </template>
+      </WorkbenchToolbar>
       <div v-if="loadError" class="production-load-error" role="alert">
         <p>{{ loadError }}</p>
         <p v-if="rows.length" class="mt-1">展示上次已知状态，请刷新后再提交。</p>
@@ -303,29 +285,6 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
   flex-direction: column;
   border-right: 1px solid hsl(var(--border));
 }
-.production-toolbar,
-.production-selection {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 12px;
-  border-bottom: 1px solid hsl(var(--border));
-}
-.production-selection {
-  padding: 4px 8px;
-  font-size: 11px;
-  color: hsl(var(--muted-foreground));
-}
-.production-select {
-  height: 32px;
-  border: 1px solid hsl(var(--input));
-  border-radius: 8px;
-  background: hsl(var(--background));
-  font-size: 11px;
-  padding: 0 8px;
-  max-width: 180px;
-}
 .production-scroll {
   flex: 1;
   overflow: auto;
@@ -381,16 +340,6 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
   color: hsl(var(--destructive));
   font-size: 12px;
   border-bottom: 1px solid hsl(var(--border));
-}
-.production-actionbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid hsl(var(--border));
-  border-radius: 12px;
-  background: hsl(var(--card) / 0.95);
-  padding: 10px 12px;
 }
 .production-facts {
   display: grid;
@@ -456,7 +405,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
 }
 @media (prefers-reduced-motion: reduce) {
   .production-workbench *,
-  .production-actionbar * {
+  .workbench-actionbar * {
     animation: none !important;
     transition: none !important;
   }

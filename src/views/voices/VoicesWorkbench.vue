@@ -2,12 +2,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { VoiceItem } from '@/types'
 import Button from '@/components/ui/Button.vue'
-import Input from '@/components/ui/Input.vue'
+import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
 import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import Pager from '@/views/textformat/Pager.vue'
-import { Copy, Loader2, Merge, RefreshCw, Search, Users, X } from 'lucide-vue-next'
+import { Copy, Loader2, Merge, Users, X } from 'lucide-vue-next'
 
 type PhaseBadge = { label: string; variant: 'default' | 'secondary' | 'destructive' | 'success' | 'warning' | 'outline'; spin: boolean }
 const props = defineProps<{
@@ -100,16 +100,14 @@ function detailKeydown(event: KeyboardEvent) {
 <template>
   <section class="voice-workbench" aria-label="角色核对工作台" :aria-busy="loading">
     <div class="voice-list">
-      <div class="voice-toolbar">
-        <label class="relative min-w-0 flex-1">
-          <span class="sr-only">搜索角色或别名</span>
-          <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="query" class="h-8 pl-8 text-xs" placeholder="搜索角色或别名" />
-        </label>
-        <button type="button" class="voice-filter" :aria-pressed="filter === 'all'" @click="filter = 'all'">全部 {{ speakers.length }}</button>
-        <button type="button" class="voice-filter" :aria-pressed="filter === 'pending'" @click="filter = 'pending'">待完善 {{ pendingCount }}</button>
-        <Button variant="ghost" class="h-8 w-8 p-0" aria-label="刷新角色列表" :disabled="loading" @click="emit('refresh')"><RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" /></Button>
-      </div>
+      <WorkbenchToolbar
+        v-model:query="query"
+        v-model:filter="filter"
+        placeholder="搜索角色或别名"
+        :filters="[{ key: 'all', label: '全部', count: speakers.length }, { key: 'pending', label: '待完善', count: pendingCount }]"
+        :loading="loading"
+        @refresh="emit('refresh')"
+      />
       <div v-if="loadError" class="voice-load-error" role="alert">
         <p>{{ loadError }}</p><p v-if="speakers.length" class="mt-1 text-muted-foreground">正在展示上次已知状态。</p>
         <Button variant="outline" class="mt-2 h-8" :disabled="loading" @click="emit('refresh')">重试加载</Button>
@@ -186,9 +184,7 @@ function detailKeydown(event: KeyboardEvent) {
 <style scoped>
 .voice-workbench { display:grid; grid-template-columns:minmax(0,1fr) 34%; min-height:390px; border:1px solid hsl(var(--border)); border-radius:12px; background:hsl(var(--card) / .95); overflow:hidden; box-shadow:var(--glass-shadow); }
 .voice-list { min-width:0; display:flex; flex-direction:column; border-right:1px solid hsl(var(--border)); }
-.voice-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:8px 12px; border-bottom:1px solid hsl(var(--border)); }
-.voice-filter { border-radius:999px; padding:5px 9px; font-size:11px; color:hsl(var(--muted-foreground)); background:hsl(var(--muted) / .5); }
-.voice-filter[aria-pressed=true] { color:hsl(var(--primary)); background:hsl(var(--primary) / .1); }
+
 .voice-scroll { min-height:320px; max-height:440px; overflow:auto; flex:1; }
 .voice-table { width:100%; table-layout:fixed; font-size:12px; line-height:18px; border-collapse:collapse; }
 .voice-table th:first-child { width:40%; }

@@ -74,13 +74,14 @@ def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depen
 
 
 @router.get("/{project_id}/text-format/state")
-def get_text_format_state(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+def get_text_format_state(project_id: str, recover: bool = True, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     """Aggregated state. A running flow with no in-flight stage tasks is
     advanced idempotently (stable tflow keys), so the read also recovers
-    flows whose last task finished after the client left."""
+    flows whose last task finished after the client left. Set recover=false
+    for a read-only snapshot without advancement or legacy-flow adoption."""
     item = _owned(db, user, project_id)
     try:
-        return flow_state(db, user, item.id)
+        return flow_state(db, user, item.id, recover=recover)
     except WorkbenchError as error:
         _raise(error)
         raise

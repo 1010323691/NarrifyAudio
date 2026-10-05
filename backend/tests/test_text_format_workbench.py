@@ -17,7 +17,7 @@ pytest.importorskip("sqlalchemy")
 
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import ChapterReviewMark, ProjectFile, Task, TaskEvent
+from backend.platform.models import ChapterReviewMark, ProjectFile, Task, TaskEvent, TextFormatFlow
 from backend.platform.task_worker import process_task_message
 from sqlalchemy import select
 
@@ -685,3 +685,68 @@ def test_flow_requires_csrf_and_valid_source(client: TestClient):
 
     state_forbidden = client.get(f"/api/v1/projects/{project_id}/text-format/state")
     assert state_forbidden.status_code == 200  # GET needs no CSRF token
+
+
+@pytest.mark.parametrize("finished_stages", [1, 3])
+def test_read_only_state_does_not_advance_completed_stages(client: TestClient, finished_stages: int):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "read-only-state.txt", CHAPTERED_BODY)
+    body = {"source_file_id": uploaded["file_id"], "config": {}}
+    state = _post_flow(client, csrf, project_id, body).json()
+    for index in range(finished_stages):
+        assert process_task_message(
+            {"payload": {"task_id": state["next_task"]["task_id"]}}, worker_id="test-workbench-worker"
+        ) == "succeeded"
+        if index + 1 < finished_stages:
+            state = _post_flow(client, csrf, project_id, body).json()
+
+    def snapshot():
+        with SessionLocal() as db:
+            flow = db.get(TextFormatFlow, state["flow"]["id"])
+            return (
+                set(db.scalars(select(Task.id).where(Task.project_id == project_id))),
+                (flow.status, flow.format_task_id, flow.analyze_task_id, flow.split_task_id, flow.manifest),
+            )
+
+    before = snapshot()
+    for _ in range(2):
+        response = client.get(f"/api/v1/projects/{project_id}/text-format/state", params={"recover": "false"})
+        assert response.status_code == 200, response.text
+        read = response.json()
+        assert read["flow"]["status"] == "running"
+        assert read["next_task"] is None
+        assert snapshot() == before
+
+    # Default GET still recovers a finished stage for existing lifecycle callers.
+    response = client.get(f"/api/v1/projects/{project_id}/text-format/state")
+    assert response.status_code == 200, response.text
+    recovered = response.json()
+    if finished_stages == 1:
+        assert recovered["next_task"]["stage"] == "analyze"
+        assert len(snapshot()[0]) == len(before[0]) + 1
+    else:
+        assert recovered["flow"]["status"] == "ready"
+        assert recovered["version"]
+        assert snapshot()[0] == before[0]
+
+
+def test_read_only_state_does_not_persist_a_legacy_flow(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "legacy-read-only.txt", CHAPTERED_BODY)
+    ready = _drive_to_ready(client, csrf, project_id, {"source_file_id": uploaded["file_id"]})
+    with SessionLocal() as db:
+        db.delete(db.get(TextFormatFlow, ready["flow"]["id"]))
+        db.commit()
+    response = client.get(f"/api/v1/projects/{project_id}/text-format/state", params={"recover": "false"})
+    assert response.status_code == 200, response.text
+    assert response.json()["flow"] is None
+    with SessionLocal() as db:
+        assert db.scalar(select(TextFormatFlow).where(TextFormatFlow.project_id == project_id)) is None
+    recovered = client.get(f"/api/v1/projects/{project_id}/text-format/state")
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["flow"]["status"] == "ready"
+    assert recovered.json()["version"]

@@ -284,6 +284,14 @@ export function useScriptParseWorkbench() {
     }
   }
 
+  function selectFiltered() {
+    if (!project.activeProjectId || busy.value || loading.value || stateError.value) return
+    selected.value = {}
+    for (const row of filteredRows.value) {
+      if (row.status !== 'active') selected.value[row.chapter.name] = true
+    }
+  }
+
   function clearSelection() {
     selected.value = {}
   }
@@ -706,7 +714,7 @@ export function useScriptParseWorkbench() {
     total, doneCount, pendingCount, busy,
     selectedCount, selectedDoneCount, selectedStaleCount,
     selected,
-    selectScope, clearSelection, toggleSelect,
+    selectScope, selectFiltered, clearSelection, toggleSelect,
     // preview
     selectedName, selectChapter, currentRow, tab, setTab,
     resultPreview, sourcePreview, loadResult, loadSource,
