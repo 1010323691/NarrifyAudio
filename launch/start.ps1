@@ -159,14 +159,14 @@ if ($backendReady) {
 }
 
 $workerProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -like "*$python*" -and $_.CommandLine -like '*-m backend.worker*' }
+  Where-Object { $_.CommandLine -like "*$python*" -and $_.CommandLine -like '*-m backend.worker_pool*' }
 if (-not $workerProcesses) {
   if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "Python environment not found. Run .\install_tts_env.ps1 -PythonVersion 3.14 first."
   }
   $quotedRoot = [char]34 + $root + [char]34
   $quotedPython = [char]34 + $python + [char]34
-  $workerCommand = "cd /d $quotedRoot && $quotedPython -m backend.worker"
+  $workerCommand = "cd /d $quotedRoot && $quotedPython -m backend.worker_pool"
   Start-Process -FilePath (Join-Path $env:WINDIR 'System32\cmd.exe') -ArgumentList @('/k', $workerCommand) -WorkingDirectory $root -WindowStyle Normal
   Write-Host 'Windows task worker starting ...'
 } else {
@@ -199,7 +199,7 @@ if (-not $frontendReady) {
 }
 
 $workerProcesses = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -like "*$python*" -and $_.CommandLine -like '*-m backend.worker*' }
+  Where-Object { $_.CommandLine -like "*$python*" -and $_.CommandLine -like '*-m backend.worker_pool*' }
 if (-not $workerProcesses) {
   throw 'The task worker exited during startup. Check its console window and logs\startup.'
 }

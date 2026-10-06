@@ -139,7 +139,7 @@ if ($workerRunning) {
     # 双层启动（同 FastAPI）：中间 powershell 退出前用 -PassThru 把 pid 写入 pidfile，
     # 之后退出，Worker 脱离本进程树
     Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command',
-        "Start-Process -FilePath '$python' -ArgumentList @('-m','backend.worker') -WorkingDirectory '$Root' -WindowStyle Hidden -PassThru -RedirectStandardOutput '$logDir\worker.log' -RedirectStandardError '$logDir\worker.err.log' | Select-Object -ExpandProperty Id | Out-File -FilePath '$workerPidFile' -Encoding ascii")
+        "Start-Process -FilePath '$python' -ArgumentList @('-m','backend.worker_pool') -WorkingDirectory '$Root' -WindowStyle Hidden -PassThru -RedirectStandardOutput '$logDir\worker.log' -RedirectStandardError '$logDir\worker.err.log' | Select-Object -ExpandProperty Id | Out-File -FilePath '$workerPidFile' -Encoding ascii")
     # pidfile 由中间进程写入（旧文件内容会被覆盖）：等它的内容真正变化（最长 10s）。
     # 没变 = 中间层根本没跑通（如日志文件被占导致 redirect 失败），不能静默
     $oldPidContent = $null

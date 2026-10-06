@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Generator
 
@@ -14,22 +16,47 @@ class Base(DeclarativeBase):
     pass
 
 
+def database_role() -> str:
+    """Detect the standard -m worker entrypoint before either engine is built."""
+    main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    default = "worker" if getattr(main_spec, "name", None) == "backend.worker" else "api"
+    role = os.getenv("NARRIFY_DB_ROLE", default).strip().lower()
+    if role not in {"api", "worker"}:
+        raise ValueError("NARRIFY_DB_ROLE must be api or worker")
+    return role
+
+
+def _pool_setting(name: str, default: int, *, minimum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer >= {minimum}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _pool_kwargs(*, lock: bool = False) -> dict:
+    role = database_role()
+    prefix = f"NARRIFY_{role.upper()}_DB_{'LOCK_' if lock else ''}POOL_"
+    defaults = {"api": (16, 8), "worker": (1, 0) if lock else (3, 1)}
+    size, overflow = defaults[role]
+    timeout = 10 if role == "worker" else 30 if lock else 60
+    return {
+        "pool_pre_ping": True,
+        "pool_size": _pool_setting(prefix + "SIZE", size, minimum=1),
+        "max_overflow": _pool_setting(prefix + "MAX_OVERFLOW", overflow, minimum=0),
+        "pool_timeout": _pool_setting(prefix + "TIMEOUT", timeout, minimum=1),
+        "pool_recycle": 1800,
+    }
+
+
 def _engine_kwargs() -> dict:
     if settings.database_url in {"sqlite://", "sqlite:///:memory:"}:
         return {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool}
     if settings.database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    # Sized for a page load firing 10+ concurrent requests, each of which
-    # checks out up to two connections (middleware + endpoint session).
-    # pool_recycle keeps long-idle connections from outliving server-side
-    # session timeouts.
-    return {
-        "pool_pre_ping": True,
-        "pool_size": 20,
-        "max_overflow": 20,
-        "pool_timeout": 60,
-        "pool_recycle": 1800,
-    }
+    return _pool_kwargs()
 
 
 engine = create_engine(settings.database_url, future=True, **_engine_kwargs())
@@ -47,13 +74,7 @@ def _lock_engine_kwargs() -> dict:
         return {"connect_args": {"check_same_thread": False}, "poolclass": StaticPool}
     if settings.database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {
-        "pool_pre_ping": True,
-        "pool_size": 32,
-        "max_overflow": 16,
-        "pool_timeout": 30,
-        "pool_recycle": 1800,
-    }
+    return _pool_kwargs(lock=True)
 
 
 lock_engine = create_engine(settings.database_url, future=True, **_lock_engine_kwargs())

@@ -84,7 +84,7 @@ trap 'exit 143' TERM
 "$PYTHON" -m alembic upgrade head
 setsid "$PYTHON" -m backend.main >logs/dev/api.log 2>logs/dev/api.err.log 9>&- &
 pids+=("$!")
-setsid "$PYTHON" -m backend.worker >logs/dev/worker.log 2>logs/dev/worker.err.log 9>&- &
+setsid "$PYTHON" -m backend.worker_pool >logs/dev/worker.log 2>logs/dev/worker.err.log 9>&- &
 pids+=("$!")
 ready=0
 for ((attempt = 0; attempt < 30; attempt++)); do

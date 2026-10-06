@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import io
 import uuid
 import shutil
@@ -365,7 +366,7 @@ def test_workspace_engine_lock_serializes_project_writers(client: TestClient):
                 "idempotency_key": f"writer-lock-{suffix}-{uuid.uuid4().hex}",
             },
         ).json()
-        claim = claim_task(task["id"], f"lock-test-{suffix}")
+        claim = claim_task(task["id"], f"lock-test-{suffix}", defer_workspace_conflicts=False)
         assert claim is not None
         claims.append(claim)
 
@@ -2655,7 +2656,7 @@ def test_workspace_rollback_guard_uses_task_lock_and_fingerprint(client: TestCli
     # 2) untouched entry is restored to its pre-publication bytes.
     final.write_text('{"fresh": true}', encoding="utf-8")
     first_claim = claim
-    claim = claim_task(_submit()["id"], "guard-wiring-worker-2")
+    claim = claim_task(_submit()["id"], "guard-wiring-worker-2", defer_workspace_conflicts=False)
     assert claim is not None
     handle = PersistentTaskHandle(claim)
     handle.mark_workspace_guarded(final)
@@ -2672,3 +2673,123 @@ def test_workspace_rollback_guard_uses_task_lock_and_fingerprint(client: TestCli
             )
             assert not journal.exists()
             assert not list(journal.parent.glob("publication-backup-*"))
+
+
+@pytest.mark.parametrize("workspace_change", [False, True])
+@pytest.mark.parametrize("fail_commit", [False, True])
+def test_shared_music_and_workspace_result_publish_atomically(client, monkeypatch, tmp_path, workspace_change, fail_commit):
+    from backend.platform import task_worker
+    from backend.engines import music
+
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Shared publication"}).json()
+    with SessionLocal.begin() as db:
+        db.get(User, first["user"]["id"]).role = "admin"
+        db.merge(UserQuotaAccount(user_id=first["user"]["id"], available_units=10))
+        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
+    library = tmp_path / "music"
+    library.mkdir()
+    shared = library / "music_index.json"
+    shared.write_bytes(b"original")
+    monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", library)
+    workspace_file = workspace / "04_voice_profiles" / "fixture.json"
+    workspace_file.parent.mkdir(parents=True, exist_ok=True)
+    workspace_file.write_bytes(b"old workspace")
+
+    def suggest(handle, *args, **kwargs):
+        handle.stage_shared_file(shared, b"new music")
+        if workspace_change:
+            handle.stage_workspace_file(workspace_file, b"new workspace")
+        return {"scene": ["test"], "mood": [], "emotion": []}
+
+    monkeypatch.setattr(music, "suggest_track_tags", suggest)
+    submitted = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={
+        "project_id": project["id"], "task_type": "music.suggest_tags", "payload": {"name": "track.mp3"},
+        "idempotency_key": uuid.uuid4().hex,
+    })
+    assert submitted.status_code == 201, submitted.text
+    claim = claim_task(submitted.json()["id"], "shared-publication-worker")
+    outcome = execute_claim(claim)
+    factory = task_worker.SessionLocal
+    if fail_commit:
+        def failing_session():
+            session = factory()
+            session.commit = lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
+            return session
+        monkeypatch.setattr(task_worker, "SessionLocal", failing_session)
+        with pytest.raises(RuntimeError, match="commit failed"):
+            complete_claim(claim, outcome)
+        assert shared.read_bytes() == b"original"
+        assert workspace_file.read_bytes() == b"old workspace"
+        with factory() as db:
+            assert db.get(Task, claim.task_id).status == "running"
+            assert not db.scalars(select(ProjectFile).where(ProjectFile.project_id == project["id"], ProjectFile.kind == "artifact")).all()
+    else:
+        assert complete_claim(claim, outcome)
+        assert shared.read_bytes() == b"new music"
+        assert workspace_file.read_bytes() == (b"new workspace" if workspace_change else b"old workspace")
+        with factory() as db:
+            assert db.get(Task, claim.task_id).status == "succeeded"
+            output = db.scalar(select(ProjectFile).where(ProjectFile.project_id == project["id"], ProjectFile.kind == "artifact"))
+            assert json.loads(object_path(output.object_key, configured_storage_root(db)).read_text())["scene"] == ["test"]
+    assert not list(library.rglob("publication.json"))
+    assert not list((workspace / ".tasks").rglob("publication.json"))
+
+
+def test_workspace_busy_tasks_stay_queued_while_other_work_is_claimed(client, monkeypatch):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first['csrf_token']
+    from backend.platform import task_worker
+    original_eligibility=task_worker._workspace_claim_eligibility
+    monkeypatch.setattr(task_worker,'_workspace_claim_eligibility',lambda now: original_eligibility(now) & (Task.owner_id==first['user']['id']))
+    with SessionLocal.begin() as db:
+        db.merge(UserQuotaAccount(user_id=first['user']['id'], available_units=100))
+    project = client.post('/api/v1/projects', headers={'X-CSRF-Token':csrf}, json={'name':'Long TTS'}).json()
+    other = client.post('/api/v1/projects', headers={'X-CSRF-Token':csrf}, json={'name':'Independent'}).json()
+    def submit(kind, payload, target=project):
+        response=client.post('/api/v1/tasks',headers={'X-CSRF-Token':csrf},json={
+            'project_id':target['id'],'task_type':kind,'payload':payload,'idempotency_key':uuid.uuid4().hex})
+        assert response.status_code==201,response.text
+        return response.json()['id']
+    running=submit('tts.batch',{'scripts':['chapter.json']})
+    assert claim_task(running,'model-worker')
+    merge=submit('tts.merge',{'package':'chapter'})
+    mutation=submit('tts.reset',{'scripts':['chapter.json']})
+    independent=submit('tts.reset',{'scripts':[]},other)
+    assert claim_task(merge,'redis-delivery-worker') is None
+    claim=claim_fair_task('mechanical-worker',task_types=('tts.merge','tts.reset'))
+    assert claim and claim.task_id==independent
+    with SessionLocal() as db:
+        assert db.get(Task,merge).status=='pending'
+        assert db.get(Task,mutation).status=='pending'
+        assert not db.scalars(select(TaskAttempt).where(TaskAttempt.task_id.in_((merge,mutation)))).all()
+    with SessionLocal.begin() as db:
+        db.get(Task,running).status='succeeded'
+        for attempt in db.scalars(select(TaskAttempt).where(TaskAttempt.task_id==running)):
+            attempt.status='succeeded'
+    claim=claim_fair_task('mechanical-worker',task_types=('tts.merge',))
+    assert claim and claim.task_id==merge
+
+
+def test_workspace_admission_preserves_parallel_chapters_and_defers_same_target(client, monkeypatch):
+    first=_register(client,f'{uuid.uuid4()}@example.com')
+    csrf=first['csrf_token']
+    project=client.post('/api/v1/projects',headers={'X-CSRF-Token':csrf},json={'name':'Parallel audio'}).json()
+    from backend.platform import task_worker
+    original_eligibility=task_worker._workspace_claim_eligibility
+    monkeypatch.setattr(task_worker,'_workspace_claim_eligibility',lambda now: original_eligibility(now) & (Task.owner_id==first['user']['id']))
+    def submit(kind,payload):
+        response=client.post('/api/v1/tasks',headers={'X-CSRF-Token':csrf},json={
+            'project_id':project['id'],'task_type':kind,'payload':payload,'idempotency_key':uuid.uuid4().hex})
+        assert response.status_code==201,response.text
+        return response.json()['id']
+    first_merge=submit('tts.merge',{'package':'chapter-one'})
+    assert claim_task(first_merge,'merge-one')
+    same=submit('bgm.mix',{'stem':'chapter-one'})
+    different=submit('tts.merge',{'package':'chapter-two'})
+    writer=submit('tts.reset',{'scripts':[]})
+    assert claim_task(same,'same-target') is None
+    assert claim_task(writer,'exclusive-writer') is None
+    claim=claim_fair_task('parallel-merge',task_types=('tts.merge','bgm.mix','tts.reset'))
+    assert claim and claim.task_id==different

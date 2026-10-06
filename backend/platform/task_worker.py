@@ -14,7 +14,8 @@ from typing import Any, Callable
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import redis
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
+from sqlalchemy.orm import aliased
 
 from ..core.config import TextConfig
 from ..core import config as core_config
@@ -41,7 +42,7 @@ from ..engines.text import format_text
 from ..engines import script as script_engine
 from ..engines import audio as audio_engine
 from .platform_settings import settings
-from .artifact_publication import PublicationJournal, publication_transaction
+from .artifact_publication import PublicationJournal, PublicationJournalBundle, publication_transaction
 from .database import SessionLocal
 from .models import (
     OutboxEvent,
@@ -106,6 +107,70 @@ WORKSPACE_MUTATING_TASK_TYPES = {
 }
 
 
+def _workspace_audio_identity(task_type: str, payload: dict) -> str | None:
+    key = {"tts.merge": "package", "bgm.mix": "stem"}.get(task_type)
+    subject = payload.get(key) if key else None
+    if not isinstance(subject, str) or not subject.strip():
+        return None
+    filename = merged_audio_filename(subject) if task_type == "tts.merge" else f"{subject}.mp3"
+    return filename.casefold()
+
+
+def _workspace_claim_eligibility(now):
+    """Leave conflicting project writers queued instead of occupying worker slots."""
+    active = aliased(Task)
+
+    def subject(row):
+        package = row.payload["package"].as_string()
+        for char in '\\/:*?"<>|':
+            package = func.replace(package, char, "_")
+        return case(
+            (row.task_type == "tts.merge", func.trim(package)),
+            else_=row.payload["stem"].as_string(),
+        )
+
+    candidate_subject, active_subject = subject(Task), subject(active)
+    compatible = (
+        Task.task_type.in_(("tts.merge", "bgm.mix"))
+        & active.task_type.in_(("tts.merge", "bgm.mix"))
+        & (func.trim(candidate_subject) != "")
+        & (func.trim(active_subject) != "")
+        & (func.lower(candidate_subject) != func.lower(active_subject))
+    )
+    conflict = select(active.id).join(TaskAttempt, TaskAttempt.task_id == active.id).where(
+        active.project_id == Task.project_id,
+        active.owner_id == Task.owner_id,
+        active.id != Task.id,
+        active.task_type.in_(WORKSPACE_MUTATING_TASK_TYPES),
+        active.status.in_(("running", "paused", "cancelling")),
+        TaskAttempt.status == "running",
+        TaskAttempt.lease_expires_at > now,
+        ~func.coalesce(compatible, False),
+    ).exists()
+    return or_(Task.task_type.not_in(WORKSPACE_MUTATING_TASK_TYPES), ~conflict)
+
+
+def _workspace_claim_available(db, task: Task, now) -> bool:
+    if task.task_type not in WORKSPACE_MUTATING_TASK_TYPES:
+        return True
+    identity = _workspace_audio_identity(task.task_type, task.payload)
+    active = db.scalars(select(Task).join(TaskAttempt, TaskAttempt.task_id == Task.id).where(
+        Task.project_id == task.project_id,
+        Task.owner_id == task.owner_id,
+        Task.id != task.id,
+        Task.task_type.in_(WORKSPACE_MUTATING_TASK_TYPES),
+        Task.status.in_(("running", "paused", "cancelling")),
+        TaskAttempt.status == "running",
+        TaskAttempt.lease_expires_at > now,
+    )).all()
+    return all(
+        identity is not None
+        and (other := _workspace_audio_identity(row.task_type, row.payload)) is not None
+        and identity != other
+        for row in active
+    )
+
+
 def ensure_consumer_group(client: redis.Redis) -> None:
     try:
         client.xgroup_create(STREAM_NAME, WORKER_GROUP, id="0-0", mkstream=True)
@@ -126,17 +191,14 @@ def _workspace_engine_lock(claim: TaskClaim):
             raise TaskExecutionError("owner_not_found", "Task owner is missing")
         workspace = project_workspace_path(db, user.username, claim.project_id)
     lock_path = workspace / ".tasks" / "workspace-engine.lock"
-    subject_key = {"tts.merge": "package", "bgm.mix": "stem"}.get(claim.task_type)
-    subject = claim.payload.get(subject_key) if subject_key else None
-    parallel_audio = isinstance(subject, str) and bool(subject.strip())
+    identity = _workspace_audio_identity(claim.task_type, claim.payload)
+    parallel_audio = identity is not None
     try:
         with ExitStack() as locks:
             locks.enter_context((shared_file_lock if parallel_audio else exclusive_file_lock)(lock_path))
             if parallel_audio:
                 # Merge and mix of the same chapter share this lock through
                 # complete_claim/rollback, including the delivery metadata commit.
-                filename = merged_audio_filename(subject) if claim.task_type == "tts.merge" else f"{subject}.mp3"
-                identity = filename.casefold()
                 chapter_lock = workspace / ".tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
                 locks.enter_context(exclusive_file_lock(chapter_lock))
             with SessionLocal() as db:
@@ -174,6 +236,7 @@ def claim_task(
     *,
     lease_seconds: int | None = None,
     excluded_task_types: tuple[str, ...] = (),
+    defer_workspace_conflicts: bool = True,
 ) -> TaskClaim | None:
     """Atomically create one fenced attempt for a submitted task."""
     lease_seconds = lease_seconds or settings.task_lease_seconds
@@ -218,6 +281,13 @@ def claim_task(
             suppress_pending_dispatch(db, task.id)
             append_task_event(db, task.id, "cancelled", {"reason": "cancel requested"})
             db.commit()
+            return None
+
+        # guarded_claim serializes competing admissions across processes. Recheck
+        # here because fair selection releases its DB session before claiming,
+        # and Redis delivery enters this path without the fair-selection filter.
+        if defer_workspace_conflicts and not _workspace_claim_available(db, task, now):
+            db.rollback()
             return None
 
         latest_attempt = db.scalar(
@@ -288,6 +358,7 @@ def claim_fair_task(
         retry_ready = or_(Task.next_attempt_at.is_(None), Task.next_attempt_at <= now)
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
+        eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
         if task_types:
             eligible_tasks = eligible_tasks & Task.task_type.in_(task_types)
         if excluded_task_types:
@@ -297,7 +368,9 @@ def claim_fair_task(
             .join(Task, Task.owner_id == UserQuotaAccount.user_id)
             .where(eligible_tasks)
             .order_by(
-                UserQuotaAccount.last_scheduled_at.asc(),
+                # PostgreSQL defaults ASC to NULLS LAST, which lets an already
+                # served account drain its queue before untouched users run.
+                UserQuotaAccount.last_scheduled_at.asc().nulls_first(),
                 Task.created_at.asc(),
                 Task.id.asc(),
             )
@@ -1046,11 +1119,25 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                         continue
                     existing.deleted_at = utcnow()
                     stale_book_paths.append(object_path(existing.object_key, configured_storage_root(db)))
-        journal = outcome.publication_journal or PublicationJournal(
-            configured_storage_root(db),
-            task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json"),
-        )
-        with publication_transaction(journal, prepared=outcome.publication_journal is not None):
+        existing = outcome.publication_journal
+        if isinstance(existing, PublicationJournalBundle):
+            journals = existing.journals
+        else:
+            journals = [existing] if existing is not None else []
+        root = configured_storage_root(db).resolve()
+        journal = next((item for item in journals if item.root == root), None)
+        if journal is None:
+            journal = PublicationJournal(
+                root,
+                task_attempt_path(db, user.username, task.project_id, task.id, attempt.id, "publication.json"),
+            )
+            if existing is not None:
+                journal.prepare()
+            journals = [*journals, journal]
+        # Shared music changes and the workspace result have separate roots,
+        # but must roll back together if the final database commit fails.
+        transaction_journal = journals[0] if len(journals) == 1 else PublicationJournalBundle(journals)
+        with publication_transaction(transaction_journal, prepared=existing is not None):
             published: list[dict[str, Any]] = []
             for item in outputs:
                 file_record = None
