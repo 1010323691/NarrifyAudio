@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..core.chapter_titles import clean_chapter_title
 from ..platform.models import ChapterReviewMark, Project, ProjectFile, Task, TextFormatFlow, User
 from ..platform.storage import configured_storage_root, object_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
@@ -309,7 +310,8 @@ def build_review_matters(split_result: dict) -> tuple[list[dict], list[dict]]:
             chapter_matter_ids.append(add_matter("chapter", label, text, advisory=advisory, chapter_key=key, detail=detail)["id"])
             pending = pending or advisory
         chapters.append({
-            **ch, "key": key, "reasons": reasons, "pending": pending,
+            **ch, "title": clean_chapter_title(ch.get("title") or ""),
+            "key": key, "reasons": reasons, "pending": pending,
             "adjusted": any(r != "kept" for r in reasons),
             "matters": chapter_matter_ids,
         })

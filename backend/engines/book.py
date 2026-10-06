@@ -27,6 +27,8 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
+from ..core.chapter_titles import clean_chapter_title
+
 
 # ============================ Encoding ============================
 
@@ -136,7 +138,7 @@ def range_char_count(newline_positions: list[int], a: int, b: int) -> int:
 # match at line boundaries, mirroring the JS /gm flag.
 BOOK_CHAPTER_RE = re.compile(
     r"^[ \t　]*第([0-9]+|[0-9零〇一二三四五六七八九十百千两]+)章"
-    r"[ \t　：:、·—\-–]*([^\r\n]{0,50})[ \t　\r]*$",
+    r"[ \t　：:;；﹔,，﹐、·•・‧|｜/／_＿—\-–]*([^\r\n]{0,50})[ \t　\r]*$",
     re.MULTILINE,
 )
 
@@ -146,7 +148,7 @@ BOOK_CHAPTER_RE = re.compile(
 BOOK_PREFIXED_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?P<prefix>[^\s\r\n][^\r\n]{0,39}?)[ \t\u3000]+"
     r"\u7b2c(?P<num>[0-9]+|[0-9\u96f6\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e24]+)\u7ae0"
-    r"[ \t\u3000\uff1a:\u3001\xb7\u2014\\-\u2013]*(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
+    r"[ \t\u3000\uff1a:;；﹔,，﹐\u3001\xb7•・‧|｜/／_＿\u2014\\-\u2013]*(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
 
@@ -156,7 +158,7 @@ BOOK_PREFIXED_CHAPTER_RE = re.compile(
 BOOK_INLINE_PREFIXED_CHAPTER_RE = re.compile(
     r"(?<![\s])(?P<prefix>[^\s\r\n，。！？；：、‘’“”]{1,20})[ \t\u3000]+"
     r"\u7b2c(?P<num>[0-9]+|[0-9\u96f6\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e24]+)\u7ae0"
-    r"[ \t\u3000\uff1a:\u3001\xb7\u2014\\-\u2013]*(?P<title>[^\r\n]{0,50})",
+    r"[ \t\u3000\uff1a:;；﹔,，﹐\u3001\xb7•・‧|｜/／_＿\u2014\\-\u2013]*(?P<title>[^\r\n]{0,50})",
     re.MULTILINE,
 )
 
@@ -168,7 +170,7 @@ BOOK_FLEX_CHAPTER_RE = re.compile(
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
-    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·\-—–]*"
+    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
@@ -179,7 +181,7 @@ BOOK_FLEX_PREFIXED_CHAPTER_RE = re.compile(
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*\u7b2c[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
-    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·\-—–]*"
+    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
@@ -189,7 +191,7 @@ BOOK_INLINE_FLEX_PREFIXED_CHAPTER_RE = re.compile(
     r"[ \t\u3000]+(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*\u7b2c[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
-    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·\-—–]*(?P<title>[^\r\n]{0,50})",
+    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]*(?P<title>[^\r\n]{0,50})",
     re.MULTILINE,
 )
 
@@ -201,7 +203,7 @@ BOOK_COMPACT_PREFIXED_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?P<prefix>[^\s\r\n]{3,39}?)[ \t\u3000]*"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
-    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·.．\-—–]*"
+    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
@@ -211,14 +213,14 @@ BOOK_INLINE_COMPACT_PREFIXED_CHAPTER_RE = re.compile(
     r"(?P<prefix>[^\s\r\n，。！？；：、‘’“”]{3,20})"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
-    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·.．\-—–]*"
+    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
     r"(?P<title>[^\r\n]{0,50})",
     re.MULTILINE,
 )
 
 BOOK_ENGLISH_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?:chapter|chap\.?|ch\.?)\s*[-_.#]?\s*"
-    r"(?P<num>[0-9０-９]+)[ \t\u3000]*(?:[:：、.·\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
+    r"(?P<num>[0-9０-９]+)[ \t\u3000]*(?:[:：;；﹔,，﹐、.·•・‧|｜/／_＿\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -226,21 +228,21 @@ BOOK_ENGLISH_CHAPTER_RE = re.compile(
 BOOK_PREFIXED_ENGLISH_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?P<prefix>[^\s\r\n][^\r\n]{0,39}?)[ \t\u3000]+"
     r"(?:chapter|chap\.?|ch\.?)\s*[-_.#]?\s*(?P<num>[0-9０-９]+)"
-    r"[ \t\u3000]*(?:[:：、.·\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
+    r"[ \t\u3000]*(?:[:：;；﹔,，﹐、.·•・‧|｜/／_＿\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
 BOOK_NUMBERED_ENGLISH_RE = re.compile(
     r"^[ \t\u3000]*(?:no\.?|number|#)\s*(?P<num>[0-9０-９]+)"
-    r"[ \t\u3000]*(?:[:：、.·\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
+    r"[ \t\u3000]*(?:[:：;；﹔,，﹐、.·•・‧|｜/／_＿\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
     r"(?P<title>[^\r\n]{1,50})[ \t\u3000\r]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
 BOOK_ENGLISH_UNIT_RE = re.compile(
     r"^[ \t\u3000]*(?:episode|ep\.?|part|section|volume|vol\.?)\s*[-_.#]?\s*"
-    r"(?P<num>[0-9０-９]+)[ \t\u3000]*(?:[:：、.·\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
+    r"(?P<num>[0-9０-９]+)[ \t\u3000]*(?:[:：;；﹔,，﹐、.·•・‧|｜/／_＿\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -249,7 +251,7 @@ BOOK_ENGLISH_WORD_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?:chapter|chap\.?|ch\.?)\s+"
     r"(?P<num>zero|one|two|three|four|five|six|seven|eight|nine|ten|"
     r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
-    r"eighteen|nineteen|twenty)[ \t\u3000]*(?:[:：、.·\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
+    r"eighteen|nineteen|twenty)[ \t\u3000]*(?:[:：;；﹔,，﹐、.·•・‧|｜/／_＿\-—–]+[ \t\u3000]*|[ \t\u3000]+)"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -259,7 +261,7 @@ BOOK_SUFFIX_UNIT_RE = re.compile(
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])"
-    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·.．,，\-—–_|｜/／]*"
+    r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
@@ -276,7 +278,7 @@ BOOK_VOLUME_ONLY_RE = re.compile(
     r"^[ \t\u3000]*(?:[☆★◆◇●○·•\-—_=~～]+[ \t\u3000]*)?"
     r"(?:[【〖〔（(「『《<])?[ \t\u3000]*"
     r"(?P<label>[卷部篇])[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:、·\-—–]+"
+    r"[ \t\u3000]*(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]+"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
@@ -287,7 +289,7 @@ BOOK_BARE_NUMBER_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?:[☆★◆◇●○·•\-—_=~～]+[ \t\u3000]*)?"
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<sep>[、,，.．。:：)）】〗〕」』》>\]］\-—–_|｜/／])"
+    r"[ \t\u3000]*(?P<sep>[;；﹔、,，.．。:：)）】〗〕」』》>\]］\-—–_|｜/／])"
     r"[ \t\u3000]*(?P<title>[^\r\n]{1,50})[ \t\u3000\r]*$",
     re.MULTILINE,
 )
@@ -601,6 +603,7 @@ def _chapter_candidates(text: str) -> list[dict]:
     # so a line such as ``第190章-第194章`` becomes one boundary with an empty
     # title plus ``range_end=194``.
     for candidate in deduped:
+        candidate["title"] = clean_chapter_title(candidate["title"])
         line_start = text.rfind("\n", 0, candidate["index"]) + 1
         line_end = text.find("\n", candidate["index"])
         if line_end < 0:
@@ -631,7 +634,6 @@ def detect_chapters(text: str) -> list[dict]:
     found = []
     for m in _chapter_candidates(text):
         title = m["title"]
-        title = re.sub(r"[ \t　]+$", "", title) if title else ""
         found.append(
             {
                 "index": m["index"],
@@ -996,7 +998,6 @@ def _internal_title_scan(text: str, ch: dict, own_header_line: int) -> list[dict
                 # copy of the chapter body.
                 continue
         title = m["title"]
-        title = re.sub(r"[ \t　]+$", "", title) if title else ""
         out.append(
             {
                 "line_start": _line_start_of(text, abs_pos),
@@ -1781,7 +1782,7 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
     out: list[str] = []
     for c in chapters:
         num = c.get("final_num", c.get("seq", 1))
-        title = (c.get("title") or "").strip()
+        title = clean_chapter_title(c.get("title") or "")
         base = f"第 {str(num).zfill(w)} 章 {title}.txt" if title else f"第 {str(num).zfill(w)} 章.txt"
         name = sanitize_file_name(base)
         k = 2

@@ -942,3 +942,23 @@ def test_direct_multi_source_task_submission_validates_inputs(client: TestClient
         "idempotency_key": f"invalid-multi-{uuid.uuid4()}",
     })
     assert response.status_code == expected, response.text
+
+
+def test_existing_workbench_result_titles_clean_boundaries_without_mutating_history():
+    from backend.services.text_format_workbench import build_review_matters
+
+    original = '；崩坏的吞噬世界，重生者夜雨！'
+    result = {'chapters': [{'seq': 1, 'final_num': 1, 'orig_num': 1, 'title': original, 'reasons': ['kept']}]}
+    chapters, _ = build_review_matters(result)
+    assert chapters[0]['title'] == '崩坏的吞噬世界，重生者夜雨！'
+    assert result['chapters'][0]['title'] == original
+
+
+def test_semicolon_title_passes_full_pipeline_and_saved_filename(client: TestClient):
+    user = _register(client, f'{uuid.uuid4()}@example.test')
+    csrf = user['csrf_token']
+    title = '崩坏的吞噬世界，重生者夜雨！'
+    source = _upload(client, csrf, 'novel.txt', f'第1章 ；{title}\n正文里的；分号要保留。\n第2章：尾声\n结束。'.encode())
+    state = _drive_to_ready(client, csrf, source['project_id'], {'source_file_ids': [source['file_id']]})
+    assert state['version']['chapters'][0]['title'] == title
+    assert state['version']['files'][0]['name'] == f'第 001 章 {title}.txt'
