@@ -1,7 +1,7 @@
 """Tests for the global LLM concurrency gate (``core/concurrency.py``).
 
 The gate bounds how many parse tasks may run their LLM job at once; the rest of a
-batch queue behind it. Production gates run at the fixed limit of 1 (A4); fresh
+batch queue behind it. Merge work uses a CPU-sized gate; fresh
 :class:`ConcurrencyGate` instances are used so the tests never disturb the
 process's shared gate.
 """
@@ -11,6 +11,10 @@ import threading
 import time
 
 from backend.core import concurrency
+
+
+def test_shared_merge_gate_uses_cpu_concurrency_policy():
+    assert concurrency.merge_gate().limit == concurrency.merge_concurrency_limit()
 
 
 def test_limit_clamps_to_at_least_one():

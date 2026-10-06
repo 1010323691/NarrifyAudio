@@ -25,9 +25,9 @@ from pathlib import Path
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.concurrency import merge_gate
+from ..core.concurrency import merge_gate, merge_concurrency_limit
 from ..core.file_lock import exclusive_file_lock
-from ..core.paths import get_or_prepare_layout
+from ..core.paths import get_or_prepare_layout, merged_audio_filename
 from ..core.task_control import TaskCancelled
 from .tts import resolve_engine, run_tts_subprocess
 from . import tts_batch as Batch
@@ -45,7 +45,7 @@ def concurrency_limit() -> int:
     Deliberately a constant policy, not a config item (auto-evaluation, per the
     batch-merge requirement).
     """
-    return max(1, min(4, (os.cpu_count() or 4) // 2))
+    return merge_concurrency_limit()
 
 
 def thread_budget(limit: int | None = None, cpu: int | None = None) -> int:
@@ -62,9 +62,6 @@ def thread_budget(limit: int | None = None, cpu: int | None = None) -> int:
     L = max(1, limit if limit is not None else concurrency_limit())
     n = cpu if cpu is not None else (os.cpu_count() or 4)
     return max(1, (n // 2) // L)
-
-# Windows-illegal filename characters (a package name becomes an output file name).
-_BAD_FILENAME_CHARS = set('\\/:*?"<>|')
 
 
 def collect_segments(manifest, ws):
@@ -159,8 +156,7 @@ def _output_name(manifest_path: Path, layout) -> str:
     top-level manifest. Keeps one merged file per source book in ``06_audio_merge/``."""
     if manifest_path.parent == layout.audio_chunk:  # top-level (pre-package) manifest
         return "cloned_audiobook.mp3"
-    stem = "".join("_" if c in _BAD_FILENAME_CHARS else c for c in manifest_path.parent.name).strip()
-    return f"{stem or 'audiobook'}.mp3"
+    return merged_audio_filename(manifest_path.parent.name)
 
 
 def _stale_voice_speakers(manifest, layout) -> list[str]:
@@ -247,8 +243,7 @@ def _merge_audio_package_locked(handle, package, layout, manifest_path) -> dict:
     if m > 1:
         handle.log(f"两阶段合并：{len(segs)} 段 → {m} 批（每批 {MERGE_BATCH_SIZE} 段）→ 整书")
 
-    # Concurrency gate (process-wide hard cap, fixed at 1 — deliberately
-    # conservative, A4): acquired only AFTER every fast-fail validation
+    # CPU-sized concurrency gate, shared with BGM mixing: acquired AFTER validation
     # (missing/corrupt/empty manifest, no ok segments) and BEFORE any staging
     # file is written — a cancel while queued (cooperative stop_check polling)
     # aborts with zero file residue. Release is balanced in the finally below

@@ -698,7 +698,9 @@ def test_mix_cancel_kills_process(sandbox, monkeypatch):
     monkeypatch.setattr(bgm_engine.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(bgm_engine, "probe_duration", lambda path, ffprobe="": (100.0, None))
     g = concurrency.merge_gate()
-    g.acquire()  # hold the only mix slot so the task parks in the cooperative wait
+    held_slots = g.limit
+    for _ in range(held_slots):
+        g.acquire()  # fill the CPU-sized gate so the task parks in the cooperative wait
     try:
         cfg = core_config.get_config()
         mgr = sandbox["mgr"]
@@ -707,10 +709,11 @@ def test_mix_cancel_kills_process(sandbox, monkeypatch):
         _wait_until(lambda: mgr.get(tid).status is TaskStatus.RUNNING, timeout=3)
         mgr.control(tid, "cancel")
         _wait_until(lambda: mgr.get(tid).status is TaskStatus.CANCELLED, timeout=3)
-        assert g.active == 1  # queued worker took no slot
+        assert g.active == held_slots  # queued worker took no slot
         assert not (sandbox["ws"] / "08_bgm" / f"{STEM}.mp3").exists()
     finally:
-        g.release()
+        for _ in range(held_slots):
+            g.release()
 
 
 def test_mix_stderr_pumped_while_running(sandbox, monkeypatch):

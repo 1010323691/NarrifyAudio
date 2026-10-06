@@ -2,16 +2,17 @@
 
 These gates limit concurrent callers within one Python process. Text-parse
 Worker threads resize the LLM gate from the administrator-configured per-process
-parse concurrency; merge work remains serialized at one permit.
+parse concurrency; merge work shares a CPU-sized gate with BGM mixing.
 """
 from __future__ import annotations
 
+import os
 import threading
 from typing import Callable
 
 
 class ConcurrencyGate:
-    """A permit gate with a configurable limit (production gates stay at 1).
+    """A permit gate with a configurable limit.
 
     ``set_limit(n)`` clamps to ``>= 1`` and wakes any waiters. ``acquire``
     blocks until a slot is free; ``release`` frees a slot and wakes one
@@ -110,9 +111,15 @@ def set_concurrency(n: int) -> None:
 
 
 # A second, independent gate for CPU/ffmpeg/disk-bound merge work.
+def merge_concurrency_limit() -> int:
+    """Reserve CPU and memory headroom: half the logical CPUs, at most four jobs."""
+    return max(1, min(4, (os.cpu_count() or 4) // 2))
+
+
 _merge_gate = ConcurrencyGate()
+_merge_gate.set_limit(merge_concurrency_limit())
 
 
 def merge_gate() -> ConcurrencyGate:
-    """The process-wide merge gate (kept at its conservative default of one)."""
+    """The process-wide CPU-sized gate shared by merges and BGM mixes."""
     return _merge_gate

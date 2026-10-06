@@ -95,9 +95,8 @@ def engine_execution_context(claim: TaskClaim):
 
     Several mature engines still obtain their settings through ``get_config``.
     Keeping the snapshot in the task payload makes a retry deterministic without
-    changing every engine signature at once.  A Worker processes one claim at a
-    time, so replacing this workspace's cache entry is scoped and restored in
-    the ``finally`` block.
+    changing every engine signature at once. ContextVar bindings isolate each
+    concurrent task's workspace and config and are reset in the ``finally`` block.
     """
     with SessionLocal() as db:
         user = db.get(User, claim.owner_id)

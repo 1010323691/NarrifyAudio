@@ -7,7 +7,7 @@ import os
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -18,8 +18,8 @@ from sqlalchemy import func, or_, select
 
 from ..core.config import TextConfig
 from ..core import config as core_config
-from ..core.file_lock import exclusive_file_lock
-from ..core.paths import WORKSPACE_DIRS
+from ..core.file_lock import exclusive_file_lock, shared_file_lock
+from ..core.paths import WORKSPACE_DIRS, merged_audio_filename
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.task_control import TaskCancelled
 from ..engines.book import (
@@ -116,7 +116,7 @@ def ensure_consumer_group(client: redis.Redis) -> None:
 
 @contextmanager
 def _workspace_engine_lock(claim: TaskClaim):
-    """Serialize legacy engine mutations and publication within one project."""
+    """Keep project writers exclusive; allow independent audio chapters to overlap."""
     if claim.task_type not in WORKSPACE_MUTATING_TASK_TYPES:
         yield True
         return
@@ -126,8 +126,19 @@ def _workspace_engine_lock(claim: TaskClaim):
             raise TaskExecutionError("owner_not_found", "Task owner is missing")
         workspace = project_workspace_path(db, user.username, claim.project_id)
     lock_path = workspace / ".tasks" / "workspace-engine.lock"
+    subject_key = {"tts.merge": "package", "bgm.mix": "stem"}.get(claim.task_type)
+    subject = claim.payload.get(subject_key) if subject_key else None
+    parallel_audio = isinstance(subject, str) and bool(subject.strip())
     try:
-        with exclusive_file_lock(lock_path):
+        with ExitStack() as locks:
+            locks.enter_context((shared_file_lock if parallel_audio else exclusive_file_lock)(lock_path))
+            if parallel_audio:
+                # Merge and mix of the same chapter share this lock through
+                # complete_claim/rollback, including the delivery metadata commit.
+                filename = merged_audio_filename(subject) if claim.task_type == "tts.merge" else f"{subject}.mp3"
+                identity = filename.casefold()
+                chapter_lock = workspace / ".tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
+                locks.enter_context(exclusive_file_lock(chapter_lock))
             with SessionLocal() as db:
                 task, attempt = _attempt_is_current(db, claim)
                 active = task is not None and attempt is not None and task.status != "cancelling"

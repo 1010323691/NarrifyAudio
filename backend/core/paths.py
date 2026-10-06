@@ -31,6 +31,13 @@ from .request_context import _UNSET, bound_workspace
 # backend/core/paths.py  ->  parents[0]=core  parents[1]=backend  parents[2]=<project>
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+
+def merged_audio_filename(package: str) -> str:
+    """Canonical merge output name, also used to lock the actual audio target."""
+    bad_chars = set('\\/:*?"<>|')
+    stem = "".join("_" if char in bad_chars else char for char in package).strip()
+    return f"{stem or 'audiobook'}.mp3"
+
 # The nine directories (eight artifacts + scratch) that follow the user's
 # workspace: (Layout attribute, on-disk directory name), in pipeline order.
 WORKSPACE_DIRS = (
