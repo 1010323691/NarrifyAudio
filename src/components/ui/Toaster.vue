@@ -54,7 +54,7 @@ onBeforeUnmount(() => timers.forEach(clearTimeout))
 </script>
 
 <template>
-  <div class="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
+  <div class="ui-toast-host pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
     <TransitionGroup enter-active-class="transition duration-200" leave-active-class="transition duration-150">
       <div
         v-for="t in toasts"

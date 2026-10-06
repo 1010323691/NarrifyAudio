@@ -21,6 +21,7 @@ import { useSettingsStore } from '../../src/stores/settings'
 import { useTaskStore } from '../../src/stores/task'
 import type { AppConfig, BgmChapterRow, TaskSnapshot } from '../../src/types'
 import '../../src/style.css'
+import '../../src/styles/mobile.css'
 
 const scenario = ref('populated')
 const calls = ref<string[]>([])

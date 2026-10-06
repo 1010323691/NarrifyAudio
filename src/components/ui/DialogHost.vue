@@ -72,7 +72,7 @@ onBeforeUnmount(() => {
 <template>
   <div
     v-if="dialogState.current"
-    class="fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
+    class="ui-dialog-host fixed inset-0 z-[100] flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px]"
     @keydown="onKeydown"
     @click.self="closeAsCancel"
   >

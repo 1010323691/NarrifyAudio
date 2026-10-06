@@ -36,6 +36,7 @@ const emit = defineEmits<{
       <slot name="filters" />
     </div>
     <div v-if="$slots.selection" class="workbench-selection-row" role="group" aria-label="批量选择"><slot name="selection" /></div>
+    <p class="mobile-table-hint">左右滑动表格查看完整信息，点击名称查看详情</p>
   </div>
 </template>
 

@@ -60,7 +60,7 @@ const pageItems = computed<(number | '...')[]>(() => {
 </script>
 
 <template>
-  <div :class="cn('flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground', props.class)">
+  <div :class="cn('mobile-pager flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground', props.class)">
     <span class="tabular-nums">{{ rangeLabel }}</span>
     <select
       class="h-7 cursor-pointer rounded-[8px] border border-input bg-background px-2 text-xs text-foreground"
@@ -81,12 +81,13 @@ const pageItems = computed<(number | '...')[]>(() => {
       >
         <ChevronLeft class="h-4 w-4" />
       </button>
+      <span class="pager-current tabular-nums" aria-live="polite">{{ props.page }} / {{ props.pageCount }}</span>
       <template v-for="(item, i) in pageItems" :key="i">
-        <span v-if="item === '...'" class="flex h-8 w-8 items-center justify-center" aria-hidden="true">…</span>
+        <span v-if="item === '...'" class="pager-ellipsis flex h-8 w-8 items-center justify-center" aria-hidden="true">…</span>
         <button
           v-else
           type="button"
-          class="flex h-8 w-8 items-center justify-center rounded-[8px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          class="pager-page-number flex h-8 w-8 items-center justify-center rounded-[8px] tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           :class="item === props.page
             ? 'bg-primary/10 text-primary'
             : 'text-foreground/70 hover:bg-muted'"

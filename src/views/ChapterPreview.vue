@@ -393,10 +393,17 @@ const tagPopupStyle = computed(() => {
   const p = tagPopup.value
   if (!p) return { left: '', top: '', width: '' }
   let left = p.rect.left
-  const maxLeft = window.innerWidth - TAG_POPUP_W - 8
+  const width = Math.min(TAG_POPUP_W, window.innerWidth - 16)
+  const maxLeft = window.innerWidth - width - 8
   left = Math.max(8, Math.min(left, maxLeft))
-  const top = p.openBelow ? p.rect.bottom + 6 : Math.max(8, p.rect.top - TAG_POPUP_H - 6)
-  return { left: `${left}px`, top: `${top}px`, width: `${TAG_POPUP_W}px` }
+  let top = p.openBelow ? p.rect.bottom + 6 : Math.max(8, p.rect.top - TAG_POPUP_H - 6)
+  const phone = window.matchMedia('(max-width: 600px), (max-width: 880px) and (max-height: 500px) and (pointer: coarse)').matches
+  if (phone) {
+    const height = window.visualViewport?.height ?? window.innerHeight
+    const popupHeight = Math.min(240, height - 16)
+    top = Math.max(8, Math.min(p.openBelow ? p.rect.bottom + 6 : p.rect.top - popupHeight - 6, height - popupHeight - 8))
+  }
+  return { left: `${left}px`, top: `${top}px`, width: `${width}px` }
 })
 
 /** 浮窗当前展开的分类对象（null = 浮窗关闭）——供模板直接取 label/tags，避免模板内 .find 闭包丢失 v-if 收窄。 */
@@ -903,7 +910,7 @@ onBeforeUnmount(() => {
               <div v-if="tagPopup" class="fixed inset-0 z-40" role="presentation" @click="closeTagPopup"></div>
               <div
                 v-if="tagPopup"
-                class="fixed z-50 rounded-lg border border-border/70 bg-popover p-2 text-popover-foreground shadow-lg"
+                class="preview-tag-popup fixed z-50 rounded-lg border border-border/70 bg-popover p-2 text-popover-foreground shadow-lg"
                 :style="tagPopupStyle"
                 role="dialog"
                 :aria-label="popupCategory ? `${popupCategory.label}标签` : ''"

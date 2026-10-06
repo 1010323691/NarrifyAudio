@@ -1,0 +1,178 @@
+/* Phone overrides only. Desktop and tablet layouts keep their existing rules.
+   One page scroller keeps headers/controls reachable when the keyboard opens;
+   dense lists retain their own bounded scroll area and every data column.
+   Repeating .app-shell gives these overrides precedence over route-scoped CSS. */
+.pager-current, .mobile-table-hint { display: none; }
+
+@media (max-width: 600px), (max-width: 880px) and (max-height: 500px) and (pointer: coarse) {
+  .app-shell.app-shell .app-sidebar {
+    position: relative;
+    flex: 0 0 auto;
+    max-height: none;
+    overflow: visible;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: hsl(var(--card));
+  }
+  .app-shell.app-shell .app-brand {
+    min-height: 56px;
+    padding: 8px 64px 8px 12px;
+    gap: 8px;
+  }
+  .app-shell.app-shell .app-brand__mark { width: 32px; height: 32px; flex-basis: 32px; }
+  .app-shell.app-shell .app-brand__title { font-size: 13px; }
+  .app-shell.app-shell .app-account {
+    position: absolute;
+    top: 6px;
+    right: 8px;
+    width: auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .app-shell.app-shell .app-account__username { display: none; }
+  .app-shell.app-shell .app-account__trigger { width: 44px; height: 44px; justify-content: center; padding: 4px; }
+  .app-shell.app-shell .app-account__menu {
+    position: fixed;
+    top: 58px;
+    right: 8px;
+    bottom: auto;
+    left: auto;
+    width: min(300px, calc(100vw - 16px));
+    max-height: calc(100dvh - 70px);
+    overflow-y: auto;
+  }
+  .app-shell.app-shell .app-nav { flex: none; padding: 4px 8px; gap: 4px; }
+  .app-shell.app-shell .app-nav__item { min-height: 44px; height: auto; padding: 8px 10px; }
+  .app-shell.app-shell .app-nav__item.is-active::before { bottom: -4px; }
+  .app-shell.app-shell .app-nav__project-title { min-height: 44px; max-width: 180px; }
+  .app-shell.app-shell .app-content {
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    padding: 12px 12px max(16px, env(safe-area-inset-bottom));
+    scrollbar-gutter: auto;
+  }
+  .app-shell.app-shell .app-content > :is(.viewport-page, .viewport-workbench, .preview-page) {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+    gap: 12px;
+  }
+  .app-shell.app-shell .app-content > .viewport-page > .page-region {
+    flex: none;
+    overflow: visible;
+    padding: 0;
+    scrollbar-gutter: auto;
+  }
+  .app-shell.app-shell .viewport-workbench > :is(.workbench-controls, .workbench-feedback, [role=alert], details),
+  .app-shell.app-shell .viewport-workbench .voices-production,
+  .app-shell.app-shell .viewport-workbench > .glass-panel:has([aria-expanded]) {
+    flex: none;
+    max-height: none;
+    overflow: visible;
+  }
+  .app-shell.app-shell .app-content > .viewport-workbench > :is(.production-workbench, .voice-workbench, .wb-workspace) {
+    flex: none;
+    height: auto;
+    min-height: 0;
+  }
+  .app-shell.app-shell :is(.production-scroll, .voice-scroll),
+  .app-shell.app-shell .wb-grid > :first-child > .overflow-y-auto {
+    flex: none;
+    height: 320px;
+    min-height: 320px;
+    max-height: none;
+    overflow: auto;
+    scroll-padding-top: 48px;
+  }
+  .app-shell.app-shell .wb-workspace .wb-grid { height: auto; }
+  .app-shell.app-shell .page-header::before { margin-bottom: 8px; }
+  .app-shell.app-shell .page-title { font-size: 22px; line-height: 1.35; }
+  .app-shell.app-shell .page-description { font-size: 12px; overflow-wrap: anywhere; }
+  .app-shell.app-shell .workbench-empty { min-height: 240px; padding: 24px 12px; overflow: auto; }
+  .app-shell.app-shell .workbench-context-bar { gap: 8px; padding: 10px; }
+  .app-shell.app-shell .workbench-context-copy { flex-basis: calc(100% - 40px); }
+  .app-shell.app-shell :is(.workbench-context-metrics, .workbench-context-actions) { margin-left: 0; width: 100%; gap: 8px 12px; }
+  .app-shell.app-shell .workbench-context-description { white-space: normal; overflow-wrap: anywhere; }
+  .app-shell.app-shell .workbench-actionbar { padding: 10px; gap: 8px; }
+  .app-shell.app-shell .workbench-action-buttons { justify-content: flex-start; }
+  .app-shell.app-shell .workbench-filter-row { flex-wrap: nowrap; overflow-x: auto; }
+  .app-shell.app-shell .workbench-filter { flex-shrink: 0; white-space: nowrap; }
+  .app-shell.app-shell .workbench-selection-row { gap: 4px; }
+  .app-shell.app-shell .workbench-search-row { padding: 8px; }
+  .app-shell.app-shell .mobile-table-hint { display: block; padding: 4px 12px 8px; font-size: 11px; color: hsl(var(--muted-foreground)); }
+  .app-shell.app-shell :is(.production-table, .wb-chapter-table) { min-width: 640px; }
+  .app-shell.app-shell .voice-table { min-width: 420px; }
+  .app-shell.app-shell table.workbench-table :is(th, td:not([colspan])) { padding-left: 8px; padding-right: 8px; }
+  .app-shell.app-shell .preview-page > .grid {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+  }
+  .app-shell.app-shell .preview-page > .grid > * { flex: none; height: 380px; min-width: 0; }
+  .app-shell.app-shell .preview-page > .grid > :first-child { height: 280px; }
+  .app-shell.app-shell .preview-page > .grid > :last-child { height: auto; min-height: 280px; }
+  .app-shell.app-shell .overview-workspace { flex: none; overflow: visible; }
+  .app-shell.app-shell .stage-columns { display: none; }
+  .app-shell.app-shell .stage-row { flex: none; min-height: 100px; grid-template-columns: minmax(0, 1fr) 68px; gap: 10px; padding: 12px; }
+  .app-shell.app-shell .stage-completion { grid-column: 1 / -1; }
+  .app-shell.app-shell .stage-panel { min-height: 0; }
+  .app-shell.app-shell .stage-list { overflow: visible; }
+  .app-shell.app-shell .task-center__workspace { flex: none; grid-template-rows: auto auto; }
+  .app-shell.app-shell .task-center__dialog { width: 100%; height: calc(100dvh - 24px); }
+  .app-shell.app-shell .task-center__overlay { padding: 12px; }
+  .app-shell.app-shell .task-center__dialog-head { flex-wrap: wrap; padding: 12px; }
+  .app-shell.app-shell .task-center__dialog-actions { width: 100%; justify-content: flex-start; }
+  .app-shell.app-shell .task-center__task-row { min-width: 0; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 8px; padding: 12px 0; }
+  .app-shell.app-shell .task-center__task-title { white-space: normal; overflow-wrap: anywhere; }
+  .app-shell.app-shell .task-center__task-progress { grid-column: 2 / -1; min-width: 0; }
+  .app-shell.app-shell .task-center__task-detail { grid-column: 2; white-space: normal; overflow-wrap: anywhere; }
+  .app-shell.app-shell .task-center__task-detail span { white-space: normal; }
+
+  /* Admin CSS loads with its route; specificity keeps mobile dimensions stable. */
+  .app-shell.app-shell.admin-shell .admin-page-header { gap: 10px; margin-bottom: 0; }
+  .app-shell.app-shell.admin-shell :is(.metric-grid, .task-summary, .admin-loading-metrics) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app-shell.app-shell.admin-shell .metric { padding: 12px; }
+  .app-shell.app-shell.admin-shell .metric strong { font-size: 22px; }
+  .app-shell.app-shell.admin-shell .metric:nth-child(2n) { border-right: 0; }
+  .app-shell.app-shell.admin-shell .metric:nth-child(2n + 1) { border-right: 1px solid hsl(var(--border)); }
+  .app-shell.app-shell.admin-shell .metric:nth-child(n + 3) { border-top: 1px solid hsl(var(--border)); }
+  .app-shell.app-shell.admin-shell .controls :is(input, select) { flex: 1 1 130px; max-width: 100%; min-width: 0; }
+  .app-shell.app-shell.admin-shell .service-grid { grid-template-columns: minmax(0, 1fr); }
+  .app-shell.app-shell.admin-shell .admin-drawer header, .app-shell.app-shell.admin-shell .admin-drawer-content { padding: 16px; }
+  .app-shell.app-shell.admin-shell .user-actions { position: static; }
+  .app-shell.app-shell.admin-shell .glass-panel > .p-5 { padding: 12px; }
+  .app-shell.app-shell.admin-shell .glass-panel > .pt-0 { padding-top: 0; }
+  .app-shell.app-shell.admin-shell .gpu-parameter-grid > label { grid-template-columns: minmax(0, 1fr) 88px; }
+  .app-shell.app-shell.admin-shell .gpu-parameter-grid > label input { width: 88px; }
+
+  .resource-center .rc-tabs { gap: 14px; overflow-x: auto; max-width: 100%; }
+  .resource-center .rc-tabs button { flex-shrink: 0; white-space: nowrap; }
+  .resource-center :is(.rc-header-actions, .rc-pagination, .rc-overview-meta) { flex-wrap: wrap; }
+  .rc-preview-host .rc-preview-footer, .rc-action-host .rc-action-footer { flex-wrap: wrap; }
+  .rc-preview-host .rc-preview-panel { width: 100%; }
+
+  /* Comfortable touch targets and 16px fields avoid iOS focus zoom. */
+  :is(.app-shell.app-shell, .auth-page, .rc-preview-host, .rc-action-host, .ui-dialog-host, .ui-toast-host, .preview-tag-popup) button:not([role=switch]) {
+    min-height: 44px;
+    min-width: 44px;
+    height: auto;
+  }
+  :is(.app-shell.app-shell, .auth-page, .rc-preview-host, .rc-action-host, .ui-dialog-host, .ui-toast-host, .preview-tag-popup) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea) {
+    font-size: 16px;
+  }
+  :is(.app-shell.app-shell, .auth-page, .rc-action-host) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]), select) { min-height: 44px; }
+  .app-shell.app-shell :is(input[type=checkbox], input[type=radio]) { width: 20px; height: 20px; flex-shrink: 0; }
+  .app-shell.app-shell [role=dialog] { max-height: calc(100dvh - 24px); overflow-y: auto; }
+  .ui-dialog-host > :is([role=dialog], [role=alertdialog]) { max-height: calc(100dvh - 32px); overflow-y: auto; }
+  .ui-dialog-host :is(h2, p), .ui-toast-host p { overflow-wrap: anywhere; }
+  .ui-toast-host .flex-1 { min-width: 0; }
+  .ui-toast-host { bottom: max(16px, env(safe-area-inset-bottom)); }
+  .preview-tag-popup { max-height: min(240px, calc(100dvh - 16px)); overflow-y: auto; }
+  .auth-page { padding-top: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .auth-page > section { padding: 24px 20px; }
+  .mobile-pager nav { width: 100%; justify-content: space-between; margin-left: 0; }
+  .mobile-pager .pager-page-number, .mobile-pager .pager-ellipsis { display: none; }
+  .mobile-pager .pager-current { display: block; }
+}
