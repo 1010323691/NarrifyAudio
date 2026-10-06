@@ -23,8 +23,9 @@ from ..engines import tts_batch as TtsBatch
 from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task
+from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_legacy_engine_tasks
 from ..platform.task_validation import is_safe_bgm_stem
+from ..services.chapter_display import chapter_display_name
 from . import _common
 
 router = APIRouter(prefix="/api/bgm", tags=["bgm"])
@@ -191,6 +192,7 @@ def list_chapters() -> dict:
                         break
         rows.append({
             "stem": stem,
+            "display_name": chapter_display_name(stem, layout),
             "narration_exists": Bgm._find_narration(layout, stem) is not None,
             "mix_exists": (layout.bgm / f"{stem}.mp3").is_file(),
             "assignment": e_out,
@@ -336,15 +338,15 @@ def run_match(
         if conflicts:
             raise HTTPException(409, "以下章节匹配任务在途：" + "、".join(conflicts))
 
-    task = submit_legacy_engine_task(
+    config = get_config().model_dump(mode="json")
+    return submit_legacy_engine_tasks(
         task_type="bgm.match",
-        label=f"BGM match ({req.mode}): {len(stems)} chapters",
-        payload={"chapters": stems, "mode": req.mode, "config": get_config().model_dump(mode="json")},
-        ctx=ctx,
-        db=db,
-        idempotency_prefix=f"bgm-match:{req.mode}",
+        entries=[{
+            "label": f"BGM 匹配（{req.mode}） · {stem}",
+            "payload": {"chapters": [stem], "mode": req.mode, "config": config},
+        } for stem in stems],
+        ctx=ctx, db=db, idempotency_prefix=f"bgm-match:{req.mode}",
     )
-    return {"task_id": task["id"]}
 
 
 class ChapterUpdateRequest(BaseModel):

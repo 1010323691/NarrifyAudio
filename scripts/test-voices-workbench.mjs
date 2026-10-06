@@ -24,13 +24,38 @@ function harness(listVoices) {
   const document = { activeElement: null }
   const api = {
     listVoices,
-    prepareFoundations: async body => { calls.push({ type: 'foundation', body }); return { task_id: 'foundation-a' } },
-    generateVoiceCandidates: async body => { calls.push({ type: 'clone', body }); return { task_id: 'clone-a' } },
+    prepareFoundations: async body => { calls.push({ type: 'foundation', body }); return { task_ids: ['foundation-a'], task_id: 'foundation-a' } },
+    generateVoiceCandidates: async body => { calls.push({ type: 'clone', body }); return { task_ids: ['clone-a'], task_id: 'clone-a' } },
+  }
+  const cache = new Map()
+  function loadComposable(name) {
+    const base = name.split('/').pop()
+    if (!cache.has(base)) {
+      const module = { exports: {} }
+      const code = ts.transpileModule(readFileSync(new URL(`../src/composables/${base}.ts`, import.meta.url), 'utf8'), {
+        compilerOptions: { module: ts.ModuleKind.CommonJS },
+      }).outputText
+      runInNewContext(code, { module, exports: module.exports, DOMException, require: resolve })
+      cache.set(base, module.exports)
+    }
+    return cache.get(base)
+  }
+  function resolve(name) {
+    if (name.includes('useWorkbench')) return loadComposable(name)
+    return dependencies(name)
+  }
+  function dependencies(name) {
+    if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onDeactivated() {}, onBeforeUnmount() {} }
+    if (name === '@/stores/auth') return { useAuthStore: () => auth }
+    if (name === '@/stores/project') return { useProjectStore: () => project }
+    if (name === '@/stores/task') return { useTaskStore: () => ({ projectTasks: [], activeTasks: () => [], refresh: async () => {} }) }
+    return { default: {} }
   }
   const module = { exports: {} }
   runInNewContext(compiled, {
     module, exports: module.exports, document,
     require(name) {
+      if (name.includes('useWorkbench')) return loadComposable(name)
       if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onBeforeUnmount() {} }
       if (name === 'vue-router') return { useRouter: () => ({ push() {} }) }
       if (name === '@/api/tts') return api

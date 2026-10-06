@@ -11,7 +11,7 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePipelineStateStore } from '@/stores/pipelineState'
-import { useWorkbenchTaskControl } from '@/composables/useWorkbenchTaskControl'
+import { useWorkbenchTaskBatch } from '@/composables/useWorkbenchTaskBatch'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
@@ -37,7 +37,6 @@ import { Layers, Loader2, RotateCcw, ArrowRight } from 'lucide-vue-next'
 const router = useRouter()
 const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
-const taskControl = useWorkbenchTaskControl()
 const captureScope = useWorkbenchScope()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
@@ -245,7 +244,8 @@ const busy = ref(false)
 const error = ref('')
 const taskId = ref<string | null>(null)
 
-const task = computed(() => taskStore.projectTasks.find((t) => t.id === taskId.value) ?? null)
+const taskBatch = useWorkbenchTaskBatch(taskId)
+const task = taskBatch.task
 
 // 长度排序后按批内上限组批，模型在任务内仅加载一次。
 // ---------------------------------------------------------------------------
@@ -274,13 +274,14 @@ function stopStatusPolling(final = true) {
 // navigation, so the poller follows onActivated/onDeactivated)
 // ---------------------------------------------------------------------------
 // 刷新恢复：页面重载后本地 taskId 丢失，但后端合成任务仍在跑（store 的 refresh 已拉回全量
-// 任务）。按 module 重新挂接在途任务（后端守卫保证至多一个在途）——每文件行由 refreshRows()
+// 任务）。按 module 重新挂接全部在途章节任务——每文件行由 refreshRows()
 //（03_parsed_json 目录列表）自行恢复，这里只恢复任务级状态（取消钮 / 完成 watcher）。
 function reattachTask() {
   if (taskId.value) return
-  const t = taskStore.activeTasks('tts-batch')[0]
+  const active = taskStore.activeTasks('tts-batch')
+  const t = active[0]
   if (t) {
-    taskId.value = t.id
+    taskBatch.track(active.map(row => row.id))
     busy.value = true
     startStatusPolling()
   }
@@ -348,8 +349,8 @@ async function doRun() {
   try {
     // Default (resume): synthesize only the not-yet-done segments, skipping existing audio
     // (fully-done files contribute no segments to the pool).
-    const { task_id } = await withinScope(runBatch({ scripts: names }), isCurrent)
-    taskId.value = task_id
+    const submitted = await withinScope(runBatch({ scripts: names }), isCurrent)
+    taskBatch.track(submitted.task_ids)
     await withinScope(taskStore.refresh(), isCurrent)
     startStatusPolling()
     // Completion is handled by the watcher on task.status.
@@ -402,8 +403,8 @@ async function doRunAll() {
       throw new Error(resetTask.error_message || '重置合成包失败')
     }
     // … then the identical one-click run: default resume, nothing done → everything re-done.
-    const { task_id } = await withinScope(runBatch({ scripts: names }), isCurrent)
-    taskId.value = task_id
+    const submitted = await withinScope(runBatch({ scripts: names }), isCurrent)
+    taskBatch.track(submitted.task_ids)
     await withinScope(taskStore.refresh(), isCurrent)
     startStatusPolling()
   } catch (e: any) {
@@ -416,7 +417,8 @@ async function doRunAll() {
 }
 
 function cancel() {
-  if (task.value) void taskControl.control(task.value.id, 'cancel')
+  const isCurrent = captureScope()
+  void taskBatch.cancel().catch(e => { if (isCurrent()) error.value = e?.message || '取消失败' })
 }
 
 watch(

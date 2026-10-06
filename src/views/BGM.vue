@@ -58,18 +58,26 @@ const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 const waitForTask = useDurableTaskWait()
 
-async function resolveDurable<T>(response: T | { task_id: string }): Promise<T> {
+async function resolveDurable<T>(response: T | { task_id?: string; task_ids?: string[] }): Promise<T> {
   const isCurrent = captureScope()
 
-  if (!('task_id' in (response as object))) return response as T
+  const submitted = response as { task_id?: string; task_ids?: string[] }
+  const ids = submitted.task_ids ?? (submitted.task_id ? [submitted.task_id] : null)
+  if (!ids) return response as T
   await withinScope(taskStore.refresh(), isCurrent)
-  const task = await withinScope(
-    waitForTask.wait((response as { task_id: string }).task_id),
-    isCurrent,
-  )
-  if (task.status !== 'succeeded')
-    throw new Error(task.error_message || (task.status === 'cancelled' ? '任务已取消' : '任务执行失败'))
-  return (task.result ?? {}) as T
+  const completed = []
+  for (let i = 0; i < ids.length; i += 4) {
+    completed.push(...await withinScope(Promise.all(ids.slice(i, i + 4).map(id => waitForTask.wait(id))), isCurrent))
+  }
+  const failed = completed.find(task => task.status !== 'succeeded')
+  if (failed) throw new Error(failed.error_message || (failed.status === 'cancelled' ? '任务已取消' : '任务执行失败'))
+  const result: Record<string, any> = {}
+  for (const task of completed) {
+    for (const [key, value] of Object.entries(task.result ?? {})) {
+      result[key] = typeof value === 'number' ? (result[key] ?? 0) + value : value
+    }
+  }
+  return result as T
 }
 
 // ---------------------------------------------------------------------------
@@ -882,7 +890,7 @@ const workRows = computed(() =>
   rows.value.map((row) => ({
     ...row,
     workKey: row.stem,
-    workName: row.stem,
+    workName: row.data.display_name || row.stem,
     workState: row.task
       ? 'running'
       : row.failedTask || row.data.music_missing || row.data.segment_music_missing

@@ -357,6 +357,7 @@ export interface MergeResult {
  *  (a manifest-length total would mark a mid-cancelled package "ready"). */
 export interface MergePackageStatus {
   name: string
+  display_name?: string
   total: number
   completed: number
   remaining: number
@@ -791,6 +792,7 @@ export interface BgmTimelineSummary {
 export interface BgmChapterRow {
   /** Chapter stem (02_split_text/<stem>.txt without .txt). */
   stem: string
+  display_name?: string
   /** True once 06_audio_merge/<stem>.mp3 (or .wav) exists — mixing needs the narration. */
   narration_exists: boolean
   /** True once 08_bgm/<stem>.mp3 exists (a no-BGM chapter's copy2 also counts). */

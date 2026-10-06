@@ -2323,38 +2323,34 @@ def _durable_ctx():
     return SimpleNamespace(user=SimpleNamespace(id="user-1"), session=object())
 
 
-def test_run_batch_submits_durable_task_with_selected_scripts(workspace, monkeypatch):
+def test_run_batch_submits_one_task_per_selected_script(workspace, monkeypatch):
     import backend.api.tts as tts_api
-    from backend.api.tts import BatchRequest, run_batch
-
     submitted = []
     def submit(**kwargs):
         submitted.append(kwargs)
-        return {"id": "durable-task"}
-    monkeypatch.setattr(tts_api, "submit_legacy_engine_task", submit)
-
-    result = run_batch(
-        BatchRequest(scripts=["s.json", "t.json"]), ctx=_durable_ctx(), db=object(),
+        return {"task_ids": ["s-task", "t-task"]}
+    monkeypatch.setattr(tts_api, "submit_legacy_engine_tasks", submit)
+    result = tts_api.run_batch(
+        tts_api.BatchRequest(scripts=["s.json", "t.json", "s.json"]), ctx=_durable_ctx(), db=object(),
     )
-
-    assert result == {"task_id": "durable-task"}
+    assert result == {"task_ids": ["s-task", "t-task"]}
     assert submitted[0]["task_type"] == "tts.batch"
-    assert submitted[0]["payload"]["scripts"] == ["s.json", "t.json"]
-    assert submitted[0]["payload"]["indices"] is None
+    entries = submitted[0]["entries"]
+    assert [entry["payload"]["scripts"] for entry in entries] == [["s.json"], ["t.json"]]
+    assert all(entry["payload"]["indices"] is None for entry in entries)
+    assert all(entry["payload"]["script"] in entry["label"] for entry in entries)
 
 
 def test_run_batch_keeps_single_file_and_index_validation(workspace, monkeypatch):
     import backend.api.tts as tts_api
-    from backend.api.tts import BatchRequest, run_batch
-
-    monkeypatch.setattr(tts_api, "submit_legacy_engine_task", lambda **kwargs: {"id": "task"})
-    result = run_batch(
-        BatchRequest(script="s.json", indices=[0, 2]), ctx=_durable_ctx(), db=object(),
+    monkeypatch.setattr(tts_api, "submit_legacy_engine_tasks", lambda **kwargs: {"task_ids": ["task"], "task_id": "task"})
+    result = tts_api.run_batch(
+        tts_api.BatchRequest(script="s.json", indices=[0, 2]), ctx=_durable_ctx(), db=object(),
     )
-    assert result == {"task_id": "task"}
+    assert result == {"task_id": "task", "task_ids": ["task"]}
     with pytest.raises(Exception) as exc:
-        run_batch(
-            BatchRequest(scripts=["s.json", "t.json"], indices=[0]),
+        tts_api.run_batch(
+            tts_api.BatchRequest(scripts=["s.json", "t.json"], indices=[0]),
             ctx=_durable_ctx(), db=object(),
         )
     assert getattr(exc.value, "status_code", None) == 400
@@ -2672,3 +2668,32 @@ def test_preview_lock_path_and_staging_dir_are_stable(workspace):
     staging = tts_batch.preview_staging_dir(layout, "s")
     assert lock == layout.temp / "locks" / "chapter_preview" / "s.lock"
     assert staging == layout.temp / "chapter_preview" / "s"
+
+
+def test_voice_batches_split_selected_characters_and_filter_new_only(workspace, monkeypatch):
+    import backend.api.tts as api
+    submitted = []
+    rows = [
+        {"name": "旁白", "line_count": 100, "foundation_status": "done", "alias_of": "", "candidates": [{}, {}]},
+        {"name": "主角", "line_count": 5, "foundation_status": "none", "alias_of": "", "candidates": []},
+        {"name": "配角", "line_count": 5, "foundation_status": "done", "alias_of": "", "candidates": []},
+        {"name": "别名", "line_count": 3, "foundation_status": "done", "alias_of": "旁白", "candidates": []},
+    ]
+    monkeypatch.setattr(api, "list_voices", lambda script: {"speakers": rows})
+    monkeypatch.setattr(api, "submit_legacy_engine_tasks", lambda **kwargs: submitted.append(kwargs) or {"task_ids": []})
+    api.prepare_foundations(api.PrepareFoundationsRequest(script="__all__", new_only=True), _durable_ctx(), object())
+    assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["主角"]]
+    api.make_clones(api.MakeClonesRequest(script="__all__", candidate_count=2, new_only=True), _durable_ctx(), object())
+    assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["配角"]]
+    api.prepare_foundations(api.PrepareFoundationsRequest(script="__all__", speakers=["旁白", "配角"]), _durable_ctx(), object())
+    assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["旁白"], ["配角"]]
+    assert all(entry["payload"]["speakers"][0] in entry["label"] for entry in submitted[-1]["entries"])
+
+
+def test_clone_new_only_folds_alias_lines_into_candidate_budget(workspace, monkeypatch):
+    import backend.api.tts as api
+    monkeypatch.setattr(api, "list_voices", lambda script: {"speakers": [
+        {"name": "主角", "line_count": 1, "foundation_status": "done", "alias_of": "", "candidates": [{}, {}]},
+        {"name": "别名", "line_count": 1000, "foundation_status": "done", "alias_of": "主角", "candidates": []},
+    ]})
+    assert api._voice_task_speakers("__all__", None, True, clone=True) == ["主角"]

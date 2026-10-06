@@ -29,6 +29,7 @@ def submit_legacy_engine_task(
     ctx: AuthContext,
     db: Session,
     idempotency_prefix: str,
+    commit: bool = True,
 ) -> dict:
     """Create one durable task owned by the caller's active workspace."""
     project = active_project(db, ctx.user, ctx.session)
@@ -39,6 +40,7 @@ def submit_legacy_engine_task(
             db, ctx.user, project_id=project.id, task_type=task_type,
             payload={"label": label, **payload},
             idempotency_key=f"{idempotency_prefix}:{uuid.uuid4()}",
+            commit=commit,
         )
     except TaskSubmissionError as exc:
         raise HTTPException(exc.status_code, exc.message) from exc
@@ -94,3 +96,28 @@ def has_active_durable_tasks(*, task_type: str, ctx: AuthContext, db: Session) -
             Task.status.in_(ACTIVE_TASK_STATUSES),
         ).limit(1)
     ) is not None
+
+
+def submit_legacy_engine_tasks(
+    *, task_type: str, entries: list[dict], ctx: AuthContext, db: Session,
+    idempotency_prefix: str,
+) -> dict:
+    """Submit independent entries atomically, without a counted batch wrapper."""
+    if not entries:
+        return {"task_ids": []}
+    created = []
+    try:
+        for entry in entries:
+            task = submit_legacy_engine_task(
+                task_type=task_type, label=entry["label"], payload=entry["payload"],
+                ctx=ctx, db=db, idempotency_prefix=idempotency_prefix, commit=False,
+            )
+            created.append(task["id"])
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    response = {"task_ids": created}
+    if len(created) == 1:
+        response["task_id"] = created[0]
+    return response

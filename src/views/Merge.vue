@@ -390,7 +390,7 @@ const workRows = computed(() =>
   rows.value.map((row) => ({
     ...row,
     workKey: row.pkg,
-    workName: row.pkg,
+    workName: row.stat?.display_name || row.pkg,
     workState: row.task
       ? 'running'
       : row.failedTask

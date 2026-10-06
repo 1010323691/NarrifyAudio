@@ -41,7 +41,7 @@ def task_dict(task: Task) -> dict:
 
 def submit_task_record(
     db: Session, user: User, *, project_id: str, task_type: str,
-    payload: dict, idempotency_key: str,
+    payload: dict, idempotency_key: str, commit: bool = True,
 ) -> Task:
     if task_type not in SUPPORTED_TASK_TYPES:
         raise TaskSubmissionError(422, f"不支持的任务类型：{task_type}")
@@ -129,7 +129,8 @@ def submit_task_record(
     if existing is not None:
         if existing.payload.get("_request_hash") != request_hash:
             raise TaskSubmissionError(409, "幂等键对应的请求内容不同")
-        db.rollback()
+        if commit:
+            db.rollback()
         return existing
     # Resolve shared policy only for a NEW task, after both idempotency checks.
     # Keep the original request hash independent of changing admin defaults.
@@ -172,5 +173,6 @@ def submit_task_record(
         aggregate_type="task", aggregate_id=task.id, event_type="task.submitted",
         payload={"task_id": task.id, "task_type": task_type, "project_id": project_id},
     ))
-    db.commit()
+    if commit:
+        db.commit()
     return task

@@ -101,7 +101,7 @@ def test_merge_status_counts_json_total(workspace):
     # rule), not the manifest length.
     _seed_package(workspace, "p1", n_segments=10, n_ok_manifest=10)
     row = api_tts.merge_status(packages=["p1"])["packages"][0]
-    assert row == {"name": "p1", "total": 10, "completed": 10,
+    assert row == {"name": "p1", "display_name": "p1", "total": 10, "completed": 10,
                    "remaining": 0, "complete": True}
 
 
@@ -139,7 +139,7 @@ def test_merge_status_missing_segment_file_not_done(workspace):
 
 def test_merge_status_zero_row(workspace):
     row = api_tts.merge_status(packages=["ghost"])["packages"][0]
-    assert row == {"name": "ghost", "total": 0, "completed": 0,
+    assert row == {"name": "ghost", "display_name": "ghost", "total": 0, "completed": 0,
                    "remaining": 0, "complete": False}
 
 
@@ -160,8 +160,21 @@ def test_merge_status_no_workspace_zero_rows(monkeypatch, tmp_path):
     try:
         res = api_tts.merge_status(packages=["p1", "p2"])
         assert res == {"packages": [
-            {"name": "p1", "total": 0, "completed": 0, "remaining": 0, "complete": False},
-            {"name": "p2", "total": 0, "completed": 0, "remaining": 0, "complete": False},
+            {"name": "p1", "display_name": "p1", "total": 0, "completed": 0, "remaining": 0, "complete": False},
+            {"name": "p2", "display_name": "p2", "total": 0, "completed": 0, "remaining": 0, "complete": False},
         ]}
     finally:
         core_config.reset_config_cache()
+
+
+def test_merge_rows_display_source_titles_without_changing_package_identity(workspace):
+    stem = "第 001 章 标题_章节内标签_"
+    layout = core_paths.get_or_prepare_layout()
+    (layout.split_text / f"{stem}.txt").write_text(
+        "书籍简介\n第1章 标题【章节内标签】！\n正文", encoding="utf-8",
+    )
+    _seed_package(workspace, stem, n_segments=1, n_ok_manifest=1)
+    row = api_tts.merge_status(packages=[stem])["packages"][0]
+    assert row["name"] == stem
+    assert row["display_name"] == "第 001 章 标题【章节内标签】！"
+    assert row["complete"] is True

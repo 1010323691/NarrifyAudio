@@ -10,14 +10,19 @@ import type {
   MergeSpeakersResult,
 } from '@/types'
 
+export interface BatchTaskSubmission {
+  task_ids: string[]
+  task_id?: string
+}
+
 /** Report whether TTS is implemented (ready vs. engine-not-installed). */
 export function ttsStatus(): Promise<TTSStatus> {
   return http.get<TTSStatus>('/api/tts/status')
 }
 
 /** 角色配音 · 阶段 1（LLM only）：start the voice-foundation Task (all / new-only / a subset). */
-export function prepareFoundations(opts: PrepareFoundationsOptions = {}): Promise<{ task_id: string }> {
-  return http.post<{ task_id: string }>('/api/tts/prepare-foundations', {
+export function prepareFoundations(opts: PrepareFoundationsOptions = {}): Promise<BatchTaskSubmission> {
+  return http.post<BatchTaskSubmission>('/api/tts/prepare-foundations', {
     speakers: opts.speakers ?? null,
     new_only: opts.new_only ?? false,
     overrides: opts.overrides ?? null,
@@ -26,8 +31,8 @@ export function prepareFoundations(opts: PrepareFoundationsOptions = {}): Promis
 }
 
 /** 角色配音 · 阶段 2（TTS only）：start the clone-seed Task (all / new-only / a subset; N parallel). */
-export function generateVoiceCandidates(opts: GenerateVoiceCandidatesOptions = {}): Promise<{ task_id: string }> {
-  return http.post<{ task_id: string }>('/api/tts/make-clones', {
+export function generateVoiceCandidates(opts: GenerateVoiceCandidatesOptions = {}): Promise<BatchTaskSubmission> {
+  return http.post<BatchTaskSubmission>('/api/tts/make-clones', {
     speakers: opts.speakers ?? null,
     new_only: opts.new_only ?? false,
     concurrency: opts.concurrency ?? null,
@@ -80,13 +85,13 @@ export function setGender(speaker: string, gender: 'male' | 'female' | ''): Prom
 }
 
 /** 音频合成：start a batch TTS Task (all lines, or the given line indices; for a script —
- *  or a whole selection of scripts, the 待合成 card's multi-select: one task synthesizes
- *  the files one by one, each in its own package). The run is a resume: it skips segments
+ *  or a whole selection of scripts, the 待合成 card's multi-select: each file is an independent
+ *  durable task with its own package). The run is a resume: it skips segments
  *  already done (omitted → the administrator-configured TTS defaults for concurrency / seed;
  *  ``seed`` -1 → random). Re-doing everything = call :func:`submitBatchReset` first (deletes the
  *  packages), then this exact same call. */
-export function runBatch(opts: BatchRunOptions = {}): Promise<{ task_id: string }> {
-  return http.post<{ task_id: string }>('/api/tts/batch', {
+export function runBatch(opts: BatchRunOptions = {}): Promise<BatchTaskSubmission> {
+  return http.post<BatchTaskSubmission>('/api/tts/batch', {
     indices: opts.indices ?? null,
     script: opts.script ?? null,
     scripts: opts.scripts ?? null,

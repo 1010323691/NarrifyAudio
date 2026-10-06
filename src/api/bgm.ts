@@ -23,8 +23,8 @@ export function bgmPreviewUrl(stem: string): string {
 }
 
 /** (Re-)match the selected chapters (empty/omitted = all) through the durable Worker. */
-export function matchChapters(chapters: string[] | null, mode: string): Promise<BgmMatchResult | { task_id: string }> {
-  return http.post<BgmMatchResult | { task_id: string }>('/api/bgm/match', { chapters, mode })
+export function matchChapters(chapters: string[] | null, mode: string): Promise<BgmMatchResult | { task_ids: string[]; task_id?: string }> {
+  return http.post<BgmMatchResult | { task_ids: string[]; task_id?: string }>('/api/bgm/match', { chapters, mode })
 }
 
 /** Start one paragraph-analysis Task per selected chapter (段落分析). */

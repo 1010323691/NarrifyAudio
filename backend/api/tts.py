@@ -1,11 +1,12 @@
 """TTS + character-voice + batch + merge endpoints (modules: TTS / 角色配音 / 音频合成 / 音频合并).
 
 ``GET /status`` reports readiness. The stage endpoints (``POST /prepare-foundations``,
-``POST /make-clones``, ``GET /voices``, ``POST /batch``, ``POST /merge``) each start a
-long-running
-:class:`Task` that drives the isolated Qwen3-TTS engine (see
+``POST /make-clones``, ``POST /batch``, ``POST /merge``) submit independent
+durable tasks for the selected characters or chapters. Workers drive the isolated
+Qwen3-TTS engine (see
 ``backend/engines/tts.py`` / ``voices.py`` / ``tts_batch.py`` / ``merge.py``) and
-return ``{"task_id"}``; the UI streams the task's progress/logs over SSE and plays
+return ``{"task_ids": [...]}``; single-entry responses also carry ``task_id``.
+The UI streams each task's progress/logs over SSE and plays
 the resulting audio via the shared ``GET /api/files/download/05_audio_chunk/{name}``
 route. Any failing task is marked failed and isolated — it never takes the console
 down (requirement #7).
@@ -15,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import shutil
 import threading
 import uuid
@@ -35,7 +35,7 @@ from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
-from ..engines.book import detect_chapters
+from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
 from ..engines.merge import boundary_gap_ms
 from ..platform.database import get_db
@@ -45,6 +45,7 @@ from ..platform.engine_task_submission import (
     active_durable_targets,
     has_active_durable_tasks,
     submit_legacy_engine_task,
+    submit_legacy_engine_tasks,
 )
 from ..platform.file_response import file_response
 from . import _common
@@ -109,9 +110,33 @@ class MakeClonesRequest(BaseModel):
         return v
 
 
-def _scope_suffix(script: str | None) -> str:
-    """A short task-label suffix naming the parsed-JSON scope ("" for the default, most-recent)."""
-    return "（全部解析文件）" if script == ALL_PARSED_JSON else ""
+def _voice_task_speakers(script: str | None, speakers: list[str] | None,
+                        new_only: bool, *, clone: bool = False,
+                        candidate_count: int | None = None) -> list[str]:
+    """Resolve the selection once; each durable row names a real character."""
+    rows = list_voices(script)["speakers"]
+    allow = set(speakers) if speakers else None
+    by_name = {row["name"]: row for row in rows}
+    counts = {row["name"]: row["line_count"] for row in rows}
+    for row in rows:
+        canonical = V._canonical_of(row["name"], by_name)
+        if canonical != row["name"] and canonical in counts:
+            counts[canonical] += row["line_count"]
+    targets = []
+    for row in rows:
+        name = row["name"]
+        if allow is not None and name not in allow:
+            continue
+        if clone:
+            if row["alias_of"] or row["foundation_status"] != "done":
+                continue
+            target = candidate_count or V.auto_candidate_count(counts[name])
+            if new_only and len(row["candidates"]) >= target:
+                continue
+        elif new_only and row["foundation_status"] == "done":
+            continue
+        targets.append(name)
+    return targets
 
 
 @router.post("/prepare-foundations")
@@ -120,30 +145,20 @@ def prepare_foundations(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Start Phase 1: batch-generate every character's voice foundation (LLM only, no TTS)."""
+    """Submit one foundation task per selected character."""
     _common.require_workspace()
-    suffix = _scope_suffix(req.script)
-    if req.speakers:
-        label = f"重新生成 {len(req.speakers)} 个角色语音推理基础{suffix}"
-    elif req.new_only:
-        label = f"生成新增角色语音推理基础{suffix}"
-    else:
-        label = f"生成所有角色语音推理基础{suffix}"
-    task = submit_legacy_engine_task(
+    script = req.script or resolve_parsed_json(None).name
+    targets = _voice_task_speakers(script, req.speakers, req.new_only)
+    config = get_config().model_dump(mode="json")
+    return submit_legacy_engine_tasks(
         task_type="voices.foundation",
-        label=label,
-        payload={
-            "speakers": req.speakers,
-            "new_only": req.new_only,
-            "overrides": req.overrides or {},
-            "script": req.script,
-            "config": get_config().model_dump(mode="json"),
-        },
-        ctx=ctx,
-        db=db,
-        idempotency_prefix="voices-foundation",
+        entries=[{
+            "label": f"语音推理基础 · {speaker}",
+            "payload": {"speakers": [speaker], "new_only": req.new_only,
+                        "overrides": req.overrides or {}, "script": script, "config": config},
+        } for speaker in targets],
+        ctx=ctx, db=db, idempotency_prefix="voices-foundation",
     )
-    return {"task_id": task["id"]}
 
 
 @router.post("/make-clones")
@@ -152,32 +167,22 @@ def make_clones(
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Start Phase 2: batch-render every character's clone seed WAV (TTS only, no LLM)."""
+    """Submit one clone task per selected foundation-bearing character."""
     _common.require_workspace()
-    suffix = _scope_suffix(req.script)
-    if req.speakers:
-        label = f"重新制作 {len(req.speakers)} 个角色克隆音频{suffix}"
-    elif req.new_only:
-        label = f"制作新增角色克隆音频{suffix}"
-    else:
-        label = f"制作所有角色克隆音频{suffix}"
-    label += " · 备选 自动" if req.candidate_count is None else f" · 备选 {req.candidate_count}"
-    task = submit_legacy_engine_task(
+    script = req.script or resolve_parsed_json(None).name
+    targets = _voice_task_speakers(script, req.speakers, req.new_only,
+                                   clone=True, candidate_count=req.candidate_count)
+    config = get_config().model_dump(mode="json")
+    return submit_legacy_engine_tasks(
         task_type="voices.clone",
-        label=label,
-        payload={
-            "speakers": req.speakers,
-            "new_only": req.new_only,
-            "concurrency": req.concurrency,
-            "script": req.script,
-            "candidate_count": req.candidate_count,
-            "config": get_config().model_dump(mode="json"),
-        },
-        ctx=ctx,
-        db=db,
-        idempotency_prefix="voices-clone",
+        entries=[{
+            "label": f"克隆音频 · {speaker}",
+            "payload": {"speakers": [speaker], "new_only": req.new_only,
+                        "concurrency": req.concurrency, "script": script,
+                        "candidate_count": req.candidate_count, "config": config},
+        } for speaker in targets],
+        ctx=ctx, db=db, idempotency_prefix="voices-clone",
     )
-    return {"task_id": task["id"]}
 
 
 def _voice_usable(entry: dict) -> bool:
@@ -616,8 +621,8 @@ class BatchRequest(BaseModel):
     indices: list[int] | None = None
     # Which parsed JSON (in 03_parsed_json/) to synthesize; None -> most recent.
     script: str | None = None
-    # Multi-file run (the 待合成 card's selection): parsed-JSON file names, synthesized one
-    # by one in a single task (each file = its own package; a per-file failure is isolated).
+    # Multi-file run (the 待合成 card's selection): parsed-JSON file names, synthesized
+    # as independent durable tasks (each file = its own package).
     # Takes precedence over ``script``; an empty list falls back to ``script`` / most recent.
     scripts: list[str] | None = None
 
@@ -634,28 +639,20 @@ def run_batch(
     scripts = req.scripts or ([req.script] if req.script else [])
     if len(scripts) > 1 and req.indices:
         raise HTTPException(status_code=400, detail="按段选择（indices）仅支持单个文件。")
-    if req.indices:
-        label = f"音频合成（{len(req.indices)} 段）"
-    else:
-        label = "音频合成"
-    if len(scripts) == 1:
-        label += f" · {scripts[0]}"
-    elif len(scripts) > 1:
-        label += f" · {len(scripts)} 个文件"
-    task = submit_legacy_engine_task(
+    scripts = list(dict.fromkeys(scripts))
+    if not scripts:
+        scripts = [resolve_parsed_json(None).name]
+    config = get_config().model_dump(mode="json")
+    label = f"音频合成（{len(req.indices)} 段）" if req.indices else "音频合成"
+    return submit_legacy_engine_tasks(
         task_type="tts.batch",
-        label=label,
-        payload={
-            "indices": req.indices,
-            "script": req.script,
-            "scripts": scripts,
-            "config": get_config().model_dump(mode="json"),
-        },
-        ctx=ctx,
-        db=db,
-        idempotency_prefix="tts-batch",
+        entries=[{
+            "label": f"{label} · {script}",
+            "payload": {"indices": req.indices, "script": script,
+                        "scripts": [script], "config": config},
+        } for script in scripts],
+        ctx=ctx, db=db, idempotency_prefix="tts-batch",
     )
-    return {"task_id": task["id"]}
 
 
 class ResetBatchRequest(BaseModel):
@@ -757,32 +754,13 @@ def _stat_key(path) -> tuple | None:
 
 
 def _chapter_source_path(name: str, layout) -> Path | None:
-    split_text = getattr(layout, "split_text", None)
-    if split_text is None or not name or Path(name).name != name:
+    if not name or Path(name).name != name:
         return None
-    root = split_text.resolve()
-    source = (root / f"{Path(name).stem}.txt").resolve()
-    return source if source.is_relative_to(root) else None
+    return chapter_source_path(Path(name).stem, layout)
 
 
 def _chapter_display_name(name: str, layout) -> str:
-    """Recover title punctuation from the source, keeping the repaired chapter number."""
-    fallback = Path(name).stem
-    source = _chapter_source_path(name, layout)
-    if source is None:
-        return fallback
-    try:
-        with source.open("r", encoding="utf-8-sig") as stream:
-            opening = stream.read(4096)
-        # The first split can include the book's introduction before its header.
-        chapters = detect_chapters(opening)
-    except (OSError, UnicodeError):
-        return fallback
-    if not chapters or not chapters[0].get("title"):
-        return fallback
-    prefix = re.match(r"^(第\s*\S+?\s*[章回节卷集部篇])", fallback)
-    header = opening[chapters[0]["start"]:].splitlines()[0].strip()
-    return f"{prefix.group(1)} {chapters[0]['title']}" if prefix else header
+    return chapter_display_name(Path(name).stem, layout) if Path(name).name == name else Path(name).stem
 
 
 def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | None = None) -> dict:
@@ -996,7 +974,8 @@ def _package_merge_status(name: str, layout) -> dict:
     whose file is still on disk (``Batch.is_done``); ``complete`` = every segment done —
     the 已就绪 badge.
     """
-    out = {"name": name, "total": 0, "completed": 0, "remaining": 0, "complete": False}
+    out = {"name": name, "display_name": chapter_display_name(name, layout),
+           "total": 0, "completed": 0, "remaining": 0, "complete": False}
     manifest = Batch.read_manifest(layout.audio_chunk / name)
     src = layout.parsed_json / f"{name}.json"
     if src.exists():
@@ -1053,7 +1032,8 @@ def merge_status(packages: Annotated[list[str] | None, Query()] = None) -> dict:
     layout = resolve_layout()
     if layout.audio_chunk is None:  # no workspace: nothing to read (read-only, degrades)
         return {"packages": [
-            {"name": p, "total": 0, "completed": 0, "remaining": 0, "complete": False}
+            {"name": p, "display_name": chapter_display_name(p, layout),
+             "total": 0, "completed": 0, "remaining": 0, "complete": False}
             for p in names
         ]}
     return {"packages": [_package_merge_status(p, layout) for p in names]}

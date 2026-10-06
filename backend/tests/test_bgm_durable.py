@@ -52,6 +52,12 @@ def _install_durable_mocks(monkeypatch, active=None):
     monkeypatch.setattr(api_bgm, "active_durable_targets", lambda **kw: set((active or {}).get(kw["task_type"], set())))
     monkeypatch.setattr(api_bgm, "active_durable_payloads", lambda **kw: [])
     monkeypatch.setattr(api_bgm, "submit_legacy_engine_task", lambda **kw: created.append(kw) or {"id": f"task-{len(created)}"})
+    def submit_batch(**kwargs):
+        ids = []
+        for entry in kwargs["entries"]:
+            ids.append(api_bgm.submit_legacy_engine_task(task_type=kwargs["task_type"], **entry)["id"])
+        return {"task_ids": ids, **({"task_id": ids[0]} if len(ids) == 1 else {})}
+    monkeypatch.setattr(api_bgm, "submit_legacy_engine_tasks", submit_batch)
     return created
 
 
@@ -144,7 +150,7 @@ def test_segment_analysis_submits_durable_tasks_and_checks_audio_conflicts(works
 def test_match_submits_durable_tasks_and_rejects_active_conflicts(workspace, monkeypatch):
     created = _install_durable_mocks(monkeypatch)
     result = api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1"], mode="random"), _api_context(), object())
-    assert result == {"task_id": "task-1"}
+    assert result == {"task_id": "task-1", "task_ids": ["task-1"]}
     assert created[0]["task_type"] == "bgm.match"
     assert created[0]["payload"]["mode"] == "random"
 
@@ -199,6 +205,19 @@ def test_bgm_routes_keep_input_and_configuration_guards(workspace, monkeypatch):
     with pytest.raises(HTTPException) as mode:
         api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1"], mode="unknown"), _api_context(), object())
     assert mode.value.status_code == 400
+
+
+def test_chapters_rows_restore_title_labels_without_changing_stems(workspace):
+    stem = "第 001 章 标题_章节内标签_"
+    layout = core_paths.get_or_prepare_layout()
+    source = layout.split_text / f"{stem}.txt"
+    source.write_text("书籍简介\n第1章 标题【章节内标签】！\n正文", encoding="utf-8")
+    rows = {row["stem"]: row for row in api_bgm.list_chapters()["chapters"]}
+    assert rows[stem]["display_name"] == "第 001 章 标题【章节内标签】！"
+    assert rows[stem]["stem"] == stem
+    source.write_text("第1章 标题【更新后的标签】？\n正文", encoding="utf-8")
+    rows = {row["stem"]: row for row in api_bgm.list_chapters()["chapters"]}
+    assert rows[stem]["display_name"] == "第 001 章 标题【更新后的标签】？"
 
 
 def test_chapters_rows(workspace):
@@ -421,3 +440,10 @@ def test_write_endpoints_no_workspace_409(monkeypatch, tmp_path):
             assert e.value.status_code == 409
     finally:
         core_config.reset_config_cache()
+
+
+def test_match_batch_submits_one_task_per_chapter(workspace, monkeypatch):
+    created = _install_durable_mocks(monkeypatch)
+    result = api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1", "ch2"], mode="random"), _api_context(), object())
+    assert result["task_ids"] == ["task-1", "task-2"]
+    assert [row["payload"]["chapters"] for row in created] == [["ch1"], ["ch2"]]

@@ -5,6 +5,8 @@ import { useProjectStore } from '@/stores/project'
 import VoicesWorkbench from './voices/VoicesWorkbench.vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
+import { useWorkbenchTaskBatch } from '@/composables/useWorkbenchTaskBatch'
+import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { listVoices, generateVoiceCandidates, mergeSpeakers, prepareFoundations, selectVoice, setGender, ttsStatus } from '@/api/tts'
@@ -44,6 +46,7 @@ const settings = useSettingsStore()
 const auth = useAuthStore()
 const project = useProjectStore()
 const taskStore = useTaskStore()
+const captureScope = useWorkbenchScope()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 
@@ -63,13 +66,15 @@ const error = ref('')
 const foundationBusy = ref(false)
 const foundationTaskId = ref<string | null>(null)
 const foundationResult = ref<PrepareFoundationsResult | null>(null)
-const foundationTask = computed(() => taskStore.projectTasks.find((t) => t.id === foundationTaskId.value) ?? null)
+const foundationBatch = useWorkbenchTaskBatch(foundationTaskId)
+const foundationTask = foundationBatch.task
 
 // Phase 2 (克隆音频, TTS only) task state.
 const cloneBusy = ref(false)
 const cloneTaskId = ref<string | null>(null)
 const cloneResult = ref<MakeClonesResult | null>(null)
-const cloneTask = computed(() => taskStore.projectTasks.find((t) => t.id === cloneTaskId.value) ?? null)
+const cloneBatch = useWorkbenchTaskBatch(cloneTaskId)
+const cloneTask = cloneBatch.task
 
 // 选择音色 overlay state: which character's candidates are shown, and which candidate the
 // user staged (null = no explicit pick → the default first candidate stays active).
@@ -275,6 +280,10 @@ async function loadVoices() {
 watch(() => `${auth.user?.id || ''}:${project.activeProjectId}`, () => {
   ++voicesRequest
   speakers.value = []
+  foundationBusy.value = false
+  cloneBusy.value = false
+  foundationTargets.value = null
+  cloneTargets.value = null
   hasScript.value = false
   voicesLoading.value = false
   voicesLoadError.value = ''
@@ -292,12 +301,12 @@ onBeforeUnmount(() => { ++voicesRequest })
 function reattachTasks() {
   const f = taskStore.activeTasks('voices-foundation')[0]
   if (f) {
-    foundationTaskId.value = f.id
+    foundationBatch.track(taskStore.activeTasks('voices-foundation').map(row => row.id))
     foundationBusy.value = true
   }
   const c = taskStore.activeTasks('voices-clone')[0]
   if (c) {
-    cloneTaskId.value = c.id
+    cloneBatch.track(taskStore.activeTasks('voices-clone').map(row => row.id))
     cloneBusy.value = true
   }
 }
@@ -332,16 +341,19 @@ async function doFoundations(opts: {
   overrides?: Record<string, string>
 }) {
   if (foundationBusy.value || cloneRunning.value) return
+  const isCurrent = captureScope()
   foundationBusy.value = true
   error.value = ''
   foundationResult.value = null
   foundationTargets.value = opts.speakers ?? null
   try {
-    const { task_id } = await prepareFoundations({ ...opts, script: script })
-    foundationTaskId.value = task_id
-    await taskStore.refresh()
+    const submitted = await withinScope(prepareFoundations({ ...opts, script }), isCurrent)
+    foundationBatch.track(submitted.task_ids)
+    if (!submitted.task_ids.length) foundationBusy.value = false
+    await withinScope(taskStore.refresh(), isCurrent)
     // Completion is handled by the watcher on foundationTask.status.
   } catch (e: any) {
+    if (!isCurrent() || e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
     foundationBusy.value = false
   }
@@ -352,19 +364,19 @@ async function doClones(opts: {
   new_only?: boolean
 }) {
   if (cloneBusy.value || foundationRunning.value) return
+  const isCurrent = captureScope()
   cloneBusy.value = true
   error.value = ''
   cloneResult.value = null
   cloneTargets.value = opts.speakers ?? null
   try {
-    const { task_id } = await generateVoiceCandidates({
-      ...opts,
-      script: script,
-    })
-    cloneTaskId.value = task_id
-    await taskStore.refresh()
+    const submitted = await withinScope(generateVoiceCandidates({ ...opts, script }), isCurrent)
+    cloneBatch.track(submitted.task_ids)
+    if (!submitted.task_ids.length) cloneBusy.value = false
+    await withinScope(taskStore.refresh(), isCurrent)
     // Completion is handled by the watcher on cloneTask.status.
   } catch (e: any) {
+    if (!isCurrent() || e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
     cloneBusy.value = false
   }
@@ -483,10 +495,12 @@ async function confirmMerge() {
 }
 
 function cancelFoundation() {
-  if (foundationTask.value) taskStore.control(foundationTask.value.id, 'cancel')
+  const isCurrent = captureScope()
+  void foundationBatch.cancel().catch(e => { if (isCurrent()) error.value = e?.message || '取消失败' })
 }
 function cancelClone() {
-  if (cloneTask.value) taskStore.control(cloneTask.value.id, 'cancel')
+  const isCurrent = captureScope()
+  void cloneBatch.cancel().catch(e => { if (isCurrent()) error.value = e?.message || '取消失败' })
 }
 
 watch(

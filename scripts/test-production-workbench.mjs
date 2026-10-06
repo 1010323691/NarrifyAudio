@@ -128,7 +128,7 @@ function harness(view, api = {}) {
       mergeStatusPackages: async () => ({ packages: [] }),
       runBatch: async (value) => {
         calls.push(value)
-        return { task_id: 'new-task' }
+        return { task_ids: ['new-task'], task_id: 'new-task' }
       },
       runMerge: async (value) => {
         calls.push(value)
@@ -181,7 +181,7 @@ function harness(view, api = {}) {
   }
   const exports = {
     BatchTTS:
-      'refreshRows, refreshStatusesOnly, fileNames, statuses, filesError, filesLoading, rows, workRows, selected, selectedNames, selectedRemaining, selectedTotal, doRun, doRunAll, status, busy, retryBatch, taskId',
+      'refreshRows, refreshStatusesOnly, fileNames, statuses, filesError, filesLoading, rows, workRows, selected, selectedNames, selectedRemaining, selectedTotal, doRun, doRunAll, status, busy, retryBatch, taskId, taskBatch, task',
     Merge:
       'refreshRows, pkgNames, pkgStats, diskMp3, rows, workRows, selected, selectedNames, selectionReady, selectAllIncludingDone, doRun, rowsLoading, rowsError',
     BGM: 'refreshRows, chapterRows, rows, workRows, selected, selectedMixable, doMix, doMixRow, loading, loadError, mode, switchMode, matchFeedback, doRematchSelected',
@@ -251,6 +251,26 @@ test('synthesis shows original titles while keeping file names for selections an
   assert.equal(h.workRows.value[1].workName, '旧章节_标题')
   h.selected[name] = true
   assert.deepEqual(Array.from(h.selectedNames.value), [name])
+})
+
+test('merge and BGM show source titles while selections retain package and stem identities', () => {
+  const stem = '第 001 章 标题_章节内标签_'
+  const displayName = '第 001 章 标题【章节内标签】！'
+  const merge = harness('Merge')
+  merge.pkgNames.value = [stem, '保留_原名']
+  merge.pkgStats.value = { [stem]: { ...file(stem, true), display_name: displayName } }
+  assert.equal(merge.workRows.value[0].workName, displayName)
+  assert.equal(merge.workRows.value[0].workKey, stem)
+  assert.equal(merge.workRows.value[1].workName, '保留_原名')
+  merge.selected[stem] = true
+  assert.deepEqual(Array.from(merge.selectedNames.value), [stem])
+  const bgm = harness('BGM')
+  bgm.chapterRows.value = [{ ...chapter(stem), display_name: displayName }, chapter('保留_原名')]
+  assert.equal(bgm.workRows.value[0].workName, displayName)
+  assert.equal(bgm.workRows.value[0].workKey, stem)
+  assert.equal(bgm.workRows.value[1].workName, '保留_原名')
+  bgm.selected[stem] = true
+  assert.deepEqual(Array.from(bgm.selectedMixable.value), [stem])
 })
 
 for (const change of ['project', 'account', 'leave'])
@@ -414,4 +434,40 @@ test('retry attaches the batch only after the failed task has been requeued', as
   await vue.nextTick()
   assert.equal(h.taskId.value, 'failed-batch')
   assert.equal(h.busy.value, true)
+})
+
+
+test('chapter batch stays active after its first completion and cancels every remaining task', async () => {
+  const h = harness('BatchTTS')
+  const row = (id, status, completed) => ({ id, status, module: 'tts-batch', task_type: 'tts.batch', label: id,
+    progress: status === 'succeeded' ? 1 : 0, logs: [], current: '', result: { total: 10, completed, failed: [] },
+  })
+  h.taskBatch.track(['one', 'two', 'three'])
+  h.taskStore.projectTasks = [row('one', 'succeeded', 10), row('two', 'running', 0), row('three', 'pending', 0)]
+  await vue.nextTick()
+  assert.equal(h.task.value.status, 'running')
+  const cancelled = []
+  h.taskStore.control = async id => cancelled.push(id)
+  await h.taskBatch.cancel()
+  assert.deepEqual(cancelled, ['two', 'three'])
+  // Completed rows falling outside the replay window still contribute to the batch.
+  h.taskStore.projectTasks = [row('two', 'running', 0), row('three', 'pending', 0)]
+  await vue.nextTick()
+  assert.equal(h.task.value.result.completed, 10)
+  h.taskStore.projectTasks = [row('two', 'succeeded', 10), row('three', 'succeeded', 10)]
+  // Read synchronously before the page's completion watcher clears its selection.
+  assert.equal(h.task.value.status, 'succeeded')
+  assert.equal(h.task.value.result.completed, 30)
+  await vue.nextTick()
+  assert.equal(h.busy.value, false)
+})
+
+test('switching project discards a cached chapter batch', async () => {
+  const h = harness('BatchTTS')
+  h.taskBatch.track(['one', 'two'])
+  h.taskStore.projectTasks = [{ id: 'one', status: 'running', logs: [], progress: 0, result: {} }]
+  await vue.nextTick()
+  h.project.activeProjectId = 'project-b'
+  assert.equal(h.taskId.value, null)
+  assert.equal(h.task.value, null)
 })
