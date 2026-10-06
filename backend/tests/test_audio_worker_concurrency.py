@@ -65,6 +65,8 @@ def audio_project():
     (("tts.merge", {"package": "one"}), ("bgm.mix", {"stem": "one"}), False),
     (("tts.merge", {"package": "one"}), ("tts.merge", {"package": "one"}), False),
     (("tts.merge", {"package": "one"}), ("tts.merge", {"package": "one "}), False),
+    (("tts.merge", {"package": "chapter??"}), ("tts.merge", {"package": "chapter__"}), False),
+    (("tts.merge", {"package": "chapter??"}), ("bgm.mix", {"stem": "chapter__"}), False),
     (("tts.merge", {"package": "one"}), ("tts.reset", {"scripts": []}), False),
     (("tts.batch", {"scripts": []}), ("tts.merge", {"package": "one"}), False),
     (("bgm.mix", {"stem": "one"}), ("bgm.match", {"chapters": []}), False),

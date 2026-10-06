@@ -27,7 +27,7 @@ from ..core import pathio
 from ..core.config import get_config
 from ..core.concurrency import merge_gate, merge_concurrency_limit
 from ..core.file_lock import exclusive_file_lock
-from ..core.paths import get_or_prepare_layout
+from ..core.paths import get_or_prepare_layout, merged_audio_filename
 from ..core.task_control import TaskCancelled
 from .tts import resolve_engine, run_tts_subprocess
 from . import tts_batch as Batch
@@ -62,9 +62,6 @@ def thread_budget(limit: int | None = None, cpu: int | None = None) -> int:
     L = max(1, limit if limit is not None else concurrency_limit())
     n = cpu if cpu is not None else (os.cpu_count() or 4)
     return max(1, (n // 2) // L)
-
-# Windows-illegal filename characters (a package name becomes an output file name).
-_BAD_FILENAME_CHARS = set('\\/:*?"<>|')
 
 
 def collect_segments(manifest, ws):
@@ -159,8 +156,7 @@ def _output_name(manifest_path: Path, layout) -> str:
     top-level manifest. Keeps one merged file per source book in ``06_audio_merge/``."""
     if manifest_path.parent == layout.audio_chunk:  # top-level (pre-package) manifest
         return "cloned_audiobook.mp3"
-    stem = "".join("_" if c in _BAD_FILENAME_CHARS else c for c in manifest_path.parent.name).strip()
-    return f"{stem or 'audiobook'}.mp3"
+    return merged_audio_filename(manifest_path.parent.name)
 
 
 def _stale_voice_speakers(manifest, layout) -> list[str]:

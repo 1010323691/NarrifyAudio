@@ -19,7 +19,7 @@ from sqlalchemy import func, or_, select
 from ..core.config import TextConfig
 from ..core import config as core_config
 from ..core.file_lock import exclusive_file_lock, shared_file_lock
-from ..core.paths import WORKSPACE_DIRS
+from ..core.paths import WORKSPACE_DIRS, merged_audio_filename
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.task_control import TaskCancelled
 from ..engines.book import (
@@ -135,7 +135,8 @@ def _workspace_engine_lock(claim: TaskClaim):
             if parallel_audio:
                 # Merge and mix of the same chapter share this lock through
                 # complete_claim/rollback, including the delivery metadata commit.
-                identity = safe_display_name(f"{subject.strip()}.mp3").casefold()
+                filename = merged_audio_filename(subject) if claim.task_type == "tts.merge" else f"{subject}.mp3"
+                identity = filename.casefold()
                 chapter_lock = workspace / ".tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
                 locks.enter_context(exclusive_file_lock(chapter_lock))
             with SessionLocal() as db:
