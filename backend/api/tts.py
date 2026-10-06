@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import uuid
@@ -34,6 +35,7 @@ from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
+from ..engines.book import detect_chapters
 from ..engines.audio import probe_duration
 from ..engines.merge import boundary_gap_ms
 from ..platform.database import get_db
@@ -754,6 +756,35 @@ def _stat_key(path) -> tuple | None:
         return None
 
 
+def _chapter_source_path(name: str, layout) -> Path | None:
+    split_text = getattr(layout, "split_text", None)
+    if split_text is None or not name or Path(name).name != name:
+        return None
+    root = split_text.resolve()
+    source = (root / f"{Path(name).stem}.txt").resolve()
+    return source if source.is_relative_to(root) else None
+
+
+def _chapter_display_name(name: str, layout) -> str:
+    """Recover title punctuation from the source, keeping the repaired chapter number."""
+    fallback = Path(name).stem
+    source = _chapter_source_path(name, layout)
+    if source is None:
+        return fallback
+    try:
+        with source.open("r", encoding="utf-8-sig") as stream:
+            opening = stream.read(4096)
+        # The first split can include the book's introduction before its header.
+        chapters = detect_chapters(opening)
+    except (OSError, UnicodeError):
+        return fallback
+    if not chapters or not chapters[0].get("title"):
+        return fallback
+    prefix = re.match(r"^(第\s*\S+?\s*[章回节卷集部篇])", fallback)
+    header = opening[chapters[0]["start"]:].splitlines()[0].strip()
+    return f"{prefix.group(1)} {chapters[0]['title']}" if prefix else header
+
+
 def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | None = None) -> dict:
     """One row of the multi-file 待合成 list (``GET /batch-status?scripts=…``).
 
@@ -767,7 +798,8 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     ``out_dir`` (the package dir) switches the completion count to the batched
     ``Batch.count_completion(out_dir=…)`` existence check; omitted, the per-entry rule runs.
     """
-    out = {"name": name, "total": 0, "completed": 0, "remaining": 0,
+    out = {"name": name, "display_name": _chapter_display_name(name, layout),
+           "total": 0, "completed": 0, "remaining": 0,
            "complete": False, "speakers": 0, "ready": 0, "missing": []}
     src = resolve_parsed_json(name)
     if not src.exists():
@@ -812,8 +844,10 @@ def _cached_file_batch_status(name: str, layout, voice_config: dict) -> dict:
         return _file_batch_status(name, layout, voice_config)
     src = resolve_parsed_json(name)
     pkg_dir = layout.audio_chunk / Batch.package_for(src)
+    chapter_source = _chapter_source_path(name, layout)
     key = (str(layout.workspace) or "", name,
            _stat_key(src),
+           _stat_key(chapter_source) if chapter_source is not None else None,
            _stat_key(pkg_dir / "manifest.json"),
            _stat_key(pkg_dir),
            _stat_key(layout.voice_profiles / "voice_config.json"))
@@ -829,6 +863,16 @@ def _cached_file_batch_status(name: str, layout, voice_config: dict) -> dict:
     # A MISS returns a copy too: the stored row must stay pristine (the pre-cache contract
     # was a fresh dict per call — a caller mutating the first row must not poison the cache).
     return {**row, "missing": list(row["missing"])}
+
+
+class BatchStatusRequest(BaseModel):
+    scripts: list[str]
+
+
+@router.post("/batch-status")
+def batch_status_files(req: BatchStatusRequest) -> dict:
+    """Read multi-file progress without putting an entire book in the URL."""
+    return batch_status(scripts=req.scripts) if req.scripts else {"files": []}
 
 
 # ``scripts`` MUST be declared as a QUERY param: in this FastAPI version a bare
@@ -981,10 +1025,17 @@ def _package_merge_status(name: str, layout) -> dict:
     return out
 
 
-# ``packages`` MUST be declared as a QUERY param: in this FastAPI version a bare
-# ``list[...]`` default is treated as a JSON request body and the repeated ``?packages=``
-# params are silently ignored (same trap as ``/batch-status``). ``Annotated`` keeps the
-# plain ``None`` default, so direct (test) calls still work without going through FastAPI.
+class MergeStatusRequest(BaseModel):
+    packages: list[str]
+
+
+@router.post("/merge-status")
+def merge_status_packages(req: MergeStatusRequest) -> dict:
+    """Read package progress with a bounded URL, including for large books."""
+    return merge_status(packages=req.packages)
+
+
+# Keep the legacy repeated query parameters explicit for existing GET callers.
 @router.get("/merge-status")
 def merge_status(packages: Annotated[list[str] | None, Query()] = None) -> dict:
     """Merge readiness of the chosen audio package(s) — the merge page's package rows.

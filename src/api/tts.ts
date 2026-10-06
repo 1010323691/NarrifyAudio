@@ -102,11 +102,9 @@ export function submitBatchReset(scripts: string[]): Promise<{ task_id: string }
 /** 音频合成进度（每文件）：each file's 【已合成 / 总段落】· 角色 · 已就绪声音, plus the
  *  【已合成】 flag when a file's segments are all done. Reads the package manifests (written
  *  incrementally as synthesis proceeds), so polling while a run streams gives live, real
- *  per-row counts. FastAPI's ``list[str]`` query param = one repeated ``scripts=`` per file. */
+ *  per-row counts. Send file names in the body so large books do not exceed HTTP URL limits. */
 export function batchStatusFiles(scripts: string[]): Promise<BatchStatusFiles> {
-  const q = new URLSearchParams()
-  for (const s of scripts) q.append('scripts', s)
-  return http.get<BatchStatusFiles>(`/api/tts/batch-status?${q.toString()}`)
+  return http.post<BatchStatusFiles>('/api/tts/batch-status', { scripts })
 }
 
 /** 音频合并：start one merge Task per selected package (always MP3 — the M4B half-branch
@@ -123,10 +121,8 @@ export function runMerge(packages: string[] = []): Promise<{
 
 /** 音频合并进度（每包）：each package's 【已合成 / 总段数】→ 已就绪 readiness. ``total``
  *  comes from the source parsed JSON (never the manifest length — see the backend), so a
- *  mid-cancelled synthesis is not reported ready. FastAPI's ``list[str]`` query param =
- *  one repeated ``packages=`` per package. */
+ *  mid-cancelled synthesis is not reported ready. Package names are carried in the JSON
+ *  request body to support large package lists. */
 export function mergeStatusPackages(packages: string[]): Promise<MergeStatusPackages> {
-  const q = new URLSearchParams()
-  for (const p of packages) q.append('packages', p)
-  return http.get<MergeStatusPackages>(`/api/tts/merge-status?${q.toString()}`)
+  return http.post<MergeStatusPackages>('/api/tts/merge-status', { packages })
 }

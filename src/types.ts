@@ -324,6 +324,8 @@ export interface BatchFileResult {
 /** Per-file synthesis stats (the 待合成 rows; ``GET /api/tts/batch-status?scripts=…``). */
 export interface BatchFileStatus {
   name: string
+  /** Original chapter title for display; name remains the file identity. */
+  display_name?: string
   total: number
   completed: number
   remaining: number

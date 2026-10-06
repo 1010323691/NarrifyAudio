@@ -2191,12 +2191,29 @@ def test_batch_status_multi_counts(workspace):
     assert (s["speakers"], s["ready"]) == (2, 1) and s["missing"] == ["B"]
     assert (t["total"], t["completed"]) == (2, 0)
     assert (t["speakers"], t["ready"], t["missing"]) == (1, 1, [])
-    assert z == {"name": "nope.json", "total": 0, "completed": 0, "remaining": 0,
+    assert z == {"name": "nope.json", "display_name": "nope", "total": 0, "completed": 0, "remaining": 0,
                  "complete": False, "speakers": 0, "ready": 0, "missing": []}
     # a file whose every segment is done (ok + file on disk) earns the 已合成 flag
     _seed_done_package(workspace, "s", [(0, "A", "hello", "0001.mp3"),
                                         (1, "B", "world", "0002.mp3")])
     assert batch_status(None, ["s.json"])["files"][0]["complete"] is True
+
+
+def test_batch_status_recovers_source_title_and_invalidates_changed_title(workspace):
+    from backend.api.tts import batch_status
+    from backend.core.paths import get_or_prepare_layout
+    layout = get_or_prepare_layout()
+    name = "第 001 章 崩坏的吞噬世界_重生者夜雨_.json"
+    (layout.parsed_json / name).write_text('[{"speaker":"A","text":"hello"}]', encoding="utf-8")
+    source = layout.split_text / name.replace(".json", ".txt")
+    source.write_text("书籍简介：第一份分册保留前言。\n\n第1章 崩坏的吞噬世界：重生者夜雨？\n原文内容", encoding="utf-8")
+    row = batch_status(scripts=[name])["files"][0]
+    assert row["name"] == name
+    assert row["display_name"] == "第 001 章 崩坏的吞噬世界：重生者夜雨？"
+    source.write_text("第1章 标题里真实的_下划线，以及问号？\n原文内容", encoding="utf-8")
+    assert batch_status(scripts=[name])["files"][0]["display_name"] == "第 001 章 标题里真实的_下划线，以及问号？"
+    source.unlink()
+    assert batch_status(scripts=[name])["files"][0]["display_name"] == name[:-5]
 
 
 def test_batch_status_keeps_voice_change_stale_after_restart(workspace):
@@ -2290,7 +2307,7 @@ def test_batch_status_multi_no_workspace_degrades(monkeypatch, tmp_path):
         from backend.api.tts import batch_status
         r = batch_status(None, ["a.json", "b.json"])
         assert r == {"files": [
-            {"name": n, "total": 0, "completed": 0, "remaining": 0,
+            {"name": n, "display_name": n[:-5], "total": 0, "completed": 0, "remaining": 0,
              "complete": False, "speakers": 0, "ready": 0, "missing": []}
             for n in ("a.json", "b.json")]}
     finally:

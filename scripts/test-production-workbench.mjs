@@ -9,6 +9,29 @@ const require = createRequire(import.meta.url)
 const vue = require('vue')
 const { parse, compileTemplate } = require('@vue/compiler-sfc')
 
+test('large synthesis and merge status selections use bounded URLs and JSON bodies', async () => {
+  const calls = []
+  const module = { exports: {} }
+  const source = readFileSync(new URL('../src/api/tts.ts', import.meta.url), 'utf8')
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText
+  runInNewContext(compiled, {
+    module, exports: module.exports,
+    require: () => ({ http: {
+      post: async (url, body) => { calls.push({ url, body }); return {} },
+      get: () => assert.fail('large status lists must not be placed in GET URLs'),
+    } }),
+  })
+  const names = Array.from({ length: 2000 }, (_, i) => `第${i}章 中文标题 音频合成条目.json`)
+  await module.exports.batchStatusFiles(names)
+  await module.exports.mergeStatusPackages(names)
+  assert.equal(calls[0].url, '/api/tts/batch-status')
+  assert.equal(calls[1].url, '/api/tts/merge-status')
+  assert.equal(calls[0].body.scripts, names)
+  assert.equal(calls[1].body.packages, names)
+})
+
 test('production templates compile with the actual Vue template compiler', () => {
   for (const file of ['components/WorkbenchToolbar.vue', 'components/WorkbenchActionBar.vue', 'components/ProductionWorkbench.vue', 'views/TextFormat.vue', 'views/ScriptParse.vue', 'views/voices/VoicesWorkbench.vue', 'views/Voices.vue', 'views/BatchTTS.vue', 'views/Merge.vue', 'views/BGM.vue']) {
     const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')
@@ -213,6 +236,21 @@ test('synthesis refresh is atomic and the newest response wins', async () => {
   assert.equal(h.fileNames.value[0], 'new.json')
   assert.equal(h.statuses.value[0].name, 'new.json')
   assert.equal(h.filesLoading.value, false)
+})
+
+test('synthesis shows original titles while keeping file names for selections and submissions', async () => {
+  const name = '第 001 章 崩坏的吞噬世界_重生者夜雨_.json'
+  const displayName = '第 001 章 崩坏的吞噬世界：重生者夜雨？'
+  const h = harness('BatchTTS', {
+    listDir: async () => ({ items: [{ name, is_dir: false }, { name: '旧章节_标题.JSON', is_dir: false }] }),
+    batchStatusFiles: async () => ({ files: [{ ...file(name), display_name: displayName }] }),
+  })
+  await h.refreshRows()
+  assert.equal(h.workRows.value[0].workName, displayName)
+  assert.equal(h.workRows.value[0].workKey, name)
+  assert.equal(h.workRows.value[1].workName, '旧章节_标题')
+  h.selected[name] = true
+  assert.deepEqual(Array.from(h.selectedNames.value), [name])
 })
 
 for (const change of ['project', 'account', 'leave'])

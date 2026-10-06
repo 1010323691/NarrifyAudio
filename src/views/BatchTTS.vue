@@ -91,6 +91,7 @@ function matches(i: FileItem): boolean {
 /** A 待合成 row: the directory's file name + its live stats (zeros when stats are missing). */
 interface FileRow {
   name: string
+  display_name?: string
   total: number
   completed: number
   remaining: number
@@ -453,7 +454,7 @@ const workRows = computed(() =>
   rows.value.map((row) => ({
     ...row,
     workKey: row.name,
-    workName: row.name,
+    workName: row.display_name || row.name.replace(/\.json$/i, ''),
     workState: row.complete
       ? 'done'
       : row.missing.length
