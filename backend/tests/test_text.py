@@ -166,6 +166,29 @@ def test_chapter_formatting():
     assert format_text(once, CFG)["text"] == once
 
 
+def test_episode_quoted_title_formatting():
+    for header in ['第四话「师傅」', '第４话『师傅』', '第四話「師傅」']:
+        assert is_chapter_title(header)
+        source = f"上一段尚未结束\n{header}\n他推开了门。"
+        expected_header = header.replace('话', '话 ').replace('話', '話 ')
+        once = format_text(source, CFG)["text"]
+        assert once == f"上一段尚未结束\n\n{expected_header}\n\n他推开了门。"
+        assert format_text(once, CFG)["text"] == once
+    assert is_chapter_title('书名 第四话「师傅」')
+    assert is_chapter_title('第四话')
+    assert not is_chapter_title('第四话还没看完')
+    assert not is_chapter_title('他说第四话「师傅」很好看')
+
+
+def test_special_quoted_chapter_headers_are_isolated():
+    for header in ['序章', '外传「格雷拉特家的母亲」', '外傳『母親』', '番外「朋友」']:
+        assert is_chapter_title(header)
+        result = format_text(f"前文未完\n{header}\n后文开始。", CFG)
+        assert result["text"] == f"前文未完\n\n{header}\n\n后文开始。"
+        assert result["stats"]["chapters"] == 1
+    assert not is_chapter_title('外传说的是母亲的故事。')
+
+
 def test_chapter_title_recognition():
     # chapter title positive
     for s in ["第一章", "第1章", "第一章 xxx", "Chapter 1", "Chapter 1: Sub",

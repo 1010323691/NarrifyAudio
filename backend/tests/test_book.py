@@ -415,6 +415,105 @@ def test_smart_clean_novel():
     assert res["original_count"] == len(again)
 
 
+def test_episode_quoted_titles_survive_formatting_and_split():
+    from backend.core.config import TextConfig
+    from backend.engines.text import format_text
+
+    for unit in ['话', '話']:
+        source = f"前言尚未结束\n第四{unit}「师傅」\n正文内容。\n第五{unit}『启程』\n后续正文。"
+        formatted = format_text(source, TextConfig())["text"]
+        for text in [source, formatted]:
+            chapters = B.analyze_text(text)["chapters"]
+            assert [c["num"] for c in chapters] == [4, 5]
+            assert [c["title"] for c in chapters] == ['「师傅」', '『启程』']
+            assert text[chapters[1]["start"]:].startswith(f"第五{unit}")
+            assert "".join(B.chapter_content({"text": text}, c) for c in chapters) == text
+        assert B.analyze_text(f"第四{unit}「师傅」")["chapters"][0]["num"] == 4
+
+
+def test_light_novel_arc_detects_all_leaf_chapters():
+    from backend.core.config import TextConfig
+    from backend.engines.text import format_text
+
+    headers = [
+        "序章", '第一话 「难道是：异世界」', '第二话 「心生反感的女仆」',
+        '第三话 「魔术教科书」', '第四话 「师傅」', '第五话 「剑术与魔术」',
+        '第六话 「尊敬的理由」', '第七话 「朋友」', '第八话 「迟钝」',
+        '第九话 「紧急家族会议」', '第十话 「遭遇瓶颈」', '第十一话 「离别」',
+        '外传「格雷拉特家的母亲」',
+    ]
+    source = "第一章 幼年期\n" + "\n".join(
+        header + "\n" + "这一节的正文内容。" * 30 for header in headers
+    )
+    for text in [source, format_text(source, TextConfig())["text"]]:
+        chapters = B.analyze_text(text)["chapters"]
+        assert len(chapters) == 13
+        assert [c["num"] for c in chapters] == [None, *range(1, 12), None]
+        assert chapters[0]["title"] == "序章"
+        assert chapters[-1]["title"] == headers[-1]
+        assert chapters[4]["title"] == '「师傅」'
+        assert "".join(B.chapter_content({"text": text}, c) for c in chapters) == text
+        repaired = B.smart_repair(text, chapters)
+        assert repaired["status"] != "error"
+        assert len(repaired["chapters"]) == 13
+        assert repaired["report"]["removed"] == []
+        assert "".join(B.chapter_content({"text": text}, c) for c in repaired["chapters"]) == text
+
+
+def test_light_novel_numbering_restarts_in_each_arc():
+    # Identical episode titles and bodies in separate arcs must stay intact.
+    source = "\n".join(
+        f"第{arc}章 分组\n" + "\n".join(
+            f"第{episode}话 「标题」\n" + "正文内容。" * 50
+            for episode in [1, 2, 3]
+        )
+        for arc in [1, 2]
+    )
+    chapters = B.analyze_text(source)["chapters"]
+    assert [c["num"] for c in chapters] == [1, 2, 3, 1, 2, 3]
+    assert source[chapters[3]["start"]:].startswith("第2章 分组")
+    assert not B.check_chapter_sequence(chapters)["hasIssues"]
+    repaired = B.smart_repair(source, chapters)
+    assert repaired["status"] != "error"
+    assert len(repaired["chapters"]) == 6
+    assert repaired["report"]["removed"] == []
+    assert all("duplicate_kept" not in c["repair"]["actions"] for c in repaired["chapters"])
+    assert "".join(B.chapter_content({"text": source}, c) for c in repaired["chapters"]) == source
+
+
+def test_special_chapter_headers_require_a_title_boundary():
+    source = '序章\n正文。\n第一章 开篇\n正文。\n外传「母亲」\n正文。'
+    chapters = B.analyze_text(source)["chapters"]
+    assert [c["title"] for c in chapters] == ['序章', '开篇', '外传「母亲」']
+    assert B.analyze_text('序章之后才是正文。\n外传说的是母亲的故事。')["chapters"] == []
+
+
+def test_adjacent_repeated_prefixed_headers_do_not_create_title_only_chapters():
+    for separator in ["\n", "\n\n", "\r\n\r\n"]:
+        source = separator.join(
+            part
+            for number in [1, 2, 3]
+            for part in [
+                *[f"第一卷 异界的兽医第{number}章标题{number}"] * 3,
+                "正文内容。" * 50,
+            ]
+        )
+        chapters = B.analyze_text(source)["chapters"]
+        assert [c["num"] for c in chapters] == [1, 2, 3]
+        repaired = B.smart_repair(source, chapters)
+        assert repaired["status"] != "error"
+        assert len(repaired["chapters"]) == 3
+        assert all(c["chars"] > 200 for c in repaired["chapters"])
+        assert all("duplicate_kept" not in c["repair"]["actions"] for c in repaired["chapters"])
+        assert "".join(B.chapter_content({"text": source}, c) for c in repaired["chapters"]) == source
+
+
+def test_internal_scan_uses_physical_header_line_for_inline_prefix():
+    source = "第一卷 异界的兽医第一章穿越了\n\n第一卷 异界的兽医第一章穿越了\n\n正文内容。"
+    chapter = {"start": 0, "end": len(source), "num": 1}
+    assert B._internal_title_scan(source, chapter, 0) == []
+
+
 def test_chapter_header_prefix_and_spacing():
     # detect prefixed and inline chapter headers
     prefix = "\u9886\u5730\u98ce\u4e91"

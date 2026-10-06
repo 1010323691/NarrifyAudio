@@ -163,13 +163,13 @@ BOOK_INLINE_PREFIXED_CHAPTER_RE = re.compile(
 )
 
 # Broader line-start forms used by Word/PDF/web exports: optional spaces,
-# full-width digits, wrappers, and alternate chapter units. ``章节回集卷部篇幕场折``
+# full-width digits, wrappers, and alternate chapter units. ``章节回话話集卷部篇幕场折``
 # are accepted only as one dominant series (see _chapter_candidates).
 BOOK_FLEX_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?:[☆★◆◇●○·•\-—_=~～]+[ \t\u3000]*)?"
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
+    r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])[ \t\u3000]*"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
@@ -180,7 +180,7 @@ BOOK_FLEX_PREFIXED_CHAPTER_RE = re.compile(
     r"(?P<prefix>[^\s\r\n][^\r\n]{0,39}?)[ \t\u3000]+"
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*\u7b2c[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
+    r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])[ \t\u3000]*"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
@@ -190,7 +190,7 @@ BOOK_INLINE_FLEX_PREFIXED_CHAPTER_RE = re.compile(
     r"(?<![\s])(?P<prefix>[^\s\r\n，。！？；：、‘’“”]{1,20})"
     r"[ \t\u3000]+(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*\u7b2c[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
+    r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])[ \t\u3000]*"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿\-—–]*(?P<title>[^\r\n]{0,50})",
     re.MULTILINE,
 )
@@ -202,7 +202,7 @@ BOOK_INLINE_FLEX_PREFIXED_CHAPTER_RE = re.compile(
 BOOK_COMPACT_PREFIXED_CHAPTER_RE = re.compile(
     r"^[ \t\u3000]*(?P<prefix>[^\s\r\n]{3,39}?)[ \t\u3000]*"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
+    r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])[ \t\u3000]*"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
@@ -212,7 +212,7 @@ BOOK_INLINE_COMPACT_PREFIXED_CHAPTER_RE = re.compile(
     r"(?<![\s\r\n])"
     r"(?P<prefix>[^\s\r\n，。！？；：、‘’“”]{3,20})"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])[ \t\u3000]*"
+    r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])[ \t\u3000]*"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
     r"(?P<title>[^\r\n]{0,50})",
     re.MULTILINE,
@@ -260,7 +260,7 @@ BOOK_SUFFIX_UNIT_RE = re.compile(
     r"^[ \t\u3000]*(?:[☆★◆◇●○·•\-—_=~～]+[ \t\u3000]*)?"
     r"(?:[【〖〔（(「『《<\[［])?[ \t\u3000]*"
     r"(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
-    r"[ \t\u3000]*(?P<kind>[章节回集卷部篇幕场折])"
+    r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
     r"(?P<title>[^\r\n]{0,50})[ \t\u3000\r]*$",
     re.MULTILINE,
@@ -302,6 +302,12 @@ BOOK_RANGE_HEADER_RE = re.compile(
     r"\u7b2c\s*(?P<start>[0-9\u96f6\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u4ebf\u5eff\u5345\u5369]+)\s*\u7ae0"
     r"\s*[-~\uff5e\u2014\u2013\u81f3\u5230]+\s*"
     r"(?:\u7b2c\s*)?(?P<end>[0-9\u96f6\u3007\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e\u5343\u4e07\u4ebf\u5eff\u5345\u5369]+)\s*\u7ae0"
+)
+
+BOOK_SPECIAL_CHAPTER_RE = re.compile(
+    r"^[ \t\u3000]*(?P<label>序章|楔子|引子|序言|前言|终章|尾声|后记|番外|外传|外傳|附录)"
+    r'(?:[ \t\u3000：:、\-—]+[^\r\n]{0,50}|[「『“"][^\r\n]{1,50}|)[ \t\u3000\r]*$',
+    re.MULTILINE,
 )
 
 
@@ -527,11 +533,27 @@ def _chapter_candidates(text: str) -> list[dict]:
             }
         )
 
-    # Prefer explicit 章 markers when a file mixes chapter and sub-section
-    # markers. If there is no 章 series, the most frequent alternate unit wins.
+    # Prefer leaf episodes within light-novel arcs. Other mixed-unit exports
+    # retain the existing preference for 章, then the dominant alternate unit.
     explicit = [c for c in raw if not c["weak"]]
     kind_counts = Counter(c["kind"] for c in explicit)
-    if "章" in kind_counts and kind_counts["章"] >= 2:
+    explicit_prefix_positions: dict[str, set[int]] = {}
+    for c in explicit:
+        if c["prefix"]:
+            explicit_prefix_positions.setdefault(c["prefix"], set()).add(c["index"])
+    episode_positions = {
+        c["index"] for c in explicit
+        if c["kind"] in {"话", "話"} and (
+            not c["prefix"] or len(explicit_prefix_positions[c["prefix"]]) >= 2
+        )
+    }
+    parents = []
+    if len(episode_positions) >= 2:
+        # In light novels, 第N章 names an arc containing 第N话 episodes.
+        # Keep the leaf series and preserve arc headings in the source slices.
+        parents = sorted({c["index"] for c in explicit if c["kind"] == "章" and not c["prefix"]})
+        raw = [c for c in raw if c["kind"] in {"话", "話"}]
+    elif "章" in kind_counts and kind_counts["章"] >= 2:
         raw = [c for c in raw if c["weak"] or c["kind"] == "章"]
     elif kind_counts:
         dominant = kind_counts.most_common(1)[0][0]
@@ -568,6 +590,7 @@ def _chapter_candidates(text: str) -> list[dict]:
     # Do this after prefix validation so a real second occurrence of the same
     # number, separated by body text, is still reported as a duplicate.
     deduped: list[dict] = []
+    previous_header_end = -1
     for candidate in candidates:
         if deduped:
             previous = deduped[-1]
@@ -590,14 +613,22 @@ def _chapter_candidates(text: str) -> list[dict]:
                 # prefixed header; one physical line must yield one boundary.
                 continue
             if (
-                not candidate["prefix"]
-                and previous["prefix"]
-                and same_number
+                same_number
+                and (
+                    (not candidate["prefix"] and previous["prefix"])
+                    or clean_chapter_title(candidate["title"]) == clean_chapter_title(previous["title"])
+                )
             ):
-                line_end = text.find("\n", previous["index"])
-                if line_end >= 0 and text[line_end + 1 : candidate["index"]].strip() == "":
+                line_start = candidate_line + 1
+                if previous_header_end >= 0 and text[previous_header_end + 1 : line_start].strip() == "":
+                    previous_header_end = text.find("\n", candidate["index"])
+                    if previous_header_end < 0:
+                        previous_header_end = len(text)
                     continue
         deduped.append(candidate)
+        previous_header_end = text.find("\n", candidate["index"])
+        if previous_header_end < 0:
+            previous_header_end = len(text)
 
     # Normalize range headers after all regex variants have been de-duplicated
     # so a line such as ``第190章-第194章`` becomes one boundary with an empty
@@ -617,14 +648,31 @@ def _chapter_candidates(text: str) -> list[dict]:
         if start is not None and end is not None and start == parse_chapter_number(candidate["numStr"]) and end > start:
             candidate["range_end"] = end
             candidate["title"] = ""
+    for m in BOOK_SPECIAL_CHAPTER_RE.finditer(text):
+        deduped.append({
+            "index": m.start(), "numStr": m.group("label"),
+            "title": m.group(0).strip(), "prefix": "", "kind": "special", "weak": False,
+        })
+    deduped.sort(key=lambda c: c["index"])
+    if parents:
+        for candidate in deduped:
+            candidate["section"] = bisect.bisect_right(parents, candidate["index"])
+        # The first leaf in an arc owns its heading, so the heading does not
+        # end up at the end of the previous arc's final episode.
+        seen_sections = set()
+        for candidate in deduped:
+            section = candidate["section"]
+            if section and section not in seen_sections:
+                candidate["index"] = parents[section - 1]
+            seen_sections.add(section)
     return deduped
 
 
 # Main chapter-header shape plus tolerant export variants. Kept next to the
 # detector so the user-facing analyze response describes the actual rule.
 EXPECTED_CHAPTER_FORMAT = (
-    "第N章（N 为阿拉伯数字或中文数字；兼容空格、全角数字、括号、书名/系列前缀、卷/回/节等单位、"
-    "Chapter N/Part N，以及连续递增的 1、标题 格式）"
+    "第N章（N 为阿拉伯数字或中文数字；兼容空格、全角数字、括号、书名/系列前缀、卷/回/话/节等单位、"
+    "Chapter N/Part N，以及连续递增的 1、标题 格式；支持序章/外传，章下有多话时按话分册）"
 )
 
 
@@ -639,6 +687,7 @@ def detect_chapters(text: str) -> list[dict]:
                 "index": m["index"],
                 "numStr": m["numStr"],
                 "title": title,
+                **({"section": m["section"]} if "section" in m else {}),
                 **({"range_end": m["range_end"]} if "range_end" in m else {}),
             }
         )
@@ -657,6 +706,7 @@ def detect_chapters(text: str) -> list[dict]:
                 "numStr": k["numStr"],
                 "num": parse_chapter_number(k["numStr"]),
                 "title": k["title"],
+                **({"section": k["section"]} if "section" in k else {}),
                 **({"range_end": k["range_end"]} if "range_end" in k else {}),
                 "chars": 0,
             }
@@ -672,6 +722,8 @@ def filter_spurious_chapters(found: list[dict]) -> list[dict]:
         return found
     keep = [True] * n
     for i in range(1, n - 1):
+        if found[i].get("section") != found[i - 1].get("section") or found[i].get("section") != found[i + 1].get("section"):
+            continue
         prev = parse_chapter_number(found[i - 1]["numStr"])
         cur = parse_chapter_number(found[i]["numStr"])
         nxt = parse_chapter_number(found[i + 1]["numStr"])
@@ -762,7 +814,10 @@ def check_chapter_sequence(chapters: list[dict]) -> dict:
     }
     prev = None
     seen: set[int] = set()
+    section = None
     for c in chapters:
+        if c.get("section") != section:
+            prev, seen, section = None, set(), c.get("section")
         num = parse_chapter_number(c["numStr"])
         if num is None:
             report["unparseable"] += 1
@@ -992,7 +1047,7 @@ def _internal_title_scan(text: str, ch: dict, own_header_line: int) -> list[dict
             continue  # the chapter's own header line
         if parse_chapter_number(m["numStr"]) == ch.get("num"):
             own_line_end = text.find("\n", own_header_line)
-            if own_line_end >= 0 and text[own_line_end + 1 : abs_pos].strip() == "":
+            if own_line_end >= 0 and text[own_line_end + 1 : _line_start_of(text, abs_pos)].strip() == "":
                 # Some exporters repeat a prefixed header and a bare header
                 # on adjacent lines. The bare line is a mirror, not a second
                 # copy of the chapter body.
@@ -1269,6 +1324,8 @@ def smart_repair(
     for i, c in enumerate(work):
         own = c["num"]
         nxt = work[i + 1]["num"] if i + 1 < len(work) else None
+        if i + 1 < len(work) and work[i + 1].get("section") != c.get("section"):
+            nxt = None
         range_end = c.get("range_end")
         if own is not None and range_end is not None and range_end > own:
             # Range markers are authoritative for the numbers they name. A
@@ -1515,12 +1572,12 @@ def smart_repair(
     for c in work:
         c["fingerprint"] = _normalized_fingerprint(text[c["start"]: c["end"]])
     # duplicate groups (same parseable number), physical order
-    groups: dict[int, list[dict]] = {}
+    groups: dict[tuple, list[dict]] = {}
     for c in work:
         if c["num"] is not None:
-            groups.setdefault(c["num"], []).append(c)
+            groups.setdefault((c.get("section"), c["num"]), []).append(c)
     drop: set[int] = set()  # ids() of chapters to drop
-    for num, members in groups.items():
+    for (_, num), members in groups.items():
         kept_fps: list[str] = [members[0]["fingerprint"]]  # first occurrence always kept
         for c in members[1:]:
             if c["fingerprint"] in kept_fps:
@@ -1559,7 +1616,10 @@ def smart_repair(
     # gap-before flag (same chain semantics as check_chapter_sequence: the
     # number jumped up from the last parseable predecessor) — report only.
     prev_num: Optional[int] = None
+    section = None
     for c in work:
+        if c.get("section") != section:
+            prev_num, section = None, c.get("section")
         if c["num"] is None:
             continue
         if prev_num is not None and c["num"] > prev_num + 1:
@@ -1648,7 +1708,7 @@ def smart_repair(
                 add_action("long_chapter_split_reduced", "low")
         if c.get("_truncated"):
             add_action("duplicate_truncated", "medium")
-        if c["num"] in dup_nums:
+        if (c.get("section"), c["num"]) in dup_nums:
             add_action("duplicate_kept", "medium")
         if c["num"] is not None and c["num"] != c["final_num"]:
             acts.append("renumbered")
@@ -1682,7 +1742,7 @@ def smart_repair(
                 reasons.append("long_chapter_split_reduced")
         if c.get("_truncated"):
             reasons.append("truncated")
-        if c["num"] in dup_nums:
+        if (c.get("section"), c["num"]) in dup_nums:
             reasons.append("duplicate_number")
         if c["num"] is not None and c["num"] != c["final_num"]:
             reasons.append("renumbered")
