@@ -42,7 +42,8 @@ def _dispatch_excluded_types(lane: str, *, once: bool, managed: bool) -> tuple[s
     excluded = set(SUPPORTED_TASK_TYPES) - set(WORKER_LANES[lane])
     if not once:
         excluded.update(MERGE_TASK_TYPES)
-        excluded.update(GPU_TASK_TYPES if managed else PARSE_TASK_TYPES)
+        excluded.update(GPU_TASK_TYPES if managed else
+                        (name for name, spec in TASK_TYPES.items() if spec.gpu_initial == "LLM"))
     return tuple(sorted(excluded))
 
 
@@ -101,15 +102,15 @@ def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once, lan
         stop.wait(max(0.1, interval))
 
 
-def _gpu_task_loop(worker_id: str, service: str, stop: threading.Event) -> None:
+def _gpu_task_loop(worker_id: str, service: str, stop: threading.Event, slot: int = 0) -> None:
     """Dedicated channels allow a mixed task to wait without blocking the other side."""
     types = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial == service and name not in PARSE_TASK_TYPES)
-    slot_id = f"{worker_id}-gpu-{service.lower()}"
+    slot_id = f"{worker_id}-gpu-{service.lower()}-{slot}"
     logger = logging.getLogger("audiobook.worker")
     try:
         while not stop.is_set():
             try:
-                if load_gpu_config().enabled or read_gpu_state()["managed"]:
+                if service == "LLM" or load_gpu_config().enabled or read_gpu_state()["managed"]:
                     heartbeat(slot_id, status="idle", capabilities={"task_types": list(types), "slots": 1})
                     claim = claim_fair_task(slot_id, task_types=types)
                     if claim:
@@ -317,10 +318,13 @@ def main() -> None:
             scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
             scheduler_thread.start()
             for service in ("LLM", "TTS"):
-                thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, service, stop),
-                                          name=f"gpu-task-{service.lower()}", daemon=True)
-                thread.start()
-                gpu_workers.append(thread)
+                # Four model processes each offer two LLM channels. Host-wide
+                # permits cap their combined calls; TTS stays single-channel.
+                for slot in range(2 if service == "LLM" else 1):
+                    thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, service, stop, slot),
+                                              name=f"gpu-task-{service.lower()}-{slot}", daemon=True)
+                    thread.start()
+                    gpu_workers.append(thread)
             parse_workers.append(threading.Thread(
                 target=_parse_worker_coordinator, args=(args.worker_id, stop),
                 name="script-parse-coordinator", daemon=True,

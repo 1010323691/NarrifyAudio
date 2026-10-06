@@ -108,7 +108,7 @@ WORKSPACE_MUTATING_TASK_TYPES = {
 
 
 def _workspace_audio_identity(task_type: str, payload: dict) -> str | None:
-    key = {"tts.merge": "package", "bgm.mix": "stem"}.get(task_type)
+    key = {"tts.merge": "package", "bgm.mix": "stem", "bgm.segment": "stem"}.get(task_type)
     subject = payload.get(key) if key else None
     if not isinstance(subject, str) or not subject.strip():
         return None
@@ -131,8 +131,8 @@ def _workspace_claim_eligibility(now):
 
     candidate_subject, active_subject = subject(Task), subject(active)
     compatible = (
-        Task.task_type.in_(("tts.merge", "bgm.mix"))
-        & active.task_type.in_(("tts.merge", "bgm.mix"))
+        Task.task_type.in_(("tts.merge", "bgm.mix", "bgm.segment"))
+        & active.task_type.in_(("tts.merge", "bgm.mix", "bgm.segment"))
         & (func.trim(candidate_subject) != "")
         & (func.trim(active_subject) != "")
         & (func.lower(candidate_subject) != func.lower(active_subject))
@@ -181,7 +181,7 @@ def ensure_consumer_group(client: redis.Redis) -> None:
 
 @contextmanager
 def _workspace_engine_lock(claim: TaskClaim):
-    """Keep project writers exclusive; allow independent audio chapters to overlap."""
+    """Keep project writers exclusive; allow independent audio/analysis chapters to overlap."""
     if claim.task_type not in WORKSPACE_MUTATING_TASK_TYPES:
         yield True
         return
@@ -197,7 +197,7 @@ def _workspace_engine_lock(claim: TaskClaim):
         with ExitStack() as locks:
             locks.enter_context((shared_file_lock if parallel_audio else exclusive_file_lock)(lock_path))
             if parallel_audio:
-                # Merge and mix of the same chapter share this lock through
+                # Merge, mix and analysis of the same chapter share this lock through
                 # complete_claim/rollback, including the delivery metadata commit.
                 chapter_lock = workspace / ".tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
                 locks.enter_context(exclusive_file_lock(chapter_lock))

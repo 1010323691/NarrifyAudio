@@ -312,11 +312,11 @@ watch(
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label for="admin-setting-8">文本解析 LLM 并发数</Label>
+            <Label for="admin-setting-8">LLM 全机并发数</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input id="admin-setting-8" v-model.number="draft.generation.parse_worker_concurrency" type="number" min="1" max="32" step="1" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
-                控制每个后台 Worker 进程内主解析的 LLM 同时请求数。解析工作槽位为该值的 2 倍、最多提前准备或等待该队列。多进程总并发为各进程限额之和。
+                所有后台 LLM 任务共享此上限，包括文本解析、角色分析、BGM 分析和音乐推荐；多进程不会叠加。解析工作槽位用于提前准备和等待，不等于同时推理数。
               </span>
             </div>
           </div>

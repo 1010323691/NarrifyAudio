@@ -198,6 +198,8 @@ def test_worker_lanes_keep_dispatch_inside_their_registered_types(lane, once, ma
     assert dispatched <= set(worker.WORKER_LANES[lane])
     if once:
         assert dispatched == set(worker.WORKER_LANES[lane])
+    if not once:
+        assert not any(worker.TASK_TYPES[name].gpu_initial == 'LLM' for name in dispatched)
     if lane=='mechanical':
         assert not dispatched.intersection(worker.GPU_TASK_TYPES)
     else:
@@ -228,5 +230,6 @@ def test_worker_lane_starts_only_its_own_background_channels(monkeypatch,lane):
         assert mechanical_targets <= set(targets)
         assert not model_targets.intersection(targets)
     else:
+        assert targets.count(worker._gpu_task_loop) == 3
         assert model_targets <= set(targets)
         assert not mechanical_targets.intersection(targets)

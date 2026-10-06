@@ -63,6 +63,11 @@ def audio_project():
 @pytest.mark.parametrize("first,second,parallel", [
     (("tts.merge", {"package": "one"}), ("tts.merge", {"package": "two"}), True),
     (("bgm.mix", {"stem": "one"}), ("bgm.mix", {"stem": "two"}), True),
+    (("bgm.segment", {"stem": "one"}), ("bgm.segment", {"stem": "two"}), True),
+    (("bgm.segment", {"stem": "one"}), ("bgm.segment", {"stem": "one"}), False),
+    (("bgm.segment", {"stem": "one"}), ("bgm.mix", {"stem": "one"}), False),
+    (("bgm.segment", {"stem": "one"}), ("tts.merge", {"package": "two"}), True),
+    (("bgm.segment", {"stem": "one"}), ("tts.reset", {"scripts": []}), False),
     (("tts.merge", {"package": "one"}), ("bgm.mix", {"stem": "one"}), False),
     (("tts.merge", {"package": "one"}), ("tts.merge", {"package": "one"}), False),
     (("tts.merge", {"package": "one"}), ("tts.merge", {"package": "one "}), False),
@@ -160,3 +165,25 @@ def test_same_project_merges_overlap_through_fenced_execution_and_publication(au
                for package in ("one", "two"))
     with SessionLocal() as db:
         assert all(db.get(Task, claim.task_id).status == "succeeded" for claim in claims)
+
+
+def test_bgm_analysis_claims_disjoint_chapters_but_defers_same_chapter(audio_project, monkeypatch):
+    from backend.platform.task_worker import claim_fair_task, _workspace_claim_available
+    from backend.platform.models import utcnow
+    submit, _ = audio_project
+    first = submit("bgm.segment", {"stem": "one"})
+    same = submit("bgm.segment", {"stem": "one"})
+    different = submit("bgm.segment", {"stem": "two"})
+    with SessionLocal.begin() as db:
+        for claim in (same, different):
+            db.get(Task, claim.task_id).status = "pending"
+            db.get(TaskAttempt, claim.attempt_id).status = "cancelled"
+    assert claim_task(same.task_id, "same-bgm") is None
+    with SessionLocal() as db:
+        assert not _workspace_claim_available(db, db.get(Task, same.task_id), utcnow())
+        assert _workspace_claim_available(db, db.get(Task, different.task_id), utcnow())
+    original = task_worker._workspace_claim_eligibility
+    monkeypatch.setattr(task_worker, "_workspace_claim_eligibility",
+                        lambda now: original(now) & (Task.owner_id == first.owner_id))
+    claimed = claim_fair_task("parallel-bgm", task_types=("bgm.segment",))
+    assert claimed and claimed.task_id == different.task_id

@@ -1,8 +1,9 @@
 """Process-local concurrency gates for LLM-bound and merge work.
 
 These gates limit concurrent callers within one Python process. Text-parse
-Worker threads resize the LLM gate from the administrator-configured per-process
-parse concurrency; merge work shares a CPU-sized gate with BGM mixing.
+Worker threads resize the LLM gate from the administrator-configured LLM limit.
+GPU admission additionally caps the combined task requests across processes;
+merge work shares a CPU-sized gate with BGM mixing.
 """
 from __future__ import annotations
 

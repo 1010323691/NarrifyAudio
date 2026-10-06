@@ -63,7 +63,7 @@ def update_feature_defaults_cache(value: dict[str, Any]) -> None:
 
 
 def parse_worker_concurrency(default: int = 4, maximum: int = 32) -> int:
-    """Return the per-process primary-parse LLM concurrency from admin settings."""
+    """Return the shared LLM request limit (historical parse setting key)."""
     generation = load_feature_defaults().get("generation", {})
     value = generation.get("parse_worker_concurrency", default) if isinstance(generation, dict) else default
     try:

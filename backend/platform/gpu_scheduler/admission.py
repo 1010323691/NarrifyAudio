@@ -7,10 +7,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..models import GPURequest, Task, TaskAttempt, new_id
 from ..task_context import EngineExecutionContext
+from ..system_config import parse_worker_concurrency
 from ..task_contracts import TaskClaim, TaskCancelledError
 from ...core.managed_process import process_identity, identity_alive
 from .config import load_config, platform_llm, service_fingerprint
@@ -34,7 +35,7 @@ def gpu_permit(service: str, handle=None):
     with transaction() as (db, state):
         config = load_config(db)
         managed = config.enabled or state["managed"]
-        if not managed and claim is None:
+        if not managed and claim is None and service != "LLM":
             bypass = True
         else:
             bypass = False
@@ -52,6 +53,9 @@ def gpu_permit(service: str, handle=None):
                 handle.check()
             elif claim is not None:
                 EngineExecutionContext(claim).check()
+            # Read the shared admin limit before taking the admission lock;
+            # the accessor may open a DB session when its cache expires.
+            llm_limit = parse_worker_concurrency() if service == "LLM" else 1
             with transaction() as (db, state):
                 request = db.get(GPURequest, request_id)
                 if request is None:
@@ -69,6 +73,10 @@ def gpu_permit(service: str, handle=None):
                 if allowed and service == "TTS" and managed:
                     allowed = db.scalar(select(GPURequest.id).where(
                         GPURequest.service == "TTS", GPURequest.status == "running").limit(1)) is None
+                if allowed and service == "LLM":
+                    active_llm = db.scalar(select(func.count()).select_from(GPURequest).where(
+                        GPURequest.service == "LLM", GPURequest.status == "running"))
+                    allowed = active_llm < llm_limit
                 # Oldest request is admitted first; a stream of short requests cannot starve it.
                 if allowed and managed:
                     # Paused requests must not block runnable requests behind them.

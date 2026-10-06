@@ -755,3 +755,95 @@ def test_backlog_or_active_calls_respect_configurable_minimum():
 
 def test_default_minimum_stay_is_five_minutes():
     assert GPUConfig().min_service_runtime == 300
+
+
+def test_all_llm_task_channels_share_one_concurrency_limit(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda: 2)
+    count = 0
+    maximum = 0
+    completed = 0
+    guard = threading.Lock()
+    release = threading.Event()
+    full = threading.Event()
+    errors = []
+
+    def work():
+        nonlocal count, maximum, completed
+        try:
+            with gpu_permit("LLM"):
+                with guard:
+                    count += 1
+                    maximum = max(maximum, count)
+                    if count == 2:
+                        full.set()
+                release.wait(5)
+                with guard:
+                    count -= 1
+                    completed += 1
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    try:
+        assert full.wait(3), "independent LLM channels should overlap"
+        time.sleep(0.3)
+        with SessionLocal() as db:
+            requests = db.scalars(select(GPURequest)).all()
+            assert sum(r.status == "running" for r in requests) == 2
+            assert sum(r.status == "waiting" for r in requests) == 3
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(8)
+    assert maximum == 2 and completed == 5 and not errors
+    assert all(not thread.is_alive() for thread in threads)
+
+
+def test_llm_limit_is_shared_across_worker_processes(tmp_path):
+    activate(enabled_config(tmp_path), "LLM")
+    script = r'''
+import sys, time
+from pathlib import Path
+from backend.platform.gpu_scheduler import admission, store
+root, slot = Path(sys.argv[1]), sys.argv[2]
+store.PROJECT_ROOT = root
+admission.parse_worker_concurrency = lambda: 2
+with admission.gpu_permit("LLM"):
+    (root / ("entered-" + slot)).touch()
+    deadline = time.monotonic() + 15
+    while not (root / "release").exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError("test release timed out")
+        time.sleep(.05)
+'''
+    children = [subprocess.Popen([sys.executable, "-c", script, str(tmp_path), str(slot)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                for slot in range(3)]
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            with SessionLocal() as db:
+                requests = db.scalars(select(GPURequest)).all()
+            if len(requests) == 3 and len(list(tmp_path.glob("entered-*"))) == 2:
+                break
+            assert all(child.poll() is None for child in children)
+            time.sleep(.05)
+        else:
+            pytest.fail("worker processes did not reach the shared LLM limit")
+        assert sum(r.status == "running" for r in requests) == 2
+        assert sum(r.status == "waiting" for r in requests) == 1
+        (tmp_path / "release").touch()
+        for child in children:
+            _, err = child.communicate(timeout=8)
+            assert child.returncode == 0, err.decode()
+        assert len(list(tmp_path.glob("entered-*"))) == 3
+    finally:
+        (tmp_path / "release").touch()
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
