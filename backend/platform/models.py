@@ -215,6 +215,8 @@ class TextFormatFlow(TimestampMixin, Base):
     project_id: Mapped[str] = mapped_column(index=True, nullable=False)
     owner_id: Mapped[str] = mapped_column(index=True, nullable=False)
     source_file_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # Ordered inputs; NULL keeps historical single-source flows compatible.
+    source_file_ids: Mapped[list[str] | None] = mapped_column(JSON)
     config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     whole_book: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 强制按字数分册（即使文本能识别出章节）。whole_book 与 force_by_length 同时为真时

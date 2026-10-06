@@ -67,6 +67,7 @@ export function useTextFormatWorkbench() {
 
   let previewToken = 0
   let previewAbort = new AbortController()
+  let actionGeneration = 0
   let loadToken = 0
   let pumpRunning = false
 
@@ -273,7 +274,7 @@ export function useTextFormatWorkbench() {
   // --- user actions ---------------------------------------------------------
   /** Start or restart the pipeline for a source file (explicit user action). */
   async function startFlow(opts: {
-    sourceFile: { file_id: string; name: string }
+    sourceFiles: { file_id: string; name: string }[]
     config: TextToggles
     wholeBook?: boolean
     /** 强制按字数分册（处理设置弹窗两选一中的「按字数分册」）。 */
@@ -281,23 +282,26 @@ export function useTextFormatWorkbench() {
     restart?: boolean
   }): Promise<boolean> {
     const projectId = project.activeProjectId
-    if (!projectId || !opts.sourceFile?.file_id) {
-      toast({ title: '请先选择要处理的 TXT 文件', variant: 'destructive' })
+    if (!projectId || !opts.sourceFiles.length || opts.sourceFiles.some((file) => !file.file_id)) {
+      toast({ title: '请先添加要处理的 TXT 或 EPUB 源文档', variant: 'destructive' })
       return false
     }
+    const generation = actionGeneration
     loading.value = true
     try {
       const state = await postWorkbenchFlow(projectId, {
-        source_file_id: opts.sourceFile.file_id,
+        source_file_ids: opts.sourceFiles.map((file) => file.file_id),
         config: { ...opts.config },
         whole_book: opts.wholeBook ?? false,
         force_by_length: opts.forceByLength ?? false,
         restart: opts.restart ?? false,
       })
+      if (generation !== actionGeneration || project.activeProjectId !== projectId) return false
       applyState(state)
       await pump()
-      return true
+      return generation === actionGeneration && project.activeProjectId === projectId
     } catch (e: any) {
+      if (generation !== actionGeneration || project.activeProjectId !== projectId) return false
       toast({
         title: e instanceof ApiError ? '无法开始处理' : '请求失败',
         variant: 'destructive',
@@ -305,7 +309,7 @@ export function useTextFormatWorkbench() {
       })
       return false
     } finally {
-      loading.value = false
+      if (generation === actionGeneration && project.activeProjectId === projectId) loading.value = false
     }
   }
 
@@ -439,6 +443,8 @@ export function useTextFormatWorkbench() {
   })
 
   function resetWorkbench() {
+    actionGeneration += 1
+    loading.value = false
     loadToken += 1
     previewToken += 1
     previewAbort.abort()

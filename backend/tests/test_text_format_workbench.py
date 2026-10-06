@@ -750,3 +750,195 @@ def test_read_only_state_does_not_persist_a_legacy_flow(client: TestClient):
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["flow"]["status"] == "ready"
     assert recovered.json()["version"]
+
+
+@pytest.mark.parametrize("extension", ["epub", "EPUB"])
+def test_epub_upload_runs_full_workbench_and_preserves_source(client: TestClient, extension: str):
+    from backend.tests.test_epub import make_epub
+
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    content = make_epub()
+    source = _upload(client, csrf, f"原稿.{extension}", content)
+    state = _drive_to_ready(client, csrf, source["project_id"], {"source_file_id": source["file_id"]})
+    assert state["flow"]["source_file_name"] == f"原稿.{extension}"
+    assert len(state["version"]["chapters"]) == 2
+    assert Path(source["path"]).read_bytes() == content
+    with SessionLocal() as db:
+        record = db.get(ProjectFile, source["file_id"])
+        assert record.deleted_at is None
+        formatted = db.get(Task, state["flow"]["format_task_id"]).result.result["preview"]
+    assert formatted.index("出发") < formatted.index("归来")
+    assert "目录" not in formatted
+    assert "脚本" not in formatted
+
+
+def test_invalid_epub_fails_with_readable_error(client: TestClient):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    source = _upload(client, csrf, "broken.epub", b"invalid archive")
+    response = _post_flow(client, csrf, source["project_id"], {"source_file_id": source["file_id"]})
+    assert response.status_code == 200, response.text
+    task_id = response.json()["next_task"]["task_id"]
+    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-epub-worker") == "invalid_epub"
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.error_code == "invalid_epub"
+        assert "损坏" in task.error_message
+    assert Path(source["path"]).read_bytes() == b"invalid archive"
+
+
+def test_mixed_sources_merge_in_order_and_recover_for_restart(client: TestClient):
+    from backend.tests.test_epub import make_epub
+
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = user["csrf_token"]
+    first = _upload(client, csrf, "上卷.txt", "第 1 章 出发\n他整理行囊，准备启程。".encode("gb18030"))
+    epub_content = make_epub(spine="first")
+    second = _upload(client, csrf, "下卷.epub", epub_content)
+    ids = [first["file_id"], second["file_id"]]
+    state = _drive_to_ready(client, csrf, first["project_id"], {"source_file_ids": ids})
+    assert len(state["version"]["chapters"]) == 2
+    assert state["flow"]["source_file_ids"] == ids
+    assert [file["name"] for file in state["flow"]["source_files"]] == ["上卷.txt", "下卷.epub"]
+    assert all(file["available"] for file in state["flow"]["source_files"])
+    with SessionLocal() as db:
+        task = db.get(Task, state["flow"]["format_task_id"])
+        preview = task.result.result["preview"]
+        assert preview.index("出发") < preview.index("归来")
+        assert task.result.result["source_file_ids"] == ids
+        assert all(db.get(ProjectFile, file_id).deleted_at is None for file_id in ids)
+    recovered = client.get(f"/api/v1/projects/{first['project_id']}/text-format/state").json()
+    assert recovered["flow"]["source_file_ids"] == ids
+    assert Path(first["path"]).read_bytes().decode("gb18030").startswith("第 1 章")
+    assert Path(second["path"]).read_bytes() == epub_content
+    reversed_state = _drive_to_ready(client, csrf, first["project_id"], {"source_file_ids": ids[::-1], "restart": True})
+    assert reversed_state["flow"]["id"] != state["flow"]["id"]
+    with SessionLocal() as db:
+        preview = db.get(Task, reversed_state["flow"]["format_task_id"]).result.result["preview"]
+    assert preview.index("归来") < preview.index("出发")
+    removed_state = _drive_to_ready(client, csrf, first["project_id"], {"source_file_ids": ids[:1], "restart": True})
+    assert len(removed_state["version"]["chapters"]) == 1
+    assert removed_state["flow"]["source_file_ids"] == ids[:1]
+    # Returning to a previous selection must publish a new current version,
+    # rather than report the unrelated latest (single-source) flow as ready.
+    restored = _drive_to_ready(client, csrf, first["project_id"], {"source_file_ids": ids})
+    assert restored["flow"]["source_file_ids"] == ids
+    assert restored["flow"]["id"] != state["flow"]["id"]
+    assert len(restored["version"]["chapters"]) == 2
+
+
+@pytest.mark.parametrize("invalid", ["duplicate", "empty", "too_many", "missing", "unsupported", "conflicting"])
+def test_invalid_source_lists_are_rejected(client: TestClient, invalid: str):
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = user["csrf_token"]
+    source = _upload(client, csrf, "source.txt", CHAPTERED_BODY)
+    file_id = source["file_id"]
+    body = {"source_file_ids": [file_id]}
+    expected = 422
+    if invalid == "duplicate":
+        body["source_file_ids"] *= 2
+    elif invalid == "empty":
+        body["source_file_ids"] = []
+    elif invalid == "too_many":
+        body["source_file_ids"] *= 101
+    elif invalid == "missing":
+        body["source_file_ids"].append(str(uuid.uuid4()))
+        expected = 404
+    elif invalid == "unsupported":
+        body["source_file_ids"].append(_upload(client, csrf, "wrong.wav", b"audio")["file_id"])
+    else:
+        body["source_file_id"] = str(uuid.uuid4())
+    response = _post_flow(client, csrf, source["project_id"], body)
+    assert response.status_code == expected, response.text
+    state = client.get(f"/api/v1/projects/{source['project_id']}/text-format/state").json()
+    assert state["flow"] is None
+    assert state["active_tasks"] == []
+
+
+def test_multi_source_flow_checks_ownership_of_every_document(client: TestClient):
+    other = _register(client, f"{uuid.uuid4()}@example.test")
+    foreign = _upload(client, other["csrf_token"], "foreign.txt", CHAPTERED_BODY)
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    own = _upload(client, user["csrf_token"], "own.txt", CHAPTERED_BODY)
+    response = _post_flow(client, user["csrf_token"], own["project_id"], {"source_file_ids": [own["file_id"], foreign["file_id"]]})
+    assert response.status_code == 404, response.text
+
+
+def test_multi_source_resume_is_idempotent_and_reorder_blocked_while_running(client: TestClient):
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = user["csrf_token"]
+    first = _upload(client, csrf, "first.txt", CHAPTERED_BODY)
+    second = _upload(client, csrf, "second.txt", CHAPTERED_BODY)
+    ids = [first["file_id"], second["file_id"]]
+    started = _post_flow(client, csrf, first["project_id"], {"source_file_ids": ids})
+    assert started.status_code == 200, started.text
+    resumed = _post_flow(client, csrf, first["project_id"], {"source_file_ids": ids})
+    assert resumed.json()["flow"]["id"] == started.json()["flow"]["id"]
+    assert resumed.json()["next_task"]["task_id"] == started.json()["next_task"]["task_id"]
+    conflict = _post_flow(client, csrf, first["project_id"], {"source_file_ids": ids[::-1]})
+    assert conflict.status_code == 409, conflict.text
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_unreadable_second_source_fails_without_publishing_partial_book(client: TestClient, deleted: bool):
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = user["csrf_token"]
+    first = _upload(client, csrf, "first.txt", CHAPTERED_BODY)
+    second = _upload(client, csrf, "broken.epub", b"not a zip")
+    response = _post_flow(client, csrf, first["project_id"], {"source_file_ids": [first["file_id"], second["file_id"]]})
+    assert response.status_code == 200, response.text
+    task_id = response.json()["next_task"]["task_id"]
+    if deleted:
+        Path(second["path"]).unlink()
+    code = process_task_message({"payload": {"task_id": task_id}}, worker_id="test-multi-source-worker")
+    assert code == ("input_missing" if deleted else "invalid_epub")
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task.status == "failed"
+        assert task.result is None
+    assert Path(first["path"]).read_bytes() == CHAPTERED_BODY
+    recovered = client.get(f"/api/v1/projects/{first['project_id']}/text-format/state").json()
+    assert recovered["flow"]["status"] == "failed"
+    assert recovered["version"] is None
+
+
+def test_legacy_single_source_flow_recovers_ordered_source_list(client: TestClient):
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = user["csrf_token"]
+    source = _upload(client, csrf, "legacy.txt", CHAPTERED_BODY)
+    state = _drive_to_ready(client, csrf, source["project_id"], {"source_file_id": source["file_id"]})
+    with SessionLocal() as db:
+        flow = db.get(TextFormatFlow, state["flow"]["id"])
+        flow.source_file_ids = None
+        db.commit()
+    recovered = client.get(f"/api/v1/projects/{source['project_id']}/text-format/state").json()
+    assert recovered["flow"]["source_file_ids"] == [source["file_id"]]
+    assert recovered["flow"]["source_files"][0]["name"] == "legacy.txt"
+
+
+@pytest.mark.parametrize("invalid", ["foreign", "duplicates", "empty", "conflicting", "other_task"])
+def test_direct_multi_source_task_submission_validates_inputs(client: TestClient, invalid: str):
+    other = _register(client, f"{uuid.uuid4()}@example.test")
+    foreign = _upload(client, other["csrf_token"], "foreign.txt", CHAPTERED_BODY)
+    user = _register(client, f"{uuid.uuid4()}@example.test")
+    own = _upload(client, user["csrf_token"], "own.txt", CHAPTERED_BODY)
+    payload = {"input_file_ids": [own["file_id"]]}
+    task_type = "text.format"
+    expected = 422
+    if invalid == "foreign":
+        payload["input_file_ids"].append(foreign["file_id"])
+        expected = 404
+    elif invalid == "duplicates":
+        payload["input_file_ids"] *= 2
+    elif invalid == "empty":
+        payload["input_file_ids"] = []
+    elif invalid == "conflicting":
+        payload["input_file_id"] = foreign["file_id"]
+    else:
+        task_type = "book.analyze"
+    response = client.post("/api/v1/tasks", headers={"X-CSRF-Token": user["csrf_token"]}, json={
+        "project_id": own["project_id"], "task_type": task_type, "payload": payload,
+        "idempotency_key": f"invalid-multi-{uuid.uuid4()}",
+    })
+    assert response.status_code == expected, response.text

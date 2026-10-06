@@ -58,6 +58,7 @@ def _task_lite(db: Session, task_id: str | None) -> dict | None:
 def _flow_dict(flow: TextFormatFlow) -> dict:
     return {
         "id": flow.id, "source_file_id": flow.source_file_id,
+        "source_file_ids": _source_ids(flow),
         "config_snapshot": flow.config_snapshot or {}, "whole_book": flow.whole_book,
         "force_by_length": flow.force_by_length,
         "format_task_id": flow.format_task_id, "analyze_task_id": flow.analyze_task_id,
@@ -72,10 +73,12 @@ def _flow_task_ids(flow: TextFormatFlow) -> set[str]:
     return {t for t in (flow.format_task_id, flow.analyze_task_id, flow.split_task_id) if t}
 
 
-def _latest_flow(db: Session, project_id: str, owner_id: str, source_file_id: str | None = None) -> TextFormatFlow | None:
+def _source_ids(flow: TextFormatFlow) -> list[str]:
+    return flow.source_file_ids or [flow.source_file_id]
+
+
+def _latest_flow(db: Session, project_id: str, owner_id: str) -> TextFormatFlow | None:
     stmt = select(TextFormatFlow).where(TextFormatFlow.project_id == project_id, TextFormatFlow.owner_id == owner_id)
-    if source_file_id:
-        stmt = stmt.where(TextFormatFlow.source_file_id == source_file_id)
     return db.scalar(stmt.order_by(TextFormatFlow.updated_at.desc(), TextFormatFlow.id.desc()).limit(1))
 
 
@@ -98,6 +101,8 @@ def _validate_source_file(db: Session, project: Project, user: User, source_file
     parts = item.object_key.split("/")
     if len(parts) < 3 or parts[2] != "01_input":
         raise WorkbenchError(422, "源文件必须来自原始文件（01_input）目录")
+    if Path(item.original_name).suffix.lower() not in {".txt", ".epub"}:
+        raise WorkbenchError(422, "源文档仅支持 TXT 或 EPUB 文件")
     return item
 
 
@@ -366,15 +371,19 @@ def _advance(db: Session, user: User, project: Project, flow: TextFormatFlow) ->
 
     # Stage 1: text.format
     if flow.format_task_id is None:
-        source = db.get(ProjectFile, flow.source_file_id)
-        if source is None or source.deleted_at is not None:
+        source_ids = _source_ids(flow)
+        sources = [db.get(ProjectFile, file_id) for file_id in source_ids]
+        if any(source is None or source.deleted_at is not None for source in sources):
             flow.status = "failed"
             flow.error = "源文件不可用，无法继续排版"
             return
+        source = sources[0]
         stem = Path(source.original_name).stem or "text"
+        if len(sources) > 1:
+            stem += "_合并"
         task = submit_task_record(db, user, project_id=project.id, task_type="text.format",
             payload={
-                "input_file_id": source.id, "config": flow.config_snapshot or {},
+                "input_file_id": source.id, "input_file_ids": source_ids, "config": flow.config_snapshot or {},
                 "publish_module": "01_input", "output_name": f"{stem}_排版.txt",
             }, idempotency_key=f"tflow:{flow.id}:format")
         flow.format_task_id = task.id
@@ -451,7 +460,7 @@ def _advance(db: Session, user: User, project: Project, flow: TextFormatFlow) ->
 
 def start_or_continue_flow(
     db: Session, user: User, project_id: str, *,
-    source_file_id: str | None = None, config: dict | None = None,
+    source_file_id: str | None = None, source_file_ids: list[str] | None = None, config: dict | None = None,
     whole_book: bool = False, force_by_length: bool = False,
     restart: bool = False,
 ) -> dict:
@@ -459,12 +468,24 @@ def start_or_continue_flow(
     if project is None:
         raise WorkbenchError(404, "项目不存在")
 
+    sources = source_file_ids if source_file_ids is not None else ([source_file_id] if source_file_id else None)
+    if sources is not None:
+        if not 1 <= len(sources) <= 100 or any(not isinstance(file_id, str) or not file_id for file_id in sources):
+            raise WorkbenchError(422, "请选择 1 至 100 个源文档")
+        if len(set(sources)) != len(sources):
+            raise WorkbenchError(422, "源文档不能重复添加")
+        if source_file_id and sources[0] != source_file_id:
+            raise WorkbenchError(422, "源文档参数不一致")
     active = _active_flow_tasks(db, user.id, project_id)
-    flow = _latest_flow(db, project.id, user.id, source_file_id)
+    flow = _latest_flow(db, project.id, user.id)
+    if flow is not None and sources is not None and _source_ids(flow) != sources:
+        # Only the current ordered selection can resume. An older matching
+        # flow may refer to artifacts already replaced by a later selection.
+        flow = None
     if restart:
         if active:
             raise WorkbenchError(409, "有排版分册任务正在进行，暂时不能重新处理")
-        if flow is not None and flow.source_file_id == source_file_id and flow.status != "running":
+        if flow is not None and flow.status != "running":
             # 重新处理：旧版本（成功或失败）保留为历史，新建 flow 重跑。
             # running 的 flow 必有活跃任务，已被上面的 409 拦住。
             flow = None
@@ -473,9 +494,10 @@ def start_or_continue_flow(
             # A ready flow for this file needs no further action.
             db.commit()
             return flow_state(db, user, project_id)
-        if not source_file_id:
-            raise WorkbenchError(422, "请先选择要处理的 TXT 文件")
-        _validate_source_file(db, project, user, source_file_id)
+        if not sources:
+            raise WorkbenchError(422, "请先添加要处理的 TXT 或 EPUB 源文档")
+        for file_id in sources:
+            _validate_source_file(db, project, user, file_id)
         if active:
             # Brand-new flow: any in-flight pipeline task (from another
             # session/file) blocks the whole project (P0-02 server-side guard).
@@ -484,7 +506,7 @@ def start_or_continue_flow(
         # 落快照前强制置真——排版质量不依赖调用方传值或平台默认。
         snapshot = {**(config or {}), "detect_chapters": True}
         flow = TextFormatFlow(
-            project_id=project.id, owner_id=user.id, source_file_id=source_file_id,
+            project_id=project.id, owner_id=user.id, source_file_id=sources[0], source_file_ids=sources,
             config_snapshot=snapshot, whole_book=bool(whole_book),
             force_by_length=bool(force_by_length and not whole_book), status="running",
         )
@@ -569,6 +591,17 @@ def flow_state(db: Session, user: User, project_id: str, *, recover: bool = True
         # 源文件名一并给出：前端刷新后回填文件栏，「重新处理」无需重新选择文件。
         source = db.get(ProjectFile, flow.source_file_id)
         flow_json["source_file_name"] = source.original_name if source is not None else None
+        flow_json["source_files"] = []
+        for file_id in _source_ids(flow):
+            record = db.scalar(select(ProjectFile).where(
+                ProjectFile.id == file_id, ProjectFile.project_id == project.id,
+                ProjectFile.owner_id == user.id,
+            ))
+            flow_json["source_files"].append({
+                "file_id": file_id, "name": record.original_name if record else "源文件已删除",
+                "size": record.size_bytes if record else 0,
+                "available": record is not None and record.deleted_at is None,
+            })
     return {
         "flow": flow_json,
         "version": version,

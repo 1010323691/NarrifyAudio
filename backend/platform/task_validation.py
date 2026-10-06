@@ -58,6 +58,18 @@ def legacy_task_payload_error(task_type: str, payload: object) -> str | None:
     """Validate client-controlled path components used by legacy task engines."""
     if not isinstance(payload, dict):
         return "任务参数无效"
+    if "input_file_ids" in payload:
+        ids = payload["input_file_ids"]
+        if task_type != "text.format":
+            return "仅排版任务支持多个源文档"
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(
+            not is_safe_path_component(file_id) or len(file_id) > 36 for file_id in ids
+        ):
+            return "请选择 1 至 100 个有效的源文档"
+        if len(set(ids)) != len(ids):
+            return "源文档不能重复添加"
+        if payload.get("input_file_id") not in (None, ids[0]):
+            return "源文档参数不一致"
     if task_type.startswith("resources."):
         return resource_task_payload_error(task_type, payload)
     if task_type in {"bgm.segment", "bgm.mix"}:

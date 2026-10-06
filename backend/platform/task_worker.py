@@ -38,6 +38,7 @@ from ..engines.book import (
     smart_repair,
     split_by_length,
 )
+from ..engines.epub import EpubError, read_epub
 from ..engines.text import format_text
 from ..engines import script as script_engine
 from ..engines import audio as audio_engine
@@ -70,6 +71,7 @@ from .storage import (
     storage_migration,
 )
 from .task_registry import TASK_TYPES
+from .task_validation import legacy_task_payload_error
 from .resource_tasks import _execute_resource_scan, _execute_resource_package, _execute_resource_cleanup
 from .resource_inventory import ResourceError
 from .task_context import (
@@ -97,6 +99,8 @@ from .task_lifecycle import (
 
 
 _write_outcome = write_task_outcome
+
+MAX_SOURCE_TEXT_BYTES = 128 * 1024 * 1024
 
 WORKER_GROUP = os.getenv("NARRIFY_TASK_GROUP", "narrify-workers")
 from .gpu_scheduler.admission import claim_allowed, allowed_task_types, bind_claim, reset_claim
@@ -420,8 +424,8 @@ def heartbeat_claim(claim: TaskClaim, *, lease_seconds: int | None = None) -> bo
         return True
 
 
-def _input_file(db, claim: TaskClaim) -> tuple[User, Project, ProjectFile, Path]:
-    input_file_id = str(claim.payload.get("input_file_id", ""))
+def _input_file(db, claim: TaskClaim, file_id: str | None = None) -> tuple[User, Project, ProjectFile, Path]:
+    input_file_id = file_id or str(claim.payload.get("input_file_id", ""))
     if not input_file_id:
         raise TaskExecutionError("invalid_payload", "任务缺少 input_file_id")
     user = db.get(User, claim.owner_id)
@@ -786,14 +790,44 @@ def _execute_load_simulation(claim: TaskClaim) -> TaskOutcome:
 
 
 def _prepare_text_claim(claim: TaskClaim) -> tuple[ProjectFile, str, str, Path]:
-    """Shared preamble for the text-based platform tasks: load + decode the input file."""
+    """Read ordered text sources in the Worker; metadata uses the first input."""
+    error = legacy_task_payload_error(claim.task_type, claim.payload)
+    if error:
+        raise TaskExecutionError("invalid_payload", error)
+    source_ids = claim.payload.get("input_file_ids") or [claim.payload.get("input_file_id")]
+    texts: list[str] = []
+    encodings: list[str] = []
+    total_bytes = 0
+    first = None
+    report = _text_progress_reporter(claim, 2, 10, "读取源文档")
     with SessionLocal() as db:
-        _, _, item, source_path = _input_file(db, claim)
-        if cancellation_requested(claim):
-            raise TaskCancelledError()
-        update_progress(claim, 10, "读取输入")
-        source_text, encoding = decode_buffer(source_path.read_bytes())
-    return item, source_text, encoding, source_path
+        for index, file_id in enumerate(source_ids):
+            if cancellation_requested(claim):
+                raise TaskCancelledError()
+            _, _, item, source_path = _input_file(db, claim, file_id)
+            if first is None:
+                first = (item, source_path)
+            report(index / len(source_ids))
+            try:
+                if source_path.suffix.lower() == ".epub":
+                    text = read_epub(source_path, on_progress=lambda fraction: report((index + fraction) / len(source_ids)))
+                    encoding = "EPUB"
+                else:
+                    if source_path.stat().st_size > MAX_SOURCE_TEXT_BYTES:
+                        raise TaskExecutionError("input_too_large", "源文本超过大小限制")
+                    text, encoding = decode_buffer(source_path.read_bytes())
+            except EpubError as exc:
+                raise TaskExecutionError("invalid_epub", f"{item.original_name}：{exc}") from exc
+            except ValueError as exc:
+                raise TaskExecutionError("invalid_text", f"{item.original_name}：无法读取文本，{exc}") from exc
+            total_bytes += len(text.encode("utf-8"))
+            if total_bytes > MAX_SOURCE_TEXT_BYTES:
+                raise TaskExecutionError("input_too_large", "合并后的源文本超过 128 MB 大小限制")
+            texts.append(text.strip("\r\n") if len(source_ids) > 1 else text)
+            encodings.append(encoding)
+    report(1)
+    item, source_path = first
+    return item, "\n\n".join(texts), " / ".join(dict.fromkeys(encodings)), source_path
 
 
 def _text_progress_reporter(claim: TaskClaim, start: int, end: int, label: str) -> Callable[[float], None]:
@@ -828,6 +862,7 @@ def _execute_text_format(claim: TaskClaim) -> TaskOutcome:
         result["text"].encode("utf-8"),
         {
             "engine": "text.format",
+            "source_file_ids": claim.payload.get("input_file_ids") or [item.id],
             "stats": result["stats"],
             "source_file_id": item.id,
             "preview": result["text"][:2000],

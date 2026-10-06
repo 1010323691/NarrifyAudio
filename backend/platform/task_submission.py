@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
-from .models import OutboxEvent, Project, Task, User, UserQuotaAccount, utcnow
+from .models import OutboxEvent, Project, ProjectFile, Task, User, UserQuotaAccount, utcnow
 from .storage import lock_storage_migration, storage_migration
 from .task_lifecycle import append_task_event
 from .task_types import ADMIN_ONLY_TASK_TYPES, BILLABLE_TASK_TYPES, SUPPORTED_TASK_TYPES
@@ -35,6 +35,7 @@ def task_dict(task: Task) -> dict:
         "updated_at": task.updated_at.isoformat(),
         "source_name": payload.get("source_name"),
         "source_file_id": payload.get("input_file_id"),
+        "source_file_ids": payload.get("input_file_ids"),
     }
 
 
@@ -71,6 +72,14 @@ def submit_task_record(
         if existing.payload.get("_request_hash") != request_hash:
             raise TaskSubmissionError(409, "幂等键对应的请求内容不同")
         return existing
+    if payload.get("input_file_ids"):
+        for file_id in payload["input_file_ids"]:
+            source = db.scalar(select(ProjectFile).where(
+                ProjectFile.id == file_id, ProjectFile.owner_id == user.id,
+                ProjectFile.project_id == project_id, ProjectFile.deleted_at.is_(None),
+            ))
+            if source is None:
+                raise TaskSubmissionError(404, "源文件不存在或已删除")
     from .resource_delivery import validate_delivery_sources, DeliveryDenied
     try:
         validate_delivery_sources(db, user, project_id, task_type, payload)

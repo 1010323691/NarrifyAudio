@@ -76,10 +76,19 @@ export interface WorkbenchVersion {
   review_marks: string[]
 }
 
+export interface WorkbenchSourceFile {
+  file_id: string
+  name: string
+  size: number
+  available: boolean
+}
+
 export interface WorkbenchFlow {
   id: string
   source_file_id: string
-  /** Display name of the source TXT (set once the backend resolves it). */
+  source_file_ids?: string[]
+  source_files?: WorkbenchSourceFile[]
+  /** Display name of the first source document. */
   source_file_name?: string | null
   config_snapshot: Record<string, unknown>
   whole_book: boolean
@@ -126,6 +135,7 @@ export function workbenchErrorMessage(status: number, body: unknown): string {
 
 export interface FlowRequest {
   source_file_id?: string | null
+  source_file_ids?: string[]
   config?: Record<string, unknown>
   whole_book?: boolean
   force_by_length?: boolean

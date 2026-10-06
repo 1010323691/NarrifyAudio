@@ -53,8 +53,12 @@ function harness(overrides = {}) {
     if (modules.has(name)) return modules.get(name).exports
     const module = { exports: {} }
     modules.set(name, module)
-    const path = fileURLToPath(new URL(`src/${name.slice(2)}.ts`, root))
-    const { outputText } = ts.transpileModule(readFileSync(path, 'utf8'), {
+    const view = name === '@/views/TextFormat'
+    const path = fileURLToPath(new URL(`src/${name.slice(2)}.${view ? 'vue' : 'ts'}`, root))
+    const raw = readFileSync(path, 'utf8')
+    const source = view ? raw.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1] +
+      '\nexport { sourceFiles, choose, moveSource, removeSource, sourceFile, startDisabled, sourcesChanged, uploading, flow }' : raw
+    const { outputText } = ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     })
     runInNewContext(outputText, {
@@ -96,9 +100,9 @@ const readyVersion = (chapters) => ({
 function workbenchApi({ getState, postFlow, calls }) {
   return {
     getWorkbenchState: (projectId, options) => getState(projectId, options),
-    postWorkbenchFlow: async () => {
+    postWorkbenchFlow: async (_projectId, body) => {
       calls.post += 1
-      return postFlow ? postFlow() : {}
+      return postFlow ? postFlow(body) : {}
     },
     postReviewMark: async () => { calls.mark += 1; return {} },
     deleteReviewMark: async () => { calls.unmark += 1; return {} },
@@ -505,4 +509,123 @@ test('state API keeps lifecycle recovery by default and opts out for manual refr
   await getWorkbenchState('P1')
   await getWorkbenchState('P1', { recover: false })
   assert.deepEqual(urls, ['/api/v1/projects/P1/text-format/state', '/api/v1/projects/P1/text-format/state?recover=false'])
+})
+
+
+test('start submits every source in the requested order', async () => {
+  let submitted
+  const { wb } = setupWorkbench({
+    postFlow: async (body) => {
+      submitted = body
+      return { flow: { id: 'merged', status: 'ready', config_snapshot: {}, source_file_ids: body.source_file_ids }, version: readyVersion(makeChapters(2)), next_task: null, active_tasks: [] }
+    },
+  })
+  assert.equal(await wb.startFlow({ sourceFiles: [{ file_id: 'second', name: '下卷.epub' }, { file_id: 'first', name: '上卷.txt' }], config: {}, restart: true }), true)
+  assert.deepEqual(submitted.source_file_ids, ['second', 'first'])
+  assert.equal(submitted.restart, true)
+})
+
+test('a late start response cannot replace the next project state', async () => {
+  const pending = deferred()
+  const { wb, project } = setupWorkbench({
+    getState: async () => ({ flow: null, version: null, next_task: null, active_tasks: [] }),
+    postFlow: () => pending.promise,
+  })
+  const starting = wb.startFlow({ sourceFiles: [{ file_id: 'one', name: 'old.txt' }], config: {} })
+  project.setCurrent({ set: true, project_id: 'P2', project_name: 'Next' })
+  await nextTick()
+  pending.resolve({ flow: { id: 'old-flow', status: 'ready', config_snapshot: {} }, version: readyVersion(makeChapters(2)), next_task: null, active_tasks: [] })
+  assert.equal(await starting, false)
+  assert.equal(wb.flow.value, null)
+  assert.equal(wb.version.value, null)
+})
+
+function setupSourceView({ pick, upload } = {}) {
+  const deactivate = []
+  const load = harness({
+    vue: { ...require('vue'), onDeactivated: (callback) => deactivate.push(callback) },
+    'vue-router': { useRouter: () => ({ push() {} }) },
+    '@/api/config': { getConfig: async () => ({ paths: { working_dir: 'workspace' }, ui: { theme: 'light' } }), patchConfig: async () => ({}) },
+    '@/utils/fileops': { pickFiles: pick ?? (async () => []) },
+    '@/api/files': { uploadFile: upload ?? (async (file) => ({ file_id: file.name, name: file.name, size: 12, path: '', project_id: 'P1' })) },
+  })
+  const project = load('@/stores/project').useProjectStore()
+  project.setCurrent({ set: true, project_id: 'P1', project_name: '测试' })
+  const settings = load('@/stores/settings').useSettingsStore()
+  settings.config = { paths: { working_dir: 'workspace' } }
+  return { view: load('@/views/TextFormat'), project, deactivate: () => deactivate.forEach((callback) => callback()) }
+}
+
+test('source picker appends mixed files and supports reordering and removal', async () => {
+  let selection = [{ name: '上卷.txt' }, { name: '下卷.epub' }]
+  const { view } = setupSourceView({ pick: async () => selection })
+  await view.choose()
+  assert.deepEqual(Array.from(view.sourceFiles.value, (file) => file.name), ['上卷.txt', '下卷.epub'])
+  selection = [{ name: '续卷.txt' }]
+  await view.choose()
+  assert.equal(view.sourceFiles.value.length, 3)
+  view.moveSource(2, -1)
+  assert.deepEqual(Array.from(view.sourceFiles.value, (file) => file.name), ['上卷.txt', '续卷.txt', '下卷.epub'])
+  view.removeSource(0)
+  assert.deepEqual(Array.from(view.sourceFiles.value, (file) => file.name), ['续卷.txt', '下卷.epub'])
+  assert.equal(view.startDisabled.value, false)
+  view.removeSource(1)
+  view.removeSource(0)
+  assert.equal(view.startDisabled.value, true)
+})
+
+test('cancelled source selection clears the upload state', async () => {
+  const { view } = setupSourceView()
+  await view.choose()
+  assert.equal(view.uploading.value, false)
+  assert.equal(view.sourceFiles.value.length, 0)
+})
+
+test('late upload cannot add sources after switching projects', async () => {
+  const pending = deferred()
+  let uploading = false
+  const { view, project } = setupSourceView({
+    pick: async () => [{ name: 'old.txt' }],
+    upload: () => { uploading = true; return pending.promise },
+  })
+  const adding = view.choose()
+  while (!uploading) await nextTick()
+  project.setCurrent({ set: true, project_id: 'P2', project_name: 'Next' })
+  pending.resolve({ file_id: 'old', name: 'old.txt', size: 12, path: '', project_id: 'P1' })
+  await adding
+  assert.equal(view.sourceFiles.value.length, 0)
+  assert.equal(view.uploading.value, false)
+})
+
+
+test('ordered source recovery does not overwrite local edits', async () => {
+  const { view } = setupSourceView()
+  view.flow.value = {
+    id: 'flow-1', status: 'failed', source_file_id: 'one', source_file_ids: ['one', 'two'],
+    source_files: [{ file_id: 'one', name: '上卷.txt', size: 10, available: true }, { file_id: 'two', name: '下卷.epub', size: 20, available: true }],
+  }
+  await nextTick()
+  assert.deepEqual(Array.from(view.sourceFiles.value, (file) => file.file_id), ['one', 'two'])
+  view.removeSource(0)
+  view.flow.value = { ...view.flow.value }
+  await nextTick()
+  assert.deepEqual(Array.from(view.sourceFiles.value, (file) => file.file_id), ['two'])
+  assert.equal(view.sourcesChanged.value, true)
+})
+
+
+test('leaving the page during upload clears busy state and discards late results', async () => {
+  const pending = deferred()
+  let began = false
+  const { view, deactivate } = setupSourceView({
+    pick: async () => [{ name: 'pending.txt' }],
+    upload: () => { began = true; return pending.promise },
+  })
+  const adding = view.choose()
+  while (!began) await nextTick()
+  deactivate()
+  assert.equal(view.uploading.value, false)
+  pending.resolve({ file_id: 'pending', name: 'pending.txt', size: 12, path: '', project_id: 'P1' })
+  await adding
+  assert.equal(view.sourceFiles.value.length, 0)
 })

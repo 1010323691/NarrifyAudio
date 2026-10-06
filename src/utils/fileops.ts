@@ -67,8 +67,7 @@ export function pickFiles(accept = '.mp3,.wav,.flac', multiple = true): Promise<
       const files = Array.from(input.files ?? [])
       resolve(files)
     }
-    // The dialog's cancel fires no change event in some browsers — treat a
-    // click-then-no-pick as an empty selection via the input going out of scope.
+    input.oncancel = () => resolve([])
     input.click()
   })
 }

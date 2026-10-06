@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
 import { useProjectGate } from '@/composables/useProjectGate'
 import { useWorkbenchScope } from '@/composables/useWorkbenchScope'
 import { useTextFormatWorkbench } from '@/composables/useTextFormatWorkbench'
-import { pickFile, type PickedFile } from '@/utils/fileops'
+import { pickFiles, type PickedFile } from '@/utils/fileops'
+import { uploadFile } from '@/api/files'
+import { useProjectStore } from '@/stores/project'
+import { useAuthStore } from '@/stores/auth'
 import { formatNumber } from '@/utils/format'
 import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
@@ -20,7 +23,7 @@ import Alert from '@/components/ui/Alert.vue'
 import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import Progress from '@/components/ui/Progress.vue'
 import ProjectGateAlert from '@/components/ui/ProjectGateAlert.vue'
-import { AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Settings2, X } from 'lucide-vue-next'
+import { ArrowUp, ArrowDown, AlertTriangle, ArrowRight, CheckCircle2, FileText, Loader2, RefreshCw, Settings2, X } from 'lucide-vue-next'
 
 import ChapterTable from '@/views/textformat/ChapterTable.vue'
 import ChapterDetailPanel from '@/views/textformat/ChapterDetailPanel.vue'
@@ -29,6 +32,8 @@ import FormatSettingsDialog from '@/views/textformat/FormatSettingsDialog.vue'
 
 const router = useRouter()
 const settings = useSettingsStore()
+const project = useProjectStore()
+const auth = useAuthStore()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 
@@ -59,7 +64,26 @@ async function refreshChapters() {
 }
 
 // --- file selection --------------------------------------------------------
-const sourceFile = ref<PickedFile | null>(null)
+type SourceDocument = PickedFile & { file_id: string; available?: boolean }
+const sourceFiles = ref<SourceDocument[]>([])
+const sourcesEdited = ref(false)
+const sourcesOpen = ref(true)
+const uploading = ref(false)
+const sourceFile = computed(() => {
+  if (!sourceFiles.value.length) return null
+  return {
+    name: sourceFiles.value.length === 1 ? sourceFiles.value[0]!.name : `${sourceFiles.value.length} 个源文档合为一本书`,
+    size: sourceFiles.value.reduce((sum, file) => sum + file.size, 0),
+  }
+})
+const sourceFormat = computed(() => [...new Set(sourceFiles.value.map((file) => file.name.split('.').pop()?.toUpperCase()))].join(' / '))
+const sourcesChanged = computed(() => !!flow.value && JSON.stringify(sourceFiles.value.map((file) => file.file_id)) !== JSON.stringify(flow.value.source_file_ids ?? [flow.value.source_file_id]))
+watch([() => project.activeProjectId, () => auth.user?.id], () => {
+  sourceFiles.value = []
+  sourcesEdited.value = false
+  sourcesOpen.value = true
+  uploading.value = false
+}, { flush: 'sync' })
 /** 分册方式：处理设置弹窗的两选一（刷新后回填最近一次运行的选择）。 */
 const splitMode = ref<SplitMode>('smart')
 const settingsOpen = ref(false)
@@ -83,41 +107,95 @@ const lengthTarget = computed(() => settings.config?.split?.length_target ?? 300
 watch(flow, (f) => {
   if (!f) return
   splitMode.value = f.force_by_length ? 'by_length' : 'smart'
-  // 刷新恢复：文件栏回填流程的源文件（「重新处理」无需重新选择文件）。
-  // 源文件已不存在（老数据 adopt 的哨兵 ID 等）时不回填假文件名——那样
-  // 「重新处理」只会 404；留空让用户重新选择真实文件即可。
-  if (!sourceFile.value?.file_id && f.source_file_id && f.source_file_name) {
-    sourceFile.value = { path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name }
+  // Recover ordered inputs; retain explicit local additions/removals until processing.
+  if (JSON.stringify(sourceFiles.value.map((file) => file.file_id)) === JSON.stringify(f.source_file_ids ?? [f.source_file_id])) {
+    sourcesEdited.value = false
+  }
+  if (!sourcesEdited.value) {
+    if (f.source_files?.length) {
+      sourceFiles.value = f.source_files.map((file) => ({ ...file, path: '' }))
+    } else if (f.source_file_id && f.source_file_name) {
+      sourceFiles.value = [{ path: '', size: 0, file_id: f.source_file_id, name: f.source_file_name }]
+    }
   }
 })
 
 // --- actions ----------------------------------------------------------------
 async function choose() {
-  const picked = await pickFile([{ name: '文本文件', extensions: ['txt'] }])
-  if (picked) sourceFile.value = picked
+  if (chooseDisabled.value) return
+  const isCurrent = captureScope()
+  const projectId = project.activeProjectId
+  uploading.value = true
+  try {
+    const files = await pickFiles('.txt,.epub')
+    if (!isCurrent()) return
+    if (sourceFiles.value.length + files.length > 100) {
+      toast({ title: '一本书最多添加 100 个源文档', variant: 'destructive' })
+      return
+    }
+    for (const file of files) {
+      if (!isCurrent()) return
+      if (!/\.(txt|epub)$/i.test(file.name)) {
+        toast({ title: '仅支持 TXT 或 EPUB 源文档', description: file.name, variant: 'destructive' })
+        continue
+      }
+      try {
+        const uploaded = await uploadFile(file)
+        if (!isCurrent() || uploaded.project_id !== projectId) return
+        sourceFiles.value.push({ ...uploaded, file_id: uploaded.file_id ?? uploaded.id!, available: true })
+        sourcesEdited.value = true
+        sourcesOpen.value = true
+      } catch (error: any) {
+        if (!isCurrent()) return
+        toast({ title: `${file.name} 上传失败`, description: error?.message || '请重试', variant: 'destructive' })
+      }
+    }
+  } finally {
+    if (isCurrent()) uploading.value = false
+  }
+}
+
+function moveSource(index: number, delta: number) {
+  if (chooseDisabled.value) return
+  const target = index + delta
+  if (target < 0 || target >= sourceFiles.value.length) return
+  const files = [...sourceFiles.value]
+  const moved = files.splice(index, 1)[0]!
+  files.splice(target, 0, moved)
+  sourceFiles.value = files
+  sourcesEdited.value = true
+}
+
+function removeSource(index: number) {
+  if (chooseDisabled.value) return
+  sourceFiles.value.splice(index, 1)
+  sourcesEdited.value = true
 }
 
 async function start(restart: boolean) {
-  if (!sourceFile.value?.file_id) {
-    toast({ title: '请先选择要处理的 TXT 文件', variant: 'destructive' })
+  if (!sourceFiles.value.length || sourceFiles.value.some((file) => file.available === false)) {
+    toast({ title: '请先添加可用的 TXT 或 EPUB 源文档', variant: 'destructive' })
     return
   }
+  const isCurrent = captureScope()
   if (!settings.loaded) await settings.load()
+  if (!isCurrent()) return
   const ok = await startFlow({
-    sourceFile: { file_id: sourceFile.value.file_id, name: sourceFile.value.name },
+    sourceFiles: sourceFiles.value.map((file) => ({ file_id: file.file_id, name: file.name })),
     config: currentConfig.value,
     forceByLength: splitMode.value === 'by_length',
     restart,
   })
-  if (ok && restart) {
+  if (ok && isCurrent() && restart) {
     toast({ title: '已重新开始处理', variant: 'success', description: '若本次处理失败，可「重试该阶段」或再次重新处理' })
   }
 }
 
-// 「选择 TXT」只受 无项目/处理中/有活跃任务/加载 限制——不能要求已选文件，否则永远点不开。
+// 「选择文件」只受 无项目/处理中/有活跃任务/加载 限制——不能要求已选文件，否则永远点不开。
 const chooseDisabled = computed(
   () =>
     !projectSet.value ||
+    uploading.value ||
     phase.value === 'processing' ||
     activeTasks.value.length > 0 ||
     loading.value,
@@ -125,7 +203,9 @@ const chooseDisabled = computed(
 const startDisabled = computed(
   () =>
     !projectSet.value ||
-    !sourceFile.value?.file_id ||
+    uploading.value ||
+    !sourceFiles.value.length ||
+    sourceFiles.value.some((file) => file.available === false) ||
     phase.value === 'processing' ||
     activeTasks.value.length > 0 ||
     loading.value,
@@ -133,7 +213,9 @@ const startDisabled = computed(
 const startLabel = computed(() => (phase.value === 'empty' ? '开始处理' : '重新处理'))
 
 async function onSettingsSave(draft: TextToggles) {
+  const isCurrent = captureScope()
   const ok = await settings.save({ text: draft })
+  if (!isCurrent()) return
   toast({
     title: ok ? '设置已保存' : '保存失败',
     variant: ok ? 'success' : 'destructive',
@@ -145,19 +227,21 @@ async function onSettingsSave(draft: TextToggles) {
 async function onSettingsReprocess(draft: TextToggles, mode: SplitMode) {
   // 「保存并重新处理」：先落盘设置再按新设置重跑——否则项目配置与流程快照分叉，
   // 摘要行的「设置已修改，重新处理后生效」徽标会常驻。保存失败不启动处理。
+  const isCurrent = captureScope()
   const ok = await settings.save({ text: draft })
+  if (!isCurrent()) return
   if (!ok) {
     toast({ title: '保存设置失败，请重试', variant: 'destructive', description: '请稍后重试' })
     return
   }
   splitMode.value = mode
   settingsOpen.value = false
-  if (!sourceFile.value?.file_id) {
-    toast({ title: '请先选择要处理的 TXT 文件', variant: 'destructive' })
+  if (!sourceFiles.value.length || sourceFiles.value.some((file) => file.available === false)) {
+    toast({ title: '请先添加可用的 TXT 或 EPUB 源文档', variant: 'destructive' })
     return
   }
   void startFlow({
-    sourceFile: { file_id: sourceFile.value.file_id, name: sourceFile.value.name },
+    sourceFiles: sourceFiles.value.map((file) => ({ file_id: file.file_id, name: file.name })),
     config: draft,
     forceByLength: mode === 'by_length',
     restart: true,
@@ -301,7 +385,7 @@ const detailHasNext = computed(() => {
 })
 const canReadVersion = computed(() => version.value?.version_status === 'current')
 const adjustedCount = computed(() => version.value?.chapters.filter((c) => c.adjusted).length ?? 0)
-const chooseLabel = computed(() => (sourceFile.value ? '更换文件' : '选择 TXT'))
+const chooseLabel = computed(() => uploading.value ? '正在上传…' : '添加源文档')
 
 // 章节号补齐位数：以最大章节号位数为标准（339 章 → 第001章）
 const chapterNumPad = computed(() => chapterNumWidth(version.value?.chapters ?? []))
@@ -329,6 +413,7 @@ const chapterBriefs = computed<Record<string, string>>(() => {
 })
 
 // --- lifecycle --------------------------------------------------------------------
+onDeactivated(() => { uploading.value = false })
 onMounted(() => {
   mediaMql = window.matchMedia('(max-width: 1100px)')
   isNarrow.value = mediaMql.matches
@@ -346,7 +431,7 @@ onBeforeUnmount(() => {
       <div>
         <p class="eyebrow">Pipeline · Text</p>
         <h1 class="page-title">排版与分册</h1>
-        <p class="page-description">整理原文、拆分分册并逐章核对；可离开页面，稍后回来自动继续。</p>
+        <p class="page-description">整理原文、拆分分册并逐章核对；多个源文档按顺序合为一本书，可稍后回来继续。</p>
       </div>
     </header>
 
@@ -358,11 +443,12 @@ onBeforeUnmount(() => {
         <template #icon><FileText /></template>
         <template #title><p :title="sourceFile?.name">{{ sourceFile?.name ?? '尚未选择文件' }}</p></template>
         <template #description>
-          <template v-if="sourceFile">TXT<template v-if="sourceFile.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template></template>
-          <template v-else>点击右侧「选择 TXT」上传原稿</template>
+          <template v-if="sourceFile">{{ sourceFormat }}<template v-if="sourceFile.size"> · {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template></template>
+          <template v-else>添加 TXT 或 EPUB 原稿，可多选并按顺序合为一本书</template>
         </template>
         <template #actions>
           <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
+          <Button v-if="sourceFiles.length" variant="ghost" size="sm" :aria-expanded="sourcesOpen" @click="sourcesOpen = !sourcesOpen">{{ sourcesOpen ? '收起源文档' : '管理源文档' }}</Button>
           <Button variant="outline" size="sm" @click="settingsOpen = true"><Settings2 class="h-4 w-4" />处理设置</Button>
         </template>
       </WorkbenchContextBar>
@@ -385,7 +471,7 @@ onBeforeUnmount(() => {
         <template #title><p :title="sourceFile?.name">{{ sourceFile?.name ?? '原稿处理结果' }}</p></template>
         <template #description>
           {{ version.version_status === 'stale' ? '版本已被覆盖，仅可核对' : '处理完成，已保存到项目' }}
-          <template v-if="sourceFile?.size"> · TXT {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
+          <template v-if="sourceFile?.size"> · {{ sourceFormat }} {{ formatNumber(Math.round(sourceFile.size / 1024)) }} KB</template>
           <WorkbenchStatus v-if="settingsDirty" variant="warning"> · 设置已修改，重新处理后生效</WorkbenchStatus>
         </template>
         <template #metrics>
@@ -396,9 +482,25 @@ onBeforeUnmount(() => {
         </template>
         <template #actions>
           <Button variant="outline" size="sm" :disabled="chooseDisabled" @click="choose">{{ chooseLabel }}</Button>
+          <Button v-if="sourceFiles.length" variant="ghost" size="sm" :aria-expanded="sourcesOpen" @click="sourcesOpen = !sourcesOpen">{{ sourcesOpen ? '收起源文档' : '管理源文档' }}</Button>
           <Button variant="outline" size="sm" @click="settingsOpen = true"><Settings2 class="h-4 w-4" />处理设置</Button>
         </template>
       </WorkbenchContextBar>
+
+      <section v-if="sourceFiles.length && sourcesOpen" class="rounded-lg border border-border/60 bg-card/40 p-3" aria-label="源文档顺序">
+        <p class="mb-2 text-xs text-muted-foreground">按下列顺序合为一本书，可调整顺序或移除文档。移除仅改变本次列表。</p>
+        <ol class="max-h-36 overflow-y-auto">
+          <li v-for="(file, index) in sourceFiles" :key="file.file_id" class="flex items-center gap-2 py-1 text-sm">
+            <span class="w-6 shrink-0 text-muted-foreground">{{ index + 1 }}</span>
+            <span class="min-w-0 flex-1 truncate" :title="file.name">{{ file.name }}</span>
+            <span v-if="file.available === false" class="text-xs text-destructive">源文件已删除</span>
+            <Button variant="ghost" size="sm" :disabled="chooseDisabled || index === 0" :aria-label="`上移 ${file.name}`" @click="moveSource(index, -1)"><ArrowUp class="h-4 w-4" /></Button>
+            <Button variant="ghost" size="sm" :disabled="chooseDisabled || index === sourceFiles.length - 1" :aria-label="`下移 ${file.name}`" @click="moveSource(index, 1)"><ArrowDown class="h-4 w-4" /></Button>
+            <Button variant="ghost" size="sm" :disabled="chooseDisabled" :aria-label="`移除 ${file.name}`" @click="removeSource(index)"><X class="h-4 w-4" /></Button>
+          </li>
+        </ol>
+      </section>
+      <p v-if="sourcesChanged" class="text-xs text-muted-foreground">源文档列表已修改，点击「重新处理」后应用。</p>
 
       <!-- 版本级事项 -->
       <template v-if="phase === 'ready' && version">
@@ -513,7 +615,7 @@ onBeforeUnmount(() => {
 
     <!-- 空态提示 -->
     <div v-if="phase === 'empty' || phase === 'failed'" class="wb-workspace workbench-empty glass-panel text-sm text-muted-foreground">
-      {{ phase === 'failed' ? '处理未完成，请重试该阶段或重新处理。' : '选择 TXT 文件后点击底部「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。' }}
+      {{ phase === 'failed' ? '处理未完成，请重试该阶段或重新处理。' : '添加 TXT 或 EPUB 源文档后点击底部「开始处理」：排版 → 章节分析 → 分册 自动完成，随后在此核对章节。' }}
     </div>
 
     <!-- 底栏 -->
@@ -535,7 +637,7 @@ onBeforeUnmount(() => {
           <span>处理失败，请重试或重新处理</span>
         </span>
         <span v-else class="text-xs text-muted-foreground">
-          选择 TXT 文件后点击「开始处理」
+          添加 TXT 或 EPUB 源文档后点击「开始处理」
         </span>
       </template>
       <Button

@@ -31,6 +31,7 @@ router = APIRouter(prefix="/api/v1/projects", tags=["text-format"])
 
 class FlowRequest(BaseModel):
     source_file_id: str | None = None
+    source_file_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
     config: dict = Field(default_factory=dict)
     whole_book: bool = False
     force_by_length: bool = False
@@ -61,7 +62,7 @@ def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depen
     try:
         return start_or_continue_flow(
             db, user, item.id,
-            source_file_id=body.source_file_id, config=body.config,
+            source_file_id=body.source_file_id, source_file_ids=body.source_file_ids, config=body.config,
             whole_book=body.whole_book, force_by_length=body.force_by_length,
             restart=body.restart,
         )

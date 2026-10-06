@@ -25,6 +25,7 @@ export interface DurableTask {
    *  result 时用它把任务关联回具体章节。旧任务/非解析任务为 null（键恒输出）。 */
   source_name?: string | null
   source_file_id?: string | null
+  source_file_ids?: string[] | null
 }
 
 const ACTIVE_DURABLE_STATUSES = new Set(['pending', 'queued', 'running', 'cancelling', 'retrying'])
