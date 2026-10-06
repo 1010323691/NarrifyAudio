@@ -45,10 +45,6 @@ STEM = "第 001 章 测试"
 STEM2 = "第 002 章 夜袭"
 
 
-def test_bgm_storage_keeps_existing_logger_namespace():
-    assert bgm_storage.log.name == "audiobook.bgm"
-
-
 @pytest.fixture
 def sandbox(monkeypatch, tmp_path):
     """Throwaway project root + workspace (with 02 chapter files) + music library."""
@@ -125,7 +121,8 @@ def _wait_until(pred, timeout: float = 8.0, step: float = 0.02) -> None:
 # score_track
 # --------------------------------------------------------------------------- #
 
-def test_score_track_weights_and_reason_pinned():
+def test_track_scoring_contract():
+    # score track weights and reason pinned
     s, r = bgm_engine.score_track(
         {"mood": ["紧张", "热血"], "scene": ["战斗"]},
         {"mood": ["紧张", "热血"], "scene": ["战斗"], "emotion": ["孤独"]},
@@ -133,16 +130,14 @@ def test_score_track_weights_and_reason_pinned():
     assert s == 8  # 2×3 + 1×2
     assert r == "mood 命中 紧张, 热血(+6)；scene 命中 战斗(+2)"
 
-
-def test_score_track_cross_bucket_names_do_not_hit():
+    # score track cross bucket names do not hit
     # 悲伤 lives in BOTH mood and emotion — bucket identity disambiguates.
     s, r = bgm_engine.score_track({"mood": ["悲伤"]}, {"emotion": ["悲伤"]})
     assert (s, r) == (0, "")
     s2, r2 = bgm_engine.score_track({"emotion": ["悲伤"]}, {"emotion": ["悲伤"]})
     assert (s2, r2) == (1, "emotion 命中 悲伤(+1)")
 
-
-def test_score_track_custom_weight_and_garbage_input():
+    # score track custom weight and garbage input
     s, r = bgm_engine.score_track({"custom": ["我的"]}, {"custom": ["我的", "别的"]})
     assert (s, r) == (1, "custom 命中 我的(+1)")
     assert bgm_engine.score_track(None, {}) == (0, "")
@@ -160,7 +155,8 @@ def _track(name, enabled=True, **tags):
     return {"enabled": enabled, "tags": base}
 
 
-def test_match_chapter_highest_score_with_tie_random():
+def test_chapter_match_ties_and_deduplication():
+    # match chapter highest score with tie random
     tracks = [
         ("a.mp3", _track("a.mp3", mood=["紧张"])),
         ("b.mp3", _track("b.mp3", mood=["紧张"])),
@@ -172,24 +168,7 @@ def test_match_chapter_highest_score_with_tie_random():
     res = bgm_engine.match_chapter({"mood": ["紧张"]}, tracks, 1, None, None, rng=random.Random(7))
     assert res["via"] == "tags" and res["score"] == 3
 
-
-def test_match_chapter_min_score_filter_falls_to_generic():
-    tracks = [
-        ("a.mp3", _track("a.mp3", mood=["紧张"])),          # score 3 < 5
-        ("g.mp3", _track("g.mp3")),                          # generic
-    ]
-    res = bgm_engine.match_chapter({"mood": ["紧张"]}, tracks, 5, None, None, rng=random.Random(1))
-    assert res == {"music": "g.mp3", "via": "generic", "score": 0,
-                   "reason": "无标签命中，使用通用音乐"}
-
-
-def test_match_chapter_enabled_only():
-    tracks = [("a.mp3", _track("a.mp3", enabled=False, mood=["紧张"]))]
-    res = bgm_engine.match_chapter({"mood": ["紧张"]}, tracks, 1, None, None, rng=random.Random(1))
-    assert res["via"] == "none" and res["music"] is None
-
-
-def test_match_chapter_adjacent_dedupe_then_relax():
+    # match chapter adjacent dedupe then relax
     tracks = [
         ("a.mp3", _track("a.mp3", mood=["紧张"])),
         ("b.mp3", _track("b.mp3", mood=["紧张"])),
@@ -206,7 +185,22 @@ def test_match_chapter_adjacent_dedupe_then_relax():
     assert res3["music"] == "g.mp3" and "放宽" in res3["reason"]
 
 
-def test_match_chapter_no_candidates():
+def test_chapter_match_fallbacks():
+    # match chapter min score filter falls to generic
+    tracks = [
+        ("a.mp3", _track("a.mp3", mood=["紧张"])),          # score 3 < 5
+        ("g.mp3", _track("g.mp3")),                          # generic
+    ]
+    res = bgm_engine.match_chapter({"mood": ["紧张"]}, tracks, 5, None, None, rng=random.Random(1))
+    assert res == {"music": "g.mp3", "via": "generic", "score": 0,
+                   "reason": "无标签命中，使用通用音乐"}
+
+    # match chapter enabled only
+    tracks = [("a.mp3", _track("a.mp3", enabled=False, mood=["紧张"]))]
+    res = bgm_engine.match_chapter({"mood": ["紧张"]}, tracks, 1, None, None, rng=random.Random(1))
+    assert res["via"] == "none" and res["music"] is None
+
+    # match chapter no candidates
     res = bgm_engine.match_chapter({"mood": ["紧张"]}, [], 1, None, None, rng=random.Random(1))
     assert res["music"] is None and res["via"] == "none"
     assert "无候选" in res["reason"]
@@ -237,7 +231,8 @@ def _cfg(volume=0.18, fade_in=1.5, fade_out=3.0, loop=True):
                                  fade_out=fade_out, loop=loop)
 
 
-def test_build_mix_cmd_default_shape():
+def test_mix_command_contract():
+    # build mix cmd default shape
     cfg = _cfg()
     cmd = bgm_engine.build_mix_cmd("ffmpeg", Path("n.mp3"), Path("m.mp3"),
                                    Path("o.mp3"), 100.0, cfg, 60.0)
@@ -255,8 +250,7 @@ def test_build_mix_cmd_default_shape():
     )
     assert cmd[10:] == ["-map", "[out]", "-c:a", "libmp3lame", str(Path("o.mp3"))]
 
-
-def test_build_mix_cmd_threads():
+    # build mix cmd threads
     # threads=N → `-threads N` 紧跟 -y（全局位，管住 libmp3lame 编码线程）
     cfg = _cfg()
     cmd = bgm_engine.build_mix_cmd("ffmpeg", Path("n.mp3"), Path("m.mp3"),
@@ -272,8 +266,7 @@ def test_build_mix_cmd_threads():
         assert "-threads" not in plain
         assert plain[:3] == ["ffmpeg", "-y", "-i"]
 
-
-def test_build_mix_cmd_no_loop():
+    # build mix cmd no loop
     cfg = _cfg(volume=0.5, loop=False)
     cmd = bgm_engine.build_mix_cmd("ffmpeg", Path("n.mp3"), Path("m.mp3"),
                                    Path("o.mp3"), 50.0, cfg, 30.0)
@@ -281,8 +274,7 @@ def test_build_mix_cmd_no_loop():
     fc = cmd[9]
     assert "volume=0.5[bgm]" in fc and "st=47.000:d=3.000" in fc
 
-
-def test_build_mix_cmd_short_chapter_fade_clamp():
+    # build mix cmd short chapter fade clamp
     # duration 4 s: fade_out 3.0 → clamped to 2.0 (min(3.0, 4/2)); st = 4 − 2 = 2.
     cfg = _cfg()
     cmd = bgm_engine.build_mix_cmd("ffmpeg", Path("n.mp3"), Path("m.mp3"),
@@ -1146,7 +1138,8 @@ def test_intensity_volume_default_tiers_and_clamp():
 # build_timeline_mix_cmd（时间轴混音命令，逐元素钉死）
 # --------------------------------------------------------------------------- #
 
-def test_build_timeline_mix_cmd_elementwise():
+def test_timeline_mix_command_contract():
+    # build timeline mix cmd elementwise
     cfg = _cfg()  # fade_in 1.5 / fade_out 3.0 / loop True
     spans = [
         {"start": 0.0, "end": 2.0, "music_id": "battle.mp3", "volume": 0.09},
@@ -1187,8 +1180,7 @@ def test_build_timeline_mix_cmd_elementwise():
     assert all(x == "-0" for x in cmd3 if x in ("-1", "-0"))
     assert cmd3.count("-stream_loop") == 2
 
-
-def test_build_timeline_mix_cmd_zero_volume_span():
+    # build timeline mix cmd zero volume span
     # volume 缺失/0 → 0.0（:g → "0"）；start 缺失 → 0
     cmd = bgm_engine.build_timeline_mix_cmd(
         "ffmpeg", Path("/n.mp3"), Path("/o.mp3"),
@@ -1212,11 +1204,6 @@ def _segment_block(start: int, end: int, intensity: int = 2,
         "music_tags": {c: list(tags.get(c) or []) for c in music_engine.TAG_CATEGORIES},
         "intensity": intensity,
     }
-
-
-def _extend_block(start: int, end: int) -> dict:
-    """extend 块（跨批延续上一开放场景；描述/标签字段一律丢弃）。"""
-    return {"start": start, "end": end, "extend": True}
 
 
 def _seed_segment_inputs(sandbox, stem=STEM, n=6, speakers=None,

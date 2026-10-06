@@ -24,7 +24,6 @@ from backend.platform.models import (
     TaskEvent,
     TaskResult,
     TextFormatFlow,
-    User,
     WorkerHeartbeat,
     utcnow,
 )

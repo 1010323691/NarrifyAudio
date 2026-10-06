@@ -54,22 +54,41 @@ def _set_pointer(sandbox, ws):
 # to_workspace_relative — the write side
 # --------------------------------------------------------------------------- #
 
-def test_to_rel_value_inside_workspace(tmp_path):
+def test_to_workspace_relative_contract(tmp_path):
     ws = tmp_path / "ws"
+    # value inside workspace
     v = ws / "05_audio_chunk" / "s" / "0001.mp3"
     assert pathio.to_workspace_relative(str(v), ws) == "05_audio_chunk/s/0001.mp3"
 
-
-def test_to_rel_backslash_style_value(tmp_path):
+    # backslash style value
     # A value written with Windows backslashes still serializes to the slash form.
-    ws = tmp_path / "ws"
     v = str(ws).replace(os.sep, "/") + "/04_voice_profiles/designed_voices/a.wav"
     assert pathio.to_workspace_relative(v, ws) == "04_voice_profiles/designed_voices/a.wav"
 
-
-def test_to_rel_value_equal_to_root_is_empty(tmp_path):
-    ws = tmp_path / "ws"
+    # value equal to root is empty
     assert pathio.to_workspace_relative(str(ws), ws) == ""
+
+    # value outside workspace is none
+    other = tmp_path / "elsewhere" / "ffmpeg.exe"
+    assert pathio.to_workspace_relative(str(other), ws) is None  # external → stays absolute
+
+    # empty and none values
+    assert pathio.to_workspace_relative("", ws) is None
+    assert pathio.to_workspace_relative("   ", ws) is None
+    assert pathio.to_workspace_relative(None, ws) is None
+    assert pathio.to_workspace_relative("x", None) is None
+
+    # relative input normalized
+    assert pathio.to_workspace_relative("05_audio_chunk/./s//0001.mp3", ws) == "05_audio_chunk/s/0001.mp3"
+    assert pathio.to_workspace_relative("a\\b", ws) == "a/b"
+
+    # relative escape raises
+    with pytest.raises(pathio.PathOutsideWorkspace):
+        pathio.to_workspace_relative("../evil.txt", ws)
+    with pytest.raises(pathio.PathOutsideWorkspace):
+        pathio.to_workspace_relative("a/../../evil.txt", ws)
+    # .. that stays inside is fine
+    assert pathio.to_workspace_relative("a/b/../c.txt", ws) == "a/c.txt"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="case-insensitivity is a Windows property")
@@ -77,36 +96,6 @@ def test_to_rel_is_case_insensitive_on_windows(tmp_path):
     ws = tmp_path / "ws"
     v = str(ws / "01_input" / "A.TXT").upper()  # "C:\\...\\WS\\01_INPUT\\A.TXT"
     assert pathio.to_workspace_relative(v, ws) == "01_input/a.txt"
-
-
-def test_to_rel_value_outside_workspace_is_none(tmp_path):
-    ws = tmp_path / "ws"
-    other = tmp_path / "elsewhere" / "ffmpeg.exe"
-    assert pathio.to_workspace_relative(str(other), ws) is None  # external → stays absolute
-
-
-def test_to_rel_empty_and_none_values(tmp_path):
-    ws = tmp_path / "ws"
-    assert pathio.to_workspace_relative("", ws) is None
-    assert pathio.to_workspace_relative("   ", ws) is None
-    assert pathio.to_workspace_relative(None, ws) is None
-    assert pathio.to_workspace_relative("x", None) is None
-
-
-def test_to_rel_relative_input_normalized(tmp_path):
-    ws = tmp_path / "ws"
-    assert pathio.to_workspace_relative("05_audio_chunk/./s//0001.mp3", ws) == "05_audio_chunk/s/0001.mp3"
-    assert pathio.to_workspace_relative("a\\b", ws) == "a/b"
-
-
-def test_to_rel_relative_escape_raises(tmp_path):
-    ws = tmp_path / "ws"
-    with pytest.raises(pathio.PathOutsideWorkspace):
-        pathio.to_workspace_relative("../evil.txt", ws)
-    with pytest.raises(pathio.PathOutsideWorkspace):
-        pathio.to_workspace_relative("a/../../evil.txt", ws)
-    # .. that stays inside is fine
-    assert pathio.to_workspace_relative("a/b/../c.txt", ws) == "a/c.txt"
 
 
 # --------------------------------------------------------------------------- #

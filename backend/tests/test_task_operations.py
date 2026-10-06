@@ -73,7 +73,8 @@ def _failed_task(db, owner, project):
 # -- module labels ----------------------------------------------------------
 
 
-def test_task_module_labels_snapshot():
+def test_task_module_and_worker_group_labels():
+    # task module labels snapshot
     cases = {
         "voices.foundation": "voices-foundation",
         "voices.clone": "voices-clone",
@@ -91,8 +92,7 @@ def test_task_module_labels_snapshot():
     for task_type, expected in cases.items():
         assert task_module(task_type) == expected, task_type
 
-
-def test_task_worker_groups_snapshot():
+    # task worker groups snapshot
     cases = {
         "script.parse": "llm",
         "music.suggest_tags": "llm",

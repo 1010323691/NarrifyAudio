@@ -92,21 +92,19 @@ def content_of(inp: str, cfg) -> str:
 # Whitespace / punctuation rules
 # --------------------------------------------------------------------------- #
 
-def test_whitespace():
+def test_whitespace_and_punctuation():
+    # whitespace
     assert format_text("  你好\t\n\n\n\n  世界  \n", CFG)["text"] == "你好\n\n世界"
 
-
-def test_ellipsis():
+    # ellipsis
     assert format_text("他想...然后走开", CFG)["text"] == "他想……然后走开"
     assert format_text("他说了。。。", CFG)["text"] == "他说了……"
     assert format_text("四个点....", CFG)["text"] == "四个点……"
 
-
-def test_repeated_punct():
+    # repeated punct
     assert format_text("好,,真的!!这样??", CFG)["text"] == "好，真的！这样？"
 
-
-def test_single_ascii_punct_preserved():
+    # single ascii punct preserved
     assert format_text("a.b, c! d?", CFG)["text"] == "a.b,c!d?"
 
 
@@ -114,18 +112,17 @@ def test_single_ascii_punct_preserved():
 # Dialogue / narration / sentence-boundary
 # --------------------------------------------------------------------------- #
 
-def test_dialogue():
+def test_dialogue_and_sentence_boundaries():
+    # dialogue
     assert (format_text('"你来了。"\n"嗯。"\n"最近怎么样？"\n', CFG)["text"]
             == '"你来了。"\n\n"嗯。"\n\n"最近怎么样？"')
     assert (format_text('"你来了。"李明说道。\n\n"嗯。"\n\n他转身走了出去。\n', CFG)["text"]
             == '"你来了。"李明说道。\n\n"嗯。"\n\n他转身走了出去。')
 
-
-def test_narration_merge():
+    # narration merge
     assert format_text("他走了一段路，\n感觉非常疲惫。\n", CFG)["text"] == "他走了一段路，感觉非常疲惫。"
 
-
-def test_sentence_boundary_breaking():
+    # sentence boundary breaking
     assert (format_text("他走了。\n她哭了。\n天黑了。", CFG)["text"]
             == "他走了。\n\n她哭了。\n\n天黑了。")
     assert (format_text("他抬起头，\n看向远方。\n她低着头。", CFG)["text"]
@@ -133,12 +130,10 @@ def test_sentence_boundary_breaking():
     assert (format_text("快看！\n好可怕？\n这……", CFG)["text"]
             == "快看！\n\n好可怕？\n\n这……")
 
-
-def test_sentence_boundary_off_merges():
+    # sentence boundary off merges
     assert format_text("他走了。\n她哭了。\n天黑了。", CFG_NOSB)["text"] == "他走了。她哭了。天黑了。"
 
-
-def test_blank_separated_lines_not_affected_by_sentence_break():
+    # blank separated lines not affected by sentence break
     assert format_text("他说。\n\n她走了。", CFG)["text"] == "他说。\n\n她走了。"
 
 
@@ -146,32 +141,17 @@ def test_blank_separated_lines_not_affected_by_sentence_break():
 # Chapter detection
 # --------------------------------------------------------------------------- #
 
-def test_chapter_isolation():
+def test_chapter_formatting():
+    # chapter isolation
     assert (format_text("夜色沉沉。\n第一章 雪夜\n他推开了门。\n", CFG)["text"]
             == "夜色沉沉。\n\n第一章 雪夜\n\n他推开了门。")
 
-
-def test_chapter_header_spacing_survives_when_detection_disabled():
+    # chapter header spacing survives when detection disabled
     cfg = CFG.model_copy(update={"detect_chapters": False})
     text = "\u9886\u5730\u98ce\u4e91 \u7b2c\u4e00\u7ae0 \u6210\u4eba\u5178\u793c\uff08\u4e0a\uff09"
     assert format_text(text, cfg)["text"] == text
 
-
-def test_chapter_title_positive():
-    for s in ["第一章", "第1章", "第一章 xxx", "Chapter 1", "Chapter 1: Sub",
-              "卷一", "楔子", "第1回", "尾声", "第 ６７ 章 标题",
-              "【第68章】标题", "第一卷", "Book 第69章 标题", "Ch. 70 Final",
-              "Chapter One: First", "Part 71: Next", "No. 72 Closing"]:
-        assert is_chapter_title(s), s
-
-
-def test_chapter_title_negative():
-    for s in ["第一场雪", "第一天", "他走了",
-              "第一节课开始了，同学们都安静下来，等待老师走进教室。"]:
-        assert not is_chapter_title(s), s
-
-
-def test_chapter_number_title_space():
+    # chapter number title space
     # 章节号与章节名紧贴 → 中间补一个空格
     assert format_text("第十九章神秘分阁主", CFG)["text"] == "第十九章 神秘分阁主"
     assert format_text("第19节 开场", CFG)["text"] == "第19节 开场"
@@ -184,6 +164,20 @@ def test_chapter_number_title_space():
     # 幂等：再过一遍不变
     once = format_text("第十九章神秘分阁主", CFG)["text"]
     assert format_text(once, CFG)["text"] == once
+
+
+def test_chapter_title_recognition():
+    # chapter title positive
+    for s in ["第一章", "第1章", "第一章 xxx", "Chapter 1", "Chapter 1: Sub",
+              "卷一", "楔子", "第1回", "尾声", "第 ６７ 章 标题",
+              "【第68章】标题", "第一卷", "Book 第69章 标题", "Ch. 70 Final",
+              "Chapter One: First", "Part 71: Next", "No. 72 Closing"]:
+        assert is_chapter_title(s), s
+
+    # chapter title negative
+    for s in ["第一场雪", "第一天", "他走了",
+              "第一节课开始了，同学们都安静下来，等待老师走进教室。"]:
+        assert not is_chapter_title(s), s
 
 
 # --------------------------------------------------------------------------- #
@@ -215,13 +209,13 @@ def test_config_variants():
 # The two safety-net invariants
 # --------------------------------------------------------------------------- #
 
-def test_content_preservation():
+def test_format_preserves_content_and_is_idempotent():
+    # content preservation
     for inp in PRESERVE_INPUTS:
         out = format_text(inp, CFG)["text"]
         assert content_of(inp, CFG) == re.sub(r"\s", "", out), repr(inp)
 
-
-def test_idempotency():
+    # idempotency
     for inp in PRESERVE_INPUTS:
         once = format_text(inp, CFG)["text"]
         twice = format_text(once, CFG)["text"]

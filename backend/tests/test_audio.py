@@ -40,19 +40,23 @@ def test_parse_duration_to_seconds():
 
 
 def test_get_extension():
-    assert A.get_extension("song.mp3") == "mp3"
-    assert A.get_extension("song.MP3") == "mp3"
-    assert A.get_extension("song") == "mp3"
-    assert A.get_extension("song.") == "mp3"
-    assert A.get_extension("archive.tar.gz") == "gz"
-    assert A.get_extension("") == "mp3"
+    for args, expected in [
+        (('song.mp3',), 'mp3'),
+        (('song.MP3',), 'mp3'),
+        (('song',), 'mp3'),
+        (('song.',), 'mp3'),
+        (('archive.tar.gz',), 'gz'),
+        (('',), 'mp3'),
+    ]:
+        assert A.get_extension(*args) == expected, args
 
 
 # =========================================================================== #
 # Even-split planning
 # =========================================================================== #
 
-def test_build_plan_even():
+def test_build_plan_boundaries():
+    # build plan even
     p = A.build_plan(100, "30")
     assert p["valid"]
     assert p["count"] == 4
@@ -68,21 +72,18 @@ def test_build_plan_even():
     # no segment exceeds the target
     assert max(s["duration"] for s in p["segments"]) <= 30 + 1e-6
 
-
-def test_build_plan_exact_division():
+    # build plan exact division
     p = A.build_plan(90, "30")
     assert p["count"] == 3
     assert all(abs(s["duration"] - 30) < 1e-9 for s in p["segments"])
 
-
-def test_build_plan_single_segment():
+    # build plan single segment
     p = A.build_plan(10, "30")
     assert p["count"] == 1
     assert p["segments"][0]["start"] == 0
     assert abs(p["segments"][0]["duration"] - 10) < 1e-9
 
-
-def test_build_plan_invalid():
+    # build plan invalid
     assert not A.build_plan(0, "30")["valid"]
     assert not A.build_plan(-5, "30")["valid"]
     assert not A.build_plan(100, "0")["valid"]
@@ -94,7 +95,8 @@ def test_build_plan_invalid():
 # Pause-snapping
 # =========================================================================== #
 
-def test_snap_boundaries_shifts_to_pause():
+def test_snap_boundaries_contract():
+    # snap boundaries shifts to pause
     # W = min(15, (30-0)/2 - 0.5) = 14.5
     r = A.snap_boundaries([0, 30, 60, 90],
                           [{"start": 20, "end": 26}, {"start": 55, "end": 65}],  # mids 23, 60
@@ -107,29 +109,27 @@ def test_snap_boundaries_shifts_to_pause():
     # strictly monotonic — boundaries can never cross
     assert all(b < c for b, c in zip(r["bounds"], r["bounds"][1:]))
 
-
-def test_snap_boundaries_fallback_no_pause_in_window():
+    # snap boundaries fallback no pause in window
     # W = min(5, 15 - 0.5) = 5 → window [25, 35]; the only pause (mid 1) is far away
     r = A.snap_boundaries([0, 30, 60], [{"start": 0, "end": 2}], 5)
     assert r["bounds"] == [0, 30, 60]  # unchanged → even-split time
     assert r["snapped"] == 0
     assert r["fallbacks"] == 1
 
-
-def test_snap_boundaries_window_too_small():
+    # snap boundaries window too small
     # segment width 1s → W = (1/2) - 0.5 = 0 → everything falls back
     r = A.snap_boundaries([0, 1, 2], [{"start": 0, "end": 0.1}], 15)
     assert r == {"bounds": [0, 1, 2], "shifts": [0.0, 0.0, 0.0],
                  "snapped": 0, "fallbacks": 1}
 
-
-def test_snap_boundaries_single_segment():
+    # snap boundaries single segment
     r = A.snap_boundaries([0, 10], [{"start": 4, "end": 6}], 15)  # n = 1
     assert r["snapped"] == 0 and r["fallbacks"] == 0
     assert r["bounds"] == [0, 10]
 
 
-def test_build_aligned_plan_count_invariant():
+def test_aligned_plan_contract():
+    # build aligned plan count invariant
     total = 120.0
     pauses = [{"start": 38, "end": 42}, {"start": 78, "end": 82}]  # mids 40, 80
     even = A.build_plan(total, "30")            # count = 4
@@ -147,8 +147,7 @@ def test_build_aligned_plan_count_invariant():
     assert all(a < b for a, b in zip(starts, starts[1:]))  # monotonic
     assert abs(starts[-1] + aligned["segments"][-1]["duration"] - total) < 1e-6
 
-
-def test_build_aligned_plan_single_segment():
+    # build aligned plan single segment
     a = A.build_aligned_plan(10, "30", [{"start": 4, "end": 6}], 15)
     assert a["count"] == 1
     assert a["aligned"] is False
@@ -159,28 +158,25 @@ def test_build_aligned_plan_single_segment():
 # Output naming
 # =========================================================================== #
 
-def test_output_name_brace():
-    # the naming format is the complete file name — no source-file prefix
-    assert A.output_name(0, "第 {} 集", "1", "mp3") == "第 1 集.mp3"
-    assert A.output_name(2, "第 {} 集", "1", "mp3") == "第 3 集.mp3"
-    assert A.output_name(0, "重活了 第 {} 集", "1", "mp3") == "重活了 第 1 集.mp3"
-
-
-def test_output_name_no_brace_appends():
-    assert A.output_name(0, "EP", "1", "mp3") == "EP_1.mp3"
-    assert A.output_name(0, "", "1", "mp3") == "1.mp3"
-
-
-def test_output_name_non_numeric_start():
-    assert A.output_name(0, "第 {} 集", "abc", "mp3") == "第 1 集.mp3"
-    assert A.output_name(0, "第 {} 集", "10x", "mp3") == "第 10 集.mp3"
+def test_output_name_contract():
+    for args, expected in [
+        ((0, '第 {} 集', '1', 'mp3',), '第 1 集.mp3'),
+        ((2, '第 {} 集', '1', 'mp3',), '第 3 集.mp3'),
+        ((0, '重活了 第 {} 集', '1', 'mp3',), '重活了 第 1 集.mp3'),
+        ((0, 'EP', '1', 'mp3',), 'EP_1.mp3'),
+        ((0, '', '1', 'mp3',), '1.mp3'),
+        ((0, '第 {} 集', 'abc', 'mp3',), '第 1 集.mp3'),
+        ((0, '第 {} 集', '10x', 'mp3',), '第 10 集.mp3'),
+    ]:
+        assert A.output_name(*args) == expected, args
 
 
 # =========================================================================== #
 # Silence-log parsing (pure)
 # =========================================================================== #
 
-def test_parse_silence_log_basic():
+def test_silence_log_contract():
+    # parse silence log basic
     lines = [
         "[silencedetect @ 0x1] silence_start: 10.5",
         "[silencedetect @ 0x1] silence_end: 12.0 | silence_duration: 1.5",
@@ -192,22 +188,18 @@ def test_parse_silence_log_basic():
         {"start": 10.5, "end": 12.0}, {"start": 40.0, "end": 43.0},
     ]
 
-
-def test_parse_silence_log_trailing_open_capped_at_total():
+    # parse silence log trailing open capped at total
     assert A.parse_silence_log(["silence_start: 95.0"], 100) == [{"start": 95.0, "end": 100.0}]
 
-
-def test_parse_silence_log_trailing_beyond_total_dropped():
+    # parse silence log trailing beyond total dropped
     assert A.parse_silence_log(["silence_start: 105.0"], 100) == []
 
-
-def test_parse_silence_log_negative_start_ignored():
+    # parse silence log negative start ignored
     lines = ["silence_start: -0.2", "silence_end: 0.5",
              "silence_start: 10", "silence_end: 11"]
     assert A.parse_silence_log(lines, 100) == [{"start": 10.0, "end": 11.0}]
 
-
-def test_parse_silence_log_sorted_by_start():
+    # parse silence log sorted by start
     lines = ["silence_start: 50", "silence_end: 51",
              "silence_start: 10", "silence_end: 12"]
     ps = A.parse_silence_log(lines, 100)

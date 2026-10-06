@@ -14,7 +14,6 @@ from sqlalchemy import delete, select
 from backend.core.managed_process import spawn_owned, terminate_owned, close_owned, tree_exited, process_identity, identity_alive, script_command
 from backend.platform.database import SessionLocal
 from backend.platform.models import GPURequest, GPUSchedulerState, SystemConfig, Task, utcnow, new_id
-from backend.platform.system_config import update_feature_defaults_cache
 from backend.platform.gpu_scheduler.config import GPUConfig, load_config, service_fingerprint
 from backend.platform.gpu_scheduler.policy import SchedulingPolicy, QueueStats
 from backend.platform.gpu_scheduler.store import transaction, read_state, QueueMonitor, process_reap, stamp
@@ -54,22 +53,22 @@ def activate(config, side="LLM"):
                      service_config=service_fingerprint(config), active_since=stamp()-100, last_switch=stamp()-100)
 
 
-@pytest.mark.parametrize("current,llm,tts,target", [
-    ("LLM", 10, 0, "LLM"), ("LLM", 0, 10, "TTS"), ("LLM", 10, 11, "LLM"),
-    ("LLM", 10, 30, "TTS"), ("TTS", 30, 10, "LLM"), ("TTS", 0, 0, "TTS"),
-    (None, 10, 0, "LLM"), (None, 0, 10, "TTS"), (None, 0, 0, None),
-])
-def test_queue_examples(current, llm, tts, target):
-    result = SchedulingPolicy().decide(GPUConfig(), current, QueueStats(llm), QueueStats(tts),
-                                       runtime=300, since_switch=300, idle_time=0, served=True)
-    assert result.target == target
+def test_queue_examples():
+    for current, llm, tts, target in [
+        ("LLM", 10, 0, "LLM"), ("LLM", 0, 10, "TTS"), ("LLM", 10, 11, "LLM"),
+        ("LLM", 10, 30, "TTS"), ("TTS", 30, 10, "LLM"), ("TTS", 0, 0, "TTS"),
+        (None, 10, 0, "LLM"), (None, 0, 10, "TTS"), (None, 0, 0, None),
+    ]:
+        result = SchedulingPolicy().decide(GPUConfig(), current, QueueStats(llm), QueueStats(tts),
+                                           runtime=300, since_switch=300, idle_time=0, served=True)
+        assert result.target == target, (current, llm, tts, target,)
 
 
-@pytest.mark.parametrize("runtime,cooldown", [(299,1000), (300,29)])
-def test_time_guards(runtime, cooldown):
-    result = SchedulingPolicy().decide(GPUConfig(), "LLM", QueueStats(1), QueueStats(100),
-                                       runtime=runtime, since_switch=cooldown, idle_time=0, served=True)
-    assert result.target == "LLM"
+def test_time_guards():
+    for runtime, cooldown in [(299,1000), (300,29)]:
+        result = SchedulingPolicy().decide(GPUConfig(), "LLM", QueueStats(1), QueueStats(100),
+                                           runtime=runtime, since_switch=cooldown, idle_time=0, served=True)
+        assert result.target == "LLM", (runtime, cooldown,)
 
 
 def test_starvation_respects_minimum_stay_and_requires_service():
@@ -731,27 +730,27 @@ def test_linux_bash_foreground_script_with_unicode_spaces(tmp_path):
         close_owned(proc)
 
 
-@pytest.mark.parametrize("current", ["LLM", "TTS"])
-def test_empty_side_switches_immediately_without_time_pressure_or_service_guards(current):
-    other = "TTS" if current == "LLM" else "LLM"
-    queues = {current: QueueStats(), other: QueueStats(waiting=1)}
-    result = SchedulingPolicy().decide(GPUConfig(min_service_runtime=900, switch_cooldown=900),
-        current, queues["LLM"], queues["TTS"], runtime=0, since_switch=0, idle_time=0, served=False)
-    assert result.target == other
-    assert result.reason == "current queue empty"
+def test_empty_side_switches_immediately_without_time_pressure_or_service_guards():
+    for current in ["LLM", "TTS"]:
+        other = "TTS" if current == "LLM" else "LLM"
+        queues = {current: QueueStats(), other: QueueStats(waiting=1)}
+        result = SchedulingPolicy().decide(GPUConfig(min_service_runtime=900, switch_cooldown=900),
+            current, queues["LLM"], queues["TTS"], runtime=0, since_switch=0, idle_time=0, served=False)
+        assert result.target == other, (current,)
+        assert result.reason == "current queue empty", (current,)
 
 
-@pytest.mark.parametrize("current", ["LLM", "TTS"])
-@pytest.mark.parametrize("waiting,running", [(1, 0), (0, 1)])
-@pytest.mark.parametrize("minimum", [60, 300, 600])
-def test_backlog_or_active_calls_respect_configurable_minimum(current, waiting, running, minimum):
-    other = "TTS" if current == "LLM" else "LLM"
-    queues = {current: QueueStats(waiting=waiting, running=running),
-              other: QueueStats(waiting=100, oldest_wait=10000)}
-    for runtime, target in [(minimum - 0.01, current), (minimum, other)]:
-        result = SchedulingPolicy().decide(GPUConfig(min_service_runtime=minimum),
-            current, queues["LLM"], queues["TTS"], runtime=runtime, since_switch=0, idle_time=0, served=True)
-        assert result.target == target
+def test_backlog_or_active_calls_respect_configurable_minimum():
+    for current in ["LLM", "TTS"]:
+        for waiting, running in [(1, 0), (0, 1)]:
+            for minimum in [60, 300, 600]:
+                other = "TTS" if current == "LLM" else "LLM"
+                queues = {current: QueueStats(waiting=waiting, running=running),
+                          other: QueueStats(waiting=100, oldest_wait=10000)}
+                for runtime, target in [(minimum - 0.01, current), (minimum, other)]:
+                    result = SchedulingPolicy().decide(GPUConfig(min_service_runtime=minimum),
+                        current, queues["LLM"], queues["TTS"], runtime=runtime, since_switch=0, idle_time=0, served=True)
+                    assert result.target == target, (current, waiting, running, minimum,)
 
 
 def test_default_minimum_stay_is_five_minutes():

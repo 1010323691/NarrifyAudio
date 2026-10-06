@@ -147,7 +147,8 @@ def _write_assignments(ws: Path, data: dict) -> Path:
 # pure functions
 # --------------------------------------------------------------------------- #
 
-def test_normalize_track_tags_in_vocabulary_and_order():
+def test_track_tag_normalization():
+    # normalize track tags in vocabulary and order
     registry = music_engine._default_index()["tags"]
     raw = {"scene": ["战斗", "日常"], "mood": ["紧张"], "emotion": [], "custom": []}
     out = music_engine.normalize_track_tags(raw, registry)
@@ -155,8 +156,7 @@ def test_normalize_track_tags_in_vocabulary_and_order():
         "scene": ["战斗", "日常"], "mood": ["紧张"], "emotion": [], "custom": [],
     }
 
-
-def test_normalize_track_tags_out_of_vocabulary_folds_to_custom():
+    # normalize track tags out of vocabulary folds to custom
     registry = music_engine._default_index()["tags"]
     raw = {"scene": ["不存在的标签", "战斗"], "mood": ["也不存在"], "custom": ["我的标签"]}
     out = music_engine.normalize_track_tags(raw, registry)
@@ -165,8 +165,7 @@ def test_normalize_track_tags_out_of_vocabulary_folds_to_custom():
     # non-custom out-of-vocab names + the client's own custom list, first-seen order
     assert out["custom"] == ["不存在的标签", "也不存在", "我的标签"]
 
-
-def test_normalize_track_tags_dedup_and_garbage():
+    # normalize track tags dedup and garbage
     registry = music_engine._default_index()["tags"]
     raw = {"scene": ["战斗", "战斗", " 战斗 "], "mood": [None, 5, "", "紧张"], "custom": "bad"}
     out = music_engine.normalize_track_tags(raw, registry)
@@ -174,8 +173,7 @@ def test_normalize_track_tags_dedup_and_garbage():
     assert out["mood"] == ["紧张"]
     assert out["custom"] == []
 
-
-def test_normalize_track_tags_non_dict_input():
+    # normalize track tags non dict input
     registry = music_engine._default_index()["tags"]
     assert music_engine.normalize_track_tags(None, registry) == {c: [] for c in music_engine.TAG_CATEGORIES}
     assert music_engine.normalize_track_tags("x", registry) == {c: [] for c in music_engine.TAG_CATEGORIES}
@@ -216,7 +214,8 @@ def _index_with_tracks() -> dict:
     return idx
 
 
-def test_apply_tag_rename_propagates():
+def test_tag_edit_propagation():
+    # apply tag rename propagates
     idx = _index_with_tracks()
     affected = music_engine.apply_tag_rename(idx, "mood", "紧张", "紧绷")
     assert affected == 2
@@ -227,13 +226,11 @@ def test_apply_tag_rename_propagates():
     # other buckets untouched
     assert idx["tracks"]["a.mp3"]["tags"]["scene"] == ["战斗"]
 
-
-def test_apply_tag_rename_absent_old_is_noop():
+    # apply tag rename absent old is noop
     idx = _index_with_tracks()
     assert music_engine.apply_tag_rename(idx, "mood", "不存在", "x") == 0
 
-
-def test_apply_tag_delete_propagates():
+    # apply tag delete propagates
     idx = _index_with_tracks()
     affected = music_engine.apply_tag_delete(idx, "emotion", "愤怒")
     assert affected == 1
@@ -670,7 +667,8 @@ def test_build_suggestion_prompts_pinned():
     assert "用户描述：（无）" in user2
 
 
-def test_parse_suggestion_reply_filters_caps_and_dedup():
+def test_suggestion_reply_parsing():
+    # parse suggestion reply filters caps and dedup
     registry = music_engine._default_index()["tags"]
     reply = (
         '```json\n'
@@ -685,8 +683,7 @@ def test_parse_suggestion_reply_filters_caps_and_dedup():
         "emotion": ["愤怒", "希望"],       # cap 2
     }
 
-
-def test_parse_suggestion_reply_non_object_is_none():
+    # parse suggestion reply non object is none
     registry = music_engine._default_index()["tags"]
     assert music_engine.parse_suggestion_reply("[1, 2]", registry) is None
     assert music_engine.parse_suggestion_reply("这不是 JSON", registry) is None
@@ -1142,20 +1139,19 @@ def _seed_folder_index() -> dict:
     return idx
 
 
-def test_folder_counts_includes_zero_folders():
+def test_folder_metadata_and_track_membership():
+    # folder counts includes zero folders
     idx = _seed_folder_index()
     assert music_engine.folder_counts(idx) == {"战斗音乐": 2, "空文件夹": 0}
     assert music_engine.folder_counts(music_engine._default_index()) == {}
 
-
-def test_create_folder_sets_created_at():
+    # create folder sets created at
     idx = music_engine._default_index()
     music_engine.create_folder(idx, "新文件夹")
     entry = idx["folders"]["新文件夹"]
     assert isinstance(entry["created_at"], str) and entry["created_at"]
 
-
-def test_apply_folder_rename_propagates_and_preserves_created_at():
+    # apply folder rename propagates and preserves created at
     idx = _seed_folder_index()
     affected = music_engine.apply_folder_rename(idx, "战斗音乐", "战斗 BGM")
     assert affected == 2
@@ -1167,16 +1163,14 @@ def test_apply_folder_rename_propagates_and_preserves_created_at():
     # rename of a missing source is a no-op
     assert music_engine.apply_folder_rename(idx, "不存在", "x") == 0
 
-
-def test_delete_folder_only_removes_key():
+    # delete folder only removes key
     idx = _seed_folder_index()
     assert music_engine.delete_folder(idx, "空文件夹") is True
     assert "空文件夹" not in idx["folders"]
     assert music_engine.delete_folder(idx, "空文件夹") is False
     assert len(idx["tracks"]) == 3  # track entries never touched
 
-
-def test_apply_track_move_moved_and_missing():
+    # apply track move moved and missing
     idx = _seed_folder_index()
     moved, missing = music_engine.apply_track_move(idx, ["t0.mp3", "ghost.mp3"], "空文件夹")
     assert moved == ["t0.mp3"]

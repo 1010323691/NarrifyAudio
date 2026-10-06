@@ -492,19 +492,19 @@ def test_concurrency_limit_formula(monkeypatch):
         assert merge.concurrency_limit() == expected
 
 
-@pytest.mark.parametrize("package,expected", [
-    ("chapter??", "chapter__.mp3"), ("chapter__", "chapter__.mp3"),
-    (" chapter ", "chapter.mp3"), ("chapter:*", "chapter__.mp3"),
-    ("  ", "audiobook.mp3"),
-])
-def test_merge_filename_uses_the_shared_target_identity(tmp_path, package, expected):
-    from types import SimpleNamespace
-    from backend.core.paths import merged_audio_filename
+def test_merge_filename_uses_the_shared_target_identity(tmp_path):
+    for package, expected in [
+        ("chapter??", "chapter__.mp3"), ("chapter__", "chapter__.mp3"),
+        (" chapter ", "chapter.mp3"), ("chapter:*", "chapter__.mp3"),
+        ("  ", "audiobook.mp3"),
+    ]:
+        from types import SimpleNamespace
+        from backend.core.paths import merged_audio_filename
 
-    audio_chunk = tmp_path / "05_audio_chunk"
-    layout = SimpleNamespace(audio_chunk=audio_chunk)
-    manifest = audio_chunk / package / "manifest.json"
-    assert merge._output_name(manifest, layout) == merged_audio_filename(package) == expected
+        audio_chunk = tmp_path / "05_audio_chunk"
+        layout = SimpleNamespace(audio_chunk=audio_chunk)
+        manifest = audio_chunk / package / "manifest.json"
+        assert merge._output_name(manifest, layout) == merged_audio_filename(package) == expected, (package, expected,)
 
 
 def test_thread_budget_formula(monkeypatch):

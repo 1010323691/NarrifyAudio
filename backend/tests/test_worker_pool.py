@@ -1,7 +1,6 @@
 """Real subprocess checks for the dedicated pool supervisor."""
 import json
 import os
-from pathlib import Path
 import sys
 import threading
 import time

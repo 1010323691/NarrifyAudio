@@ -31,62 +31,7 @@ from backend.engines.llm_transport import (
     llm_json_with_retry,
     request_chat_completion_stream,
 )
-from backend.engines.script import (
-    DEFAULT_SYSTEM_PROMPT,
-    DEFAULT_USER_PROMPT,
-    INSTRUCT_MAX_WORDS,
-    adaptive_spot_rate,
-    SPOT_CHECK_HISTORY_CAP,
-    _ALIGN_FAIL_MIN,
-    _ALIGN_SUSPICIOUS_MIN,
-    _append_spot_history,
-    _has_attribution_tag,
-    _is_pure_saying_tag,
-    _llm_chat_completion,
-    _load_spot_history,
-    _parse_entries_reply,
-    _pick_majority,
-    _quote_parity,
-    _reparse_vote,
-    _risk_tier,
-    _strip_leading_saying_tag,
-    _tag_in,
-    absorb_punct_entries,
-    boundary_check_speakers,
-    build_batch_window,
-    check_chunk_alignment,
-    check_chunk_fidelity,
-    clean_json_string,
-    delete_pure_saying_tags,
-    fix_mojibake,
-    generate_file,
-    group_retry_indices,
-    is_suspicious_entry_text,
-    instruct_entry_indices,
-    instruct_word_count,
-    long_entry_indices,
-    long_paragraph_resplit,
-    merge_adjacent_same_speaker,
-    parse_speaker,
-    parse_speaker_map_full,
-    process_chunk,
-    revalidate_entry,
-    repair_json_array,
-    salvage_json_entries,
-    select_boundary_targets,
-    select_boundary_risk_targets,
-    select_spot_targets,
-    spot_budget,
-    spot_check_speakers,
-    split_chunk_balanced,
-    split_into_chunks,
-    split_long_entries,
-    split_long_text,
-    strip_outer_quotes,
-    suspicious_entry_indices,
-    validate_sentence_splits,
-    validate_instructs,
-)
+from backend.engines.script import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, INSTRUCT_MAX_WORDS, adaptive_spot_rate, SPOT_CHECK_HISTORY_CAP, _ALIGN_FAIL_MIN, _ALIGN_SUSPICIOUS_MIN, _append_spot_history, _has_attribution_tag, _is_pure_saying_tag, _llm_chat_completion, _load_spot_history, _pick_majority, _quote_parity, _reparse_vote, _risk_tier, _strip_leading_saying_tag, _tag_in, absorb_punct_entries, boundary_check_speakers, build_batch_window, check_chunk_alignment, check_chunk_fidelity, clean_json_string, delete_pure_saying_tags, fix_mojibake, generate_file, group_retry_indices, is_suspicious_entry_text, instruct_entry_indices, instruct_word_count, long_entry_indices, long_paragraph_resplit, merge_adjacent_same_speaker, parse_speaker, parse_speaker_map_full, process_chunk, revalidate_entry, repair_json_array, salvage_json_entries, select_boundary_targets, select_boundary_risk_targets, select_spot_targets, spot_budget, spot_check_speakers, split_chunk_balanced, split_into_chunks, split_long_entries, split_long_text, strip_outer_quotes, suspicious_entry_indices, validate_sentence_splits, validate_instructs
 from backend.engines.text import is_chapter_title
 
 BS = chr(92)  # backslash — built via chr() so no literal backslashes live in this file
@@ -102,28 +47,25 @@ def _entry(speaker: str, text: str, instruct: str = "tone") -> dict:
 # split_into_chunks
 # --------------------------------------------------------------------------- #
 
-def test_split_by_paragraphs():
+def test_chunk_split_basic_contract():
+    # split by paragraphs
     assert split_into_chunks("para one\n\npara two\n\npara three", max_size=10) == [
         "para one", "para two", "para three",
     ]
 
-
-def test_split_packs_small_paragraphs():
+    # split packs small paragraphs
     assert split_into_chunks("aa\n\nbb\n\ncc", max_size=100) == ["aa\n\nbb\n\ncc"]
 
-
-def test_split_long_paragraph_by_sentences():
+    # split long paragraph by sentences
     # 17 字 @8：段数 ceil(17/8)=3 → 固定切法尾段 1 字 < 4（半长）→ 减一为 2 段，
     # 目标均长 8.5，最近合法边界（句末+空白）= 11 → 两段尽量平均。
     assert split_into_chunks("aaaa. bbbb. cccc.", max_size=8) == ["aaaa. bbbb.", "cccc."]
 
-
-def test_split_empty():
+    # split empty
     assert split_into_chunks("") == []
     assert split_into_chunks("   \n\n  ", max_size=10) == []
 
-
-def test_split_preserves_content():
+    # split preserves content
     samples = [
         "para one\n\npara two\n\npara three",
         "aaaa. bbbb. cccc.",
@@ -139,7 +81,8 @@ def _paras(n, ch, width=100):
     return "\n\n".join(ch * width for _ in range(n))
 
 
-def test_split_count_rule_evening_out_short_tail():
+def test_chunk_split_balancing_and_boundaries():
+    # split count rule evening out short tail
     # 段数公式四例（每段 100 字、段间 2 字空行；长度 = strip 后）：
     # ① 31 段 = 3160 字 @1500：ceil → 3，固定切法尾段 160 < 750 → 2 段均分
     # ② 38 段 = 3874 字 @1500：ceil → 3，尾段 874 ≥ 750 → 保持 3 段
@@ -150,15 +93,13 @@ def test_split_count_rule_evening_out_short_tail():
     assert [len(c) for c in split_into_chunks(_paras(45, "丙"), max_size=1500)] == [1528, 1528, 1528]
     assert [len(c) for c in split_into_chunks(_paras(46, "丁"), max_size=1500)] == [1528, 1630, 1528]
 
-
-def test_split_clamps_count_to_boundary_count():
+    # split clamps count to boundary count
     # 段数公式给 4（ceil(30/8)），但内部合法边界仅 1 个（段间空行）→ 钳回 2 段：
     # 目标均长只是软目标，合法结构边界是最高约束（无边界处绝不强切）。
     src = "夜色像潮水一样漫进街巷，行人渐稀。\n\n巷口的灯一盏盏亮起来。"
     assert len(split_into_chunks(src, max_size=8)) == 2
 
-
-def test_split_cjk_sentence_boundaries():
+    # split cjk sentence boundaries
     # 无空格中文句：CJK 句末标点 。！？!?… 是零宽合法边界（不要求后随空白）——
     # 旧正则 (?<=[.!?])\s+ 对中文从不触发，超长中文段从此可切。
     src = "句子一。句子二。句子三。句子四。"
@@ -166,8 +107,7 @@ def test_split_cjk_sentence_boundaries():
     assert chunks == ["句子一。句子二。", "句子三。句子四。"]
     assert all(c.endswith("。") for c in chunks)
 
-
-def test_split_ascii_mid_token_dot_protected():
+    # split ascii mid token dot protected
     # ASCII .!? 须后随空白才是句末边界——3.14 的词内点号绝不可成为切点。
     # 4 字尾段「dddd」< 半长 5 → 收尾 pass 并入左邻（只删切点）；
     # 「3.14」始终完整地位于同一块内。
@@ -176,8 +116,7 @@ def test_split_ascii_mid_token_dot_protected():
     assert chunks == ["aaaa.", "bbbb 3.14 cccc. dddd"]
     assert "3.14" in chunks[1]
 
-
-def test_split_short_tail_merged():
+    # split short tail merged
     # 固定切法会留下 10 字尾段（< 半长 100）→ 收尾 pass 删掉相邻切点、
     # 与较短邻块合并（只删切点，不引入新切点）→ 2 段。
     src = "甲" * 300 + "\n\n" + "乙" * 300 + "\n\n" + "丙" * 10
@@ -186,7 +125,8 @@ def test_split_short_tail_merged():
     assert chunks[1] == "乙" * 300 + "\n\n" + "丙" * 10
 
 
-def test_split_keeps_lone_tail_title_block():
+def test_chunk_split_title_retention():
+    # split keeps lone tail title block
     # 书末短标题块（6 字 < 半长 10）无法与左邻合并（合并块末行成标题 = 悬题）
     # → 保留短块（允许，非异常）——标题独立成块，绝不丢失。
     title = "第十章 舞会"
@@ -194,32 +134,50 @@ def test_split_keeps_lone_tail_title_block():
     chunks = split_into_chunks(src, max_size=20)
     assert chunks == ["甲" * 30, title]
 
+    # split evicts trailing title to next chunk
+    p1 = "旁" * 80
+    title = "第十章 舞会"
+    p2 = "景" * 80
+    src = p1 + "\n\n" + title + "\n\n" + p2
+    chunks = split_into_chunks(src, max_size=100)
+    # p1 (80) + title (6) fits one chunk (88) but p2 (80) doesn't -> the chunk
+    # closes with the title at its tail -> the title moves to the NEXT chunk's head
+    # (stays with the chapter body it heads, far from truncation risk).
+    assert chunks == [p1, title + "\n\n" + p2]
+
+    # split keeps lone title chunk
+    p1 = "旁" * 100
+    title = "第十一章 雨"
+    p2 = "景" * 100
+    src = p1 + "\n\n" + title + "\n\n" + p2
+    chunks = split_into_chunks(src, max_size=100)
+    # 210 字 @100：段数 3 → 固定切法尾段 10 < 50 → 减一为 2 段，目标均长 105。
+    # 最近边界（108，标题之后）悬题（切后块末行是标题）→ 改判取次近边界 100
+    # （标题之前）——标题恒随其统领正文同段，不再独占一块。
+    assert chunks == [p1, title + "\n\n" + p2]
+
 
 # --------------------------------------------------------------------------- #
 # clean_json_string
 # --------------------------------------------------------------------------- #
 
-def test_clean_strips_code_fence():
+def test_clean_json_contract():
+    # clean strips code fence
     assert clean_json_string('```json\n[{"a":1}]\n```') == '[{"a":1}]'
 
-
-def test_clean_strips_thinking_tags():
+    # clean strips thinking tags
     assert clean_json_string('<thinking>blah</thinking>[{"a":1}] tail') == '[{"a":1}]'
 
-
-def test_clean_bracket_counter_with_noise():
+    # clean bracket counter with noise
     assert clean_json_string('x [{"a":1},{"b":2}] y') == '[{"a":1},{"b":2}]'
 
-
-def test_clean_salvages_unclosed_array():
+    # clean salvages unclosed array
     assert clean_json_string('noise [{"a":1},{"b":2}') == '[{"a":1}]'
 
-
-def test_clean_returns_none_without_array():
+    # clean returns none without array
     assert clean_json_string("no brackets here") is None
 
-
-def test_clean_escapes_control_chars_in_strings():
+    # clean escapes control chars in strings
     raw = '[{"speaker":"N","text":"a\nb","instruct":"i"}]'  # \n is a real newline
     cleaned = clean_json_string(raw)
     assert json.loads(cleaned)[0]["text"] == "a\nb"
@@ -229,35 +187,31 @@ def test_clean_escapes_control_chars_in_strings():
 # repair_json_array
 # --------------------------------------------------------------------------- #
 
-def test_repair_valid_array():
+def test_repair_json_contract():
+    # repair valid array
     assert repair_json_array('[{"speaker":"N","text":"a","instruct":"b"}]') == [_entry("N", "a", "b")]
 
-
-def test_repair_missing_comma():
+    # repair missing comma
     got = repair_json_array(
         '[{"speaker":"A","text":"1","instruct":"i"}'
         '{"speaker":"B","text":"2","instruct":"j"}]'
     )
     assert [e["speaker"] for e in got] == ["A", "B"]
 
-
-def test_repair_trailing_comma():
+    # repair trailing comma
     assert repair_json_array('[{"speaker":"A","text":"1","instruct":"i"},]') == [_entry("A", "1", "i")]
 
-
-def test_repair_drops_non_dict_and_logs():
+    # repair drops non dict and logs
     logs = []
     got = repair_json_array('[{"speaker":"A","text":"1","instruct":"i"}, "stray"]', log=logs.append)
     assert got == [_entry("A", "1", "i")]
     assert logs == ["Dropped 1 non-object entries from LLM JSON array"]
 
-
-def test_repair_drops_non_dict_without_log():
+    # repair drops non dict without log
     # No ``log`` callback: the drop path must not crash (the ``and log`` guard).
     assert repair_json_array('[{"speaker":"A","text":"1","instruct":"i"}, "stray"]') == [_entry("A", "1", "i")]
 
-
-def test_repair_unparseable():
+    # repair unparseable
     assert repair_json_array("not json at all") is None
     assert repair_json_array("") is None
 
@@ -266,18 +220,17 @@ def test_repair_unparseable():
 # salvage_json_entries
 # --------------------------------------------------------------------------- #
 
-def test_salvage_single_entry():
+def test_salvage_json_contract():
+    # salvage single entry
     got = salvage_json_entries('noise [{"speaker":"NARRATOR","text":"他说","instruct":"calm"}, garbage')
     assert got == [_entry("NARRATOR", "他说", "calm")]
 
-
-def test_salvage_unescapes_text():
+    # salvage unescapes text
     raw = '{"speaker":"N","text":"a' + BS + 'nb","instruct":"i"}'  # text value is a\nb (escaped)
     got = salvage_json_entries(raw)
     assert got[0]["text"] == "a\nb"
 
-
-def test_salvage_none_when_no_match():
+    # salvage none when no match
     assert salvage_json_entries("no objects here") is None
 
 
@@ -285,11 +238,11 @@ def test_salvage_none_when_no_match():
 # fix_mojibake
 # --------------------------------------------------------------------------- #
 
-def test_fix_mojibake_noop_on_clean_text():
+def test_mojibake_cleanup():
+    # fix mojibake noop on clean text
     assert fix_mojibake("plain text 123 中文") == "plain text 123 中文"
 
-
-def test_fix_mojibake_replaces_ellipsis():
+    # fix mojibake replaces ellipsis
     # The CP1252-as-UTF8 mojibake of "…" (E2 80 A6) is mapped back to the real ellipsis.
     assert fix_mojibake("aâ€¦b") == "a…b"
 
@@ -719,35 +672,12 @@ def test_stream_http404_propagates_through_process_chunk(monkeypatch):
 # 章标题防丢（split_into_chunks 尾部标题守卫）
 # --------------------------------------------------------------------------- #
 
-def test_split_evicts_trailing_title_to_next_chunk():
-    p1 = "旁" * 80
-    title = "第十章 舞会"
-    p2 = "景" * 80
-    src = p1 + "\n\n" + title + "\n\n" + p2
-    chunks = split_into_chunks(src, max_size=100)
-    # p1 (80) + title (6) fits one chunk (88) but p2 (80) doesn't -> the chunk
-    # closes with the title at its tail -> the title moves to the NEXT chunk's head
-    # (stays with the chapter body it heads, far from truncation risk).
-    assert chunks == [p1, title + "\n\n" + p2]
-
-
-def test_split_keeps_lone_title_chunk():
-    p1 = "旁" * 100
-    title = "第十一章 雨"
-    p2 = "景" * 100
-    src = p1 + "\n\n" + title + "\n\n" + p2
-    chunks = split_into_chunks(src, max_size=100)
-    # 210 字 @100：段数 3 → 固定切法尾段 10 < 50 → 减一为 2 段，目标均长 105。
-    # 最近边界（108，标题之后）悬题（切后块末行是标题）→ 改判取次近边界 100
-    # （标题之前）——标题恒随其统领正文同段，不再独占一块。
-    assert chunks == [p1, title + "\n\n" + p2]
-
-
 # --------------------------------------------------------------------------- #
 # 忠实性校验（check_chunk_fidelity）
 # --------------------------------------------------------------------------- #
 
-def test_fidelity_passes_on_faithful_output():
+def test_chunk_fidelity_contract():
+    # fidelity passes on faithful output
     chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n她答：{LQ}那就一直走。{RQ}"
     entries = [
         {"speaker": "NARRATOR", "text": "他道"},
@@ -757,8 +687,7 @@ def test_fidelity_passes_on_faithful_output():
     ]
     assert check_chunk_fidelity(chunk, entries) == []
 
-
-def test_fidelity_catches_dropped_line():
+    # fidelity catches dropped line
     chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n她答：{LQ}那就一直走。{RQ}"
     entries = [
         {"speaker": "NARRATOR", "text": "他道"},
@@ -767,8 +696,7 @@ def test_fidelity_catches_dropped_line():
     # the second quoted passage is absent from every output text -> reported by skeleton
     assert check_chunk_fidelity(chunk, entries) == ["那就一直走"]
 
-
-def test_fidelity_immune_to_quote_and_tag_removal():
+    # fidelity immune to quote and tag removal
     # 引号被剥离、语气标签并入旁白 —— 骨架不变 -> 不误报
     chunk = f"他道：{LQ}这条路没有尽头。{RQ}\n\n她答：{LQ}那就一直走。{RQ}"
     entries = [
@@ -778,8 +706,7 @@ def test_fidelity_immune_to_quote_and_tag_removal():
     ]
     assert check_chunk_fidelity(chunk, entries) == []
 
-
-def test_fidelity_ignores_short_and_empty_quotes():
+    # fidelity ignores short and empty quotes
     # <4 词字符的引语不作保真信号（单字感叹不值得触发重发）
     chunk = f"他喊：{LQ}走。{RQ}"
     assert check_chunk_fidelity(chunk, [{"speaker": "A", "text": "随便什么内容。"}]) == []
@@ -790,7 +717,8 @@ def test_fidelity_ignores_short_and_empty_quotes():
 # 对半切开（split_chunk_balanced）
 # --------------------------------------------------------------------------- #
 
-def test_check_chunk_alignment_large_block_loss_fails():
+def test_alignment_length_bands():
+    # check chunk alignment large block loss fails
     # 规则 4/5：连续未匹配 > 100 字（骨架）→ 完整性异常 → ok False。源侧大段缺失
     # 进 missing、输出侧大段新增进 extra，各侧独立判。
     source = "开篇" + "甲" * 100 + "收束" + "乙" * 125
@@ -807,8 +735,7 @@ def test_check_chunk_alignment_large_block_loss_fails():
     assert any(len(g) > _ALIGN_FAIL_MIN for g in extra["extra"])
     assert not extra["missing"]
 
-
-def test_check_chunk_alignment_suspicious_band_passes():
+    # check chunk alignment suspicious band passes
     # 规则 4：50 < 连续未匹配 ≤ 100 字 → 标记可疑：仍 ok True（不阻塞、不触发
     # 恢复阶梯），区段暴露在 suspicious 供日志，不进 missing/extra。
     res = check_chunk_alignment("甲" * 100 + "乙" * 60, [
@@ -819,8 +746,7 @@ def test_check_chunk_alignment_suspicious_band_passes():
     assert any(_ALIGN_SUSPICIOUS_MIN < len(g) <= _ALIGN_FAIL_MIN
                for g in res["suspicious"])
 
-
-def test_check_chunk_alignment_small_gaps_ignored():
+    # check chunk alignment small gaps ignored
     # 规则 1/3：≤ 50 字连续未匹配（短标签删除 / 代词替换 / 轻微整理）→ 忽略，
     # 不累计、不报。
     res = check_chunk_alignment("甲" * 100 + "乙" * 30 + "丙" * 30, [
@@ -828,6 +754,19 @@ def test_check_chunk_alignment_small_gaps_ignored():
     ])
     assert res["ok"] is True
     assert not res["missing"] and not res["extra"] and not res["suspicious"]
+
+    # check chunk alignment empty source uses same bands
+    # 空 source 早退分支与主路径同一判档：≤50 字输出忽略、50–100 字标记可疑
+    # （不阻塞）、>100 字判大段新增（extra）→ ok False。
+    small = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 30}])
+    assert small["ok"] is True and not small["extra"] and not small["suspicious"]
+    mid = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 60}])
+    assert mid["ok"] is True and not mid["extra"]
+    assert any(_ALIGN_SUSPICIOUS_MIN < len(g) <= _ALIGN_FAIL_MIN
+               for g in mid["suspicious"])
+    large = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 120}])
+    assert large["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in large["extra"])
 
 
 def test_check_chunk_alignment_reordered_blocks_fail_both_sides():
@@ -842,36 +781,20 @@ def test_check_chunk_alignment_reordered_blocks_fail_both_sides():
     assert any(len(g) > _ALIGN_FAIL_MIN for g in res["extra"])
 
 
-def test_check_chunk_alignment_empty_source_uses_same_bands():
-    # 空 source 早退分支与主路径同一判档：≤50 字输出忽略、50–100 字标记可疑
-    # （不阻塞）、>100 字判大段新增（extra）→ ok False。
-    small = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 30}])
-    assert small["ok"] is True and not small["extra"] and not small["suspicious"]
-    mid = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 60}])
-    assert mid["ok"] is True and not mid["extra"]
-    assert any(_ALIGN_SUSPICIOUS_MIN < len(g) <= _ALIGN_FAIL_MIN
-               for g in mid["suspicious"])
-    large = check_chunk_alignment("", [{"speaker": "NARRATOR", "text": "甲" * 120}])
-    assert large["ok"] is False
-    assert any(len(g) > _ALIGN_FAIL_MIN for g in large["extra"])
-
-
-def test_split_balanced_prefers_paragraph_boundary():
+def test_balanced_split_fallbacks():
+    # split balanced prefers paragraph boundary
     chunk = "甲" * 50 + "\n\n" + "乙" * 50
     assert split_chunk_balanced(chunk) == ("甲" * 50, "乙" * 50)
 
-
-def test_split_balanced_falls_back_to_newline():
+    # split balanced falls back to newline
     chunk = "甲" * 50 + "\n" + "乙" * 50
     assert split_chunk_balanced(chunk) == ("甲" * 50, "乙" * 50)
 
-
-def test_split_balanced_falls_back_to_sentence_end():
+    # split balanced falls back to sentence end
     chunk = "甲" * 40 + "。" + "乙" * 50 + "。"
     assert split_chunk_balanced(chunk) == ("甲" * 40 + "。", "乙" * 50 + "。")
 
-
-def test_split_balanced_no_boundary_returns_whole():
+    # split balanced no boundary returns whole
     assert split_chunk_balanced("甲" * 50) == ("甲" * 50, "")
 
 
@@ -1092,7 +1015,8 @@ def test_process_chunk_alignment_off_still_retries_unparseable_json(monkeypatch)
     assert calls["max_tokens"] == [100, 200]
 
 
-def test_check_chunk_alignment_speaker_name_not_flagged_missing():
+def test_alignment_attribution_and_missing_content():
+    # check chunk alignment speaker name not flagged missing
     # 纯标签删除（提示词编辑 (e)）：名字只留在 speaker 字段，「名字+说话动词」的
     # 标签缺口（6 字骨架）落在 ≤50 字忽略档，不误判为「缺失」。
     res = check_chunk_alignment(f"东方明风笑道：{LQ}走吧。{RQ}", [
@@ -1100,8 +1024,7 @@ def test_check_chunk_alignment_speaker_name_not_flagged_missing():
     ])
     assert res["ok"] is True and not res["missing"] and not res["extra"]
 
-
-def test_check_chunk_alignment_tag_gap_ignored_long_loss_flagged():
+    # check chunk alignment tag gap ignored long loss flagged
     # 短标签/短叙述行删除（≤50 字）→ 忽略；> 100 字的叙述段缺失 → 完整性异常
     # （旧「标签文法豁免」路径已并入长度判档，不再特判）。
     source = f"他继续笑道：{LQ}此事不可说。{RQ}\n\n她转身离去。"
@@ -1122,8 +1045,32 @@ def test_check_chunk_alignment_tag_gap_ignored_long_loss_flagged():
     assert res["ok"] is False
     assert any(len(g) > _ALIGN_FAIL_MIN for g in res["missing"])
 
+    # check chunk alignment zhidao line judged by length
+    # 旧「道」尾豁免已从对齐校验移除：以「…才知道」结尾的缺失不再特判，只按
+    # 连续未匹配长度判档——短行（≤50 字）忽略，> 100 字照报为缺失
+    # （知/难 形态守卫如今只作用于 _reparse_vote 投票门）。
+    short = check_chunk_alignment(f"林某才知道。{LQ}走吧。{RQ}", [
+        {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
+    ])
+    assert short["ok"] is True and not short["missing"]
+    long_line = (
+        "林某才终于明白这条路其实从来没有尽头，"
+        "当年师傅说的那番话他一个字也没有听进去，"
+        "此刻回想起来才觉得自己实在是荒唐至极。"
+        "窗外夜色深沉，烛火摇曳，把他的影子拉得很长，"
+        "他在这条路上走了整整十年从未有过一丝动摇，"
+        "直到此刻才恍然大悟"
+    )
+    assert len("".join(c for c in long_line if c.isalnum())) > _ALIGN_FAIL_MIN
+    res = check_chunk_alignment(f"{long_line}。{LQ}走吧。{RQ}", [
+        {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
+    ])
+    assert res["ok"] is False
+    assert any(len(g) > _ALIGN_FAIL_MIN for g in res["missing"])
 
-def test_reparse_vote_accepts_speech_verb_removed_variant():
+
+def test_reparse_vote_contract():
+    # reparse vote accepts speech verb removed variant
     # 提示词编辑 (e) 的第三处变体：标签含描述性动作时保留动作、只删说话动词
     # （…衣领，吼道 → …衣领。）——骨架去尾动词簇的变体通过投票门；
     # 多动一个词（真丢内容）仍被拒。
@@ -1138,6 +1085,48 @@ def test_reparse_vote_accepts_speech_verb_removed_variant():
     real_drop = _reparse_vote(
         [{"speaker": "NARRATOR", "text": "史蒂夫猛地抓住杜尘。"}], entry, roster)
     assert real_drop is None
+
+    # reparse vote rejects zhidao tail variant
+    # 同一守卫作用于 _reparse_vote：以「…才知道」结尾的条目，「去掉尾道」变体
+    # 不在合法集合内，重判投票拒绝（对照：「…吼道」的动词变体仍放行）。
+    entry = {"speaker": "NARRATOR", "text": "林某才知道"}
+    roster = frozenset({"NARRATOR"})
+    assert _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "林某才知。"}], entry, roster) is None
+    entry2 = {"speaker": "NARRATOR", "text": "杜尘吼道"}
+    assert _reparse_vote(
+        [{"speaker": "NARRATOR", "text": "杜尘吼道。"}], entry2, roster) == (
+        ("NARRATOR", "杜尘吼道"),)
+
+    # reparse vote accepts faithful rederivations
+    # 单段：纯标签整段丢弃（编辑 (e)）→ 骨架 = 剥标签后的原文
+    assert _reparse_vote([{"speaker": "林某", "text": "二哥还没出来吗？"}],
+                         SUSP_ENTRY, ROSTER) == (("林某", "二哥还没出来吗"),)
+    # 两段：标签保留为旁白段 → 骨架 = 原文（含标签）
+    assert _reparse_vote([
+        {"speaker": "NARRATOR", "text": "林某冷笑道。"},
+        {"speaker": "林某", "text": "二哥还没出来吗？"},
+    ], SUSP_ENTRY, ROSTER) == (("NARRATOR", "林某冷笑道"), ("林某", "二哥还没出来吗"))
+    # 骨架对引号/冒号编辑免疫：原样保留包裹也通过
+    assert _reparse_vote(
+        [{"speaker": "NARRATOR", "text": SUSP_ENTRY["text"]}], SUSP_ENTRY, ROSTER) is not None
+
+    # reparse vote rejects unfaithful or unknown
+    bad = [
+        [{"speaker": "林某", "text": "二哥出来了吗？"}],        # 丢词（还没）
+        [{"speaker": "林某", "text": f"{LQ}二哥还没出来吗？{RQ}罢了"}],  # 增词
+        [{"speaker": "赵四", "text": "二哥还没出来吗？"}],       # 角色不在花名册
+        [{"speaker": "林某", "text": "二哥"},
+         {"speaker": "林某", "text": "还没出来吗？"}],          # 多段同主体
+        [{"speaker": "林某", "text": "二哥还没出来吗？"},
+         {"speaker": "NARRATOR", "text": "林某冷笑道。"}],      # 段序颠倒
+        [{"speaker": "NARRATOR", "text": ""}],                  # 空段文字
+        [{"speaker": "NARRATOR"}],                              # 缺 text
+        [],                                                     # 无段
+        ["not-a-dict"],                                         # 非 dict 段
+    ]
+    for parts in bad:
+        assert _reparse_vote(parts, SUSP_ENTRY, ROSTER) is None, parts
 
 
 def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch):
@@ -1175,43 +1164,6 @@ def test_process_chunk_fidelity_unknown_finish_reason_doubles_first(monkeypatch)
     ]
     assert calls["n"] == 2
     assert calls["max_tokens"] == [100, 200]
-
-
-def test_check_chunk_alignment_zhidao_line_judged_by_length():
-    # 旧「道」尾豁免已从对齐校验移除：以「…才知道」结尾的缺失不再特判，只按
-    # 连续未匹配长度判档——短行（≤50 字）忽略，> 100 字照报为缺失
-    # （知/难 形态守卫如今只作用于 _reparse_vote 投票门）。
-    short = check_chunk_alignment(f"林某才知道。{LQ}走吧。{RQ}", [
-        {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
-    ])
-    assert short["ok"] is True and not short["missing"]
-    long_line = (
-        "林某才终于明白这条路其实从来没有尽头，"
-        "当年师傅说的那番话他一个字也没有听进去，"
-        "此刻回想起来才觉得自己实在是荒唐至极。"
-        "窗外夜色深沉，烛火摇曳，把他的影子拉得很长，"
-        "他在这条路上走了整整十年从未有过一丝动摇，"
-        "直到此刻才恍然大悟"
-    )
-    assert len("".join(c for c in long_line if c.isalnum())) > _ALIGN_FAIL_MIN
-    res = check_chunk_alignment(f"{long_line}。{LQ}走吧。{RQ}", [
-        {"speaker": "林某", "text": f"{LQ}走吧。{RQ}"},
-    ])
-    assert res["ok"] is False
-    assert any(len(g) > _ALIGN_FAIL_MIN for g in res["missing"])
-
-
-def test_reparse_vote_rejects_zhidao_tail_variant():
-    # 同一守卫作用于 _reparse_vote：以「…才知道」结尾的条目，「去掉尾道」变体
-    # 不在合法集合内，重判投票拒绝（对照：「…吼道」的动词变体仍放行）。
-    entry = {"speaker": "NARRATOR", "text": "林某才知道"}
-    roster = frozenset({"NARRATOR"})
-    assert _reparse_vote(
-        [{"speaker": "NARRATOR", "text": "林某才知。"}], entry, roster) is None
-    entry2 = {"speaker": "NARRATOR", "text": "杜尘吼道"}
-    assert _reparse_vote(
-        [{"speaker": "NARRATOR", "text": "杜尘吼道。"}], entry2, roster) == (
-        ("NARRATOR", "杜尘吼道"),)
 
 
 def test_process_chunk_doubled_budget_rejected_falls_back_to_split(monkeypatch):
@@ -1294,7 +1246,8 @@ def test_process_chunk_retry_doubled_budget_rejected_falls_back(monkeypatch):
 # 同人段落机械合并（merge_adjacent_same_speaker：连续同 speaker，词字符口径）
 # --------------------------------------------------------------------------- #
 
-def test_merge_same_speaker_merges_adjacent_run():
+def test_same_speaker_merge_content_and_instruct():
+    # merge same speaker merges adjacent run
     entries = [
         {"speaker": "NARRATOR", "text": "夜色沉了下来", "instruct": "a"},
         {"speaker": "NARRATOR", "text": "风穿过巷子", "instruct": "b"},
@@ -1312,8 +1265,7 @@ def test_merge_same_speaker_merges_adjacent_run():
     ]
     assert entries == original  # 输入列表不被改动
 
-
-def test_merge_same_speaker_chains_and_keeps_first_instruct():
+    # merge same speaker chains and keeps first instruct
     entries = [
         {"speaker": "NARRATOR", "text": "一", "instruct": "slow"},
         {"speaker": "NARRATOR", "text": "二", "instruct": "fast"},
@@ -1324,8 +1276,23 @@ def test_merge_same_speaker_chains_and_keeps_first_instruct():
     assert n == 2
     assert out == [{"speaker": "NARRATOR", "text": "一。二。三", "instruct": "slow"}]
 
+    # merge same speaker instruct takes most word chars
+    # instruct 取词字符数最多的成员（非首条）
+    entries = [
+        {"speaker": "BOB", "text": "短", "instruct": "a"},
+        {"speaker": "BOB", "text": "这段文字要长得多一些才行", "instruct": "b"},
+        {"speaker": "BOB", "text": "中", "instruct": "c"},
+    ]
+    out, n = merge_adjacent_same_speaker(entries, is_chapter_title)
+    # 短(1)+长(12)=13≤100 并入；+中(1)：13+1=14≤100 并入 → 一条
+    # 词字符最多 = 长(12) → instruct b
+    assert n == 2
+    assert len(out) == 1
+    assert out[0]["instruct"] == "b"
 
-def test_merge_same_speaker_keeps_titles_standalone():
+
+def test_same_speaker_merge_title_guards():
+    # merge same speaker keeps titles standalone
     entries = [
         {"speaker": "NARRATOR", "text": "前章结尾"},
         {"speaker": "NARRATOR", "text": "第十章 舞会"},
@@ -1335,74 +1302,7 @@ def test_merge_same_speaker_keeps_titles_standalone():
     assert n == 0  # 标题行的前后两侧一律不合并
     assert [e["text"] for e in out] == ["前章结尾", "第十章 舞会", "舞会开始了"]
 
-
-def test_merge_same_speaker_caps_merged_word_chars():
-    # 词字符口径：甲×3900 + 乙×200 = 4100 > 4000 且较短方 200 > 10 → 不合并
-    a = {"speaker": "NARRATOR", "text": "甲" * 3900}
-    b = {"speaker": "NARRATOR", "text": "乙" * 200}
-    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title, max_chars=4000)
-    assert n == 0
-    assert out == [a, b]
-
-
-def test_merge_same_speaker_default_cap_blocks_oversize():
-    # 缺省上限 100 词字符：60 + 60 = 120 > 100 且较短方 60 > 10 → 不合并
-    a = {"speaker": "NARRATOR", "text": "甲" * 60}
-    b = {"speaker": "NARRATOR", "text": "乙" * 60}
-    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
-    assert n == 0
-    assert out == [a, b]
-
-
-def test_merge_same_speaker_merges_short_run_by_default():
-    # 缺省上限 100 词字符：40 + 40 = 80 ≤ 100 → 合并（边界补「。」）
-    a = {"speaker": "NARRATOR", "text": "甲" * 40}
-    b = {"speaker": "NARRATOR", "text": "乙" * 40}
-    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
-    assert n == 1
-    assert out == [{"speaker": "NARRATOR", "text": "甲" * 40 + "。" + "乙" * 40}]
-
-
-def test_merge_same_speaker_forced_merge_short_member():
-    # ≤10 强制合并：较短一方 5 字 → 即使合并后 > 100 也必合并
-    a = {"speaker": "NARRATOR", "text": "甲" * 100}
-    b = {"speaker": "NARRATOR", "text": "乙" * 5}
-    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
-    assert n == 1
-    assert out == [{"speaker": "NARRATOR", "text": "甲" * 100 + "。" + "乙" * 5}]
-
-
-def test_merge_same_speaker_forced_merge_grows_long_block():
-    # 贪心：块已 100 字，后续 5 字段较短方 ≤10 → 强制并入（块 → 105）；
-    # 再后 50 字段：块 105+50=155>100 且较短方 50>10 → 封块、开新块
-    entries = [
-        {"speaker": "BOB", "text": "丙" * 100, "instruct": "x"},
-        {"speaker": "BOB", "text": "丁" * 5, "instruct": "y"},
-        {"speaker": "BOB", "text": "戊" * 50, "instruct": "z"},
-    ]
-    out, n = merge_adjacent_same_speaker(entries, is_chapter_title)
-    assert n == 1
-    assert len(out) == 2
-    assert out[0]["text"] == "丙" * 100 + "。" + "丁" * 5
-    assert out[1]["text"] == "戊" * 50
-
-
-def test_merge_same_speaker_greedy_absorbs_while_within_cap():
-    # 贪心：块+段 ≤100 持续并入；超过即封块
-    entries = [
-        {"speaker": "BOB", "text": "甲" * 40, "instruct": "a"},
-        {"speaker": "BOB", "text": "乙" * 40, "instruct": "b"},
-        {"speaker": "BOB", "text": "丙" * 40, "instruct": "c"},
-    ]
-    out, n = merge_adjacent_same_speaker(entries, is_chapter_title)
-    # 甲(40)+乙(40)=80≤100 并入 → 块 80；丙(40)：80+40=120>100 且较短方 40>10 → 封块
-    assert n == 1
-    assert len(out) == 2
-    assert out[0]["text"] == "甲" * 40 + "。" + "乙" * 40
-    assert out[1]["text"] == "丙" * 40
-
-
-def test_merge_same_speaker_block_becomes_title_blocks_further_merge():
+    # merge same speaker block becomes title blocks further merge
     # 章标题恒判、无豁免：运行块一旦成为标题即封口（自定义 title_test 命中合并后形态
     # "楔。子"——楔+子 边界补「。」后的实际形态）
     def t_test(t):
@@ -1419,19 +1319,66 @@ def test_merge_same_speaker_block_becomes_title_blocks_further_merge():
     assert out[1]["text"] == "很长的一段文字内容在这里面"
 
 
-def test_merge_same_speaker_instruct_takes_most_word_chars():
-    # instruct 取词字符数最多的成员（非首条）
+def test_same_speaker_merge_limits():
+    # merge same speaker caps merged word chars
+    # 词字符口径：甲×3900 + 乙×200 = 4100 > 4000 且较短方 200 > 10 → 不合并
+    a = {"speaker": "NARRATOR", "text": "甲" * 3900}
+    b = {"speaker": "NARRATOR", "text": "乙" * 200}
+    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title, max_chars=4000)
+    assert n == 0
+    assert out == [a, b]
+
+    # merge same speaker default cap blocks oversize
+    # 缺省上限 100 词字符：60 + 60 = 120 > 100 且较短方 60 > 10 → 不合并
+    a = {"speaker": "NARRATOR", "text": "甲" * 60}
+    b = {"speaker": "NARRATOR", "text": "乙" * 60}
+    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
+    assert n == 0
+    assert out == [a, b]
+
+    # merge same speaker merges short run by default
+    # 缺省上限 100 词字符：40 + 40 = 80 ≤ 100 → 合并（边界补「。」）
+    a = {"speaker": "NARRATOR", "text": "甲" * 40}
+    b = {"speaker": "NARRATOR", "text": "乙" * 40}
+    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
+    assert n == 1
+    assert out == [{"speaker": "NARRATOR", "text": "甲" * 40 + "。" + "乙" * 40}]
+
+    # merge same speaker forced merge short member
+    # ≤10 强制合并：较短一方 5 字 → 即使合并后 > 100 也必合并
+    a = {"speaker": "NARRATOR", "text": "甲" * 100}
+    b = {"speaker": "NARRATOR", "text": "乙" * 5}
+    out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
+    assert n == 1
+    assert out == [{"speaker": "NARRATOR", "text": "甲" * 100 + "。" + "乙" * 5}]
+
+    # merge same speaker forced merge grows long block
+    # 贪心：块已 100 字，后续 5 字段较短方 ≤10 → 强制并入（块 → 105）；
+    # 再后 50 字段：块 105+50=155>100 且较短方 50>10 → 封块、开新块
     entries = [
-        {"speaker": "BOB", "text": "短", "instruct": "a"},
-        {"speaker": "BOB", "text": "这段文字要长得多一些才行", "instruct": "b"},
-        {"speaker": "BOB", "text": "中", "instruct": "c"},
+        {"speaker": "BOB", "text": "丙" * 100, "instruct": "x"},
+        {"speaker": "BOB", "text": "丁" * 5, "instruct": "y"},
+        {"speaker": "BOB", "text": "戊" * 50, "instruct": "z"},
     ]
     out, n = merge_adjacent_same_speaker(entries, is_chapter_title)
-    # 短(1)+长(12)=13≤100 并入；+中(1)：13+1=14≤100 并入 → 一条
-    # 词字符最多 = 长(12) → instruct b
-    assert n == 2
-    assert len(out) == 1
-    assert out[0]["instruct"] == "b"
+    assert n == 1
+    assert len(out) == 2
+    assert out[0]["text"] == "丙" * 100 + "。" + "丁" * 5
+    assert out[1]["text"] == "戊" * 50
+
+    # merge same speaker greedy absorbs while within cap
+    # 贪心：块+段 ≤100 持续并入；超过即封块
+    entries = [
+        {"speaker": "BOB", "text": "甲" * 40, "instruct": "a"},
+        {"speaker": "BOB", "text": "乙" * 40, "instruct": "b"},
+        {"speaker": "BOB", "text": "丙" * 40, "instruct": "c"},
+    ]
+    out, n = merge_adjacent_same_speaker(entries, is_chapter_title)
+    # 甲(40)+乙(40)=80≤100 并入 → 块 80；丙(40)：80+40=120>100 且较短方 40>10 → 封块
+    assert n == 1
+    assert len(out) == 2
+    assert out[0]["text"] == "甲" * 40 + "。" + "乙" * 40
+    assert out[1]["text"] == "丙" * 40
 
 
 # --------------------------------------------------------------------------- #
@@ -1461,7 +1408,8 @@ W_ALL_LIN = json.dumps([{"speaker": "林某", "text": "林某冷笑道二哥还�
                        ensure_ascii=False)
 
 
-def test_suspicious_detector_pins():
+def test_suspicious_entry_detection():
+    # suspicious detector pins
     # 触发 = 外层双引号包裹（弯/直任意形式）且引号跨度内有「…道 + 冒号」；
     # 冒号是硬条件（知道/难道/道理 的「道」后无冒号 → 不触发）。
     suspicious = [
@@ -1490,8 +1438,7 @@ def test_suspicious_detector_pins():
     for t in clean:
         assert is_suspicious_entry_text(t) is False, repr(t)
 
-
-def test_suspicious_indices_skips_non_dicts():
+    # suspicious indices skips non dicts
     entries = [
         {"speaker": "NARRATOR", "text": f"{LQ}又道：{LQ}嗯？{RQ}{RQ}", "instruct": ""},
         {"speaker": "林某", "text": f"{LQ}走。{RQ}", "instruct": ""},
@@ -1511,38 +1458,6 @@ def test_strip_leading_saying_tag():
     # 无开头标签 / 未包裹 → 原样返回（中段标签不剥——交给段落混合检查）
     assert _strip_leading_saying_tag(f"{LQ}二哥。{RQ}") == f"{LQ}二哥。{RQ}"
     assert _strip_leading_saying_tag("林某冷笑道：走") == "林某冷笑道：走"
-
-
-def test_reparse_vote_accepts_faithful_rederivations():
-    # 单段：纯标签整段丢弃（编辑 (e)）→ 骨架 = 剥标签后的原文
-    assert _reparse_vote([{"speaker": "林某", "text": "二哥还没出来吗？"}],
-                         SUSP_ENTRY, ROSTER) == (("林某", "二哥还没出来吗"),)
-    # 两段：标签保留为旁白段 → 骨架 = 原文（含标签）
-    assert _reparse_vote([
-        {"speaker": "NARRATOR", "text": "林某冷笑道。"},
-        {"speaker": "林某", "text": "二哥还没出来吗？"},
-    ], SUSP_ENTRY, ROSTER) == (("NARRATOR", "林某冷笑道"), ("林某", "二哥还没出来吗"))
-    # 骨架对引号/冒号编辑免疫：原样保留包裹也通过
-    assert _reparse_vote(
-        [{"speaker": "NARRATOR", "text": SUSP_ENTRY["text"]}], SUSP_ENTRY, ROSTER) is not None
-
-
-def test_reparse_vote_rejects_unfaithful_or_unknown():
-    bad = [
-        [{"speaker": "林某", "text": "二哥出来了吗？"}],        # 丢词（还没）
-        [{"speaker": "林某", "text": f"{LQ}二哥还没出来吗？{RQ}罢了"}],  # 增词
-        [{"speaker": "赵四", "text": "二哥还没出来吗？"}],       # 角色不在花名册
-        [{"speaker": "林某", "text": "二哥"},
-         {"speaker": "林某", "text": "还没出来吗？"}],          # 多段同主体
-        [{"speaker": "林某", "text": "二哥还没出来吗？"},
-         {"speaker": "NARRATOR", "text": "林某冷笑道。"}],      # 段序颠倒
-        [{"speaker": "NARRATOR", "text": ""}],                  # 空段文字
-        [{"speaker": "NARRATOR"}],                              # 缺 text
-        [],                                                     # 无段
-        ["not-a-dict"],                                         # 非 dict 段
-    ]
-    for parts in bad:
-        assert _reparse_vote(parts, SUSP_ENTRY, ROSTER) is None, parts
 
 
 def _run_revalidate(monkeypatch, payloads, handle=None):
@@ -1848,7 +1763,8 @@ def test_validate_instructs_inherits_contiguous_narrator_directions_without_llm(
     assert entries[1]["instruct"] == ""
 
 
-def test_batch_window_flags_the_targets():
+def test_batch_context_window_contract():
+    # batch window flags the targets
     entries = [_entry("N", f"t{i}") for i in range(30)]
     # A middle batch of 3 targets starting at index 10, with ±1 context.
     w = build_batch_window(entries, start=10, size=3, n=1)
@@ -1856,37 +1772,32 @@ def test_batch_window_flags_the_targets():
     assert [e.get("target") for e in w] == [None, True, True, True, None]
     assert all("instruct" not in e for e in w)  # instruct is dropped to save tokens
 
-
-def test_batch_window_clamps_at_start():
+    # batch window clamps at start
     entries = [_entry("N", f"t{i}") for i in range(5)]
     w = build_batch_window(entries, start=0, size=3, n=2)  # no context before index 0
     assert [e["index"] for e in w] == [0, 1, 2, 3, 4]
     assert [e.get("target") for e in w] == [True, True, True, None, None]
 
-
-def test_batch_window_clamps_at_end():
+    # batch window clamps at end
     entries = [_entry("N", f"t{i}") for i in range(5)]
     w = build_batch_window(entries, start=3, size=5, n=2)  # the block runs past the end
     assert [e["index"] for e in w] == [1, 2, 3, 4]
     assert [e.get("target") for e in w] == [None, None, True, True]
 
-
-def test_batch_window_zero_n_only_targets():
+    # batch window zero n only targets
     entries = [_entry("N", f"t{i}") for i in range(6)]
     w = build_batch_window(entries, start=2, size=3, n=0)
     assert [e["index"] for e in w] == [2, 3, 4]
     assert all(e.get("target") is True for e in w)
 
-
-def test_batch_window_carries_original_speaker_and_text():
+    # batch window carries original speaker and text
     entries = [_entry("ALICE", "你好"), _entry("NARRATOR", "他走了"), _entry("BOB", "再见")]
     w = build_batch_window(entries, start=0, size=2, n=1)
     assert w[0] == {"index": 0, "speaker": "ALICE", "text": "你好", "target": True}
     assert w[1] == {"index": 1, "speaker": "NARRATOR", "text": "他走了", "target": True}
     assert w[2] == {"index": 2, "speaker": "BOB", "text": "再见"}  # context: no target key
 
-
-def test_batch_window_skip_excludes_skipped_targets():
+    # batch window skip excludes skipped targets
     entries = [_entry("N", f"t{i}") for i in range(5)]
     # Index 2 sits inside the target range but is skipped (the spot audit's in-span
     # non-targets ride along unflagged, like context). (The block starts at 0, so the
@@ -1900,60 +1811,50 @@ def test_batch_window_skip_excludes_skipped_targets():
     assert [e.get("target") for e in w0] == [True, True, True, None]
 
 
-def test_parse_speaker_clean_object():
+def test_speaker_reply_parsing():
+    # parse speaker clean object
     assert parse_speaker('{"speaker": "ELENA"}') == "ELENA"
 
-
-def test_parse_speaker_object_with_extra_keys():
+    # parse speaker object with extra keys
     assert parse_speaker('{"speaker": "NARRATOR", "reason": "it is narration"}') == "NARRATOR"
 
-
-def test_parse_speaker_strips_closed_thinking_tags():
+    # parse speaker strips closed thinking tags
     lt, gt = chr(60), chr(62)  # build the tags so no literal <> / newline lives in the file
     raw = lt + "think" + gt + "hmm, it is dialogue" + lt + "/think" + gt + ' {"speaker": "BOB"}'
     assert parse_speaker(raw) == "BOB"
 
-
-def test_parse_speaker_markdown_fence():
+    # parse speaker markdown fence
     raw = "```json\n" + '{"speaker": "CARL"}' + "\n```"
     assert parse_speaker(raw) == "CARL"
 
-
-def test_parse_speaker_single_element_array():
+    # parse speaker single element array
     assert parse_speaker('["ELENA"]') == "ELENA"
 
-
-def test_parse_speaker_bare_token():
+    # parse speaker bare token
     assert parse_speaker("ELENA") == "ELENA"
 
-
-def test_parse_speaker_sentence_is_none():
+    # parse speaker sentence is none
     assert parse_speaker("I think the speaker is probably ELENA because...") is None
 
-
-def test_parse_speaker_empty_is_none():
+    # parse speaker empty is none
     assert parse_speaker("") is None
     assert parse_speaker(None) is None
 
-
-def test_parse_speaker_object_without_speaker_is_none():
+    # parse speaker object without speaker is none
     assert parse_speaker('{"foo": "bar"}') is None
 
-
-def test_parse_speaker_map_full_captures_text():
+    # parse speaker map full captures text
     text = ('{"results": [{"index": 0, "speaker": "A", "text": "t0"},'
             ' {"index": 1, "speaker": "B"}]}')
     assert parse_speaker_map_full(text, [0, 1]) == {0: ("A", "t0"), 1: ("B", None)}
 
-
-def test_parse_speaker_map_full_ignores_non_targets_and_blank_text():
+    # parse speaker map full ignores non targets and blank text
     # A text for a non-target index is dropped; a blank text key is treated as absent.
     text = ('{"results": [{"index": 0, "speaker": "A", "text": "  "},'
             ' {"index": 9, "speaker": "X", "text": "z"}]}')
     assert parse_speaker_map_full(text, [0, 1]) == {0: ("A", None)}
 
-
-def test_parse_speaker_map_full_speaker_projection():
+    # parse speaker map full speaker projection
     # The speaker projection of the full parser lands exactly on the target indices,
     # one speaker each (the legacy speaker-only contract).
     text = '{"results": [{"index": 3, "speaker": "A", "text": "t"}, {"index": 7, "speaker": "B"}]}'
@@ -1961,7 +1862,8 @@ def test_parse_speaker_map_full_speaker_projection():
     assert {i: sp for i, (sp, _tx) in full.items()} == {3: "A", 7: "B"}
 
 
-def test_strip_outer_quotes_all_supported_pairs():
+def test_outer_quote_stripping():
+    # strip outer quotes all supported pairs
     # Corner / double-corner / curly-single pairs via chr() — hand-typed quotes are unreliable.
     CB, CC = chr(0x300C), chr(0x300D)  # corner
     DB, DC = chr(0x300E), chr(0x300F)  # double corner
@@ -1973,21 +1875,18 @@ def test_strip_outer_quotes_all_supported_pairs():
     assert strip_outer_quotes(SQ + "hello" + SQ) == "hello"
     assert strip_outer_quotes(chr(39) + "hi" + chr(39)) == "hi"
 
-
-def test_strip_outer_quotes_keeps_inner_quotes():
+    # strip outer quotes keeps inner quotes
     # Only the outermost pair is stripped — an inner quoted term is preserved.
     CB, CC = chr(0x300C), chr(0x300D)
     inner = "他说" + CB + "快跑" + CC + "。"
     assert strip_outer_quotes(LQ + inner + RQ) == inner
 
-
-def test_strip_outer_quotes_not_wrapped_is_none():
+    # strip outer quotes not wrapped is none
     assert strip_outer_quotes("他走进了房间") is None
     # A leading CLOSER (the pair is reversed) is not a wrap.
     assert strip_outer_quotes(RQ + "你来了。" + LQ) is None
 
-
-def test_strip_outer_quotes_empty_interior_is_none():
+    # strip outer quotes empty interior is none
     CB, CC = chr(0x300C), chr(0x300D)
     assert strip_outer_quotes(LQ + RQ) is None
     assert strip_outer_quotes(CB + CC) is None
@@ -1996,47 +1895,39 @@ def test_strip_outer_quotes_empty_interior_is_none():
     assert strip_outer_quotes(None) is None
 
 
-def test_majority_two_of_three():
+def test_speaker_vote_majority():
+    # majority two of three
     assert _pick_majority(["A", "A", "B"]) == "A"
 
-
-def test_majority_all_three():
+    # majority all three
     assert _pick_majority(["A", "A", "A"]) == "A"
 
-
-def test_majority_all_distinct_is_none():
+    # majority all distinct is none
     assert _pick_majority(["A", "B", "C"]) is None
 
-
-def test_majority_tie_is_none():
+    # majority tie is none
     assert _pick_majority(["A", "A", "B", "B"]) is None
 
-
-def test_majority_ignores_none_and_rejects_lone_vote():
+    # majority ignores none and rejects lone vote
     assert _pick_majority(["A"]) is None              # a lone vote is not a majority
     assert _pick_majority([None, "A", "A"]) == "A"    # None votes are ignored
     assert _pick_majority([None, None]) is None
 
-
-def test_majority_four_with_and_without_majority():
+    # majority four with and without majority
     assert _pick_majority(["A", "B", "A", "C"]) == "A"
     assert _pick_majority(["A", "B", "C", "D"]) is None
 
 
 def test_retry_grouping_gap_and_batch_cap():
-    # Consecutive failures share a call while their ±n context windows overlap; a
-    # larger gap or the batch cap starts a new group (one LLM call per group).
-    assert group_retry_indices([], 4, 20) == []
-    assert group_retry_indices([5], 4, 20) == [[5]]
-    # Gaps ≤ n (4) stay together: 6-5=1, 10-6=4.
-    assert group_retry_indices([5, 6, 10], 4, 20) == [[5, 6, 10]]
-    # Gap 6 > 4 → a new group (one call must not span the gap).
-    assert group_retry_indices([5, 11], 4, 20) == [[5], [11]]
-    # The batch cap splits a long run into groups of ≤ batch targets.
-    assert group_retry_indices(list(range(25)), 4, 10) == [
-        list(range(0, 10)), list(range(10, 20)), list(range(20, 25))]
-    # n=0: only truly adjacent (gap ≤ 1) indices share a call.
-    assert group_retry_indices([5, 6, 8], 0, 20) == [[5, 6], [8]]
+    for args, expected in [
+        (([], 4, 20,), []),
+        (([5], 4, 20,), [[5]]),
+        (([5, 6, 10], 4, 20,), [[5, 6, 10]]),
+        (([5, 11], 4, 20,), [[5], [11]]),
+        ((list(range(25)), 4, 10,), [list(range(0, 10)), list(range(10, 20)), list(range(20, 25))]),
+        (([5, 6, 8], 0, 20,), [[5, 6], [8]]),
+    ]:
+        assert group_retry_indices(*args) == expected, args
 
 
 @pytest.fixture
@@ -2337,7 +2228,8 @@ def test_generate_file_delete_tags_off_keeps_tags(tmp_path, monkeypatch, workspa
 # --------------------------------------------------------------------------- #
 
 
-def test_pure_tag_predicate_positives():
+def test_pure_saying_tag_recognition():
+    # pure tag predicate positives
     # 五归属动词收尾（含末尾标点形态与无标点形态；「，」/「：」/「！」/「……」均剥掉后再判）
     for t in (
         "老道怒道。", "杜尘急道。", "史蒂夫解释道。",
@@ -2350,8 +2242,7 @@ def test_pure_tag_predicate_positives():
             {"老道", "杜尘", "史蒂夫", "胖女人"},
         ), t
 
-
-def test_pure_tag_predicate_negatives():
+    # pure tag predicate negatives
     # 知道/难道 的「道」= 形态守卫（与归属抽样同一守卫），不是标签
     for t in ("他不知道。", "她不知道。", "他难道。"):
         assert not _is_pure_saying_tag(_entry("NARRATOR", t, ""), is_chapter_title), t
@@ -2519,21 +2410,23 @@ def test_adaptive_spot_rate_uses_history_without_touching_cold_start(monkeypatch
 
 
 def test_spot_budget_table():
-    # @0.05：预算 = max(1, round(rate·N)) 封顶 N；1/3 → 纯随机，其余 → 风险
-    assert spot_budget(1, 0.05) == (0, 1)
-    assert spot_budget(2, 0.05) == (0, 1)
-    assert spot_budget(10, 0.05) == (0, 1)
-    assert spot_budget(100, 0.05) == (2, 3)
-    assert spot_budget(101, 0.05) == (2, 3)
-    # rate = 0 / 负 → 关闭；无条目 → 关闭
-    assert spot_budget(100, 0.0) == (0, 0)
-    assert spot_budget(100, -0.1) == (0, 0)
-    assert spot_budget(0, 0.05) == (0, 0)
-    # rate ≥ 1 → 全量
-    assert spot_budget(5, 1.0) == (2, 3)
+    for args, expected in [
+        ((1, 0.05,), (0, 1)),
+        ((2, 0.05,), (0, 1)),
+        ((10, 0.05,), (0, 1)),
+        ((100, 0.05,), (2, 3)),
+        ((101, 0.05,), (2, 3)),
+        ((100, 0.0,), (0, 0)),
+        ((100, -0.1,), (0, 0)),
+        ((0, 0.05,), (0, 0)),
+        ((5, 1.0,), (2, 3)),
+    ]:
+        assert spot_budget(*args) == expected, args
 
 
-def test_tag_in_positives():
+def test_attribution_tag_and_previous_entry():
+    # attribution tag recognition
+    # tag in positives
     # 人名（2~3 字）× 五动词
     for name in ("林某", "王小明", "任昊"):
         for verb in "说道问答喊":
@@ -2545,8 +2438,7 @@ def test_tag_in_positives():
     # 标签在句首之外的位置同样命中
     assert _tag_in("林某说他知道这件事")
 
-
-def test_tag_in_negatives():
+    # tag in negatives
     # 知道/难道 是形态而非标签（「道」前一字符 = 知/难 的形态守卫，不是词表黑名单）
     for t in ("他知道", "她知道", "不知道", "谁知道", "他难道", "这道理", "林某知道"):
         assert not _tag_in(t), t
@@ -2554,8 +2446,7 @@ def test_tag_in_negatives():
     assert not _tag_in("风平浪静")
     assert not _tag_in("")
 
-
-def test_has_attribution_tag_prev_rule():
+    # has attribution tag prev rule
     # 标签可落在前一条（「林某说」在台词行之前）
     assert _has_attribution_tag("", "林某说")
     assert _has_attribution_tag("他走了", "王小明答")
@@ -2563,7 +2454,8 @@ def test_has_attribution_tag_prev_rule():
     assert not _has_attribution_tag("", "他走了")  # 前一条也无标签
 
 
-def test_risk_tier_combos():
+def test_spot_check_risk_tiers():
+    # risk tier combos
     long_tx = "这件事必须从长计议，绝对不可轻举妄动，否则后果不堪设想。"  # 29 字
     # tier 0：有标签 + 长 + 少说话人
     e0 = [_entry("林某", "林某说" + long_tx, "")]
@@ -2584,16 +2476,14 @@ def test_risk_tier_combos():
     ]
     assert _risk_tier(e3[4], e3, 4) == 3
 
-
-def test_risk_tier_short_boundary():
+    # risk tier short boundary
     # ≤10 字 → 短（10 字命中，11 字不命中）
     e10 = [_entry("林某", "1234567890", "")]
     e11 = [_entry("林某", "12345678901", "")]
     assert _risk_tier(e10[0], e10, 0) == 2  # 无标签 + 短
     assert _risk_tier(e11[0], e11, 0) == 1  # 仅无标签
 
-
-def test_risk_tier_multi_speaker_boundary():
+    # risk tier multi speaker boundary
     long_tx = "这是一段足够长的旁白文字，用来撑满字数。"
 
     def mk(neighbors):
@@ -2608,8 +2498,7 @@ def test_risk_tier_multi_speaker_boundary():
     e3 = mk(["王某", "赵某"])
     assert _risk_tier(e3[-1], e3, len(e3) - 1) == 0
 
-
-def test_risk_tier_window_clamps_at_file_start():
+    # risk tier window clamps at file start
     # i=0：窗口 clamp 到 [0, N)——不越界，计数照常
     es = [_entry("林某", "林某说这是一段足够长的旁白文字。", "")] + [
         _entry(s, "这是一段足够长的旁白文字，用来撑满字数。", "")
@@ -3101,17 +2990,15 @@ def _boundary_e2e(tmp_path, monkeypatch, workspace, rejudge_reply,
 
 
 def test_select_boundary_targets_unit():
-    # 单 chunk → 无内部边界 → 零目标
-    assert select_boundary_targets([6], 4, 6) == []
-    # n=0 → 零目标（窗宽 0 = 阶段退化为零 LLM 调用的空操作）
-    assert select_boundary_targets([3, 6], 0, 6) == []
-    # 单个内部边界 b=3、两侧各 n 条 → [3-1, 3+1)
-    assert select_boundary_targets([3, 6], 1, 6) == [2, 3]
-    # 相邻两边界窗口重叠 → 全局去重
-    assert select_boundary_targets([3, 5, 6], 2, 6) == [1, 2, 3, 4, 5]
-    # 边界贴近文件头/尾 → 钳入 [0, total)
-    assert select_boundary_targets([1, 6], 3, 6) == [0, 1, 2, 3]
-    assert select_boundary_targets([5, 6], 3, 6) == [2, 3, 4, 5]
+    for args, expected in [
+        (([6], 4, 6,), []),
+        (([3, 6], 0, 6,), []),
+        (([3, 6], 1, 6,), [2, 3]),
+        (([3, 5, 6], 2, 6,), [1, 2, 3, 4, 5]),
+        (([1, 6], 3, 6,), [0, 1, 2, 3]),
+        (([5, 6], 3, 6,), [2, 3, 4, 5]),
+    ]:
+        assert select_boundary_targets(*args) == expected, args
 
 
 def test_boundary_risk_filter_skips_clean_and_keeps_speaker_turn():
@@ -3447,7 +3334,8 @@ def test_long_entry_indices_unit():
     assert long_entry_indices(entries, 200) == [1]
 
 
-def test_split_long_entries_unit():
+def test_long_entry_split_contract():
+    # split long entries unit
     # speaker / instruct 继承（instruct 只给首段）；输入列表不动；硬保证 ≤ 上限
     e = [
         {"speaker": "NARRATOR", "text": LONG_SRC, "instruct": "calm"},
@@ -3467,8 +3355,7 @@ def test_split_long_entries_unit():
     out2, n2 = split_long_entries(short, 200, is_chapter_title)
     assert out2 is short and n2 == 0
 
-
-def test_split_long_entries_replaces_multiple_long_rows_without_shifting():
+    # split long entries replaces multiple long rows without shifting
     first = "甲" * 450
     middle = {"speaker": "林某", "text": "中间短句。", "instruct": "middle"}
     second = "乙" * 450

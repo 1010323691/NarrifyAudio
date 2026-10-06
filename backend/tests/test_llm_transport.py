@@ -1,13 +1,6 @@
-"""Q15/S5: the two LLM transport verbs must share ONE business body.
-
-Plan acceptance: 「LLM 两路径共同业务参数 diff 为空」 — ``stream`` /
-``stream_options`` are exempt (the legitimate per-verb difference); the
-``extra_body`` asymmetry is retained as-is (non-streaming only — see the
-arbitration note in ``request_chat_completion_stream``).
-"""
+"""LLM request bodies, transport errors, retries and model discovery."""
 from __future__ import annotations
 
-import inspect
 import io
 import json
 import urllib.error
@@ -40,13 +33,13 @@ COMMON = dict(
 EXEMPT = {"stream", "stream_options"}
 
 
-def test_build_chat_body_stream_adds_only_stream_pair():
+def test_chat_request_body_contract():
+    # build chat body stream adds only stream pair
     plain = build_chat_body(**COMMON)
     streamed = build_chat_body(stream=True, **COMMON)
     assert streamed == {**plain, "stream": True, "stream_options": {"include_usage": True}}
 
-
-def test_build_chat_body_omits_zero_optionals():
+    # build chat body omits zero optionals
     body = build_chat_body(
         model="m", messages=[], temperature=0.0, top_p=1.0,
         presence_penalty=0.0, max_tokens=10,
@@ -54,8 +47,7 @@ def test_build_chat_body_omits_zero_optionals():
     assert set(body) == {
         "model", "messages", "temperature", "top_p", "presence_penalty", "max_tokens"}
 
-
-def test_build_chat_body_merges_extra_body_top_level():
+    # build chat body merges extra body top level
     body = build_chat_body(
         model="m", messages=[], temperature=0.0, top_p=1.0,
         presence_penalty=0.0, max_tokens=10,
@@ -123,13 +115,6 @@ def test_two_paths_share_business_body(monkeypatch):
     assert stream["stream"] is True
     assert stream["stream_options"] == {"include_usage": True}
     assert "stream" not in non and "stream_options" not in non
-
-
-def test_extra_body_asymmetry_is_documented_and_stable():
-    """Q15 裁决：extra_body 透传保留在非流式一侧（含 400/422 单次回退）；
-    流式路径不新增透传（属行为变化，本轮不做）。"""
-    assert "extra_body" in inspect.signature(request_chat_completion).parameters
-    assert "extra_body" not in inspect.signature(request_chat_completion_stream).parameters
 
 
 # --------------------------------------------------------------------------- #

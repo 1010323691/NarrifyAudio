@@ -9,8 +9,6 @@ the chapter-sequence report and the exact output-file naming.
 """
 from __future__ import annotations
 
-import pytest
-
 from backend.engines import book as B
 
 
@@ -34,7 +32,8 @@ def make_novel(num_chapters: int = 20, body_repeats: int = 40) -> str:
 # Character counting
 # --------------------------------------------------------------------------- #
 
-def test_range_char_count_excludes_newlines():
+def test_range_char_count_contract():
+    # range char count excludes newlines
     text = "abc\ndef\n"  # positions: a0 b1 c2 \n3 d4 e5 f6 \n7
     nl = B.build_newline_positions(text)
     assert nl == [3, 7]
@@ -45,8 +44,7 @@ def test_range_char_count_excludes_newlines():
     # The whole-text count equals non-newline code points.
     assert sum(1 for c in text if c not in "\r\n") == B.range_char_count(nl, 0, len(text))
 
-
-def test_range_char_count_multibyte_code_points():
+    # range char count multibyte code points
     # Emoji (non-BMP) count as one code point each, matching Python len().
     text = "你好🌍🔥"  # 6 code points, 2 of them non-BMP
     nl = B.build_newline_positions(text)
@@ -57,7 +55,8 @@ def test_range_char_count_multibyte_code_points():
 # Chapter detection + tiling
 # --------------------------------------------------------------------------- #
 
-def test_chapters_tile_the_whole_text():
+def test_chapter_detection_tiling_and_round_trip():
+    # chapters tile the whole text
     text = make_novel(20)
     analysis = B.analyze_text(text)
     chs = analysis["chapters"]
@@ -77,14 +76,21 @@ def test_chapters_tile_the_whole_text():
     # Chapter numbers parsed as 1..20.
     assert [c["num"] for c in chs] == list(range(1, 21))
 
-
-def test_chapter_header_positions_are_real_headers():
+    # chapter header positions are real headers
     text = make_novel(10)
     analysis = B.analyze_text(text)
     chs = analysis["chapters"]
     # From chapter 2 onward, the slice begins at its "第N章" header.
     for i in range(1, len(chs)):
         assert text[chs[i]["start"]].startswith("第")
+
+    # round trip concatenation equals original
+    text = make_novel(40)
+    analysis = B.analyze_text(text)
+    # One file per chapter: concatenating the per-chapter slices reproduces the
+    # original exactly (no character lost, added, or reordered).
+    joined = "".join(B.chapter_content(analysis, ch) for ch in analysis["chapters"])
+    assert joined == text
 
 
 def test_no_chapters_yields_no_files():
@@ -98,20 +104,12 @@ def test_no_chapters_yields_no_files():
 # The core invariant: round-trip
 # --------------------------------------------------------------------------- #
 
-def test_round_trip_concatenation_equals_original():
-    text = make_novel(40)
-    analysis = B.analyze_text(text)
-    # One file per chapter: concatenating the per-chapter slices reproduces the
-    # original exactly (no character lost, added, or reordered).
-    joined = "".join(B.chapter_content(analysis, ch) for ch in analysis["chapters"])
-    assert joined == text
-
-
 # --------------------------------------------------------------------------- #
 # Output-file naming (exact contract)
 # --------------------------------------------------------------------------- #
 
-def test_chapter_filenames_format_and_padding():
+def test_chapter_filename_contract():
+    # chapter filenames format and padding
     # Chapters numbered 1..5 -> NN width max(2, 1) = 2; chapter width max(3, 1) = 3.
     chapters = [
         {"num": 1, "numStr": "1"},
@@ -129,15 +127,13 @@ def test_chapter_filenames_format_and_padding():
         "测试小说 分册05 第005章.txt",
     ]
 
-
-def test_chapter_filenames_widen_with_largest_number():
+    # chapter filenames widen with largest number
     # Largest chapter number is 1234 -> width 4 (>= 3).
     chapters = [{"num": 1, "numStr": "1"}, {"num": 1234, "numStr": "1234"}]
     names = B.make_chapter_filenames("书", chapters)
     assert names == ["书 分册01 第0001章.txt", "书 分册02 第1234章.txt"]
 
-
-def test_chapter_filenames_keep_original_non_numeric_labels():
+    # chapter filenames keep original non numeric labels
     # A chapter whose number can't be parsed keeps its raw label, unpadded.
     chapters = [
         {"num": None, "numStr": "楔子"},
@@ -147,8 +143,7 @@ def test_chapter_filenames_keep_original_non_numeric_labels():
     # 楔子 is unpadded; chapter 1 padded to width 3.
     assert names == ["书 分册01 第楔子章.txt", "书 分册02 第001章.txt"]
 
-
-def test_chapter_filenames_never_renumber():
+    # chapter filenames never renumber
     # A gap (1, 2, 5) must be preserved, not renumbered to 1,2,3.
     chapters = [
         {"num": 1, "numStr": "1"},
@@ -162,8 +157,7 @@ def test_chapter_filenames_never_renumber():
         "书 分册03 第005章.txt",
     ]
 
-
-def test_chapter_filenames_widen_with_count():
+    # chapter filenames widen with count
     # 120 chapters -> NN width max(2, digits of 120) = 3; chapter-number width
     # is driven by the largest NUMBER (120 -> 3), not by the count.
     chapters = [{"num": i, "numStr": str(i)} for i in range(1, 121)]
@@ -171,8 +165,7 @@ def test_chapter_filenames_widen_with_count():
     assert names[0] == "书 分册001 第001章.txt"
     assert names[-1] == "书 分册120 第120章.txt"
 
-
-def test_chapter_filenames_unique_for_duplicate_numbers():
+    # chapter filenames unique for duplicate numbers
     # Duplicated chapter numbers must not collide: the positional 分册NN disambiguates.
     chapters = [{"num": 5, "numStr": "5"}, {"num": 5, "numStr": "5"}]
     names = B.make_chapter_filenames("书", chapters)
@@ -204,27 +197,25 @@ def test_base_name_and_sanitizing():
 # Encoding detection
 # --------------------------------------------------------------------------- #
 
-def test_decode_utf8_bom():
+def test_decode_buffer_encodings():
+    # decode utf8 bom
     data = b"\xef\xbb\xbf" + "你好".encode("utf-8")
     text, enc = B.decode_buffer(data)
     assert text == "你好"
     assert enc == "UTF-8（含 BOM）"
 
-
-def test_decode_utf16_le_bom():
+    # decode utf16 le bom
     data = b"\xff\xfe" + "你好".encode("utf-16-le")
     text, enc = B.decode_buffer(data)
     assert text == "你好"
     assert enc == "UTF-16 LE（含 BOM）"
 
-
-def test_decode_plain_utf8_cjk():
+    # decode plain utf8 cjk
     text = "你好世界，这是一段中文文本。" * 20
     text, enc = B.decode_buffer(text.encode("utf-8"))
     assert enc == "UTF-8"
 
-
-def test_decode_gbk_fallback():
+    # decode gbk fallback
     original = "你好世界，测试文本，中文内容。" * 50
     data = original.encode("gbk")  # not valid UTF-8 -> falls back to GB18030
     text, enc = B.decode_buffer(data)
@@ -236,7 +227,8 @@ def test_decode_gbk_fallback():
 # Chinese-numeral parsing
 # --------------------------------------------------------------------------- #
 
-def test_parse_cn_number():
+def test_chinese_number_parsing():
+    # parse cn number
     cases = {
         "一": 1, "二": 2, "两": 2, "九": 9,
         "十": 10, "十一": 11, "二十": 20, "九十九": 99,
@@ -245,8 +237,7 @@ def test_parse_cn_number():
     for s, expected in cases.items():
         assert B.parse_cn_number(s) == expected, s
 
-
-def test_parse_cn_number_invalid():
+    # parse cn number invalid
     assert B.parse_cn_number("") is None
     assert B.parse_cn_number("〇") is None  # total 0 -> None
     assert B.parse_cn_number("abc") is None
@@ -268,25 +259,23 @@ def _chs(*numstrs):
     return [{"seq": i + 1, "numStr": s} for i, s in enumerate(numstrs)]
 
 
-def test_sequence_gap():
+def test_chapter_sequence_report():
+    # sequence gap
     rep = B.check_chapter_sequence(_chs("1", "2", "3", "5"))
     assert rep["hasIssues"]
     assert rep["gaps"] == [{"after": 3, "missing": [4]}]
 
-
-def test_sequence_duplicate():
+    # sequence duplicate
     rep = B.check_chapter_sequence(_chs("1", "2", "2", "3"))
     assert rep["hasIssues"]
     assert rep["duplicates"] == [{"seq": 3, "num": 2}]
 
-
-def test_sequence_disorder():
+    # sequence disorder
     rep = B.check_chapter_sequence(_chs("3", "1", "2"))
     assert rep["hasIssues"]
     assert any(d["num"] == 1 for d in rep["disorder"])
 
-
-def test_sequence_clean():
+    # sequence clean
     rep = B.check_chapter_sequence(_chs("1", "2", "3", "4"))
     assert not rep["hasIssues"]
     assert rep["first"] == 1 and rep["last"] == 4
@@ -332,29 +321,29 @@ def balanced_fixture(lengths, *, separator="\n\n", numbers=None, sentence_chars=
     return "".join(blocks), chapters
 
 
-@pytest.mark.parametrize("separator", ["\n\n", "\r\n\r\n", ""])
-def test_long_chapter_balance_average_lossless_and_no_short_tail(separator):
-    text, chapters = balanced_fixture([6000, 26000, 6000, 6000, 6000], separator=separator)
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
-    parts = [c for c in result["chapters"] if "long_split" in c]
-    assert result["split_policy"]["target_chars"] == 6000
-    assert result["split_policy"]["normal_sample_count"] == 4
-    assert [p["chars"] for p in parts] == [6500] * 4
-    assert [p["long_split"]["segment_index"] for p in parts] == [1, 2, 3, 4]
-    assert all(p["num"] == 2 and p["title"] == "标题1" for p in parts)
-    assert all("duplicate_kept" not in p["repair"]["actions"] for p in parts)
-    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
-    assert len(set(B.make_smart_filenames(result["chapters"]))) == len(result["chapters"])
-    # Sentence fallback also cuts on full sentence ends.
-    if not separator:
-        assert all(text[p["end"] - 1] == "。" for p in parts)
+def test_long_chapter_balance_average_lossless_and_no_short_tail():
+    for separator in ["\n\n", "\r\n\r\n", ""]:
+        text, chapters = balanced_fixture([6000, 26000, 6000, 6000, 6000], separator=separator)
+        result = B.smart_repair(text, chapters, split_long_chapters=True)
+        parts = [c for c in result["chapters"] if "long_split" in c]
+        assert result["split_policy"]["target_chars"] == 6000, (separator,)
+        assert result["split_policy"]["normal_sample_count"] == 4, (separator,)
+        assert [p["chars"] for p in parts] == [6500] * 4, (separator,)
+        assert [p["long_split"]["segment_index"] for p in parts] == [1, 2, 3, 4], (separator,)
+        assert all(p["num"] == 2 and p["title"] == "标题1" for p in parts), (separator,)
+        assert all("duplicate_kept" not in p["repair"]["actions"] for p in parts), (separator,)
+        assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text, (separator,)
+        assert len(set(B.make_smart_filenames(result["chapters"]))) == len(result["chapters"]), (separator,)
+        # Sentence fallback also cuts on full sentence ends.
+        if not separator:
+            assert all(text[p["end"] - 1] == "。" for p in parts), (separator,)
 
 
-@pytest.mark.parametrize("length, expected", [(11999, 0), (12000, 2)])
-def test_long_chapter_balance_two_times_threshold(length, expected):
-    text, chapters = balanced_fixture([6000, length, 6000, 6000, 6000])
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
-    assert sum("long_split" in c for c in result["chapters"]) == expected
+def test_long_chapter_balance_two_times_threshold():
+    for length, expected in [(11999, 0), (12000, 2)]:
+        text, chapters = balanced_fixture([6000, length, 6000, 6000, 6000])
+        result = B.smart_repair(text, chapters, split_long_chapters=True)
+        assert sum("long_split" in c for c in result["chapters"]) == expected, (length, expected,)
 
 
 def test_long_chapter_balance_multiple_and_unparseable_numbers():
@@ -367,16 +356,17 @@ def test_long_chapter_balance_multiple_and_unparseable_numbers():
     assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
 
 
-@pytest.mark.parametrize("lengths", [[500, 5000], [100, 5000, 100, 100, 100]])
-def test_long_chapter_balance_uses_fallback_when_baseline_unreliable(lengths):
-    text, chapters = balanced_fixture(lengths)
-    result = B.smart_repair(text, chapters, split_long_chapters=True, length_target=2000)
-    assert result["split_policy"]["target_source"] == "length_target"
-    assert result["split_policy"]["target_chars"] == 2000
-    assert any("long_chapter_split" in c["repair"]["actions"] for c in result["chapters"])
+def test_long_chapter_balance_uses_fallback_when_baseline_unreliable():
+    for lengths in [[500, 5000], [100, 5000, 100, 100, 100]]:
+        text, chapters = balanced_fixture(lengths)
+        result = B.smart_repair(text, chapters, split_long_chapters=True, length_target=2000)
+        assert result["split_policy"]["target_source"] == "length_target", (lengths,)
+        assert result["split_policy"]["target_chars"] == 2000, (lengths,)
+        assert any("long_chapter_split" in c["repair"]["actions"] for c in result["chapters"]), (lengths,)
 
 
-def test_long_chapter_balance_no_safe_boundaries_is_reported_on_chapter():
+def test_long_chapter_balance_boundary_guardrails():
+    # long chapter balance no safe boundaries is reported on chapter
     text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], separator="")
     text = text[:chapters[1]["start"]] + text[chapters[1]["start"]:chapters[1]["end"]].replace("。", "乙") + text[chapters[1]["end"]:]
     result = B.smart_repair(text, chapters, split_long_chapters=True)
@@ -385,8 +375,7 @@ def test_long_chapter_balance_no_safe_boundaries_is_reported_on_chapter():
     assert "long_chapter_split_skipped" in kept["repair"]["reasons"]
     assert any(w["type"] == "long_chapter_split_skipped" for w in result["report"]["warnings"])
 
-
-def test_long_chapter_balance_reduces_count_at_safe_boundaries():
+    # long chapter balance reduces count at safe boundaries
     text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], separator="", sentence_chars=7500)
     result = B.smart_repair(text, chapters, split_long_chapters=True)
     parts = [c for c in result["chapters"] if "long_split" in c]
@@ -394,21 +383,21 @@ def test_long_chapter_balance_reduces_count_at_safe_boundaries():
     assert all("long_chapter_split_reduced" in p["repair"]["reasons"] for p in parts)
 
 
-@pytest.mark.parametrize("kind", ["gap", "range", "duplicate", "last"])
-def test_long_chapter_balance_composes_with_structural_repair(kind):
-    numbers = [1, 2, 4, 5, 6, 7] if kind == "gap" else [1, 2, 2, 3, 4, 5] if kind == "duplicate" else None
-    lengths = [3000, 30000, 3000, 3000, 3000, 30000 if kind == "last" else 3000]
-    text, chapters = balanced_fixture(lengths, numbers=numbers)
-    if kind == "range":
-        chapters[1]["range_end"] = 3
-    old = B.smart_repair(text, chapters)
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
-    assert result["status"] == "ok"
-    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
-    assert result["final_numbers"] == list(range(1, len(result["chapters"]) + 1))
-    old_actions = {a for c in old["chapters"] for a in c["repair"]["actions"] if a != "kept"}
-    new_actions = {a for c in result["chapters"] for a in c["repair"]["actions"]}
-    assert old_actions <= new_actions
+def test_long_chapter_balance_composes_with_structural_repair():
+    for kind in ["gap", "range", "duplicate", "last"]:
+        numbers = [1, 2, 4, 5, 6, 7] if kind == "gap" else [1, 2, 2, 3, 4, 5] if kind == "duplicate" else None
+        lengths = [3000, 30000, 3000, 3000, 3000, 30000 if kind == "last" else 3000]
+        text, chapters = balanced_fixture(lengths, numbers=numbers)
+        if kind == "range":
+            chapters[1]["range_end"] = 3
+        old = B.smart_repair(text, chapters)
+        result = B.smart_repair(text, chapters, split_long_chapters=True)
+        assert result["status"] == "ok", (kind,)
+        assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text, (kind,)
+        assert result["final_numbers"] == list(range(1, len(result["chapters"]) + 1)), (kind,)
+        old_actions = {a for c in old["chapters"] for a in c["repair"]["actions"] if a != "kept"}
+        new_actions = {a for c in result["chapters"] for a in c["repair"]["actions"]}
+        assert old_actions <= new_actions, (kind,)
 
 
 def test_smart_clean_novel():
@@ -426,7 +415,8 @@ def test_smart_clean_novel():
     assert res["original_count"] == len(again)
 
 
-def test_detect_prefixed_and_inline_chapter_headers():
+def test_chapter_header_prefix_and_spacing():
+    # detect prefixed and inline chapter headers
     prefix = "\u9886\u5730\u98ce\u4e91"
     text = "\n\n".join(
         [
@@ -446,8 +436,7 @@ def test_detect_prefixed_and_inline_chapter_headers():
         "\u7ed3\u5c40",
     ]
 
-
-def test_detect_compact_prefixed_headers_after_formatting():
+    # detect compact prefixed headers after formatting
     text = "\n\n".join(
         [
             "\u9886\u5730\u98ce\u4e91\u7b2c\u4e00\u7ae0\u6210\u4eba\u5178\u793c",
@@ -463,8 +452,7 @@ def test_detect_compact_prefixed_headers_after_formatting():
         "\u51b3\u6218",
     ]
 
-
-def test_detect_attached_chinese_title_without_spacing():
+    # detect attached chinese title without spacing
     text = "\n\n".join(
         [
             "\u9886\u5730\u98ce\u4e91\u7b2c\u4e94\u5341\u4e5d\u7ae0\u51fb\u6e83\u5de6\u7ffc",
@@ -613,7 +601,8 @@ def test_smart_gap_renumbers_without_splitting():
     assert "".join(text[c["start"]: c["end"]] for c in res["chapters"]) == text
 
 
-def test_smart_absorbed_duplicate_same_content_truncated():
+def test_smart_duplicate_content_policy():
+    # smart absorbed duplicate same content truncated
     # 1..10 with ch5 = header+body twice (the second 第5章 line is dropped by
     # the spurious filter, so the copy is absorbed inside top-level ch5).
     text = smart_novel(
@@ -639,8 +628,7 @@ def test_smart_absorbed_duplicate_same_content_truncated():
     kept = "".join(text[c["start"]: c["end"]] for c in res["chapters"])
     assert kept == text[: res["chapters"][4]["end"]] + text[ch6_start:]
 
-
-def test_smart_absorbed_duplicate_diff_content_kept():
+    # smart absorbed duplicate diff content kept
     # Same shape, but the absorbed copy has different content -> both kept,
     # split at the duplicated line, renumbered.
     text = smart_novel(
@@ -661,6 +649,26 @@ def test_smart_absorbed_duplicate_diff_content_kept():
     assert any(w["type"] == "duplicate_split_kept" for w in res["report"]["warnings"])
     # nothing dropped -> full round-trip
     assert "".join(text[c["start"]: c["end"]] for c in res["chapters"]) == text
+
+    # smart toplevel duplicate dropped
+    # A duplicate at the very end survives the spurious filter (the last
+    # candidate is never dropped) -> handled by the top-level fingerprint
+    # groups and dropped.
+    text = smart_novel(
+        [(i, f"标题{i}", smart_body(30, i)) for i in range(1, 4)] + [(3, "标题3", smart_body(30, 3))]
+    )
+    orig = B.analyze_text(text)["chapters"]
+    assert len(orig) == 4  # both 第3章 present at the top level
+    res = smart_run(text)
+    assert res["status"] == "ok"
+    assert len(res["chapters"]) == 3
+    assert [c["final_num"] for c in res["chapters"]] == [1, 2, 3]
+    assert len(res["report"]["removed"]) == 1
+    rm = res["report"]["removed"][0]
+    assert rm["kind"] == "dropped" and rm["num"] == 3
+    kept = "".join(text[c["start"]: c["end"]] for c in res["chapters"])
+    assert kept == text[: orig[3]["start"]]  # dropped trailing chapter excised
+    assert "duplicate_kept" in res["chapters"][2]["repair"]["actions"]
 
 
 def test_smart_gap_after_duplicate_only_when_real_gap():
@@ -683,27 +691,6 @@ def test_smart_gap_after_duplicate_only_when_real_gap():
     )
     res = smart_run(text)
     assert any(w["type"] == "gap_after_duplicate" for w in res["report"]["warnings"])
-
-
-def test_smart_toplevel_duplicate_dropped():
-    # A duplicate at the very end survives the spurious filter (the last
-    # candidate is never dropped) -> handled by the top-level fingerprint
-    # groups and dropped.
-    text = smart_novel(
-        [(i, f"标题{i}", smart_body(30, i)) for i in range(1, 4)] + [(3, "标题3", smart_body(30, 3))]
-    )
-    orig = B.analyze_text(text)["chapters"]
-    assert len(orig) == 4  # both 第3章 present at the top level
-    res = smart_run(text)
-    assert res["status"] == "ok"
-    assert len(res["chapters"]) == 3
-    assert [c["final_num"] for c in res["chapters"]] == [1, 2, 3]
-    assert len(res["report"]["removed"]) == 1
-    rm = res["report"]["removed"][0]
-    assert rm["kind"] == "dropped" and rm["num"] == 3
-    kept = "".join(text[c["start"]: c["end"]] for c in res["chapters"])
-    assert kept == text[: orig[3]["start"]]  # dropped trailing chapter excised
-    assert "duplicate_kept" in res["chapters"][2]["repair"]["actions"]
 
 
 def test_smart_long_inferred_split():
@@ -745,7 +732,8 @@ def test_smart_idempotent_on_repaired_structure():
     assert [c["final_num"] for c in second["chapters"]] == [c["final_num"] for c in first["chapters"]]
 
 
-def test_smart_long_no_blank_lines_exact_cut():
+def test_smart_long_split_fallbacks():
+    # smart long no blank lines exact cut
     # A long chapter with no blank lines inside: the cut cannot snap to a
     # paragraph boundary -> exact position + mid-paragraph warning.
     paras = ["这是一部用于测试的智能识别小说。", "前言内容，若干行。", "第1章 标题1"]
@@ -763,8 +751,7 @@ def test_smart_long_no_blank_lines_exact_cut():
     assert len(segs) == 2
     assert "".join(text[c["start"]: c["end"]] for c in res["chapters"]) == text
 
-
-def test_smart_last_chapter_long_mechanically_splits():
+    # smart last chapter long mechanically splits
     # A long LAST chapter has no next number to compare, so use the observed
     # average and paragraph boundaries as the mechanical fallback.
     text = smart_novel(
@@ -816,7 +803,8 @@ def test_smart_unparseable_number_long_kept():
     assert [c["final_num"] for c in res["chapters"]] == list(range(1, len(res["chapters"]) + 1))
 
 
-def test_smart_small_book_disables_length():
+def test_smart_length_guardrails():
+    # smart small book disables length
     text = smart_novel([(i, f"标题{i}", smart_body(500, i)) for i in range(1, 4)])
     res = smart_run(text)
     assert res["status"] == "ok"  # length_disabled warning -> not "clean"
@@ -824,8 +812,7 @@ def test_smart_small_book_disables_length():
     assert any(w["type"] == "length_disabled" for w in res["report"]["warnings"])
     assert "章节数少于 5 章" in next(w["detail"] for w in res["report"]["warnings"] if w["type"] == "length_disabled")
 
-
-def test_smart_low_median_disables_length():
+    # smart low median disables length
     # >= 5 chapters but the median is below 200 chars -> length detection off.
     text = smart_novel([(i, f"标题{i}", smart_body(5, i)) for i in range(1, 8)])
     res = smart_run(text)
@@ -855,7 +842,8 @@ def test_smart_chinese_numerals():
     assert [s["repair"]["orig_numStr"] for s in segs] == ["二", "3", "4"]
 
 
-def test_smart_filename_widths():
+def test_smart_filename_contract():
+    # smart filename widths
     # N <= 1000 -> 3-digit width (001); N > 1000 -> 4-digit (0001).
     names = B.make_smart_filenames([{"final_num": i, "title": f"标题{i}"} for i in range(1, 1001)])
     assert names[0] == "第 001 章 标题1.txt"
@@ -867,8 +855,25 @@ def test_smart_filename_widths():
     assert B.make_smart_filenames([{"final_num": 1, "title": ""}]) == ["第 001 章.txt"]
     assert B.make_smart_filenames([{"final_num": 7, "title": "  " }]) == ["第 007 章.txt"]
 
+    # smart filenames unique and sanitized
+    # final_num is unique by construction, but the de-dup pass must keep the
+    # list unique even when sanitizing collapses names.
+    chs = [
+        {"final_num": 1, "title": "甲/b"},   # -> 甲_b
+        {"final_num": 2, "title": "甲_b"},   # sanitizes to the same title,
+        # but a different number prefix keeps the full names unique
+    ]
+    names = B.make_smart_filenames(chs)
+    assert names == ["第 001 章 甲_b.txt", "第 002 章 甲_b.txt"]
+    assert len(set(names)) == len(names)
+    # illegal characters are replaced
+    names = B.make_smart_filenames([{"final_num": 1, "title": 'a/b\\c:d*e'}])
+    assert all(ch not in names[0] for ch in '\\/:*?')
+    assert names[0].endswith(".txt")
 
-def test_smart_range_headers_fill_numbers_without_fake_titles():
+
+def test_smart_range_title_policy():
+    # smart range headers fill numbers without fake titles
     def block(start: int, end: int) -> str:
         header = f"\u7b2c{start}\u7ae0-\u7b2c{end}\u7ae0"
         body = "\n\n".join(f"\u8fd9\u662f\u8303\u56f4\u6bb5\u843d{i}" + "\u7532" * 180 for i in range(12))
@@ -885,8 +890,7 @@ def test_smart_range_headers_fill_numbers_without_fake_titles():
     assert all(c["title"] == "" for c in result["chapters"])
     assert all("range_split" in c["repair"]["actions"] for c in result["chapters"])
 
-
-def test_smart_range_keeps_real_title_inside_range():
+    # smart range keeps real title inside range
     text = (
         "\u7b2c1\u7ae0-\u7b2c3\u7ae0\n\n"
         + "\n\n".join("\u7532" * 180 for _ in range(12))
@@ -900,23 +904,6 @@ def test_smart_range_keeps_real_title_inside_range():
     assert result["status"] == "ok"
     assert [c["final_num"] for c in result["chapters"]] == [1, 2, 3, 4]
     assert result["chapters"][2]["title"] == "\u771f\u5b9e\u6807\u9898"
-
-
-def test_smart_filenames_unique_and_sanitized():
-    # final_num is unique by construction, but the de-dup pass must keep the
-    # list unique even when sanitizing collapses names.
-    chs = [
-        {"final_num": 1, "title": "甲/b"},   # -> 甲_b
-        {"final_num": 2, "title": "甲_b"},   # sanitizes to the same title,
-        # but a different number prefix keeps the full names unique
-    ]
-    names = B.make_smart_filenames(chs)
-    assert names == ["第 001 章 甲_b.txt", "第 002 章 甲_b.txt"]
-    assert len(set(names)) == len(names)
-    # illegal characters are replaced
-    names = B.make_smart_filenames([{"final_num": 1, "title": 'a/b\\c:d*e'}])
-    assert all(ch not in names[0] for ch in '\\/:*?')
-    assert names[0].endswith(".txt")
 
 
 def test_smart_fingerprint_ignores_whitespace():
@@ -1004,7 +991,8 @@ def test_smart_round_trip_and_tiling_invariants():
 # Length-based splitting (chapter-less fallback: split_by_length)
 # --------------------------------------------------------------------------- #
 
-def test_length_split_even_division_uses_paragraph_bounds():
+def test_length_split_paragraph_balancing():
+    # length split even division uses paragraph bounds
     # 31 paragraphs x 200 chars = 6200 chars. Target 3000 -> wanted =
     # round(6200/3000) = 2 segments near 3100 each — never a short 200-char tail.
     text = "\n\n".join("甲" * 200 for _ in range(31))
@@ -1026,8 +1014,7 @@ def test_length_split_even_division_uses_paragraph_bounds():
     assert "".join(text[s["start"]: s["end"]] for s in segs) == text
     assert res["warnings"] == []
 
-
-def test_length_split_even_division_5800():
+    # length split even division 5800
     # 29 paragraphs x 200 = 5800 -> wanted = round(5800/3000) = 2 (~2900 each).
     text = "\n\n".join("甲" * 200 for _ in range(29))
     res = B.split_by_length(text, target_chars=3000)
@@ -1038,7 +1025,8 @@ def test_length_split_even_division_5800():
     assert all(c >= 2600 for c in chars)
 
 
-def test_length_split_single_paragraph_splits_at_sentence_ends():
+def test_length_split_sentence_fallback():
+    # length split single paragraph splits at sentence ends
     # One giant paragraph, no blank lines: 310 sentences of 20 chars = 6200.
     # The paragraph tier is empty, so cuts must fall on sentence ends — and
     # never mid-sentence: each cut is right after 。.
@@ -1054,8 +1042,7 @@ def test_length_split_single_paragraph_splits_at_sentence_ends():
             assert text[s["start"] - 1] in "。！？…"
     assert "".join(text[s["start"]: s["end"]] for s in res["segments"]) == text
 
-
-def test_length_split_falls_back_to_sentences_only_where_paragraphs_lack():
+    # length split falls back to sentences only where paragraphs lack
     # Two paragraphs (1 internal gap); wanted = round(5000/1000) = 5 needs 4
     # cuts, so 3 come from sentence ends inside the long paragraphs.
     p1 = ("甲" * 99 + "。") * 20  # 2000 chars, single line
@@ -1077,7 +1064,8 @@ def test_length_split_falls_back_to_sentences_only_where_paragraphs_lack():
     assert all(abs(s["chars"] - 1000) <= 200 for s in segs)
 
 
-def test_length_split_reduces_count_when_boundaries_run_short():
+def test_length_split_boundary_shortage():
+    # length split reduces count when boundaries run short
     # 4 paragraphs x 1200 filler chars (no punctuation anywhere): only 3 legal
     # cut points exist, so wanted = round(4800/1000) = 5 must degrade to 4.
     text = "\n\n".join("甲" * 1200 for _ in range(4))
@@ -1088,8 +1076,7 @@ def test_length_split_reduces_count_when_boundaries_run_short():
     assert [w["type"] for w in res["warnings"]] == ["length_split_reduced"]
     assert "5 册降为 4 册" in res["warnings"][0]["detail"]
 
-
-def test_length_split_without_any_boundary_degrades_to_whole_book():
+    # length split without any boundary degrades to whole book
     text = "甲" * 6200  # one paragraph, no sentence punctuation at all
     res = B.split_by_length(text, target_chars=3000)
     assert res["status"] == "ok"
@@ -1097,8 +1084,7 @@ def test_length_split_without_any_boundary_degrades_to_whole_book():
     assert res["segments"] == [{"seq": 1, "start": 0, "end": len(text), "chars": 6200}]
     assert [w["type"] for w in res["warnings"]] == ["length_split_degraded"]
 
-
-def test_length_split_small_text_is_single_segment():
+    # length split small text is single segment
     text = "这是一本很短的小说，只有几百字而已。"
     res = B.split_by_length(text)
     assert res["status"] == "ok"
@@ -1108,15 +1094,15 @@ def test_length_split_small_text_is_single_segment():
     assert res["segments"][0]["end"] == len(text)
 
 
-def test_length_split_invalid_target_falls_back_to_default():
+def test_length_split_invalid_inputs():
+    # length split invalid target falls back to default
     text = "甲" * 300
     for bad in (None, 0, -5, "abc"):
         res = B.split_by_length(text, bad)
         assert res["target"] == B.DEFAULT_LENGTH_TARGET_CHARS == 3000
         assert res["status"] == "ok"
 
-
-def test_length_split_empty_text_errors():
+    # length split empty text errors
     for text in ("", "\n\n", "\r\n\r\n"):
         res = B.split_by_length(text)
         assert res["status"] == "error"
@@ -1125,28 +1111,28 @@ def test_length_split_empty_text_errors():
         assert res["segment_count"] == 0
 
 
-@pytest.mark.parametrize("separator", ["\n\n", "\r\n\r\n", "\n\n\n\n"])
-def test_long_chapter_balance_reserves_later_boundaries(separator):
-    normal = ("甲" * 99 + "。") * 60
-    long_body = separator.join(char * length for char, length in zip("乙丙丁戊", [1000, 1000, 23000, 1000]))
-    text = separator.join(f"第{i}章 标题{i}{separator}{long_body if i == 2 else normal}{separator}" for i in range(1, 6))
-    raw = B.analyze_text(text)
-    assert len(raw["chapters"]) == 5
-    result = B.smart_repair(text, raw["chapters"], split_long_chapters=True)
-    parts = [c for c in result["chapters"] if "long_split" in c]
-    assert len(parts) == 4
-    assert all(c["chars"] > 0 and c["long_split"]["segment_count"] == 4 for c in parts)
-    assert all("long_chapter_split_skipped" not in c["repair"]["actions"] for c in parts)
-    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+def test_long_chapter_balance_reserves_later_boundaries():
+    for separator in ["\n\n", "\r\n\r\n", "\n\n\n\n"]:
+        normal = ("甲" * 99 + "。") * 60
+        long_body = separator.join(char * length for char, length in zip("乙丙丁戊", [1000, 1000, 23000, 1000]))
+        text = separator.join(f"第{i}章 标题{i}{separator}{long_body if i == 2 else normal}{separator}" for i in range(1, 6))
+        raw = B.analyze_text(text)
+        assert len(raw["chapters"]) == 5, (separator,)
+        result = B.smart_repair(text, raw["chapters"], split_long_chapters=True)
+        parts = [c for c in result["chapters"] if "long_split" in c]
+        assert len(parts) == 4, (separator,)
+        assert all(c["chars"] > 0 and c["long_split"]["segment_count"] == 4 for c in parts), (separator,)
+        assert all("long_chapter_split_skipped" not in c["repair"]["actions"] for c in parts), (separator,)
+        assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text, (separator,)
 
 
-@pytest.mark.parametrize("separator", ["\n\n", "。", "\n\n\n\n"])
-def test_length_split_reserves_boundaries_for_shared_by_length_mode(separator):
-    text = separator.join(char * length for char, length in zip("甲乙丙丁戊", [1000, 1000, 1000, 22000, 1000]))
-    result = B.split_by_length(text, 6000)
-    assert result["segment_count"] == 4
-    assert all(c["chars"] > 0 for c in result["segments"])
-    assert "".join(text[c["start"]:c["end"]] for c in result["segments"]) == text
+def test_length_split_reserves_boundaries_for_shared_by_length_mode():
+    for separator in ["\n\n", "。", "\n\n\n\n"]:
+        text = separator.join(char * length for char, length in zip("甲乙丙丁戊", [1000, 1000, 1000, 22000, 1000]))
+        result = B.split_by_length(text, 6000)
+        assert result["segment_count"] == 4, (separator,)
+        assert all(c["chars"] > 0 for c in result["segments"]), (separator,)
+        assert "".join(text[c["start"]:c["end"]] for c in result["segments"]) == text, (separator,)
 
 
 def test_length_split_crlf_gap_and_lone_carriage_return():

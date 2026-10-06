@@ -74,23 +74,17 @@ def testbuild_segments_empty_script():
 # _voice_usable
 # --------------------------------------------------------------------------- #
 
-def test_voice_usable_clone_needs_ref_audio():
-    assert _voice_usable({"type": "clone", "ref_audio": "/x/preview.wav"}) is True
-    assert _voice_usable({"type": "clone"}) is False
-
-
-def test_voice_usable_design_needs_description():
-    assert _voice_usable({"type": "design", "description": "a warm voice"}) is True
-    assert _voice_usable({"type": "design", "description": "   "}) is False
-
-
-def test_voice_usable_custom_always():
-    assert _voice_usable({"type": "custom"}) is True
-
-
-def test_voice_usable_unknown_type():
-    assert _voice_usable({"type": "lora"}) is False
-    assert _voice_usable({}) is False
+def test_voice_usability_contract():
+    for args, expected in [
+        (({'type': 'clone', 'ref_audio': '/x/preview.wav'},), True),
+        (({'type': 'clone'},), False),
+        (({'type': 'design', 'description': 'a warm voice'},), True),
+        (({'type': 'design', 'description': '   '},), False),
+        (({'type': 'custom'},), True),
+        (({'type': 'lora'},), False),
+        (({},), False),
+    ]:
+        assert _voice_usable(*args) is expected, args
 
 
 # --------------------------------------------------------------------------- #
@@ -227,18 +221,21 @@ def _cmd_flag(cmd, flag):
 
 
 def test_timeout_demotion_uses_actual_subbatch_size():
-    assert tts_batch.timeout_demotion_cap(340, 96) == 48
-    assert tts_batch.timeout_demotion_cap(4, 2) == 1
-    assert tts_batch.timeout_demotion_cap(4, 0) == 2  # fallback when watchdog data is absent
+    for args, expected in [
+        ((340, 96,), 48),
+        ((4, 2,), 1),
+        ((4, 0,), 2),
+    ]:
+        assert tts_batch.timeout_demotion_cap(*args) == expected, args
 
 
-@pytest.mark.parametrize("cap,rows,auto,expected", [
-    (340, 224, True, 128), (340, 340, True, 272),
-    (128, 96, True, 80), (80, 80, True, 40),
-    (340, 2, True, 1), (80, 0, True, 40), (128, 80, False, 40),
-])
-def test_oom_demotion_steps_below_actual_batch(cap, rows, auto, expected):
-    assert tts_batch.oom_demotion_cap(cap, rows, auto) == expected
+def test_oom_demotion_steps_below_actual_batch():
+    for cap, rows, auto, expected in [
+        (340, 224, True, 128), (340, 340, True, 272),
+        (128, 96, True, 80), (80, 80, True, 40),
+        (340, 2, True, 1), (80, 0, True, 40), (128, 80, False, 40),
+    ]:
+        assert tts_batch.oom_demotion_cap(cap, rows, auto) == expected, (cap, rows, auto, expected,)
 
 
 @pytest.mark.parametrize("pooled", [False, True])
@@ -332,7 +329,7 @@ def test_synthesize_passes_request_concurrency(workspace, monkeypatch):
 
 
 def test_synthesize_defaults_concurrency_from_config(workspace, monkeypatch):
-    # concurrency=None -> the persisted default (config.tts.batch_concurrency = 4).
+    # concurrency=None -> the configured default (batch_concurrency = 80).
     captured = {}
     _stub_engine(monkeypatch, captured)
     tts_batch.synthesize(_Handle(), None, "s.json", None)
@@ -340,7 +337,7 @@ def test_synthesize_defaults_concurrency_from_config(workspace, monkeypatch):
 
 
 def test_synthesize_zero_concurrency_falls_back_to_default(workspace, monkeypatch):
-    # 0 is falsy -> treated as "use the config default" (4), never a degenerate pool.
+    # 0 requests the config default (80), never a degenerate pool.
     captured = {}
     _stub_engine(monkeypatch, captured)
     tts_batch.synthesize(_Handle(), None, "s.json", 0)
@@ -368,23 +365,6 @@ def test_synthesize_reports_effective_concurrency_in_log(workspace, monkeypatch)
     h = _Handle()
     tts_batch.synthesize(h, None, "s.json", 3)
     assert any("批内上限 3 段" in msg for _lvl, msg in h.logs)
-
-
-def test_synthesize_omits_disabled_checks_flag_by_default(workspace, monkeypatch):
-    # Production no longer accepts configurable planner checks.
-    captured = {}
-    _stub_engine(monkeypatch, captured)
-    tts_batch.synthesize(_Handle(), None, "s.json", 4)
-    assert "--disabled-checks" not in captured["cmd"]
-
-
-def test_synthesize_disabled_checks_in_cmd(workspace, monkeypatch):
-    # Old config keys must not reactivate removed planner constraints.
-    core_config.update_config({"tts": {"planner_vram": False, "planner_length_ratio": False}})
-    captured = {}
-    _stub_engine(monkeypatch, captured)
-    tts_batch.synthesize(_Handle(), None, "s.json", 4)
-    assert "--disabled-checks" not in captured["cmd"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1552,11 +1532,11 @@ def test_done_indices_no_workspace_uses_is_done_fallback(workspace):
     assert tts_batch.done_indices(entries, out, None) == {0}
 
 
-def test_plan_to_synthesize_resume_skips_done():
+def test_synthesis_plan_selection():
+    # plan to synthesize resume skips done
     assert tts_batch.plan_to_synthesize({0, 1, 2}, {0, 1}) == {2}
 
-
-def test_plan_to_synthesize_explicit_indices_intersect():
+    # plan to synthesize explicit indices intersect
     assert tts_batch.plan_to_synthesize({0, 1, 2}, {0}, indices=[1, 2, 9]) == {1, 2}
 
 

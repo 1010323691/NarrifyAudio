@@ -1,11 +1,4 @@
-"""Offline tests for the config model changes backing the voice / batch / merge
-stages (``backend/core/config.py``) — the new TTS fields, the persona-prompt block,
-and the pure deep-merge that ``update_config`` relies on.
-
-``update_config`` itself writes the real ``config/setting.json`` and is therefore exercised
-in the manual run, not here; instead this pins the schema defaults and the pure
-``_deep_update`` merge in isolation.
-"""
+"""Config defaults, validation, legacy reads and sandboxed workspace persistence."""
 from __future__ import annotations
 
 import json
@@ -30,21 +23,28 @@ from pydantic import ValidationError
 # TTSConfig defaults
 # --------------------------------------------------------------------------- #
 
-def test_tts_config_model_ids():
+def test_tts_config_defaults_and_legacy_constraints():
+    # tts config model ids
     t = TTSConfig()
     assert t.model == "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     assert t.base_model == "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     assert t.design_model == "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 
-
-def test_tts_config_pause_defaults():
+    # tts config pause defaults
     t = TTSConfig()
     assert t.pause_between_speakers_ms == 500
     assert t.pause_same_speaker_ms == 250
 
-
-def test_tts_config_batch_concurrency_default():
+    # tts config batch concurrency default
     assert TTSConfig().batch_concurrency == 80
+
+    # legacy batch constraints are ignored and removed on save
+    old = dict(planner_length_bands=True, planner_batch_chars=True, planner_seq_chars=True,
+               planner_length_ratio=True, planner_vram=True, batch_max_chars=1000,
+               batch_length_ratio=1.1, vocoder_batch_size=64, profile_stages=True)
+    config = TTSConfig(**old, batch_concurrency=80)
+    assert config.batch_concurrency == 80
+    assert not set(old) & config.model_dump().keys()
 
 
 def test_retired_tts_settings_are_dropped_from_app_config():
@@ -71,7 +71,8 @@ def test_retired_tts_settings_are_dropped_from_app_config():
 # GenerationConfig: in-parse check toggles (migrated off the retired check sections)
 # --------------------------------------------------------------------------- #
 
-def test_generation_config_check_stage_defaults():
+def test_generation_check_config_contract():
+    # generation config check stage defaults
     # 断句失败校验 / 纯归属标签条清理 / 角色匹配检查 default ON (existing behavior
     # unchanged); the re-judgment batch geometry moved here from the deleted
     # ``speaker_check`` section.
@@ -104,8 +105,7 @@ def test_generation_config_check_stage_defaults():
     assert g2.validate_instructs is g.validate_instructs
     assert g2.check_chunk_alignment is g.check_chunk_alignment
 
-
-def test_generation_config_user_owned_checks_round_trip_false():
+    # generation config user owned checks round trip false
     # 开关可显式置 False 且往返不丢（任务快照回放依赖此路径）。
     g = GenerationConfig(
         check_chunk_alignment=False,
@@ -128,13 +128,13 @@ def test_generation_config_user_owned_checks_round_trip_false():
 # AppConfig: persona prompts + round-trip
 # --------------------------------------------------------------------------- #
 
-def test_app_config_includes_persona_prompts():
+def test_app_config_prompts_and_round_trip():
+    # app config includes persona prompts
     cfg = AppConfig()
     assert cfg.persona_prompts.system_prompt == ""
     assert cfg.persona_prompts.user_prompt == ""
 
-
-def test_app_config_round_trips():
+    # app config round trips
     data = AppConfig().model_dump()
     back = AppConfig.model_validate(data)
     assert back.tts.pause_between_speakers_ms == 500
@@ -146,14 +146,14 @@ def test_app_config_round_trips():
 # UIConfig: 解析日志显示开关（解析页日志区显隐 + 三指标位置）
 # --------------------------------------------------------------------------- #
 
-def test_ui_config_show_parse_logs_default_off():
+def test_ui_config_defaults_and_round_trip():
+    # ui config show parse logs default off
     # 默认关：解析页隐藏「解析进度」日志区，三指标移到「开始处理」按钮下方。
     u = UIConfig()
     assert u.show_parse_logs is False
     assert u.theme == "system"
 
-
-def test_ui_config_round_trips_show_parse_logs():
+    # ui config round trips show parse logs
     data = AppConfig().model_dump()
     data["ui"]["show_parse_logs"] = True
     back = AppConfig.model_validate(data)
@@ -162,26 +162,19 @@ def test_ui_config_round_trips_show_parse_logs():
     again = AppConfig.model_validate(back.model_dump())
     assert again.ui.show_parse_logs is True
 
-
-def test_ui_config_missing_field_falls_back_to_default():
+    # ui config missing field falls back to default
     # 旧工作空间配置缺该字段 → Pydantic 默认值填充（False），读取链不报错。
     data = AppConfig().model_dump()
     del data["ui"]["show_parse_logs"]
     cfg = AppConfig.model_validate(data)
     assert cfg.ui.show_parse_logs is False
 
-
-# --------------------------------------------------------------------------- #
-# UIConfig: 音频分集导航项显隐开关（侧边栏「音频分集」项）
-# --------------------------------------------------------------------------- #
-
-def test_ui_config_show_audio_split_default_off():
+    # ui config show audio split default off
     # 默认关：侧边栏隐藏「音频分集」导航项（页面路由保留，仍可直访）。
     u = UIConfig()
     assert u.show_audio_split is False
 
-
-def test_ui_config_round_trips_show_audio_split():
+    # ui config round trips show audio split
     data = AppConfig().model_dump()
     data["ui"]["show_audio_split"] = True
     back = AppConfig.model_validate(data)
@@ -190,8 +183,7 @@ def test_ui_config_round_trips_show_audio_split():
     again = AppConfig.model_validate(back.model_dump())
     assert again.ui.show_audio_split is True
 
-
-def test_ui_config_missing_show_audio_split_falls_back_to_default():
+    # ui config missing show audio split falls back to default
     # 旧工作空间配置缺该字段 → Pydantic 默认值填充（False），读取链不报错。
     data = AppConfig().model_dump()
     del data["ui"]["show_audio_split"]
@@ -200,22 +192,25 @@ def test_ui_config_missing_show_audio_split_falls_back_to_default():
 
 
 # --------------------------------------------------------------------------- #
+# UIConfig: 音频分集导航项显隐开关（侧边栏「音频分集」项）
+# --------------------------------------------------------------------------- #
+
+# --------------------------------------------------------------------------- #
 # _deep_update (the merge update_config uses)
 # --------------------------------------------------------------------------- #
 
-def test_deep_update_replaces_scalars():
+def test_deep_update_contract():
+    # deep update replaces scalars
     base = {"a": 1, "b": 2}
     _deep_update(base, {"b": 20, "c": 3})
     assert base == {"a": 1, "b": 20, "c": 3}
 
-
-def test_deep_update_merges_nested_dicts():
+    # deep update merges nested dicts
     base = {"a": {"x": 1, "y": 2}, "b": 3}
     _deep_update(base, {"a": {"y": 20}, "c": 4})
     assert base == {"a": {"x": 1, "y": 20}, "b": 3, "c": 4}
 
-
-def test_deep_update_replaces_dict_with_scalar():
+    # deep update replaces dict with scalar
     # A dict value replaced by a non-dict is overwritten, not merged into.
     base = {"a": {"x": 1}}
     _deep_update(base, {"a": 5})
@@ -445,7 +440,8 @@ def test_template_seeded_from_defaults_when_missing(sandbox):
 # BGMConfig defaults (背景音乐系统)
 # --------------------------------------------------------------------------- #
 
-def test_bgm_config_defaults():
+def test_bgm_config_defaults_and_round_trip():
+    # bgm config defaults
     b = BGMConfig()
     assert b.volume == 0.18
     assert b.fade_in == 1.5
@@ -456,8 +452,7 @@ def test_bgm_config_defaults():
     assert b.segment_batch_size == 20
     assert b.segment_volume_tiers == [0.5, 1.0, 1.5]
 
-
-def test_app_config_round_trips_bgm():
+    # app config round trips bgm
     data = AppConfig().model_dump()
     data["bgm"]["volume"] = 0.3
     data["bgm"]["fade_in"] = 0.5
@@ -476,6 +471,25 @@ def test_app_config_round_trips_bgm():
     # 再次落盘/重读不丢字段（schema 稳定）。
     again = AppConfig.model_validate(back.model_dump())
     assert again.bgm == back.bgm
+
+    # app config missing bgm section falls back to defaults
+    # 旧工作空间配置缺整个 bgm 段 → Pydantic 默认值填充，读取链不报错。
+    data = AppConfig().model_dump()
+    del data["bgm"]
+    cfg = AppConfig.model_validate(data)
+    assert cfg.bgm == BGMConfig()
+    # 缺单个字段同样降级默认。
+    data2 = AppConfig().model_dump()
+    del data2["bgm"]["volume"]
+    assert AppConfig.model_validate(data2).bgm.volume == 0.18
+
+    # bgm config partial round trip
+    # 设置页只改一个字段：model_validate 后其余字段保持默认（深合并补丁由 update_config 负责）。
+    data = AppConfig().model_dump()
+    data["bgm"]["volume"] = 0.5
+    cfg = AppConfig.model_validate(data)
+    assert cfg.bgm.volume == 0.5
+    assert cfg.bgm.fade_in == 1.5  # 其余字段未被波及
 
 
 def test_bgm_params_are_admin_managed_workspace_values_ignored(sandbox):
@@ -502,38 +516,27 @@ def test_bgm_params_are_admin_managed_workspace_values_ignored(sandbox):
     assert "analysis_chars" not in saved["bgm"]
 
 
-def test_app_config_missing_bgm_section_falls_back_to_defaults():
-    # 旧工作空间配置缺整个 bgm 段 → Pydantic 默认值填充，读取链不报错。
-    data = AppConfig().model_dump()
-    del data["bgm"]
-    cfg = AppConfig.model_validate(data)
-    assert cfg.bgm == BGMConfig()
-    # 缺单个字段同样降级默认。
-    data2 = AppConfig().model_dump()
-    del data2["bgm"]["volume"]
-    assert AppConfig.model_validate(data2).bgm.volume == 0.18
-
-
-def test_bgm_config_partial_round_trip():
-    # 设置页只改一个字段：model_validate 后其余字段保持默认（深合并补丁由 update_config 负责）。
-    data = AppConfig().model_dump()
-    data["bgm"]["volume"] = 0.5
-    cfg = AppConfig.model_validate(data)
-    assert cfg.bgm.volume == 0.5
-    assert cfg.bgm.fade_in == 1.5  # 其余字段未被波及
-
-
 # --------------------------------------------------------------------------- #
 # SplitConfig（零章节按字数分册目标字数：管理员统一配置，bgm 同款处理）
 # --------------------------------------------------------------------------- #
 
-def test_split_config_default_and_bounds():
+def test_split_config_defaults_and_bounds():
+    # split config default and bounds
     assert SplitConfig().length_target == 3000
     assert SplitConfig().smart_split_long_chapters is True
     with pytest.raises(ValidationError):
         SplitConfig(length_target=99)
     with pytest.raises(ValidationError):
         SplitConfig(length_target=200_001)
+
+    # app config missing split section falls back to defaults
+    # 旧工作空间配置缺整个 split 段 → Pydantic 默认值填充，读取链不报错。
+    data = AppConfig().model_dump()
+    del data["split"]
+    assert AppConfig.model_validate(data).split == SplitConfig()
+    data2 = AppConfig().model_dump()
+    del data2["split"]["length_target"]
+    assert AppConfig.model_validate(data2).split.length_target == 3000
 
 
 def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeypatch):
@@ -562,22 +565,3 @@ def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeyp
     saved = _read(ws / "config" / "setting.json")
     assert saved["log"]["level"] == "DEBUG"
     assert saved["split"]["length_target"] == SplitConfig().length_target
-
-
-def test_app_config_missing_split_section_falls_back_to_defaults():
-    # 旧工作空间配置缺整个 split 段 → Pydantic 默认值填充，读取链不报错。
-    data = AppConfig().model_dump()
-    del data["split"]
-    assert AppConfig.model_validate(data).split == SplitConfig()
-    data2 = AppConfig().model_dump()
-    del data2["split"]["length_target"]
-    assert AppConfig.model_validate(data2).split.length_target == 3000
-
-
-def test_legacy_batch_constraints_are_ignored_and_removed_on_save():
-    old = dict(planner_length_bands=True, planner_batch_chars=True, planner_seq_chars=True,
-               planner_length_ratio=True, planner_vram=True, batch_max_chars=1000,
-               batch_length_ratio=1.1, vocoder_batch_size=64, profile_stages=True)
-    config = TTSConfig(**old, batch_concurrency=80)
-    assert config.batch_concurrency == 80
-    assert not set(old) & config.model_dump().keys()

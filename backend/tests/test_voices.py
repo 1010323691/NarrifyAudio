@@ -63,36 +63,31 @@ BS = chr(92)  # backslash — built via chr() so no literal backslashes live in 
 # extract_json_object
 # --------------------------------------------------------------------------- #
 
-def test_extract_simple_object():
+def test_extract_json_object_contract():
+    # extract simple object
     assert extract_json_object('{"description":"d","ref_text":"r"}') == {
         "description": "d", "ref_text": "r",
     }
 
-
-def test_extract_embedded_in_prose():
+    # extract embedded in prose
     got = extract_json_object('Here you go: {"description":"x"} and more')
     assert got == {"description": "x"}
 
-
-def test_extract_nested_object():
+    # extract nested object
     assert extract_json_object('{"a": {"b": 1}}') == {"a": {"b": 1}}
 
-
-def test_extract_ignores_brace_in_string():
+    # extract ignores brace in string
     assert extract_json_object('{"s":"a}b"}') == {"s": "a}b"}
 
-
-def test_extract_ignores_escaped_quote():
+    # extract ignores escaped quote
     # raw JSON text: {"a":"a\"b"}  — the \" must not close the string
     raw = '{"a":"a' + BS + '"b"}'
     assert extract_json_object(raw) == {"a": 'a"b'}
 
-
-def test_extract_none_without_braces():
+    # extract none without braces
     assert extract_json_object("no braces here") is None
 
-
-def test_extract_none_when_unbalanced():
+    # extract none when unbalanced
     assert extract_json_object('{"a":1') is None
 
 
@@ -100,83 +95,61 @@ def test_extract_none_when_unbalanced():
 # normalize_speaker_name
 # --------------------------------------------------------------------------- #
 
-def test_normalize_strips_honorifics():
-    assert normalize_speaker_name("Dr. Smith") == "smith"
-    assert normalize_speaker_name("  Mr. Jones  ") == "jones"
-    assert normalize_speaker_name("Prof. Ada") == "ada"
-
-
-def test_normalize_lowercases_and_strips_punct():
-    assert normalize_speaker_name("Alice") == "alice"
-    assert normalize_speaker_name("O'Brien") == "obrien"
-
-
-def test_normalize_collapses_whitespace():
-    assert normalize_speaker_name("John   Smith") == "john smith"
-
-
-def test_normalize_non_string_is_empty():
-    assert normalize_speaker_name(123) == ""
-    assert normalize_speaker_name(None) == ""
-
-
-def test_normalize_cjk_stripped():
-    # CJK is not in the [a-z0-9\s] keep-set (1:1 port of the source) — the filename
-    # sanitizer (_sanitize) is what preserves CJK, not the name normaliser.
-    assert normalize_speaker_name("张三") == ""
+def test_normalize_speaker_name_contract():
+    for args, expected in [
+        (('Dr. Smith',), 'smith'),
+        (('  Mr. Jones  ',), 'jones'),
+        (('Prof. Ada',), 'ada'),
+        (('Alice',), 'alice'),
+        (("O'Brien",), 'obrien'),
+        (('John   Smith',), 'john smith'),
+        ((123,), ''),
+        ((None,), ''),
+        (('张三',), ''),
+    ]:
+        assert normalize_speaker_name(*args) == expected, args
 
 
 # --------------------------------------------------------------------------- #
 # _token_jaccard
 # --------------------------------------------------------------------------- #
 
-def test_jaccard_identical():
-    assert _token_jaccard("John Smith", "john smith") == 1.0
-
-
-def test_jaccard_disjoint():
-    assert _token_jaccard("John", "Smith") == 0.0
-
-
-def test_jaccard_partial():
-    assert _token_jaccard("John Smith", "John Doe") == 1 / 3
-
-
-def test_jaccard_empty_side():
-    assert _token_jaccard("", "John") == 0.0
+def test_token_jaccard_contract():
+    for args, expected in [
+        (('John Smith', 'john smith',), 1.0),
+        (('John', 'Smith',), 0.0),
+        (('John Smith', 'John Doe',), 1 / 3),
+        (('', 'John',), 0.0),
+    ]:
+        assert _token_jaccard(*args) == expected, args
 
 
 # --------------------------------------------------------------------------- #
 # _resolve_to_canonical
 # --------------------------------------------------------------------------- #
 
-def test_canonical_exact_match():
+def test_canonical_name_resolution():
+    # canonical exact match
     # "Smith" -> "smith" matches "Dr. Smith" -> "smith" after normalization.
     assert _resolve_to_canonical("Smith", ["John", "Dr. Smith"]) == "Dr. Smith"
 
-
-def test_canonical_exact_after_normalize():
+    # canonical exact after normalize
     assert _resolve_to_canonical("Dr. Smith", ["John", "Smith"]) == "Smith"
 
-
-def test_canonical_substring():
+    # canonical substring
     assert _resolve_to_canonical("Smithson", ["Smith"]) == "Smith"
 
-
-def test_canonical_jaccard_pass():
+    # canonical jaccard pass
     # Neither exact nor substring; the token-Jaccard (1/3) clears the low threshold.
     assert _resolve_to_canonical("John Peter", ["John James"], threshold=0.2) == "John James"
 
-
-def test_canonical_jaccard_below_threshold():
+    # canonical jaccard below threshold
     assert _resolve_to_canonical("John Peter", ["John James"], threshold=0.5) is None
 
-
-def test_canonical_empty_raw():
+    # canonical empty raw
     assert _resolve_to_canonical("", ["John"]) is None
 
-
-def test_canonical_cjk_unresolvable():
+    # canonical cjk unresolvable
     # CJK normalises to "" on both sides, so it can never be resolved this way.
     assert _resolve_to_canonical("张三", ["李四"]) is None
 
@@ -189,16 +162,15 @@ def _pairs(n, start=0):
     return [(start + k, f"line {k}") for k in range(n)]
 
 
-def test_bands_empty():
+def test_target_sampling_bands():
+    # bands empty
     assert _select_target_bands([]) == ([], [], [])
 
-
-def test_bands_few_lines_all_to_front():
+    # bands few lines all to front
     # Fewer than 3 * per lines: everything folds into 'front' (none dropped).
     assert _select_target_bands(_pairs(5)) == ([0, 1, 2, 3, 4], [], [])
 
-
-def test_bands_front_back_middle_spread():
+    # bands front back middle spread
     front, middle, back = _select_target_bands(_pairs(40))
     assert front == list(range(0, 8))
     assert back == list(range(32, 40))
@@ -206,8 +178,7 @@ def test_bands_front_back_middle_spread():
     assert middle == [8, 11, 15, 18, 21, 24, 28, 31]
     assert all(8 <= x <= 31 for x in middle)
 
-
-def test_bands_are_disjoint():
+    # bands are disjoint
     front, middle, back = _select_target_bands(_pairs(60))
     seen = set(front) | set(middle) | set(back)
     assert len(seen) == len(front) + len(middle) + len(back)  # no overlap
@@ -217,7 +188,8 @@ def test_bands_are_disjoint():
 # _window_block  (optimization A: per-line ±context, any speaker)
 # --------------------------------------------------------------------------- #
 
-def test_window_block_marks_target_and_keeps_order():
+def test_context_window_contract():
+    # window block marks target and keeps order
     script = [
         {"speaker": "NARRATOR", "text": "c0"},
         {"speaker": "Bob", "text": "c1"},
@@ -228,8 +200,7 @@ def test_window_block_marks_target_and_keeps_order():
         "   NARRATOR: c0\n   Bob: c1\n★ Alice: target\n   NARRATOR: c2"
     )
 
-
-def test_window_block_clamps_at_start():
+    # window block clamps at start
     script = [
         {"speaker": "Alice", "text": "t0"},
         {"speaker": "NARRATOR", "text": "c1"},
@@ -239,8 +210,7 @@ def test_window_block_clamps_at_start():
         "★ Alice: t0\n   NARRATOR: c1\n   Bob: c2"
     )
 
-
-def test_window_block_respects_window():
+    # window block respects window
     script = [
         {"speaker": "NARRATOR", "text": "c0"},
         {"speaker": "NARRATOR", "text": "c1"},
@@ -253,8 +223,7 @@ def test_window_block_respects_window():
         "   NARRATOR: c1\n★ Alice: target\n   NARRATOR: c2"
     )
 
-
-def test_window_block_skips_empty_text():
+    # window block skips empty text
     script = [
         {"speaker": "NARRATOR", "text": "   "},  # whitespace -> empty -> dropped
         {"speaker": "Alice", "text": "hi"},
@@ -266,20 +235,14 @@ def test_window_block_skips_empty_text():
 # pick_ref_text
 # --------------------------------------------------------------------------- #
 
-def test_ref_text_prefers_long_enough_line():
-    assert pick_ref_text(["short", "this is a long enough line"]) == "this is a long enough line"
-
-
-def test_ref_text_falls_back_to_first_nonempty():
-    assert pick_ref_text(["a", "b c"]) == "a"
-
-
-def test_ref_text_skips_blank():
-    assert pick_ref_text(["", "  ", "hello there friend"]) == "hello there friend"
-
-
-def test_ref_text_empty():
-    assert pick_ref_text([]) == ""
+def test_reference_text_selection():
+    for args, expected in [
+        ((['short', 'this is a long enough line'],), 'this is a long enough line'),
+        ((['a', 'b c'],), 'a'),
+        ((['', '  ', 'hello there friend'],), 'hello there friend'),
+        (([],), ''),
+    ]:
+        assert pick_ref_text(*args) == expected, args
 
 
 # --------------------------------------------------------------------------- #
@@ -297,22 +260,15 @@ def test_fallback_persona_shape():
 # _sanitize (filename-safe)
 # --------------------------------------------------------------------------- #
 
-def test_sanitize_replaces_separators():
-    assert _sanitize("John Smith") == "john_smith"
-
-
-def test_sanitize_replaces_punct():
-    assert _sanitize("A.B/C") == "a_b_c"
-
-
-def test_sanitize_keeps_cjk():
-    # \w matches CJK, so CJK character names survive into the filename.
-    assert _sanitize("张三") == "张三"
-
-
-def test_sanitize_empty_or_none():
-    assert _sanitize("") == "unknown"
-    assert _sanitize(None) == "unknown"
+def test_filename_sanitization():
+    for args, expected in [
+        (('John Smith',), 'john_smith'),
+        (('A.B/C',), 'a_b_c'),
+        (('张三',), '张三'),
+        (('',), 'unknown'),
+        ((None,), 'unknown'),
+    ]:
+        assert _sanitize(*args) == expected, args
 
 
 # --------------------------------------------------------------------------- #
@@ -320,33 +276,36 @@ def test_sanitize_empty_or_none():
 # --------------------------------------------------------------------------- #
 
 def test_has_foundation_requires_description():
-    assert _has_foundation({"type": "foundation", "description": "a voice"}) is True
-    # A foundation entry whose generation failed (empty description) is NOT usable.
-    assert _has_foundation({"type": "foundation", "description": "   "}) is False
-    # A pre-split entry that carries a description counts as a foundation.
-    assert _has_foundation({"type": "clone", "description": "a voice", "ref_audio": "/x.wav"}) is True
-    assert _has_foundation({"type": "foundation"}) is False
-    assert _has_foundation({}) is False
-    assert _has_foundation(None) is False
+    for args, expected in [
+        (({'type': 'foundation', 'description': 'a voice'},), True),
+        (({'type': 'foundation', 'description': '   '},), False),
+        (({'type': 'clone', 'description': 'a voice', 'ref_audio': '/x.wav'},), True),
+        (({'type': 'foundation'},), False),
+        (({},), False),
+        ((None,), False),
+    ]:
+        assert _has_foundation(*args) is expected, args
 
 
 def test_clone_done_requires_clone_with_ref_audio():
-    assert _clone_done({"type": "clone", "ref_audio": "/x.wav"}) is True
-    # A clone entry with no (or missing) reference audio is not done.
-    assert _clone_done({"type": "clone"}) is False
-    assert _clone_done({"type": "clone", "ref_audio": ""}) is False
-    # A design fallback / foundation is not a clone.
-    assert _clone_done({"type": "design", "description": "x"}) is False
-    assert _clone_done({"type": "foundation", "description": "x"}) is False
-    assert _clone_done({}) is False
-    assert _clone_done(None) is False
+    for args, expected in [
+        (({'type': 'clone', 'ref_audio': '/x.wav'},), True),
+        (({'type': 'clone'},), False),
+        (({'type': 'clone', 'ref_audio': ''},), False),
+        (({'type': 'design', 'description': 'x'},), False),
+        (({'type': 'foundation', 'description': 'x'},), False),
+        (({},), False),
+        ((None,), False),
+    ]:
+        assert _clone_done(*args) is expected, args
 
 
 # --------------------------------------------------------------------------- #
 # Phase-status inference  (_foundation_status / _clone_status)
 # --------------------------------------------------------------------------- #
 
-def test_foundation_status_explicit_field_wins():
+def test_foundation_status_contract():
+    # foundation status explicit field wins
     # An explicit Phase-1 field is authoritative, even over a stored description.
     assert _foundation_status({"foundation_status": "failed", "description": "x"}) == "failed"
     assert _foundation_status({"foundation_status": "done", "description": ""}) == "done"
@@ -354,8 +313,7 @@ def test_foundation_status_explicit_field_wins():
     assert _foundation_status({"foundation_status": "weird", "description": "x"}) == "done"
     assert _foundation_status({"foundation_status": "weird"}) == "none"
 
-
-def test_foundation_status_inferred_from_description():
+    # foundation status inferred from description
     assert _foundation_status({"description": "a voice"}) == "done"
     assert _foundation_status({"type": "clone", "description": "a voice", "ref_audio": "/x"}) == "done"
     assert _foundation_status({"type": "foundation", "description": "   "}) == "none"
@@ -363,30 +321,30 @@ def test_foundation_status_inferred_from_description():
     assert _foundation_status(None) is not None  # does not raise; empty dict is the caller's concern
 
 
-def test_clone_status_explicit_field_wins():
-    assert _clone_status({"clone_status": "failed", "type": "clone", "ref_audio": "/x"}) == "failed"
-    assert _clone_status({"clone_status": "done"}) == "done"
-
-
-def test_clone_status_inferred_from_clone_entry():
-    assert _clone_status({"type": "clone", "ref_audio": "/x.wav"}) == "done"
-    assert _clone_status({"type": "clone"}) == "none"
-    assert _clone_status({"type": "design", "description": "x"}) == "none"
-    assert _clone_status({}) == "none"
+def test_clone_status_contract():
+    for args, expected in [
+        (({'clone_status': 'failed', 'type': 'clone', 'ref_audio': '/x'},), 'failed'),
+        (({'clone_status': 'done'},), 'done'),
+        (({'type': 'clone', 'ref_audio': '/x.wav'},), 'done'),
+        (({'type': 'clone'},), 'none'),
+        (({'type': 'design', 'description': 'x'},), 'none'),
+        (({},), 'none'),
+    ]:
+        assert _clone_status(*args) == expected, args
 
 
 # --------------------------------------------------------------------------- #
 # auto_candidate_count  (AUTO-mode budget: absolute log-scale bands)
 # --------------------------------------------------------------------------- #
 
-def test_auto_count_cameo_below_20_is_one():
+def test_auto_candidate_count_contract():
+    # auto count cameo below 20 is one
     # Under 20 lines is a 龙套 (cameo): exactly one candidate, auto-used (no manual pick).
     assert auto_candidate_count(19) == 1
     assert auto_candidate_count(5) == 1
     assert auto_candidate_count(0) == 1
 
-
-def test_auto_count_log_ladder_anchors():
+    # auto count log ladder anchors
     # Absolute log-scale bands (no project-relative ratio): 100–200 lines earn 3–4,
     # the 570 → 5700 decade spans 6–8, and a 20k-line 旁白 saturates at 8 without
     # demoting any lead.
@@ -399,8 +357,7 @@ def test_auto_count_log_ladder_anchors():
     assert auto_candidate_count(5700) == 8
     assert auto_candidate_count(20000) == 8
 
-
-def test_auto_count_floor_two_from_20_lines():
+    # auto count floor two from 20 lines
     # 20+ lines always earns at least two candidates; the log steps land where the
     # ladder says (50 = last two, 51 the first three, 99 the last three).
     assert auto_candidate_count(20) == 2
@@ -408,8 +365,7 @@ def test_auto_count_floor_two_from_20_lines():
     assert auto_candidate_count(51) == 3
     assert auto_candidate_count(99) == 3
 
-
-def test_auto_count_monotone_and_bounded():
+    # auto count monotone and bounded
     prev = 0
     for lines in range(0, 20001):
         c = auto_candidate_count(lines)
@@ -422,7 +378,8 @@ def test_auto_count_monotone_and_bounded():
 # effective_candidates / _clone_have  (candidate bookkeeping shared by UI + select)
 # --------------------------------------------------------------------------- #
 
-def test_effective_candidates_new_format_cleaned():
+def test_effective_candidates_contract():
+    # effective candidates new format cleaned
     entry = {
         "type": "clone",
         "ref_audio": "04_voice_profiles/designed_voices/a_c1.wav",
@@ -440,8 +397,7 @@ def test_effective_candidates_new_format_cleaned():
     assert out[1]["ref_audio"] == "04_voice_profiles/designed_voices/a_c2.wav"  # stripped
     assert [c["seed"] for c in out] == [11, 12]  # the string "12" is coerced to int
 
-
-def test_effective_candidates_legacy_clone_synthesised():
+    # effective candidates legacy clone synthesised
     # A pre-candidates entry (no candidates key) holding a usable clone appears as a
     # single candidate, so the UI stays coherent (the pick button stays disabled).
     entry = {"type": "clone", "ref_audio": "04_voice_profiles/designed_voices/old.wav", "seed": 7}
@@ -449,8 +405,7 @@ def test_effective_candidates_legacy_clone_synthesised():
         {"id": "1", "ref_audio": "04_voice_profiles/designed_voices/old.wav", "seed": 7},
     ]
 
-
-def test_effective_candidates_empty_when_no_clone():
+    # effective candidates empty when no clone
     assert effective_candidates({"type": "foundation", "description": "x"}) == []
     assert effective_candidates({"type": "clone"}) == []  # a clone with no ref_audio
     assert effective_candidates({"type": "design", "candidates": [], "description": "x"}) == []
@@ -459,32 +414,32 @@ def test_effective_candidates_empty_when_no_clone():
 
 
 def test_clone_have_counts():
-    assert _clone_have({"type": "clone", "ref_audio": "/x"}) == 1  # legacy -> one
-    assert _clone_have({"type": "clone", "ref_audio": "/x",
-                        "candidates": [{"id": "1", "ref_audio": "/a"},
-                                       {"id": "2", "ref_audio": "/b"}]}) == 2
-    assert _clone_have({}) == 0
+    for args, expected in [
+        (({'type': 'clone', 'ref_audio': '/x'},), 1),
+        (({'type': 'clone', 'ref_audio': '/x', 'candidates': [{'id': '1', 'ref_audio': '/a'}, {'id': '2', 'ref_audio': '/b'}]},), 2),
+        (({},), 0),
+    ]:
+        assert _clone_have(*args) == expected, args
 
 
 # --------------------------------------------------------------------------- #
 # _effective_line_counts  (alias labels folded into their canonical character)
 # --------------------------------------------------------------------------- #
 
-def test_effective_line_counts_fold_alias_chain():
+def test_effective_line_counts_contract():
+    # effective line counts fold alias chain
     # A's lines are spoken by C's voice (A -> B -> C, two hops): they all land on C.
     order = ["A", "B", "C"]
     samples = {"A": list(range(10)), "B": list(range(5)), "C": list(range(3))}
     vc = {"A": {"alias_of": "B"}, "B": {"alias_of": "C"}, "C": {}}
     assert _effective_line_counts(order, samples, vc) == {"A": 10, "B": 5, "C": 18}
 
-
-def test_effective_line_counts_no_aliases_unchanged():
+    # effective line counts no aliases unchanged
     order = ["A", "B"]
     samples = {"A": list(range(7)), "B": list(range(3))}
     assert _effective_line_counts(order, samples, {"A": {}, "B": {}}) == {"A": 7, "B": 3}
 
-
-def test_effective_line_counts_alias_to_out_of_scope_contributes_nothing():
+    # effective line counts alias to out of scope contributes nothing
     # An alias whose canonical is not in the loaded scope must not inflate any budget.
     order = ["A"]
     samples = {"A": list(range(4))}
@@ -492,8 +447,7 @@ def test_effective_line_counts_alias_to_out_of_scope_contributes_nothing():
     assert out == {"A": 4}
     assert max(out.values()) == 4  # no phantom canonical line count
 
-
-def test_effective_line_counts_alias_cycle_safe():
+    # effective line counts alias cycle safe
     # A -> B -> A: the hop guard terminates and nothing is folded (no inflation).
     order = ["A", "B"]
     samples = {"A": list(range(2)), "B": list(range(3))}

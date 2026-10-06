@@ -39,31 +39,32 @@ def forbid_llm(monkeypatch):
     monkeypatch.setattr(script, "_llm_call", fail)
 
 
-@pytest.mark.parametrize("text", ["你知道：人生没有捷径。", "他不知道：门已经开了。", "难道：事情结束了？"])
-def test_ordinary_dao_words_neither_trigger_nor_allow_deletion(monkeypatch, text):
-    forbid_llm(monkeypatch)
-    wrapped = f"“{text}”"
-    original = entry("林某", wrapped)
-    assert not script.is_suspicious_entry_text(wrapped)
-    assert script._strip_leading_saying_tag(wrapped, {"林某"}) == wrapped
-    dropped = text.split("：", 1)[1]
-    assert script._reparse_vote([entry("林某", dropped)], original, {"林某"}) is None
-    rows = [original]
-    out, checked, fixed = script.validate_sentence_splits(
-        Handle(), LLMConfig(), GenerationConfig(), "sys", "{chunk}", rows,
-    )
-    assert out is rows and (checked, fixed) == (0, 0)
+def test_ordinary_dao_words_neither_trigger_nor_allow_deletion(monkeypatch):
+    for text in ["你知道：人生没有捷径。", "他不知道：门已经开了。", "难道：事情结束了？"]:
+        with monkeypatch.context() as monkeypatch:
+            forbid_llm(monkeypatch)
+            wrapped = f"“{text}”"
+            original = entry("林某", wrapped)
+            assert not script.is_suspicious_entry_text(wrapped), (text,)
+            assert script._strip_leading_saying_tag(wrapped, {"林某"}) == wrapped, (text,)
+            dropped = text.split("：", 1)[1]
+            assert script._reparse_vote([entry("林某", dropped)], original, {"林某"}) is None, (text,)
+            rows = [original]
+            out, checked, fixed = script.validate_sentence_splits(
+                Handle(), LLMConfig(), GenerationConfig(), "sys", "{chunk}", rows,
+            )
+            assert out is rows and (checked, fixed) == (0, 0), (text,)
 
 
-@pytest.mark.parametrize("text,dropped", [
-    ("他走上街道。", "他走上街。"),
-    ("他没有答。", "他没有。"),
-    ("他转身喊道。", "他转身。"),
-    ("她没有回答。", "她没有。"),
-])
-def test_reparse_gate_rejects_trimming_ordinary_sentence_tails(text, dropped):
-    assert script._reparse_vote([entry("NARRATOR", dropped)],
-                               entry("NARRATOR", text), {"NARRATOR"}) is None
+def test_reparse_gate_rejects_trimming_ordinary_sentence_tails():
+    for text, dropped in [
+        ("他走上街道。", "他走上街。"),
+        ("他没有答。", "他没有。"),
+        ("他转身喊道。", "他转身。"),
+        ("她没有回答。", "她没有。"),
+    ]:
+        assert script._reparse_vote([entry("NARRATOR", dropped)],
+                                   entry("NARRATOR", text), {"NARRATOR"}) is None, (text, dropped,)
 
 
 def test_descriptive_action_cannot_be_dropped_as_a_leading_tag():
@@ -73,39 +74,39 @@ def test_descriptive_action_cannot_be_dropped_as_a_leading_tag():
                                {"林某", "NARRATOR"}) is None
 
 
-@pytest.mark.parametrize("replies,expected_calls", [
-    (["他走上街。", "他走上街。"], 2),
-    (["他走上街。", "他走上街道。", "他走上街。"], 3),
-])
-def test_stricter_gate_does_not_spend_more_votes_than_old_early_stop(
-    monkeypatch, replies, expected_calls,
-):
-    calls = []
+def test_stricter_gate_does_not_spend_more_votes_than_old_early_stop(monkeypatch):
+    for replies, expected_calls in [
+        (["他走上街。", "他走上街。"], 2),
+        (["他走上街。", "他走上街道。", "他走上街。"], 3),
+    ]:
+        with monkeypatch.context() as monkeypatch:
+            calls = []
 
-    def llm(*args, **kwargs):
-        calls.append(1)
-        assert len(calls) <= expected_calls
-        return json.dumps([entry("NARRATOR", replies[len(calls) - 1])])
+            def llm(*args, **kwargs):
+                calls.append(1)
+                assert len(calls) <= expected_calls, (replies, expected_calls,)
+                return json.dumps([entry("NARRATOR", replies[len(calls) - 1])])
 
-    monkeypatch.setattr(script, "_llm_call", llm)
-    result = script.revalidate_entry(
-        Handle(), LLMConfig(), GenerationConfig(), "sys", "{chunk}",
-        entry("NARRATOR", "他走上街道。"), "", {"NARRATOR"},
-    )
-    assert result is None and len(calls) == expected_calls
+            monkeypatch.setattr(script, "_llm_call", llm)
+            result = script.revalidate_entry(
+                Handle(), LLMConfig(), GenerationConfig(), "sys", "{chunk}",
+                entry("NARRATOR", "他走上街道。"), "", {"NARRATOR"},
+            )
+            assert result is None and len(calls) == expected_calls, (replies, expected_calls,)
 
 
-@pytest.mark.parametrize("text", [
-    "他走上街道。", "他指着山道。", "他没有答。", "他欲言又止，没说。",
-    "他转身喊道。", "老道瞪眼怒道。", "杜尘暗喜，急道。", "她不知道。",
-    "陌生人说道。",
-])
-def test_conservative_tag_cleanup_keeps_actions_negations_and_unknown_names(monkeypatch, text):
-    forbid_llm(monkeypatch)
-    rows = [entry("NARRATOR", text), entry("林某", "你走吧。")]
-    audit = []
-    out, deleted, texts = script.delete_pure_saying_tags(rows, is_chapter_title, audit=audit)
-    assert out == rows and (deleted, texts, audit) == (0, [], [])
+def test_conservative_tag_cleanup_keeps_actions_negations_and_unknown_names(monkeypatch):
+    for text in [
+        "他走上街道。", "他指着山道。", "他没有答。", "他欲言又止，没说。",
+        "他转身喊道。", "老道瞪眼怒道。", "杜尘暗喜，急道。", "她不知道。",
+        "陌生人说道。",
+    ]:
+        with monkeypatch.context() as monkeypatch:
+            forbid_llm(monkeypatch)
+            rows = [entry("NARRATOR", text), entry("林某", "你走吧。")]
+            audit = []
+            out, deleted, texts = script.delete_pure_saying_tags(rows, is_chapter_title, audit=audit)
+            assert out == rows and (deleted, texts, audit) == (0, [], []), (text,)
 
 
 def test_known_pure_tags_deleted_with_audit_and_without_requests(monkeypatch):
@@ -119,41 +120,41 @@ def test_known_pure_tags_deleted_with_audit_and_without_requests(monkeypatch):
     assert rows[0]["text"] == "林某低声说道。"
 
 
-@pytest.mark.parametrize("rows,expected,absorbed,deleted", [
-    ([entry("NARRATOR", "……"), entry("NARRATOR", "？"), entry("NARRATOR", "夜色。")],
-     ["……？夜色。"], 2, 0),
-    ([entry("NARRATOR", "夜色。"), entry("NARRATOR", "……"), entry("NARRATOR", "？")],
-     ["夜色。……？"], 2, 0),
-    ([entry("NARRATOR", "……"), entry("NARRATOR", "？"), entry("林某", "你好。")],
-     ["你好。"], 0, 2),
-    ([entry("NARRATOR", "第5章 风暴"), entry("NARRATOR", "……"), entry("NARRATOR", "？")],
-     ["第5章 风暴"], 0, 2),
-    ([entry("NARRATOR", "一天后。"), entry("NARRATOR", "……")],
-     ["一天后。"], 0, 1),
-])
-def test_punctuation_runs_have_real_text_targets_and_preserve_exact_punctuation(
-    monkeypatch, rows, expected, absorbed, deleted,
-):
-    forbid_llm(monkeypatch)
-    original = [dict(row) for row in rows]
-    out, a, d = script.absorb_punct_entries(rows, is_chapter_title)
-    assert [row["text"] for row in out] == expected
-    assert (a, d) == (absorbed, deleted)
-    assert rows == original
-    assert all(script._skeleton(row["text"]) for row in out)
+def test_punctuation_runs_have_real_text_targets_and_preserve_exact_punctuation(monkeypatch):
+    for rows, expected, absorbed, deleted in [
+        ([entry("NARRATOR", "……"), entry("NARRATOR", "？"), entry("NARRATOR", "夜色。")],
+         ["……？夜色。"], 2, 0),
+        ([entry("NARRATOR", "夜色。"), entry("NARRATOR", "……"), entry("NARRATOR", "？")],
+         ["夜色。……？"], 2, 0),
+        ([entry("NARRATOR", "……"), entry("NARRATOR", "？"), entry("林某", "你好。")],
+         ["你好。"], 0, 2),
+        ([entry("NARRATOR", "第5章 风暴"), entry("NARRATOR", "……"), entry("NARRATOR", "？")],
+         ["第5章 风暴"], 0, 2),
+        ([entry("NARRATOR", "一天后。"), entry("NARRATOR", "……")],
+         ["一天后。"], 0, 1),
+    ]:
+        with monkeypatch.context() as monkeypatch:
+            forbid_llm(monkeypatch)
+            original = [dict(row) for row in rows]
+            out, a, d = script.absorb_punct_entries(rows, is_chapter_title)
+            assert [row["text"] for row in out] == expected, (rows, expected, absorbed, deleted,)
+            assert (a, d) == (absorbed, deleted), (rows, expected, absorbed, deleted,)
+            assert rows == original, (rows, expected, absorbed, deleted,)
+            assert all(script._skeleton(row["text"]) for row in out), (rows, expected, absorbed, deleted,)
 
 
-@pytest.mark.parametrize("marker", ["第5章 风暴", "一天后。", "次日。", "与此同时。"])
-def test_instruct_inheritance_stops_at_boundaries_without_new_requests(monkeypatch, marker):
-    forbid_llm(monkeypatch)
-    rows = [entry("NARRATOR", "夜色。", "Warm narration."),
-            entry("NARRATOR", marker), entry("NARRATOR", "风声。")]
-    handle = Handle()
-    out, checked, fixed = script.validate_instructs(
-        handle, LLMConfig(), GenerationConfig(), "sys", "unused", rows,
-    )
-    assert out == rows and (checked, fixed) == (2, 0)
-    assert any(level == "WARNING" and "待核对" in text for level, text in handle.logs)
+def test_instruct_inheritance_stops_at_boundaries_without_new_requests(monkeypatch):
+    for marker in ["第5章 风暴", "一天后。", "次日。", "与此同时。"]:
+        with monkeypatch.context() as monkeypatch:
+            forbid_llm(monkeypatch)
+            rows = [entry("NARRATOR", "夜色。", "Warm narration."),
+                    entry("NARRATOR", marker), entry("NARRATOR", "风声。")]
+            handle = Handle()
+            out, checked, fixed = script.validate_instructs(
+                handle, LLMConfig(), GenerationConfig(), "sys", "unused", rows,
+            )
+            assert out == rows and (checked, fixed) == (2, 0), (marker,)
+            assert any(level == "WARNING" and "待核对" in text for level, text in handle.logs), (marker,)
 
 
 def test_incompatible_neighbor_instructs_remain_unresolved_without_requests(monkeypatch):
@@ -188,30 +189,31 @@ def test_budgeted_instruct_request_excludes_newly_blocked_inheritance(monkeypatc
     assert out[2:] == rows[2:]
 
 
-@pytest.mark.parametrize("reply", [
-    [{"instruct": "Clear speech."}],
-    [{"index": True, "instruct": "Clear speech."}],
-    [{"index": 0.5, "instruct": "Clear speech."}],
-    [{"index": 0, "instruct": 123}],
-    [{"index": 0, "instruct": " ".join(["word"] * 36)}],
-    [{"index": 0, "instruct": "Clear speech.", "speaker": "OTHER"}],
-    [{"index": 0, "instruct": "Clear speech."}, {"index": 0, "instruct": "Shouting."}],
-])
-def test_invalid_instruct_reply_is_not_applied_or_retried(monkeypatch, reply):
-    calls = []
+def test_invalid_instruct_reply_is_not_applied_or_retried(monkeypatch):
+    for reply in [
+        [{"instruct": "Clear speech."}],
+        [{"index": True, "instruct": "Clear speech."}],
+        [{"index": 0.5, "instruct": "Clear speech."}],
+        [{"index": 0, "instruct": 123}],
+        [{"index": 0, "instruct": " ".join(["word"] * 36)}],
+        [{"index": 0, "instruct": "Clear speech.", "speaker": "OTHER"}],
+        [{"index": 0, "instruct": "Clear speech."}, {"index": 0, "instruct": "Shouting."}],
+    ]:
+        with monkeypatch.context() as monkeypatch:
+            calls = []
 
-    def llm(*args, **kwargs):
-        calls.append(1)
-        return json.dumps(reply)
+            def llm(*args, **kwargs):
+                calls.append(1)
+                return json.dumps(reply)
 
-    monkeypatch.setattr(script, "_llm_call", llm)
-    rows = [entry("林某", "你好。")]
-    handle = Handle()
-    out, checked, fixed = script.validate_instructs(
-        handle, LLMConfig(), GenerationConfig(), "sys", "unused", rows,
-    )
-    assert out == rows and (checked, fixed) == (1, 0) and len(calls) == 1
-    assert any("待核对" in text for _, text in handle.logs)
+            monkeypatch.setattr(script, "_llm_call", llm)
+            rows = [entry("林某", "你好。")]
+            handle = Handle()
+            out, checked, fixed = script.validate_instructs(
+                handle, LLMConfig(), GenerationConfig(), "sys", "unused", rows,
+            )
+            assert out == rows and (checked, fixed) == (1, 0) and len(calls) == 1, (reply,)
+            assert any("待核对" in text for _, text in handle.logs), (reply,)
 
 
 def test_35_word_instruct_is_valid_without_requests(monkeypatch):

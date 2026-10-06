@@ -12,7 +12,6 @@ import hashlib
 import json
 import uuid
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,7 +26,7 @@ from backend.platform.file_catalog import catalog_managed_file
 from backend.platform.models import Project, ProjectFile, Task, TaskResult, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path
 from backend.platform.task_submission import task_dict
-from backend.services.script_parse_state import _build_file_states, get_state
+from backend.services.script_parse_state import _build_file_states
 from sqlalchemy import select
 
 

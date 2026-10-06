@@ -151,17 +151,16 @@ def test_merge_workers_execute_multiple_jobs_concurrently(monkeypatch):
             thread.join(timeout=2)
 
 
-def test_parse_worker_slots_double_llm_concurrency():
+def test_parse_worker_slot_limits():
+    # parse worker slots double llm concurrency
     assert parse_worker_slot_count(1) == 2
     assert parse_worker_slot_count(4) == 8
     assert parse_worker_slot_count(16) == 32
 
-
-def test_parse_worker_slots_respect_hard_maximum():
+    # parse worker slots respect hard maximum
     assert parse_worker_slot_count(32) == PARSE_WORKER_MAX == 64
 
-
-def test_paused_parse_attempts_get_replacement_worker_slots():
+    # paused parse attempts get replacement worker slots
     assert parse_worker_slot_count(4, parked_worker_count=8) == 16
     assert parse_worker_slot_count(4, parked_worker_count=0) == 8
     assert parse_worker_slot_count(32, parked_worker_count=8) == PARSE_WORKER_MAX

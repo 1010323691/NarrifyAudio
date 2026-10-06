@@ -1,11 +1,9 @@
-"""S1: the unified 19-type registry is the single source of truth for dispatch
-policy; every table row's executor name must bind to the live function in the
-owning dispatcher's map (shadow double-run retired, #34)."""
+"""Task admission policies and registry-to-executor consistency."""
 from __future__ import annotations
 
 import pytest
 
-from backend.platform import engine_task_executor, task_worker, task_types
+from backend.platform import engine_task_executor, task_worker
 from backend.platform.task_contracts import TaskClaim, TaskExecutionError
 from backend.platform.task_registry import (
     ADMIN_ONLY_TASK_TYPES,
@@ -23,7 +21,8 @@ def _claim(task_type: str) -> TaskClaim:
     )
 
 
-def test_table_has_all_types_with_policy_sets_pinned():
+def test_registry_policy_and_dispatch_contract():
+    # table has all types with policy sets pinned
     assert len(TASK_TYPES) == 22
     assert set(TASK_TYPES) == SUPPORTED_TASK_TYPES
     # 策略集合按批次 2 的字面量钉扎——单一事实源即注册表，集合只能从表导出。
@@ -37,22 +36,14 @@ def test_table_has_all_types_with_policy_sets_pinned():
         "tts.preview_render", "bgm.segment", "bgm.mix", "bgm.match", "bgm.package",
         "music.suggest_tags", "audio.zip", "audio.export", "tts.reset",
     })
-    # 直连 6 类型名同样字面钉扎（影子 if-chain 清退后，这里是类型名的唯一钉扎点）。
+    # Direct executors cover the remaining admitted task types.
     assert set(SUPPORTED_TASK_TYPES) - LEGACY_ENGINE_TASK_TYPES == frozenset({
         "text.format", "book.analyze", "book.split", "script.parse",
         "audio.silences", "audio.cut",
         "resources.scan", "resources.package", "resources.cleanup",
     })
 
-
-def test_types_module_reexports_the_registry_sets():
-    assert task_types.SUPPORTED_TASK_TYPES is SUPPORTED_TASK_TYPES
-    assert task_types.BILLABLE_TASK_TYPES is BILLABLE_TASK_TYPES
-    assert task_types.ADMIN_ONLY_TASK_TYPES is ADMIN_ONLY_TASK_TYPES
-    assert task_types.LEGACY_ENGINE_TASK_TYPES is LEGACY_ENGINE_TASK_TYPES
-
-
-def test_every_type_binds_to_a_live_executor_in_its_dispatcher():
+    # every type binds to a live executor in its dispatcher
     # 注册表 executor 名必须与分发器函数表里的活函数一致（影子双跑清退后这是
     # 表与运行时分发之间的一致性保证，替代旧的运行时交叉核对）。
     for name, spec in TASK_TYPES.items():

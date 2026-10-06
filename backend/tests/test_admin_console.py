@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.services.task_operations import task_worker_group
 from backend.services.admin_storage import scan_project_directory
 from backend.core import observability
 from backend.main import app
@@ -274,14 +273,6 @@ def test_workspace_scan_skips_symlinked_directories(tmp_path: Path):
     assert result["size_bytes"] == 0
 
 
-@pytest.mark.parametrize(
-    ("task_type", "expected"),
-    [("script.parse", "llm"), ("tts.batch", "tts"), ("bgm.mix", "audio"), ("text.format", "system")],
-)
-def test_admin_event_module_mapping(task_type: str, expected: str):
-    assert task_worker_group(task_type) == expected
-
-
 def test_api_requests_today_uses_a_separate_daily_aggregate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(observability, "_daily_counts", {})
     for _ in range(8):
@@ -289,39 +280,41 @@ def test_api_requests_today_uses_a_separate_daily_aggregate(monkeypatch: pytest.
     assert observability.api_requests_today() == 8
 
 
-@pytest.mark.parametrize("route", [
-    "/api/health", "/api/config/client-logs", "/api/v1/admin/overview",
-    "/api/v1/admin/performance", "/api/v1/admin/task-metrics",
-    "/api/v1/admin/tasks", "/api/v1/admin/gpu-scheduler/status",
-    "/api/v1/tasks", "/api/v1/tasks/{task_id}", "/api/v1/tasks/stream",
-])
-def test_status_checks_do_not_increase_daily_usage_but_keep_diagnostics(monkeypatch, route):
-    monkeypatch.setattr(observability, "_daily_counts", {})
-    monkeypatch.setattr(observability, "_minute_counts", {})
-    monkeypatch.setattr(observability, "_samples", observability.deque(maxlen=5000))
-    observability.record_api_request(route, 200, 1.0)
-    observability.record_api_request(route, 503, 2.0)
-    assert observability.api_requests_today() == 0
-    assert observability.api_requests_today(0) == 0
-    assert observability.api_requests_today(-540) == 0
-    assert observability.api_snapshot()["request_count"] == 2
-    assert observability.api_snapshot()["server_error_count"] == 1
+def test_status_checks_do_not_increase_daily_usage_but_keep_diagnostics(monkeypatch):
+    for route in [
+        "/api/health", "/api/config/client-logs", "/api/v1/admin/overview",
+        "/api/v1/admin/performance", "/api/v1/admin/task-metrics",
+        "/api/v1/admin/tasks", "/api/v1/admin/gpu-scheduler/status",
+        "/api/v1/tasks", "/api/v1/tasks/{task_id}", "/api/v1/tasks/stream",
+    ]:
+        with monkeypatch.context() as monkeypatch:
+            monkeypatch.setattr(observability, "_daily_counts", {})
+            monkeypatch.setattr(observability, "_minute_counts", {})
+            monkeypatch.setattr(observability, "_samples", observability.deque(maxlen=5000))
+            observability.record_api_request(route, 200, 1.0)
+            observability.record_api_request(route, 503, 2.0)
+            assert observability.api_requests_today() == 0, (route,)
+            assert observability.api_requests_today(0) == 0, (route,)
+            assert observability.api_requests_today(-540) == 0, (route,)
+            assert observability.api_snapshot()["request_count"] == 2, (route,)
+            assert observability.api_snapshot()["server_error_count"] == 1, (route,)
 
 
-@pytest.mark.parametrize("route,method", [
-    ("/api/v1/projects", "GET"),
-    ("/api/v1/admin/users", "GET"),
-    ("/api/v1/admin/settings/registration", "PUT"),
-    ("/api/v1/tasks", "POST"),
-    ("/api/v1/tasks/{task_id}", "DELETE"),
-])
-def test_business_requests_and_mutations_still_increase_daily_usage(monkeypatch, route, method):
-    monkeypatch.setattr(observability, "_daily_counts", {})
-    monkeypatch.setattr(observability, "_minute_counts", {})
-    observability.record_api_request(route, 200, 1.0, method)
-    assert observability.api_requests_today() == 1
-    assert observability.api_requests_today(0) == 1
-    assert observability.api_requests_today(-540) == 1
+def test_business_requests_and_mutations_still_increase_daily_usage(monkeypatch):
+    for route, method in [
+        ("/api/v1/projects", "GET"),
+        ("/api/v1/admin/users", "GET"),
+        ("/api/v1/admin/settings/registration", "PUT"),
+        ("/api/v1/tasks", "POST"),
+        ("/api/v1/tasks/{task_id}", "DELETE"),
+    ]:
+        with monkeypatch.context() as monkeypatch:
+            monkeypatch.setattr(observability, "_daily_counts", {})
+            monkeypatch.setattr(observability, "_minute_counts", {})
+            observability.record_api_request(route, 200, 1.0, method)
+            assert observability.api_requests_today() == 1, (route, method,)
+            assert observability.api_requests_today(0) == 1, (route, method,)
+            assert observability.api_requests_today(-540) == 1, (route, method,)
 
 
 def test_admin_polling_routes_do_not_count_their_own_requests(client, monkeypatch):

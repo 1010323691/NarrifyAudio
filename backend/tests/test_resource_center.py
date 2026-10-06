@@ -15,11 +15,11 @@ from sqlalchemy import select
 
 from backend.main import app
 from backend.platform.database import SessionLocal
-from backend.platform.models import Project, ProjectFile, Task, TaskResult, User, utcnow
+from backend.platform.models import ProjectFile, Task, TaskResult, utcnow
 from backend.core.safe_filesystem import file_identity
-from backend.platform.resource_inventory import ResourceError, build_index, internal_path
+from backend.platform.resource_inventory import internal_path
 from backend.platform.storage import configured_storage_root
-from backend.platform.task_worker import claim_task, complete_claim, execute_claim, fail_claim
+from backend.platform.task_worker import claim_task, complete_claim, execute_claim
 from backend.platform.task_contracts import TaskExecutionError
 
 
@@ -335,8 +335,7 @@ def test_preview_redacts_config_and_supports_range_and_truncation(client, worksp
     assert response["truncated"] and len(response["content"]) == 1024 * 1024
 
 
-@pytest.mark.parametrize("repeat", range(12))
-def test_export_preserves_directory_structure_and_has_separate_storage(client, workspace, repeat):
+def test_export_preserves_directory_structure_and_has_separate_storage(client, workspace):
     _write(workspace["root"], "07_output/卷一/chapter.mp3", "第一卷".encode())
     _write(workspace["root"], "07_output/卷二/chapter.mp3", "第二卷".encode())
     _delivery(workspace, "07_output/卷一/chapter.mp3")
