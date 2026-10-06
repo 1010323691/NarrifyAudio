@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..platform.models import OutboxEvent, Project, QuotaTransaction, Task, TaskAttempt, utcnow
 from ..platform.platform_settings import settings
 from ..platform.task_context import _as_utc
+from ..platform.task_admission import LLM_TASK_TYPES
 from ..platform.task_lifecycle import (
     ACTIVE_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -237,11 +238,15 @@ def control_task_category(
         lease_expires = _as_utc(attempt.lease_expires_at) if attempt is not None else None
         resume_error_code = task.error_code
         if attempt is not None and lease_expires is not None and lease_expires > now:
-            task.status = "running"
-            task.error_code = ""
+            # The parked execution thread reacquires host-wide task capacity before
+            # continuing. API transactions must never promote LLM tasks directly.
+            waits_for_capacity = task.task_type in LLM_TASK_TYPES
+            task.status = "queued" if waits_for_capacity else "running"
+            task.error_code = "resume_waiting" if waits_for_capacity else ""
             task.error_message = ""
             task.updated_at = now
-            append_task_event(db, task.id, "resumed", {"same_attempt": True})
+            append_task_event(db, task.id, "resume_requested" if waits_for_capacity else "resumed",
+                              {"same_attempt": True})
         else:
             task.status = "pending"
             # LLM-outage recovery is deliberately exempt from the normal attempt cap.

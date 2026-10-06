@@ -760,7 +760,7 @@ def test_default_minimum_stay_is_five_minutes():
 def test_all_llm_task_channels_share_one_concurrency_limit(tmp_path, monkeypatch):
     from backend.platform.gpu_scheduler import admission
     activate(enabled_config(tmp_path), "LLM")
-    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda: 2)
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 2)
     count = 0
     maximum = 0
     completed = 0
@@ -811,7 +811,7 @@ from pathlib import Path
 from backend.platform.gpu_scheduler import admission, store
 root, slot = Path(sys.argv[1]), sys.argv[2]
 store.PROJECT_ROOT = root
-admission.parse_worker_concurrency = lambda: 2
+admission.parse_worker_concurrency = lambda **kwargs: 2
 with admission.gpu_permit("LLM"):
     (root / ("entered-" + slot)).touch()
     deadline = time.monotonic() + 15

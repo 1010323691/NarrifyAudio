@@ -20,6 +20,8 @@ from .task_contracts import (
     TaskClaim, TaskExecutionError,
 )
 from .task_lifecycle import TERMINAL_TASK_STATUSES, append_task_event
+from .task_admission import llm_task_capacity_available
+from .gpu_scheduler.store import host_lock
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -252,7 +254,25 @@ class EngineExecutionContext:
     def _paused(self) -> bool:
         with SessionLocal() as db:
             task = db.get(Task, self.claim.task_id)
-            return task is not None and task.status == "paused"
+            resume_waiting = task is not None and task.status == "queued" and task.error_code == "resume_waiting"
+            if not resume_waiting:
+                return task is not None and task.status == "paused"
+        # Use the same lock as claim_task, and hold it through commit so two
+        # resumed/new tasks cannot both take the last available task position.
+        with host_lock(), SessionLocal.begin() as db:
+            task, attempt = _attempt_is_current(db, self.claim)
+            if task is None or attempt is None:
+                return False
+            if task.status != "queued" or task.error_code != "resume_waiting":
+                return task.status == "paused"
+            if not llm_task_capacity_available(db):
+                return True
+            task.status = "running"
+            task.error_code = ""
+            task.error_message = ""
+            task.updated_at = utcnow()
+            append_task_event(db, task.id, "resumed", {"same_attempt": True})
+            return False
 
     def _pause(self, on_pause=None) -> None:
         # Free scarce permits while parked so other tasks can make progress.

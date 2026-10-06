@@ -53,10 +53,10 @@ def gpu_permit(service: str, handle=None):
                 handle.check()
             elif claim is not None:
                 EngineExecutionContext(claim).check()
-            # Read the shared admin limit before taking the admission lock;
-            # the accessor may open a DB session when its cache expires.
-            llm_limit = parse_worker_concurrency() if service == "LLM" else 1
+            # Read the current admin limit with the admission session, so a
+            # different process's config cache cannot admit excess requests.
             with transaction() as (db, state):
+                llm_limit = parse_worker_concurrency(db=db) if service == "LLM" else 1
                 request = db.get(GPURequest, request_id)
                 if request is None:
                     raise TaskCancelledError()

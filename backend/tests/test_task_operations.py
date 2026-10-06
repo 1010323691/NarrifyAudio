@@ -226,7 +226,8 @@ def test_category_pause_and_resume_reuses_live_attempt_and_requeues_idle_task():
         resumed = control_task_category(db, owner.id, project.id, "script", "resume")
         assert {task.id for task in resumed} == {idle.id, live.id}
         assert idle.status == "pending"  # no live attempt: ordinary outbox dispatch
-        assert live.status == "running"  # active lease: continue the same attempt
+        assert live.status == "queued"  # active lease: reacquire global capacity first
+        assert live.error_code == "resume_waiting"
         assert attempt.status == "running"
         assert unrelated.status == "running"
         assert other_project_task.status == "pending"

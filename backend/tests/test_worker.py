@@ -166,6 +166,21 @@ def test_parse_worker_slot_limits():
     assert parse_worker_slot_count(32, parked_worker_count=8) == PARSE_WORKER_MAX
 
 
+def test_llm_execution_thread_claims_all_llm_features(monkeypatch):
+    stop = threading.Event()
+    selected = []
+
+    def claim(worker_id, *, task_types):
+        selected.extend(task_types)
+        stop.set()
+        return None
+
+    monkeypatch.setattr(worker, "claim_fair_task", claim)
+    monkeypatch.setattr(worker, "_mark_offline_safely", lambda _: None)
+    worker._parse_worker_loop("model-worker", 1, stop, stop)
+    assert set(selected) == {"script.parse", "voices.foundation", "bgm.segment", "music.suggest_tags"}
+
+
 def test_paused_parse_worker_count_is_scoped_to_this_process(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -230,6 +245,6 @@ def test_worker_lane_starts_only_its_own_background_channels(monkeypatch,lane):
         assert mechanical_targets <= set(targets)
         assert not model_targets.intersection(targets)
     else:
-        assert targets.count(worker._gpu_task_loop) == 3
+        assert targets.count(worker._gpu_task_loop) == 1
         assert model_targets <= set(targets)
         assert not mechanical_targets.intersection(targets)

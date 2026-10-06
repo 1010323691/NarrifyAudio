@@ -67,9 +67,9 @@ def update_feature_defaults_cache(value: dict[str, Any]) -> None:
         _cache.update(value=value, expires=time.monotonic() + _CACHE_TTL_SECONDS)
 
 
-def parse_worker_concurrency(default: int = 4, maximum: int = 32) -> int:
+def parse_worker_concurrency(default: int = 4, maximum: int = 32, *, db: Session | None = None) -> int:
     """Return the shared LLM request limit (historical parse setting key)."""
-    generation = load_feature_defaults().get("generation", {})
+    generation = load_feature_defaults(db).get("generation", {})
     value = generation.get("parse_worker_concurrency", default) if isinstance(generation, dict) else default
     try:
         return max(1, min(maximum, int(value)))

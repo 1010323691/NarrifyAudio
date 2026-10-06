@@ -71,6 +71,7 @@ from .storage import (
     storage_migration,
 )
 from .task_registry import TASK_TYPES
+from .task_admission import LLM_TASK_TYPES, llm_task_capacity_available
 from .task_validation import legacy_task_payload_error
 from .resource_tasks import _execute_resource_scan, _execute_resource_package, _execute_resource_cleanup
 from .resource_inventory import ResourceError
@@ -294,6 +295,10 @@ def claim_task(
             db.rollback()
             return None
 
+        if task.task_type in LLM_TASK_TYPES and not llm_task_capacity_available(db, exclude_task_id=task.id):
+            db.rollback()
+            return None
+
         latest_attempt = db.scalar(
             select(func.max(TaskAttempt.attempt_no)).where(TaskAttempt.task_id == task.id)
         ) or 0
@@ -363,6 +368,14 @@ def claim_fair_task(
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
+        # Resuming live attempts are continued by their existing execution thread.
+        live_attempt = select(TaskAttempt.id).where(
+            TaskAttempt.task_id == Task.id, TaskAttempt.status == "running",
+            TaskAttempt.lease_expires_at > now,
+        ).exists()
+        eligible_tasks = eligible_tasks & ~live_attempt
+        if not llm_task_capacity_available(db):
+            eligible_tasks = eligible_tasks & Task.task_type.not_in(LLM_TASK_TYPES)
         if task_types:
             eligible_tasks = eligible_tasks & Task.task_type.in_(task_types)
         if excluded_task_types:
@@ -1476,7 +1489,7 @@ def recover_database_tasks(limit: int = 100) -> int:
                 .order_by(TaskAttempt.attempt_no.desc())
                 .with_for_update()
             )
-            if task.status in {"running", "cancelling"} and attempt is not None and _as_utc(attempt.lease_expires_at) and _as_utc(attempt.lease_expires_at) > now:
+            if attempt is not None and _as_utc(attempt.lease_expires_at) and _as_utc(attempt.lease_expires_at) > now:
                 continue
             if attempt is not None and attempt.status == "running":
                 _reconcile_attempt_publication(db, task, attempt)

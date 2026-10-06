@@ -27,10 +27,11 @@ from .platform.gpu_scheduler.runtime import Scheduler
 from .platform.gpu_scheduler.config import load_config as load_gpu_config
 from .platform.gpu_scheduler.store import read_state as read_gpu_state
 from .platform.task_registry import TASK_TYPES
+from .platform.task_admission import LLM_TASK_MULTIPLIER, LLM_TASK_TYPES
 
 PARSE_LLM_CONCURRENCY_MAX = 32
 PARSE_WORKER_MAX = PARSE_LLM_CONCURRENCY_MAX * 2
-PARSE_WORKER_MULTIPLIER = 2
+PARSE_WORKER_MULTIPLIER = LLM_TASK_MULTIPLIER
 PARSE_TASK_TYPES = ("script.parse",)
 MERGE_TASK_TYPES = ("tts.merge", "bgm.mix")
 GPU_TASK_TYPES = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial)
@@ -155,26 +156,26 @@ def _start_merge_workers(worker_id: str, stop: threading.Event) -> list[threadin
 
 
 def parse_worker_slot_count(llm_concurrency: int, parked_worker_count: int = 0) -> int:
-    """Keep the configured active queue slots available when tasks are parked."""
+    """Provision local LLM threads; claim admission enforces the global task cap."""
     configured_slots = max(1, int(llm_concurrency)) * PARSE_WORKER_MULTIPLIER
     return min(PARSE_WORKER_MAX, configured_slots + max(0, int(parked_worker_count)))
 
 
 def _paused_parse_worker_count(worker_id: str) -> int:
-    """Count this process's live, manually paused parse attempts.
+    """Count this process's parked LLM attempts (historical parse worker IDs).
 
     Their threads preserve the in-memory execution stack, so the coordinator
-    provisions replacement workers while keeping the number of runnable slots
-    at the configured limit. Other worker processes do not compensate for them.
+    provisions replacement threads. The shared claim cap still bounds runnable
+    tasks across all processes; other processes do not compensate for these threads.
     """
     with SessionLocal() as db:
         return int(db.scalar(
             select(func.count(TaskAttempt.id))
             .join(Task, Task.id == TaskAttempt.task_id)
             .where(
-                Task.task_type.in_(PARSE_TASK_TYPES),
-                Task.status == "paused",
-                Task.error_code == "manual_pause",
+                Task.task_type.in_(LLM_TASK_TYPES),
+                ((Task.status == "paused") & (Task.error_code == "manual_pause"))
+                | ((Task.status == "queued") & (Task.error_code == "resume_waiting")),
                 TaskAttempt.status == "running",
                 TaskAttempt.worker_id.startswith(f"{worker_id}-parse-", autoescape=True),
             )
@@ -210,7 +211,7 @@ def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_st
     try:
         while not stop.is_set() and not slot_stop.is_set():
             try:
-                claim = claim_fair_task(slot_id, task_types=PARSE_TASK_TYPES)
+                claim = claim_fair_task(slot_id, task_types=LLM_TASK_TYPES)
                 if claim is not None:
                     idle_delay = 0.25
                     _run_claim_fenced(claim)
@@ -317,14 +318,12 @@ def main() -> None:
         if args.task_lane == "model":
             scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
             scheduler_thread.start()
-            for service in ("LLM", "TTS"):
-                # Four model processes each offer two LLM channels. Host-wide
-                # permits cap their combined calls; TTS stays single-channel.
-                for slot in range(2 if service == "LLM" else 1):
-                    thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, service, stop, slot),
-                                              name=f"gpu-task-{service.lower()}-{slot}", daemon=True)
-                    thread.start()
-                    gpu_workers.append(thread)
+            # All LLM types share the coordinator below and the host-wide task
+            # budget. TTS retains its independent single-channel execution path.
+            thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, "TTS", stop, 0),
+                                      name="gpu-task-tts-0", daemon=True)
+            thread.start()
+            gpu_workers.append(thread)
             parse_workers.append(threading.Thread(
                 target=_parse_worker_coordinator, args=(args.worker_id, stop),
                 name="script-parse-coordinator", daemon=True,
