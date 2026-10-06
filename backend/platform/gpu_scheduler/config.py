@@ -52,12 +52,12 @@ def load_config(db=None) -> GPUConfig:
     return GPUConfig.model_validate(row.value if row else {})
 
 
-def platform_llm() -> LLMConfig:
-    return LLMConfig.model_validate(load_feature_defaults().get("llm", {}))
+def platform_llm(db=None) -> LLMConfig:
+    return LLMConfig.model_validate(load_feature_defaults(db).get("llm", {}))
 
 
-def service_fingerprint(config, llm=None):
-    llm = llm or platform_llm()
+def service_fingerprint(config, llm=None, *, db=None):
+    llm = llm or (platform_llm() if db is None else platform_llm(db))
     data = [config.enabled, config.llm_start_script_path, config.llm_stop_script_path,
             llm.base_url, llm.api_key, llm.model_name]
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()

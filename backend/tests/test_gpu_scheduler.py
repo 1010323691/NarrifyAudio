@@ -165,7 +165,7 @@ def test_config_edit_during_switch_cannot_open_wrong_service_admission(tmp_path,
     from backend.platform.gpu_scheduler import runtime, config as config_module
     selected = [LLMConfig(model_name="old-model")]
     monkeypatch.setattr(runtime, "platform_llm", lambda: selected[0])
-    monkeypatch.setattr(config_module, "platform_llm", lambda: selected[0])
+    monkeypatch.setattr(config_module, "platform_llm", lambda db=None: selected[0])
     config = enabled_config(tmp_path)
     with transaction() as (db, _state): db.add(SystemConfig(key="gpu_scheduler", value=config.model_dump()))
     class EditingManager(FakeManager):
@@ -438,7 +438,7 @@ def test_coordinator_restart_cleans_verified_llm_exit(tmp_path, monkeypatch, llm
         llm_process = process_identity(os.getpid())
     llm = LLMConfig(base_url="http://127.0.0.1:9999/v1", model_name="restarted")
     for module in (config_module, runtime):
-        monkeypatch.setattr(module, "platform_llm", lambda: llm)
+        monkeypatch.setattr(module, "platform_llm", lambda db=None: llm)
     config = enabled_config(tmp_path, gpu_release_wait=0)
     activate(config, side="LLM")
     with transaction() as (_db, state):
@@ -608,7 +608,7 @@ server.serve_forever(); server.server_close()
     stop.write_text(f'@echo off\nchcp 65001 >nul\n"{sys.executable}" -c "import urllib.request; urllib.request.urlopen(\'http://127.0.0.1:{port}/shutdown\').read()"\n', encoding="utf-8")
     llm = LLMConfig(base_url=f"http://127.0.0.1:{port}/v1", model_name="fake-model", api_key="")
     for module in (config_module, manager_module, runtime, admission):
-        monkeypatch.setattr(module, "platform_llm", lambda: llm)
+        monkeypatch.setattr(module, "platform_llm", lambda db=None: llm)
     config = GPUConfig(enabled=True, llm_start_script_path=str(start), llm_stop_script_path=str(stop),
                        startup_timeout=10, service_stop_timeout=10, health_check_interval=0.1, gpu_release_wait=0)
     with transaction() as (db, _state):
@@ -847,3 +847,62 @@ with admission.gpu_permit("LLM"):
             if child.poll() is None:
                 child.kill()
             child.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("pool_size", [1, 4])
+def test_concurrent_admission_reuses_connections_without_waiting_on_cache(tmp_path, monkeypatch, pool_size):
+    """All Worker connections may be held by concurrent claim selectors."""
+    from concurrent.futures import ThreadPoolExecutor
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import sessionmaker
+    from backend.core.config import LLMConfig
+    from backend.platform.models import Base
+    from backend.platform import system_config
+    from backend.platform.gpu_scheduler import config as config_module, store
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'small-pool.db'}",
+                           pool_size=pool_size, max_overflow=0, pool_timeout=0.2)
+    sessions = sessionmaker(engine, expire_on_commit=False)
+    Base.metadata.create_all(engine)
+    config = enabled_config(tmp_path)
+    llm = LLMConfig(model_name="stored-model")
+    fingerprint = service_fingerprint(config, llm)
+    with sessions.begin() as db:
+        db.add_all([
+            SystemConfig(key="application.features", value={"llm": llm.model_dump()}),
+            SystemConfig(key="gpu_scheduler", value=config.model_dump()),
+            GPUSchedulerState(id="local", value={"state": "LLM_ACTIVE", "current": "LLM", "managed": True,
+                                                 "service_config": fingerprint}),
+        ])
+    monkeypatch.setattr(system_config, "SessionLocal", sessions)
+    monkeypatch.setattr(config_module, "SessionLocal", sessions)
+    monkeypatch.setattr(store, "SessionLocal", sessions)
+    barrier = threading.Barrier(pool_size)
+
+    def admit():
+        with sessions() as db:
+            db.execute(text("SELECT 1"))
+            barrier.wait(timeout=5)
+            return claim_allowed("script.parse", db)
+
+    try:
+        # Simulate a cache refresh owning its lock. Admission must use its own
+        # transaction, even when the cache is stale or another thread refreshes.
+        with ThreadPoolExecutor(max_workers=pool_size) as executor:
+            with system_config._lock:
+                futures = [executor.submit(admit) for _ in range(pool_size)]
+                assert all(future.result(timeout=5) for future in futures)
+        # Legacy scheduler state lacks llm_runtime. Granting a permit must also
+        # read its fallback settings using the connection it already holds.
+        with gpu_permit("LLM") as request_id:
+            with sessions() as db:
+                request = db.get(GPURequest, request_id)
+                assert request.process["llm_runtime"]["model_name"] == llm.model_name
+        with sessions.begin() as db:
+            db.get(SystemConfig, "application.features").value = {
+                "llm": {**llm.model_dump(), "model_name": "edited-model"}}
+        with sessions() as db:
+            assert not claim_allowed("script.parse", db)
+            assert claim_allowed("text.format", db)
+    finally:
+        engine.dispose()

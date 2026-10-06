@@ -40,8 +40,13 @@ _cache: dict[str, Any] = {"expires": 0.0, "value": {}}
 _CACHE_TTL_SECONDS = 3.0
 
 
-def load_feature_defaults() -> dict[str, Any]:
+def load_feature_defaults(db: Session | None = None) -> dict[str, Any]:
     """Read the shared feature defaults with a short process-local cache."""
+    if db is not None:
+        # Admission already owns a connection. Do not wait on the cache lock:
+        # its refresher may itself be waiting for this connection pool.
+        row = db.get(SystemConfig, "application.features")
+        return row.value if row and isinstance(row.value, dict) else {}
     now = time.monotonic()
     with _lock:
         if now < _cache["expires"]:

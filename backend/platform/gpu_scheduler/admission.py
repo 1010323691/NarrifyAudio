@@ -68,7 +68,7 @@ def gpu_permit(service: str, handle=None):
                     if task is None or task.status not in {"running", "paused"} or attempt is None or attempt.status != "running":
                         raise TaskCancelledError()
                 allowed = not managed or (state["state"] == f"{service}_ACTIVE" and state["current"] == service)
-                if managed and state["service_config"] != service_fingerprint(config):
+                if managed and state["service_config"] != service_fingerprint(config, db=db):
                     allowed = False
                 if allowed and service == "TTS" and managed:
                     allowed = db.scalar(select(GPURequest.id).where(
@@ -88,7 +88,7 @@ def gpu_permit(service: str, handle=None):
                 if allowed:
                     request.status = "running"
                     if managed and service == "LLM":
-                        request.process = {**request.process, "llm_runtime": state.get("llm_runtime") or platform_llm().model_dump()}
+                        request.process = {**request.process, "llm_runtime": state.get("llm_runtime") or platform_llm(db).model_dump()}
                     state["served"] = True
                     break
             time.sleep(delay)
@@ -153,7 +153,7 @@ def allowed_task_types(db=None) -> set[str]:
         state = row.value if row else {}
     if not config.enabled and not state.get("managed"):
         return set(TASK_TYPES)
-    matching_config = state.get("service_config") == service_fingerprint(config)
+    matching_config = state.get("service_config") == service_fingerprint(config, db=db)
     return {name for name, spec in TASK_TYPES.items() if not spec.gpu_initial or
             (matching_config and state.get("state") == f"{spec.gpu_initial}_ACTIVE")}
 
