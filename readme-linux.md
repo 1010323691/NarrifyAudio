@@ -546,6 +546,10 @@ sudo systemctl start narrify-api narrify-worker
 
 完整依赖升级后重新核对 CUDA wheel 与 GPU 推理；仅使用基础环境的部署继续按基础依赖清单维护。`narrify-migrate` 设置了 `RemainAfterExit`，升级时必须显式 **restart** 才会再次执行迁移，不能只重新启动 API。
 
+已安装 systemd 单元的机器，更新本地源码后可在仓库根目录执行 `bash launch/build.sh`，一键构建并加载最新代码。脚本自动识别 user / system 部署，先完成前端类型检查与构建、Python 编译检查和分层门禁，再执行 `daemon-reload`、停止 API / Worker、启动数据服务、重新运行迁移、启动 API / Worker，并检查 API 健康状态。它不拉取 Git 更新；浏览器完成后刷新。执行期间已有任务会受到服务重启影响，建议等待制作任务结束再运行。
+
+默认复用已安装依赖；依赖清单有变化时运行 `bash launch/build.sh --install-deps`，会先停止应用，再执行 `npm ci`、安装 `backend/requirements.txt` 和 `pip check`。这包括 TTS 依赖，完整依赖升级后的 CUDA 核对仍按上文执行。只需构建产物时使用 `bash launch/build.sh --build-only`，无需 systemd。普通构建失败时不停止服务；依赖安装模式中的失败及迁移失败会保持应用停止，修复后重新运行脚本。
+
 迁移失败时保持应用停止，查看日志并修复原因，不删库重建。代码回退与数据库回退是两件事；不可逆迁移依靠升级前备份恢复。
 
 ## 备份与 Windows 数据迁移

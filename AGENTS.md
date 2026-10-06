@@ -6,7 +6,7 @@ Narrify Audio 是 Windows 本地有声书制作工作台，由 Vue 3 + TypeScrip
 
 - `src/`：前端代码；HTTP 客户端放在 `src/api/`，Pinia 状态放在 `src/stores/`，页面模块放在 `src/views/`，通用界面组件放在 `src/components/`，工作台组合逻辑放在 `src/composables/`，布局放在 `src/layouts/`。
 - `backend/`：API 路由位于 `backend/api/`，业务编排位于 `backend/services/`，任务、认证、额度与存储等平台逻辑位于 `backend/platform/`，基础设施位于 `backend/core/`，业务引擎位于 `backend/engines/`。
-- `backend/main.py` 与 `backend/worker.py`：分别为 API 和后台任务进程入口；长时制作任务由 Worker 执行。
+- `backend/main.py` 与 `backend/worker_pool.py`：分别为 API 和后台任务池入口；任务池监督机械与模型 Worker，长时制作任务由 Worker 执行。
 - `backend/migrations/`：Alembic 数据库迁移；pytest 测试位于 `backend/tests/`。
 - `tts-engine/`：独立的 TTS 工作进程代码；大型模型依赖安装到共享 `.venv`，但仍通过子进程运行，不在 FastAPI 进程内导入。
 - `backend/resources/`：提示词及其他运行时资源。`dist/` 是构建产物，不应手动编辑。
@@ -32,7 +32,7 @@ npm.cmd install
 .\launch\start.ps1                                  # 检查数据服务、按需迁移并启动 API + Worker + Vite
 npm.cmd run dev                              # 启动 Vite（127.0.0.1:5173）
 .\.venv\Scripts\python.exe -m backend.main    # 启动 FastAPI（127.0.0.1:8642）
-.\.venv\Scripts\python.exe -m backend.worker  # 启动后台任务 Worker
+.\.venv\Scripts\python.exe -m backend.worker_pool  # 启动机械与模型 Worker 池
 .\launch\stop-data-services.ps1                     # 先停止 API/Worker，再停止数据服务
 npm.cmd run typecheck                        # 前端 TypeScript/Vue 类型检查
 npm.cmd run build                            # 类型检查 + 前端生产构建
