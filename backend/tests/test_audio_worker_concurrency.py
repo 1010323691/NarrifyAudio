@@ -44,7 +44,8 @@ def audio_project():
                 "idempotency_key": uuid.uuid4().hex,
             })
             assert response.status_code == 201, response.text
-            claim = claim_task(response.json()["id"], f"audio-test-{len(claims)}")
+            # Exercise the filesystem fence with intentionally conflicting manual claims.
+            claim = claim_task(response.json()["id"], f"audio-test-{len(claims)}", defer_workspace_conflicts=False)
             assert claim is not None
             claims.append(claim)
             return claim

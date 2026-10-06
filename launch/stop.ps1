@@ -17,14 +17,14 @@ function Test-AppProcess {
   $command = $Process.CommandLine
   if (-not $command) { return $false }
   if ($Process.Name -eq 'python.exe') {
-    return $command -match ('^"?' + [regex]::Escape($python) + '"?\s+-m\s+backend\.(main|worker)(\s|$)')
+    return $command -match ('^"?' + [regex]::Escape($python) + '"?\s+-m\s+backend\.(main|worker|worker_pool)(\s|$)')
   }
   if ($Process.Name -eq 'node.exe') {
     return $command -match ([regex]::Escape($root) + '[\\/]node_modules[\\/].*vite[\\/]bin[\\/]vite\.js(?=["\s]|$)')
   }
   if ($Process.Name -eq 'cmd.exe') {
     return $command -match ('cd\s+/d\s+"' + [regex]::Escape($root) + '"\s+&&') -and
-      $command -match '(-m\s+backend\.(main|worker)(\s|$)|npm\.cmd\s+run\s+dev(\s|$))'
+      $command -match '(-m\s+backend\.(main|worker|worker_pool)(\s|$)|npm\.cmd\s+run\s+dev(\s|$))'
   }
   return $false
 }

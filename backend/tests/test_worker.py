@@ -188,3 +188,46 @@ def test_paused_parse_worker_count_is_scoped_to_this_process(monkeypatch):
         db.commit()
     monkeypatch.setattr(worker, "SessionLocal", factory)
     assert worker._paused_parse_worker_count("worker-a") == 1
+
+
+@pytest.mark.parametrize('lane', ['mechanical', 'model'])
+@pytest.mark.parametrize('once', [False, True])
+@pytest.mark.parametrize('managed', [False, True])
+def test_worker_lanes_keep_dispatch_inside_their_registered_types(lane, once, managed):
+    excluded=set(worker._dispatch_excluded_types(lane,once=once,managed=managed))
+    dispatched=set(worker.SUPPORTED_TASK_TYPES)-excluded
+    assert dispatched <= set(worker.WORKER_LANES[lane])
+    if once:
+        assert dispatched == set(worker.WORKER_LANES[lane])
+    if lane=='mechanical':
+        assert not dispatched.intersection(worker.GPU_TASK_TYPES)
+    else:
+        assert not dispatched.intersection(worker.MECHANICAL_TASK_TYPES)
+
+
+@pytest.mark.parametrize('lane', ['mechanical','model'])
+def test_worker_lane_starts_only_its_own_background_channels(monkeypatch,lane):
+    targets=[]; registry=[]; dispatch=[]
+    class Thread:
+        def __init__(self,target,**kwargs):
+            targets.append(target)
+        def start(self):pass
+        def join(self,**kwargs):pass
+    monkeypatch.setattr(worker.threading,'Thread',Thread)
+    monkeypatch.setattr(worker,'heartbeat',lambda *a,**kw: registry.append(kw))
+    monkeypatch.setattr(worker,'mark_offline',lambda *a:None)
+    monkeypatch.setattr(worker,'_start_merge_workers',lambda *a:targets.append(worker._merge_worker_loop) or [])
+    monkeypatch.setattr(worker,'_dispatch_loop',lambda *a,**kw:dispatch.append(kw))
+    monkeypatch.setattr('sys.argv',['worker','--task-lane',lane])
+    worker.main()
+    assert registry[0]['capabilities']['task_lane']==lane
+    assert set(registry[0]['capabilities']['task_types'])==set(worker.WORKER_LANES[lane])
+    assert dispatch[0]['lane']==lane
+    model_targets={worker._parse_worker_coordinator,worker._gpu_task_loop,worker._llm_recovery_probe_loop}
+    mechanical_targets={worker._merge_worker_loop,worker._project_retention_loop}
+    if lane=='mechanical':
+        assert mechanical_targets <= set(targets)
+        assert not model_targets.intersection(targets)
+    else:
+        assert model_targets <= set(targets)
+        assert not mechanical_targets.intersection(targets)

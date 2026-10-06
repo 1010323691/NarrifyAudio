@@ -372,7 +372,7 @@ Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem
 ```powershell
 npm.cmd run dev                 # 仅启动前端
 .\.venv\Scripts\python.exe -m backend.main   # 仅启动 API
-.\.venv\Scripts\python.exe -m backend.worker # 仅启动 Worker
+.\.venv\Scripts\python.exe -m backend.worker_pool # 启动 4 个机械 Worker + 4 个模型 Worker
 npm.cmd run typecheck           # 前端类型检查
 npm.cmd run build               # 类型检查并构建前端
 npm.cmd run build:all           # 前端构建 + 后端编译检查 + 分层门禁（lint-imports）
@@ -381,8 +381,8 @@ npm.cmd run build:all           # 前端构建 + 后端编译检查 + 分层门�
 
 基础部署只需完成登录与任务验收；开发改动按 `AGENTS.md` 执行检查。后端测试固定使用 `-n 4 --dist loadscope`。
 
-API 和 Worker 使用独立、可配置的数据库连接池；默认一个 API 加四个 Worker
-的连接上限为 76，适用于 PostgreSQL `max_connections=100` 的起始预算。
+API 和 Worker 使用独立、可配置的数据库连接池；默认一个 API 加八个 Worker
+的连接上限为 88，适用于 PostgreSQL `max_connections=100` 的起始预算。
 配置项见 `.env.example`；调整后需重启相应进程。连接预算、等待超时以及 Worker
 瞬时数据库故障重试行为详见 [数据库连接预算与故障恢复](readme-linux.md#数据库连接预算与故障恢复)。
 
@@ -408,3 +408,14 @@ $backupFile = Join-Path '.backups' ('narrify-' + (Get-Date -Format 'yyyyMMdd-HHm
 ```
 
 升级使用 Alembic 迁移，不通过删除数据库重新初始化。迁移会修复旧版孤立 Project / Workspace 的关联记录，不删除或移动用户工作空间文件；迁移前的备份仍需保留。
+
+
+### 独立任务 Worker 池
+
+正式启动使用 `python -m backend.worker_pool`，默认 4 个机械任务 Worker 和 4 个模型任务 Worker，均为独立进程。Windows 启动脚本及 Linux 开发启动脚本已使用此入口；Linux systemd 的 `narrify-worker.service` 使用同一入口。
+
+`backend.worker --task-lane mechanical` 只领取非模型任务；`--task-lane model` 只领取注册表标记为 LLM/TTS 的任务。单 Worker 默认只处理机械任务，不提供混合领取模式。模型任务范围包含文本解析、角色基础、角色克隆、批量合成、预览渲染、BGM 场景分析、音乐标签推荐；合并及混音仍归机械 Worker。模型专用进程保留原 GPU 调度及模型调用许可限制。
+
+监督进程只重启退出的槽位，并保持它原来的分工。可通过 `--mechanical-workers`、`--model-workers` 配置两组数量。扩容时须计算连接池总预算：API 两池共 48，每个 Worker 两池共 5，默认八个 Worker 合计上限 88。已有 systemd 安装需要更新服务入口并重新加载服务配置，修改源码不会自动改写已安装的 unit。
+
+同一项目的冲突写任务在领取前排队，避免正常的长模型调用引发 30 秒文件锁超时及重复尝试；其他项目与非冲突任务继续被领取。同一项目不同章节的合并/混音仍可并行。任务数据一致性要求造成的等待与模型占用机械执行槽的等待分别处理。

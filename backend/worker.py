@@ -34,6 +34,16 @@ PARSE_WORKER_MULTIPLIER = 2
 PARSE_TASK_TYPES = ("script.parse",)
 MERGE_TASK_TYPES = ("tts.merge", "bgm.mix")
 GPU_TASK_TYPES = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial)
+MECHANICAL_TASK_TYPES = tuple(name for name, spec in TASK_TYPES.items() if not spec.gpu_initial)
+WORKER_LANES = {"mechanical": MECHANICAL_TASK_TYPES, "model": GPU_TASK_TYPES}
+
+
+def _dispatch_excluded_types(lane: str, *, once: bool, managed: bool) -> tuple[str, ...]:
+    excluded = set(SUPPORTED_TASK_TYPES) - set(WORKER_LANES[lane])
+    if not once:
+        excluded.update(MERGE_TASK_TYPES)
+        excluded.update(GPU_TASK_TYPES if managed else PARSE_TASK_TYPES)
+    return tuple(sorted(excluded))
 
 
 def _retry_database_operation(
@@ -68,7 +78,7 @@ def _mark_offline_safely(worker_id: str) -> None:
         logging.getLogger("audiobook.worker").warning("Could not mark worker offline: %s", worker_id)
 
 
-def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once):
+def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once, lane="mechanical"):
     def dispatch():
         heartbeat(worker_id, status="idle", capabilities=capabilities)
         recover_database_tasks()
@@ -77,8 +87,9 @@ def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once):
             client,
             worker_id=worker_id,
             block_ms=100 if once else int(max(100, interval * 1000)),
-            excluded_task_types=() if once else (
-                MERGE_TASK_TYPES + (GPU_TASK_TYPES if load_gpu_config().enabled or read_gpu_state()["managed"] else PARSE_TASK_TYPES)
+            excluded_task_types=_dispatch_excluded_types(
+                lane, once=once,
+                managed=False if once else load_gpu_config().enabled or read_gpu_state()["managed"],
             ),
         )
         if result not in {"idle", "skipped"}:
@@ -267,13 +278,21 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="publish one batch and exit")
     parser.add_argument("--interval", type=float, default=1.0, help="poll interval in seconds")
     parser.add_argument("--worker-id", default=os.getenv("NARRIFY_WORKER_ID", f"worker-local-{os.getpid()}"))
+    parser.add_argument(
+        "--task-lane", choices=tuple(WORKER_LANES),
+        default=os.getenv("NARRIFY_WORKER_LANE", "mechanical"),
+        help="mechanical tasks only, or LLM/TTS model tasks only",
+    )
     args = parser.parse_args()
+    if args.task_lane not in WORKER_LANES:
+        parser.error("NARRIFY_WORKER_LANE must be mechanical or model")
     client = redis.Redis.from_url(os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
     capabilities = {
         "task_types": [
-            *sorted(SUPPORTED_TASK_TYPES),
+            *sorted(WORKER_LANES[args.task_lane]),
         ],
         "queue": "narrify-tasks",
+        "task_lane": args.task_lane,
     }
     stop = threading.Event()
     if not _retry_database_operation(
@@ -287,34 +306,32 @@ def main() -> None:
     merge_workers: list[threading.Thread] = []
     scheduler_thread: threading.Thread | None = None
     if not args.once:
-        merge_workers = _start_merge_workers(args.worker_id, stop)
-        scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
-        scheduler_thread.start()
-        for service in ("LLM", "TTS"):
-            thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, service, stop),
-                                      name=f"gpu-task-{service.lower()}", daemon=True)
-            thread.start()
-            gpu_workers.append(thread)
-        retention_worker = threading.Thread(
-            target=_project_retention_loop,
-            args=(stop,),
-            name="project-retention-cleanup",
-            daemon=True,
-        )
-        retention_worker.start()
-        parse_workers.append(threading.Thread(
-            target=_parse_worker_coordinator,
-            args=(args.worker_id, stop),
-            name="script-parse-coordinator",
-            daemon=True,
-        ))
-        parse_workers[0].start()
-        threading.Thread(
-            target=_llm_recovery_probe_loop, args=(stop,),
-            name="llm-recovery-probe", daemon=True,
-        ).start()
+        if args.task_lane == "mechanical":
+            merge_workers = _start_merge_workers(args.worker_id, stop)
+            retention_worker = threading.Thread(
+                target=_project_retention_loop, args=(stop,),
+                name="project-retention-cleanup", daemon=True,
+            )
+            retention_worker.start()
+        if args.task_lane == "model":
+            scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
+            scheduler_thread.start()
+            for service in ("LLM", "TTS"):
+                thread = threading.Thread(target=_gpu_task_loop, args=(args.worker_id, service, stop),
+                                          name=f"gpu-task-{service.lower()}", daemon=True)
+                thread.start()
+                gpu_workers.append(thread)
+            parse_workers.append(threading.Thread(
+                target=_parse_worker_coordinator, args=(args.worker_id, stop),
+                name="script-parse-coordinator", daemon=True,
+            ))
+            parse_workers[0].start()
+            threading.Thread(
+                target=_llm_recovery_probe_loop, args=(stop,),
+                name="llm-recovery-probe", daemon=True,
+            ).start()
     try:
-        _dispatch_loop(client, args.worker_id, capabilities, stop, interval=args.interval, once=args.once)
+        _dispatch_loop(client, args.worker_id, capabilities, stop, interval=args.interval, once=args.once, lane=args.task_lane)
     except Exception:
         try:
             heartbeat(args.worker_id, status="error", capabilities=capabilities)

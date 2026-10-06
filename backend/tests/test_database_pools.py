@@ -7,7 +7,7 @@ from backend.platform import database
 
 
 @pytest.mark.parametrize("role,size,overflow,lock_size,lock_overflow", [
-    ("api", 16, 8, 16, 8), ("worker", 4, 2, 1, 0),
+    ("api", 16, 8, 16, 8), ("worker", 3, 1, 1, 0),
 ])
 def test_database_pools_have_separate_bounded_budgets(monkeypatch, role, size, overflow, lock_size, lock_overflow):
     monkeypatch.setenv("NARRIFY_DB_ROLE", role)

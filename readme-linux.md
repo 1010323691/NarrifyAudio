@@ -240,9 +240,9 @@ PATH=/opt/narrify-audio/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 ### 数据库连接预算与故障恢复
 
 连接池按进程分别配置，默认 API 业务池与迁移锁池均为 `16+8`，每个 Worker
-业务池为 `4+2`、锁池为 `1+0`（未使用时不创建连接）。一个 API 进程加四个
-Worker 的连接上限为 `48 + 4×7 = 76`；PostgreSQL 保持 `max_connections=100`
-时，剩余 24 个连接供迁移、运维及其他客户端使用。增加 API/Worker 进程或
+业务池为 `3+1`、锁池为 `1+0`（未使用时不创建连接）。一个 API 进程加八个
+Worker（4 个机械任务 + 4 个模型任务）的连接上限为 `48 + 8×5 = 88`；PostgreSQL 保持 `max_connections=100`
+时，剩余 12 个连接供迁移、运维及其他客户端使用。增加 API/Worker 进程或
 解析并发之前，须重新计算所有进程的池上限，而非只增大单个连接池。
 
 `.env.example` 列出 `NARRIFY_API_DB_*` 和 `NARRIFY_WORKER_DB_*` 配置；
@@ -320,7 +320,7 @@ User=narrify
 Group=narrify
 WorkingDirectory=/opt/narrify-audio
 EnvironmentFile=/etc/narrify-audio/narrify.env
-ExecStart=/opt/narrify-audio/.venv/bin/python -m backend.worker
+ExecStart=/opt/narrify-audio/.venv/bin/python -m backend.worker_pool
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=120
@@ -601,3 +601,14 @@ sudo tar -czf "$backup_dir/narrify-files.tar.gz" \
 当前代码已处理 POSIX 虚拟环境路径和 `fcntl` 文件锁，但 Linux 自动化部署、GPU 冒烟和生产运行仍需目标机验证。部分 TTS 错误提示还会建议运行 `install_tts_env.ps1`，Linux 实际按本文第 8 节安装。
 
 TTS 强制终止在 Windows 会杀进程树，POSIX 分支目前只调用子进程 `kill()`。因此 Linux 单任务取消 / 暂停期间，可能有 FFmpeg 等后代进程继续运行；本指南的 `KillMode=control-group` 能在停止整个 Worker 服务时清理同一服务组，但不能替代单任务的进程树取消。完整上线验收应覆盖取消、暂停、重试和临时文件清理；如果观察到残留，需要补充 POSIX 进程组管理，而不是仅修改部署配置。
+
+
+### 独立任务 Worker 池
+
+正式启动使用 `python -m backend.worker_pool`，默认 4 个机械任务 Worker 和 4 个模型任务 Worker，均为独立进程。Windows 启动脚本及 Linux 开发启动脚本已使用此入口；Linux systemd 的 `narrify-worker.service` 使用同一入口。
+
+`backend.worker --task-lane mechanical` 只领取非模型任务；`--task-lane model` 只领取注册表标记为 LLM/TTS 的任务。单 Worker 默认只处理机械任务，不提供混合领取模式。模型任务范围包含文本解析、角色基础、角色克隆、批量合成、预览渲染、BGM 场景分析、音乐标签推荐；合并及混音仍归机械 Worker。模型专用进程保留原 GPU 调度及模型调用许可限制。
+
+监督进程只重启退出的槽位，并保持它原来的分工。可通过 `--mechanical-workers`、`--model-workers` 配置两组数量。扩容时须计算连接池总预算：API 两池共 48，每个 Worker 两池共 5，默认八个 Worker 合计上限 88。已有 systemd 安装需要更新服务入口并重新加载服务配置，修改源码不会自动改写已安装的 unit。
+
+同一项目的冲突写任务在领取前排队，避免正常的长模型调用引发 30 秒文件锁超时及重复尝试；其他项目与非冲突任务继续被领取。同一项目不同章节的合并/混音仍可并行。任务数据一致性要求造成的等待与模型占用机械执行槽的等待分别处理。

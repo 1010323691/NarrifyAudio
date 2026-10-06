@@ -39,7 +39,7 @@ def _pool_setting(name: str, default: int, *, minimum: int) -> int:
 def _pool_kwargs(*, lock: bool = False) -> dict:
     role = database_role()
     prefix = f"NARRIFY_{role.upper()}_DB_{'LOCK_' if lock else ''}POOL_"
-    defaults = {"api": (16, 8), "worker": (1, 0) if lock else (4, 2)}
+    defaults = {"api": (16, 8), "worker": (1, 0) if lock else (3, 1)}
     size, overflow = defaults[role]
     timeout = 10 if role == "worker" else 30 if lock else 60
     return {
