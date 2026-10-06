@@ -120,14 +120,21 @@ async def bind_authenticated_workspace(request, call_next):
     token = None
     session_token = request.cookies.get(settings.session_cookie)
     if session_token:
-        with SessionLocal() as db:
-            session = load_session(db, session_token)
-            if session is not None:
+        def resolve_workspace():
+            # Pool checkout can wait under load. Never block the event loop:
+            # other requests need it to complete and release their connections.
+            with SessionLocal() as db:
+                session = load_session(db, session_token)
+                if session is None:
+                    return False, None
                 project = active_project(db, session.user, session)
-                if project is not None:
-                    token = bind_workspace(project_workspace_path(db, session.user.username, project.id))
-                else:
-                    token = bind_workspace(None)
+                workspace = project_workspace_path(db, session.user.username, project.id) if project else None
+                return True, workspace
+
+        authenticated, workspace = await run_in_threadpool(resolve_workspace)
+        if authenticated:
+            # Bind in the request context, not the threadpool's copied context.
+            token = bind_workspace(workspace)
     try:
         return await call_next(request)
     finally:

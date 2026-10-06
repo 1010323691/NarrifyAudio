@@ -297,7 +297,9 @@ def claim_fair_task(
             .join(Task, Task.owner_id == UserQuotaAccount.user_id)
             .where(eligible_tasks)
             .order_by(
-                UserQuotaAccount.last_scheduled_at.asc(),
+                # PostgreSQL defaults ASC to NULLS LAST, which lets an already
+                # served account drain its queue before untouched users run.
+                UserQuotaAccount.last_scheduled_at.asc().nulls_first(),
                 Task.created_at.asc(),
                 Task.id.asc(),
             )

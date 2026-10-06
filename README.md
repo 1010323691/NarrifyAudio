@@ -381,6 +381,11 @@ npm.cmd run build:all           # 前端构建 + 后端编译检查 + 分层门�
 
 基础部署只需完成登录与任务验收；开发改动按 `AGENTS.md` 执行检查。后端测试固定使用 `-n 4 --dist loadscope`。
 
+API 和 Worker 使用独立、可配置的数据库连接池；默认一个 API 加四个 Worker
+的连接上限为 76，适用于 PostgreSQL `max_connections=100` 的起始预算。
+配置项见 `.env.example`；调整后需重启相应进程。连接预算、等待超时以及 Worker
+瞬时数据库故障重试行为详见 [数据库连接预算与故障恢复](readme-linux.md#数据库连接预算与故障恢复)。
+
 ### 构建前端
 
 `npm.cmd run build` 生成 `dist/`。FastAPI 可直接提供其中的静态页面，构建后也可从 `http://127.0.0.1:8642` 访问工作台；此模式仍需 PostgreSQL、Memurai 和独立 Worker，只是不再需要 Vite。默认 `launch/start.bat` 仍会启动 Vite。

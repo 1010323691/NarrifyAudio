@@ -6,9 +6,11 @@ import logging
 import os
 import threading
 import time
+from typing import Callable
 
 import redis
 from sqlalchemy import func, select
+from sqlalchemy.exc import InterfaceError, OperationalError, TimeoutError as PoolTimeoutError
 
 from .platform.outbox import publish_pending
 from .platform.task_worker import recover_database_tasks, resume_llm_unavailable_tasks, run_once
@@ -34,6 +36,60 @@ MERGE_TASK_TYPES = ("tts.merge", "bgm.mix")
 GPU_TASK_TYPES = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial)
 
 
+def _retry_database_operation(
+    operation: Callable[[], object], stop: threading.Event, *, once: bool = False,
+) -> bool:
+    """Retry a dispatch unit, leaving any claimed attempt behind its lease fence."""
+    delay = 1.0
+    while not stop.is_set():
+        try:
+            operation()
+            return True
+        except (OperationalError, InterfaceError, PoolTimeoutError) as exc:
+            code = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            transient = code is None or code.startswith(("08", "53")) or code in {
+                "40001", "40P01", "57P01", "57P02", "57P03",
+            }
+            if once or not transient:
+                raise
+            # Log locally: writing an error heartbeat needs the unavailable DB.
+            logging.getLogger("audiobook.worker").warning(
+                "Database unavailable; retrying in %.1fs (%s)", delay, type(exc).__name__,
+            )
+            stop.wait(delay)
+            delay = min(delay * 2, 30.0)
+    return False
+
+
+def _mark_offline_safely(worker_id: str) -> None:
+    try:
+        mark_offline(worker_id)
+    except Exception:
+        logging.getLogger("audiobook.worker").warning("Could not mark worker offline: %s", worker_id)
+
+
+def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once):
+    def dispatch():
+        heartbeat(worker_id, status="idle", capabilities=capabilities)
+        recover_database_tasks()
+        publish_pending()
+        result = run_once(
+            client,
+            worker_id=worker_id,
+            block_ms=100 if once else int(max(100, interval * 1000)),
+            excluded_task_types=() if once else (
+                MERGE_TASK_TYPES + (GPU_TASK_TYPES if load_gpu_config().enabled or read_gpu_state()["managed"] else PARSE_TASK_TYPES)
+            ),
+        )
+        if result not in {"idle", "skipped"}:
+            heartbeat(worker_id, status="idle", capabilities=capabilities)
+
+    while _retry_database_operation(dispatch, stop, once=once):
+        if once:
+            return
+        stop.wait(max(0.1, interval))
+
+
 def _gpu_task_loop(worker_id: str, service: str, stop: threading.Event) -> None:
     """Dedicated channels allow a mixed task to wait without blocking the other side."""
     types = tuple(name for name, spec in TASK_TYPES.items() if spec.gpu_initial == service and name not in PARSE_TASK_TYPES)
@@ -52,7 +108,7 @@ def _gpu_task_loop(worker_id: str, service: str, stop: threading.Event) -> None:
                 logger.exception("GPU task channel failed service=%s", service)
             stop.wait(0.5)
     finally:
-        mark_offline(slot_id)
+        _mark_offline_safely(slot_id)
 
 
 def _merge_worker_loop(worker_id: str, slot: int, stop: threading.Event) -> None:
@@ -71,7 +127,7 @@ def _merge_worker_loop(worker_id: str, slot: int, stop: threading.Event) -> None
                 logger.exception("Merge worker slot failed; retrying slot=%s", slot)
             stop.wait(0.5)
     finally:
-        mark_offline(slot_id)
+        _mark_offline_safely(slot_id)
 
 
 def _start_merge_workers(worker_id: str, stop: threading.Event) -> list[threading.Thread]:
@@ -154,7 +210,7 @@ def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_st
                 slot_stop.wait(1.0)
                 idle_delay = 0.25
     finally:
-        mark_offline(slot_id)
+        _mark_offline_safely(slot_id)
 
 
 def _parse_worker_coordinator(worker_id: str, stop: threading.Event) -> None:
@@ -203,7 +259,7 @@ def _parse_worker_coordinator(worker_id: str, stop: threading.Event) -> None:
         for _thread, slot_stop in workers.values():
             slot_stop.set()
         for slot in workers:
-            mark_offline(f"{worker_id}-parse-{slot:02d}")
+            _mark_offline_safely(f"{worker_id}-parse-{slot:02d}")
 
 
 def main() -> None:
@@ -219,8 +275,12 @@ def main() -> None:
         ],
         "queue": "narrify-tasks",
     }
-    heartbeat(args.worker_id, status="starting", capabilities=capabilities)
     stop = threading.Event()
+    if not _retry_database_operation(
+        lambda: heartbeat(args.worker_id, status="starting", capabilities=capabilities),
+        stop, once=args.once,
+    ):
+        return
     parse_workers: list[threading.Thread] = []
     retention_worker: threading.Thread | None = None
     gpu_workers: list[threading.Thread] = []
@@ -254,25 +314,12 @@ def main() -> None:
             name="llm-recovery-probe", daemon=True,
         ).start()
     try:
-        while True:
-            heartbeat(args.worker_id, status="idle", capabilities=capabilities)
-            recover_database_tasks()
-            publish_pending()
-            result = run_once(
-                client,
-                worker_id=args.worker_id,
-                block_ms=100 if args.once else int(max(100, args.interval * 1000)),
-                excluded_task_types=() if args.once else (
-                    MERGE_TASK_TYPES + (GPU_TASK_TYPES if load_gpu_config().enabled or read_gpu_state()["managed"] else PARSE_TASK_TYPES)
-                ),
-            )
-            if result not in {"idle", "skipped"}:
-                heartbeat(args.worker_id, status="idle", capabilities=capabilities)
-            if args.once:
-                return
-            time.sleep(max(0.1, args.interval))
+        _dispatch_loop(client, args.worker_id, capabilities, stop, interval=args.interval, once=args.once)
     except Exception:
-        heartbeat(args.worker_id, status="error", capabilities=capabilities)
+        try:
+            heartbeat(args.worker_id, status="error", capabilities=capabilities)
+        except Exception:
+            logging.getLogger("audiobook.worker").warning("Could not write worker error heartbeat")
         raise
     finally:
         stop.set()
@@ -286,7 +333,7 @@ def main() -> None:
             thread.join(timeout=2)
         if scheduler_thread:
             scheduler_thread.join(timeout=5)
-        mark_offline(args.worker_id)
+        _mark_offline_safely(args.worker_id)
 
 
 def _llm_recovery_probe_loop(stop: threading.Event) -> None:

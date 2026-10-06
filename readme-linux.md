@@ -237,6 +237,27 @@ PATH=/opt/narrify-audio/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 ## 5. 用 systemd 执行迁移并管理进程
 
+### 数据库连接预算与故障恢复
+
+连接池按进程分别配置，默认 API 业务池与迁移锁池均为 `16+8`，每个 Worker
+业务池为 `4+2`、锁池为 `1+0`（未使用时不创建连接）。一个 API 进程加四个
+Worker 的连接上限为 `48 + 4×7 = 76`；PostgreSQL 保持 `max_connections=100`
+时，剩余 24 个连接供迁移、运维及其他客户端使用。增加 API/Worker 进程或
+解析并发之前，须重新计算所有进程的池上限，而非只增大单个连接池。
+
+`.env.example` 列出 `NARRIFY_API_DB_*` 和 `NARRIFY_WORKER_DB_*` 配置；
+`POOL_SIZE` 必须大于零，`POOL_MAX_OVERFLOW` 可为零，禁止无限溢出。
+同一组的 `POOL_TIMEOUT` 可指定等待秒数：API 业务池默认 60、锁池 30，
+Worker 两个池均为 10。修改后重启相应进程生效。标准
+`python -m backend.worker` 自动选择 Worker 配置；自定义嵌入式启动器可设置
+`NARRIFY_DB_ROLE=worker`，API 则使用 `api`，不要在共享环境文件中固定此角色。
+
+持续运行的 Worker 在启动心跳、心跳更新、取任务或调度遇到数据库连接中断、
+连接耗尽或连接池超时时，以 1、2、4 秒递增退避，最长间隔 30 秒，数据库恢复
+后继续工作。已有任务仍由租约与 fencing 机制保护，不直接重放执行。
+错误心跳和退出状态上报失败不会覆盖原始异常。`--once` 保持失败即退出，
+错误凭据、SQL 编程错误等非瞬时故障不会无限重试。
+
 分别用 `sudoedit` 创建下面三个文件。API 与 Worker 使用同一工作目录、解释器和环境文件；数据库迁移只由独立的一次性服务执行。
 
 ### `/etc/systemd/system/narrify-migrate.service`
