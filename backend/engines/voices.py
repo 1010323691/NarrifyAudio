@@ -4,8 +4,8 @@ Splits voice preparation into two independent phases so the LLM and the TTS engi
 never share the GPU at once (each can then run at its own max concurrency):
 
 **Phase 1 — ``prepare_foundations`` (LLM only, no TTS).** Detects every speaker in
-the parsed script (in order of first appearance), folds obvious aliases into an
-existing character, then — in parallel, bounded by ``generation.max_concurrency`` —
+the parsed script (in order of first appearance), keeps alias hints for display only
+without inferring character identity from names, then — in parallel, bounded by ``generation.max_concurrency`` —
 asks the LLM for each character's voice *foundation*: a ``description`` + a
 multi-sentence ``ref_text`` seed, reasoned from the character's own lines sampled
 across the book (front / middle / back), each carrying its ±window local context
@@ -48,6 +48,7 @@ import re
 import secrets
 import time
 import uuid
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
 from pathlib import Path
@@ -55,6 +56,7 @@ from pathlib import Path
 from ..core import pathio
 from ..core.config import get_config
 from ..core.file_lock import exclusive_file_lock
+from ..core.role_hints import suggest_role_hints
 from ..core.filenames import safe_filename
 from ..core.task_control import TaskCancelled
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_parsed_json, resolve_parsed_json_all
@@ -117,9 +119,9 @@ def extract_json_object(text):
 def normalize_speaker_name(name):
     if not isinstance(name, str):
         return ""
-    s = name.strip().lower()
+    s = unicodedata.normalize("NFKC", name).strip().casefold()
     s = re.sub(r"^(mr|mrs|ms|miss|dr|prof|sir|lady|lord)\.?\s+", "", s)
-    s = re.sub(r"[^a-z0-9\s]", "", s)
+    s = "".join(c for c in s if c.isalnum() or c.isspace())
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -416,32 +418,10 @@ def _load_voice_config(handle):
 
 
 def _fold_aliases(handle, selected, voice_config):
-    """Fold a label that clearly matches an existing character into an ``alias_of``
-    pointer instead of giving it a new voice (heuristic; runs before the LLM / TTS).
-
-    Returns ``(unique_speakers, resolved_aliases)``.
-    """
-    resolved_aliases: dict = {}
-    unique_speakers: list = []
-    for sp in selected:
-        existing = [n for n in voice_config.keys() if n != sp]
-        alias = ""
-        norm_self = normalize_speaker_name(sp)
-        for cand in existing:
-            if norm_self and normalize_speaker_name(cand) == norm_self:
-                alias = cand
-                break
-        if not alias and existing:
-            alias = _resolve_to_canonical(sp, existing, threshold=0.8)
-        if alias:
-            handle.log(f"识别到别名：{sp} → {alias}（复用其声音）")
-            entry = voice_config.get(sp, {})
-            entry.update({"alias_of": alias, "seed": entry.get("seed", -1)})
-            voice_config[sp] = entry
-            resolved_aliases[sp] = alias
-        else:
-            unique_speakers.append(sp)
-    return unique_speakers, resolved_aliases
+    """Suggest role associations without changing any role's independent processing."""
+    hints = suggest_role_hints(list(dict.fromkeys([*voice_config, *selected])), voice_config)
+    hints = {sp: target for sp, target in hints.items() if sp in selected}
+    return list(selected), hints
 
 
 def _has_foundation(entry) -> bool:
@@ -473,39 +453,13 @@ def auto_candidate_count(lines: int) -> int:
 
 
 def _canonical_of(sp, voice_config) -> str:
-    """Follow an entry's ``alias_of`` chain to the canonical character name.
-
-    Mirrors the worker's ``_resolve_alias`` (8-hop cycle guard) so the auto-mode line
-    counts agree with the voice actually used at synthesis time.
-    """
-    name = sp
-    seen = set()
-    for _ in range(8):
-        if name in seen:
-            break
-        seen.add(name)
-        entry = voice_config.get(name) or {}
-        alias = entry.get("alias_of") or entry.get("alias")
-        if not isinstance(alias, str) or not alias.strip() or alias == name:
-            break
-        name = alias
-    return name
+    """Display hints do not change the role used for synthesis."""
+    return sp
 
 
 def _effective_line_counts(order, samples, voice_config) -> dict:
-    """Per-character line counts with alias labels folded into their canonical character.
-
-    Alias lines are spoken by the canonical's voice, so they count toward its candidate
-    budget; each label's lines land directly on its final canonical (no double counting
-    through intermediate hops). Labels whose canonical is outside the loaded scope are
-    dropped (that voice is not rendered in this run).
-    """
-    counts = {sp: len(samples.get(sp, [])) for sp in order}
-    for sp in order:
-        canon = _canonical_of(sp, voice_config)
-        if canon != sp and canon in counts:
-            counts[canon] += counts[sp]
-    return counts
+    """Budget candidates from each role's own lines, ignoring display hints."""
+    return {sp: len(samples.get(sp, [])) for sp in order}
 
 
 def _seed_of(value, default: int = -1) -> int:
@@ -663,9 +617,8 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             if getattr(handle, "cancelled", False):
                 raise TaskCancelled()
             _, latest = _load_voice_config(handle)
-            for alias, canonical in resolved_aliases.items():
-                entry = latest.setdefault(alias, {})
-                entry.update({"alias_of": canonical, "seed": entry.get("seed", -1)})
+            # Alias hints are display metadata. Do not rewrite
+            # them from this task's snapshot or restore a concurrently removed link.
             if result is not None:
                 entry = latest.setdefault(result["speaker"], {})
                 entry.update({key: result[key] for key in (
@@ -732,7 +685,8 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     handle.log(f"voice_config 已保存：{vc_path}")
 
     handle.progress(1.0, "完成")
-    handle.log(f"语音推理基础生成完成：{len(unique_speakers)} 个角色 + {len(resolved_aliases)} 个别名。")
+    resolved_aliases = suggest_role_hints(order, voice_config, {sp: len(samples[sp]) for sp in order})
+    handle.log(f"语音推理基础生成完成：{len(unique_speakers)} 个角色，{len(resolved_aliases)} 条角色关联提示（仅供参考）。")
     return {
         "count": len(unique_speakers),
         "aliases": len(resolved_aliases),
@@ -747,7 +701,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
     """Phase 2 (TTS only): render each foundation-bearing character's clone candidates.
 
     The first argument is the durable task context. Reads back the foundations persisted by Phase 1
-    and, for every in-scope non-alias character that has a foundation, renders its clone
+    and, for every in-scope character that has a foundation, renders its clone
     *candidate* seed WAVs — all candidates in ONE long-lived shared ``.venv`` subprocess
     (the worker's ``design-batch`` mode: the VoiceDesign model loads once, the candidates
     run as native tensor sub-batches, each candidate seeded by its sub-batch) — stored as
@@ -779,17 +733,13 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
     layout = get_or_prepare_layout()
     ws = layout.workspace
 
-    # Characters eligible for a clone: in-scope, non-alias, already carrying a foundation.
-    def _is_alias(sp):
-        return bool((voice_config.get(sp) or {}).get("alias_of"))
-
-    selected = [s for s in order if _has_foundation(voice_config.get(s)) and not _is_alias(s)]
-    no_foundation = [s for s in order if not _has_foundation(voice_config.get(s)) and not _is_alias(s)]
+    # Every role with a foundation can make its own voice, including hinted roles.
+    selected = [s for s in order if _has_foundation(voice_config.get(s))]
+    no_foundation = [s for s in order if not _has_foundation(voice_config.get(s))]
     if no_foundation:
         handle.log(f"提示：{len(no_foundation)} 个角色尚无语音推理基础，本次跳过——请先运行阶段 1。", "WARNING")
     # Per-character candidate target: the fixed count, or the AUTO ladder — absolute
-    # log-scale bands on each character's own line count (alias lines folded into the
-    # canonical voice). No project-wide denominator: a 20k-line 旁白 must not demote a
+    # log-scale bands on each character's own line count. No project-wide denominator: a 20k-line 旁白 must not demote a
     # 2k-line lead (the old lines/max-lines ratio did exactly that). The new_only /
     # speakers filters below can't shift the budget, so a single-character remake lands
     # on the same budget as a full run.

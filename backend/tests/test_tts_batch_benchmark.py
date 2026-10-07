@@ -51,14 +51,14 @@ def test_protocol_accepts_one_full_batch():
     assert bench.inspect_trial(content, 0, 2)[0] is True
 
 
-def test_inputs_read_only_exact_endpoint_and_alias_guard(tmp_path):
+def test_inputs_read_only_exact_endpoint_and_display_hints(tmp_path):
     profiles = tmp_path / '04_voice_profiles'
     scripts = tmp_path / '03_parsed_json'
     profiles.mkdir(); scripts.mkdir()
     reference = profiles / 'ref.wav'
     reference.write_bytes(b'test')
     config = profiles / 'voice_config.json'
-    config.write_text(json.dumps({'A': {'alias_of': 'B'}, 'B': {'type': 'clone', 'ref_audio': '04_voice_profiles/ref.wav'}}))
+    config.write_text(json.dumps({'A': {'alias_of': 'B', 'type': 'clone', 'ref_audio': '04_voice_profiles/ref.wav'}, 'B': {'type': 'foundation'}}))
     (scripts / 'chapter.json').write_text(json.dumps([{'text': 'hello'}]))
     original = config.read_bytes()
     voices, texts = bench.load_inputs(tmp_path, 'A', [(5, 2)])
@@ -68,7 +68,7 @@ def test_inputs_read_only_exact_endpoint_and_alias_guard(tmp_path):
     with pytest.raises(ValueError, match='exactly 20'):
         bench.load_inputs(tmp_path, 'A', [(20, 2)])
     config.write_text(json.dumps({'A': {'alias_of': 'B'}, 'B': {'alias_of': 'A'}}))
-    with pytest.raises(ValueError, match='cycle'):
+    with pytest.raises(ValueError, match='completed clone'):
         bench.load_inputs(tmp_path, 'A', [(5, 2)])
 
 

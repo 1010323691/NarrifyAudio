@@ -215,11 +215,11 @@ export interface TTSStatus {
 export interface VoiceItem {
   name: string
   line_count: number
-  status: 'ready' | 'pending' // overall ready = alias OR a usable voice (clone/design/custom); a bare foundation is NOT ready
+  status: 'ready' | 'pending' // own usable voice (clone/design/custom); association hints do not affect readiness
   foundation_status: 'none' | 'done' | 'failed' // Phase 1 (语音推理基础) state
   clone_status: 'none' | 'done' | 'failed' // Phase 2 (克隆音频) state
   type: string // clone | design | custom | foundation | ''
-  alias_of: string // non-empty -> this label points at another character's voice
+  alias_of: string // display-only role association hint; never redirects voice synthesis
   gender: 'male' | 'female' | '' // '' = unknown; pre-filled by Phase 1, the badge pick wins
   description: string
   preview: string // path relative to 04_voice_profiles/ (playable via downloadUrl('04_voice_profiles', preview)); '' if none
@@ -338,7 +338,7 @@ export interface BatchFileStatus {
   complete: boolean
   /** Distinct speakers in the file (first-appearance order, incl. NARRATOR). */
   speakers: number
-  /** Speakers with a usable voice (an alias, or a ready clone/design/custom) — the same rule
+  /** Speakers with their own usable voice (clone/design/custom) — the same rule
    *  the 角色配音 page uses for its ready state. */
   ready: number
   /** Speakers without a usable voice (warned before the run). */

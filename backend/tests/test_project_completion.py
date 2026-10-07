@@ -28,6 +28,15 @@ def chapter(root: Path, name: str, done: int, total: int = 3):
     write(root, f'05_audio_chunk/{name}/manifest.json', manifest)
 
 
+def test_voice_hint_does_not_count_as_completed_voice(tmp_path):
+    chapter(tmp_path, 'a', 0)
+    write(tmp_path, '04_voice_profiles/voice_config.json', {
+        'A': {'alias_of': 'B', 'type': 'foundation'},
+        'B': {'type': 'clone', 'ref_audio': 'other.wav'},
+    })
+    assert project_completion(tmp_path)['04_voice_profiles']['completed'] == 0
+
+
 def test_partial_book_is_not_complete_even_when_every_submitted_run_succeeded(tmp_path):
     for i in range(25):
         chapter(tmp_path, f'ch{i}', 3 if i == 0 else 1)

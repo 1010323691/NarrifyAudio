@@ -37,6 +37,7 @@ from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
+from ..core.role_hints import suggest_role_hints
 from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
@@ -119,19 +120,14 @@ def _voice_task_speakers(script: str | None, speakers: list[str] | None,
     """Resolve the selection once; each durable row names a real character."""
     rows = list_voices(script)["speakers"]
     allow = set(speakers) if speakers else None
-    by_name = {row["name"]: row for row in rows}
     counts = {row["name"]: row["line_count"] for row in rows}
-    for row in rows:
-        canonical = V._canonical_of(row["name"], by_name)
-        if canonical != row["name"] and canonical in counts:
-            counts[canonical] += row["line_count"]
     targets = []
     for row in rows:
         name = row["name"]
         if allow is not None and name not in allow:
             continue
         if clone:
-            if row["alias_of"] or row["foundation_status"] != "done":
+            if row["foundation_status"] != "done":
                 continue
             target = candidate_count or V.auto_candidate_count(counts[name])
             if new_only and len(row["candidates"]) >= target:
@@ -334,18 +330,19 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     # ties keep first-appearance (or voice_config) order.
     names = sorted(order if has_script else list(voice_config.keys()),
                    key=lambda sp: -counts.get(sp, 0))
+    hints = suggest_role_hints(names, voice_config, counts)
 
-    ready_names = {n for n in names if voice_config.get(n, {}).get("alias_of") or _voice_usable(voice_config.get(n, {}))}
+    ready_names = {n for n in names if _voice_ready(n, voice_config)}
     counts_out = {"all": len(names), "ready": len(ready_names), "pending": len(names) - len(ready_names),
-                  "non_alias": sum(not voice_config.get(n, {}).get("alias_of") for n in names),
-                  "foundation": sum(not voice_config.get(n, {}).get("alias_of") and _foundation_status(voice_config.get(n, {})) == "done" for n in names),
-                  "clone": sum(not voice_config.get(n, {}).get("alias_of") and _clone_status(voice_config.get(n, {})) == "done" for n in names)}
+                  "non_alias": len(names),
+                  "foundation": sum(_foundation_status(voice_config.get(n, {})) == "done" for n in names),
+                  "clone": sum(_clone_status(voice_config.get(n, {})) == "done" for n in names)}
     matching = [n for n in names if (filter == "all" or n not in ready_names) and
-                (not q.strip() or q.strip().casefold() in (n + " " + voice_config.get(n, {}).get("alias_of", "")).casefold())]
+                (not q.strip() or q.strip().casefold() in (n + " " + hints.get(n, "")).casefold())]
     pagination = page_meta(len(matching), page or 1, page_size, counts_out)
     if keys_only:
         return {"has_script": has_script, "script_path": script_path_out, "voice_config_path": str(vc_path),
-                "speakers": [{"name": n, "line_count": counts.get(n, 0), "status": "ready" if n in ready_names else "pending", "alias_of": voice_config.get(n, {}).get("alias_of", "")} for n in (page_slice(matching, page, page_size) if page is not None else matching)], "pagination": pagination}
+                "speakers": [{"name": n, "line_count": counts.get(n, 0), "status": "ready" if n in ready_names else "pending", "alias_of": hints.get(n, "")} for n in (page_slice(matching, page, page_size) if page is not None else matching)], "pagination": pagination}
     names = [] if summary_only else page_slice(matching, page, page_size) if page is not None else matching
 
     def _preview_of(ref: str) -> str:
@@ -370,8 +367,8 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     for sp in names:
         entry = voice_config.get(sp, {})
         vtype = entry.get("type", "")
-        alias_of = entry.get("alias_of", "")
-        ready = bool(alias_of) or _voice_usable(entry)
+        alias_of = hints.get(sp, "")
+        ready = _voice_ready(sp, voice_config)
         # Every clone candidate the character has (legacy entries synthesise one from
         # their clone reference), plus the user's pick (None = the default first one).
         cands = V.effective_candidates(entry)
@@ -755,6 +752,10 @@ def _read_voice_config(layout) -> dict:
         return {}
 
 
+def _voice_ready(speaker: str, voice_config: dict) -> bool:
+    return _voice_usable(voice_config.get(speaker) or {})
+
+
 def _expected_voice_params(layout, segments, voice_config: dict):
     """Expected per-segment voice JSON, or ``None`` for legacy workspaces."""
     vc_path = layout.voice_profiles / "voice_config.json"
@@ -810,7 +811,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
 
     Per file: segment completion (same rule as the single-file endpoint — ``completed`` = a
     manifest entry ``ok`` whose file is still on disk) plus character readiness (the same
-    ready rule as ``/voices``: an alias or a usable voice entry). ``complete`` marks a file
+    ready rule as ``/voices``: the role's own usable voice entry). ``complete`` marks a file
     whose every synthesizable segment is done (the 已合成 badge; a file with no synthesizable
     segments never gets it). Degrades to a zero row when the file is missing / corrupt /
     empty, or no workspace is set. ``is_script`` distinguishes script arrays
@@ -852,8 +853,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     out["complete"] = c["total"] > 0 and c["completed"] == c["total"]
     order: list[str] = []
     _fold_script(order, {}, data)  # distinct speakers, first-appearance order (incl. NARRATOR)
-    ready = [sp for sp in order
-             if (voice_config.get(sp) or {}).get("alias_of") or _voice_usable(voice_config.get(sp) or {})]
+    ready = [sp for sp in order if _voice_ready(sp, voice_config)]
     out["speakers"] = len(order)
     out["ready"] = len(ready)
     out["missing"] = [sp for sp in order if sp not in set(ready)]

@@ -246,10 +246,10 @@ const cloneRunning = computed(() => taskStore.projectTasks.some((t) => t.module 
 const foundationBlocked = computed(() => foundationBusy.value || cloneRunning.value || !hasScript.value || !projectSet.value)
 const cloneBlocked = computed(() => cloneBusy.value || foundationRunning.value || !hasScript.value || !projectSet.value)
 
-// Progress + readiness (denominator = non-alias characters).
-const nonAlias = computed(() => speakers.value.filter((s) => !s.alias_of))
-const foundationDone = computed(() => listPagination.value?.counts.foundation ?? nonAlias.value.filter((s) => s.foundation_status === 'done').length)
-const cloneDone = computed(() => listPagination.value?.counts.clone ?? nonAlias.value.filter((s) => s.clone_status === 'done').length)
+// Every listed role owns its own voice; alias arrows are hints only.
+const voiceRoles = computed(() => speakers.value)
+const foundationDone = computed(() => listPagination.value?.counts.foundation ?? voiceRoles.value.filter((s) => s.foundation_status === 'done').length)
+const cloneDone = computed(() => listPagination.value?.counts.clone ?? voiceRoles.value.filter((s) => s.clone_status === 'done').length)
 const readyCount = computed(() => listPagination.value?.counts.ready ?? speakers.value.filter((s) => s.status === 'ready').length)
 
 type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'success' | 'warning' | 'outline'
@@ -608,7 +608,7 @@ watch(
     if (st === 'succeeded') {
       foundationResult.value = t.result as PrepareFoundationsResult
       foundationBusy.value = false
-      toast({ title: '语音推理基础生成完成', variant: 'success', description: `已为 ${foundationResult.value?.count ?? 0} 个角色生成基础（${foundationResult.value?.aliases ?? 0} 个别名）` })
+      toast({ title: '语音推理基础生成完成', variant: 'success', description: `已为 ${foundationResult.value?.count ?? 0} 个角色生成基础（保留 ${foundationResult.value?.aliases ?? 0} 条角色关联提示）` })
       // Keep foundationTaskId set so the log panel stays visible with the final logs; the next
       // run simply overwrites it.
       loadVoices()
@@ -728,7 +728,7 @@ watch(
               class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
             >
               <CheckCircle2 class="h-4 w-4 shrink-0" />
-              完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，识别 {{ foundationResult.aliases }} 个别名（未启动 TTS）。
+              完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，保留 {{ foundationResult.aliases }} 条角色关联提示（未启动 TTS）。
             </div>
           </CardContent>
         </section>
@@ -758,7 +758,7 @@ watch(
       <WorkbenchActionBar>
         <template #summary>
           <strong>声音就绪 {{ readyCount }} / {{ listPagination?.counts.all ?? speakers.length }} 个角色</strong>
-          <p class="mt-1 text-muted-foreground">基础 {{ foundationDone }} / {{ (listPagination?.counts.non_alias ?? nonAlias.length) }} · 克隆音频 {{ cloneDone }} / {{ (listPagination?.counts.non_alias ?? nonAlias.length) }}</p>
+          <p class="mt-1 text-muted-foreground">基础 {{ foundationDone }} / {{ (listPagination?.counts.non_alias ?? voiceRoles.length) }} · 克隆音频 {{ cloneDone }} / {{ (listPagination?.counts.non_alias ?? voiceRoles.length) }}</p>
         </template>
         <div class="flex flex-wrap items-center gap-2" role="group" aria-label="基础生成">
           <span class="text-xs text-muted-foreground">基础生成</span>
