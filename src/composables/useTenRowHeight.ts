@@ -6,6 +6,7 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
   let observer: ResizeObserver | null = null
   let tableObserver: MutationObserver | null = null
   let rowsObserver: MutationObserver | null = null
+  let rowsResizer: ResizeObserver | null = null
   let rowsTarget: HTMLElement | null = null
   // The skeleton tbody is replaced wholesale when rows load, so a tbody-level
   // observer goes stale: the table-level childList observer catches the swap,
@@ -15,7 +16,15 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
     if (tbody === rowsTarget) return
     rowsObserver?.disconnect()
     rowsObserver = new MutationObserver(measure)
-    if (tbody) rowsObserver.observe(tbody, { childList: true })
+    rowsResizer?.disconnect()
+    rowsResizer = new ResizeObserver(measure)
+    if (tbody) {
+      rowsObserver.observe(tbody, { childList: true })
+      // In-place cell content (e.g. a status line appearing after analysis
+      // settles) stretches rows without any DOM structure change: the tbody
+      // height change is the only geometric signal left to re-measure on.
+      rowsResizer.observe(tbody)
+    }
     rowsTarget = tbody
   }
   function measure() {
@@ -48,7 +57,13 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
       if (prior) element.style.setProperty('--list-row-height', prior)
       else element.style.removeProperty('--list-row-height')
       const excess = Math.max(0, natural - 27)
-      if (excess && fitted > 27 + excess) fitted = Math.max(minimum, Math.floor((fitted - excess) * 64) / 64)
+      if (excess && fitted > 27) {
+        // Rows render at H + excess in the 27-37px band, so the fill value
+        // alone overflows by 10 × excess. Pull down by the excess; when the
+        // content band does not fit at all (band < natural) the floor already
+        // gives the least-overflowing height.
+        fitted = Math.max(minimum, Math.floor((fitted - excess) * 64) / 64)
+      }
     }
     fittedHeight.value = fitted
     // A measured tbody swap leaves the row observer on the removed node.
@@ -60,6 +75,7 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
       observer?.disconnect()
       tableObserver?.disconnect()
       rowsObserver?.disconnect()
+      rowsResizer?.disconnect()
       rowsTarget = null
       tableObserver = new MutationObserver(measure)
       if (element) {
@@ -72,6 +88,6 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
     }, { immediate: true, flush: 'post' })
   })
   watch(() => toValue(pageSize), async () => { await nextTick(); measure() })
-  onBeforeUnmount(() => { observer?.disconnect(); tableObserver?.disconnect(); rowsObserver?.disconnect() })
+  onBeforeUnmount(() => { observer?.disconnect(); tableObserver?.disconnect(); rowsObserver?.disconnect(); rowsResizer?.disconnect() })
   return computed(() => toValue(pageSize) === 10 ? `${fittedHeight.value}px` : undefined)
 }
