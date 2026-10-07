@@ -119,7 +119,7 @@ test('polling an earlier audio card cannot starve later cards in the initial que
 })
 test('active-context refresh after deletion cannot overwrite a new login or project selection', async () => {
   const source = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
-  const fn = source.slice(source.indexOf('async function syncActiveProject()'), source.indexOf('async function load(force'))
+  const fn = source.slice(source.indexOf('async function syncActiveProject('), source.indexOf('async function load(force'))
   for (const change of ['none', 'account', 'selection', 'busy']) {
     const pending = deferred(), applied = []
     const auth = {user:{id:'u'}}, projectStore = {current:{project_id:'deleted'},busy:false,setCurrent:value=>applied.push(value)}
@@ -134,4 +134,25 @@ test('active-context refresh after deletion cannot overwrite a new login or proj
     pending.resolve({set:false,project_id:''}); await request
     assert.equal(applied.length, change === 'none' ? 1 : 0, change)
   }
+})
+test('deleting an active project still synchronizes shared context after navigation away', async () => {
+  const source = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
+  const sync = source.slice(source.indexOf('async function syncActiveProject('), source.indexOf('async function createProject()'))
+  const remove = source.slice(source.indexOf('async function requestDelete('), source.indexOf('function activate()'))
+  const pending = deferred(), applied = [], reads = []
+  const module = {exports:{}}
+  const context = {
+    module,exports:module.exports,auth:{user:{id:'u'}},document:{hidden:false},viewActive:true,
+    projectStore:{current:{project_id:'deleted'},busy:false,setCurrent:value=>applied.push(value)},
+    deletingProjectId:{value:''},showConfirm:()=>Promise.resolve(true),deleteProject:()=>pending.promise,
+    getActiveProject:()=>{reads.push('active');return Promise.resolve({set:false,project_id:''})},
+    loadProjectPage:()=>{reads.push('page');return Promise.resolve()},toast:()=>{},
+  }
+  runInNewContext(ts.transpileModule(sync + remove + '\nexports.remove = requestDelete', {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText, context)
+  const request = module.exports.remove({id:'deleted',name:'book'})
+  await flush(); context.viewActive = false
+  pending.resolve({ok:true}); await request
+  assert.deepEqual(reads,['active'])
+  assert.equal(applied.length,1)
+  assert.equal(context.deletingProjectId.value,'')
 })

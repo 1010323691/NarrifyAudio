@@ -100,9 +100,8 @@ function updatedAt(value: string) {
   return Number.isNaN(date.getTime()) ? '最近更新未知' : `最近更新 ${date.toLocaleDateString()}`
 }
 
-async function syncActiveProject() {
-  const userId = auth.user?.id
-  const previous = projectStore.current
+async function syncActiveProject(userId = auth.user?.id, previous = projectStore.current) {
+  if (userId !== auth.user?.id || previous !== projectStore.current || projectStore.busy) return
   const current = await getActiveProject()
   // A new login or project selection owns the shared context once it starts.
   if (userId === auth.user?.id && previous === projectStore.current && !projectStore.busy) {
@@ -156,15 +155,20 @@ async function openProject(project: ProjectSummary) {
 // error, and the list reloads on success.
 async function requestDelete(project: ProjectSummary) {
   if (projectStore.busy || deletingProjectId.value) return
+  const userId = auth.user?.id
   const confirmed = await showConfirm(
     `将项目「${project.name}」移入回收站。本地文件和任务记录会保留一个自然月，可在回收站恢复；到期后会彻底删除。如果项目有未完成任务，需要先等待任务完成或取消任务。`,
     { title: '删除项目', confirmText: '删除项目', destructive: true },
   )
-  if (!confirmed) return
+  if (!confirmed || userId !== auth.user?.id) return
+  const previous = projectStore.current
   deletingProjectId.value = project.id
   try {
     await deleteProject(project.id)
-    await load(true)
+    // Mutation completion updates shared context even if this page was deactivated.
+    try { await syncActiveProject(userId, previous) }
+    catch { if (userId === auth.user?.id) toast({ title: '项目已删除', variant: 'destructive', description: '当前项目状态暂未同步，请刷新页面。' }) }
+    await load()
   } catch (cause: any) {
     toast({ title: '删除项目失败', variant: 'destructive', description: cause?.message || '请稍后重试。' })
   } finally {

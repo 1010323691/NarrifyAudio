@@ -15,6 +15,9 @@ try {
     page.setDefaultTimeout(8000)
     const reads = [], errors = [], mutations = [], streams = []
     let deleted = false
+    let releaseDelete, signalDelete
+    const deletionGate = new Promise(resolve => {releaseDelete = resolve})
+    const deletionStarted = new Promise(resolve => {signalDelete = resolve})
     let release
     const gate = new Promise(resolve => {release = resolve})
     page.on('pageerror', error => errors.push(error.message))
@@ -25,7 +28,7 @@ try {
       if (!['GET','HEAD'].includes(route.request().method())) mutations.push(path)
       let body = layoutResponse(path,'user')
       if (path === '/api/v1/projects/active') body = deleted ? {set:false,exists:false,project_id:'',project_name:'',path:'',dirs:{}} : {...body,project_id:'p1-0',project_name:'CARD-1-0'}
-      if (path === '/api/v1/projects/p1-0' && route.request().method() === 'DELETE') { deleted = true; body = {ok:true} }
+      if (path === '/api/v1/projects/p1-0' && route.request().method() === 'DELETE') { signalDelete(); await deletionGate; deleted = true; body = {ok:true} }
       if (path === '/api/v1/tasks/stream') {
         streams.push(url.search)
         return route.fulfill({contentType:'text/event-stream',body:'data: {"type":"snapshot_all","tasks":[]}\n\n'})
@@ -34,7 +37,7 @@ try {
         const p = Number(url.searchParams.get('page') || 1)
         body = {items:Array.from({length:12},(_,i)=>({...layoutResponse(path,'user')[0],id:`p${p}-${i}`,name:`CARD-${p}-${i}`})).filter(row=>!deleted || row.id !== 'p1-0'),pagination:{page:p,page_size:12,total:24}}
       }
-      if (path.endsWith('/summary')) {
+      if (path.startsWith('/api/v1/projects/') && path.endsWith('/summary')) {
         const section = url.searchParams.get('section')
         assert.ok(section, 'no full summary allowed')
         if (section === 'production') await gate
@@ -67,10 +70,17 @@ try {
     await page.getByRole('button',{name:'上一页',exact:true}).click()
     await page.getByRole('button',{name:'删除项目 CARD-1-0',exact:true}).click()
     const activeReads = reads.filter(r=>r.path==='/api/v1/projects/active').length
+    if (viewport.width !== 1440) releaseDelete()
     await page.getByRole('alertdialog').getByRole('button',{name:'删除项目',exact:true}).click()
+    await deletionStarted
+    if (viewport.width === 1440) {
+      await page.getByRole('link',{name:'任务中心',exact:true}).click()
+      await page.waitForURL('**/#/tasks')
+      releaseDelete()
+    }
     await page.waitForFunction(()=>!document.querySelector('.app-nav__project-title'))
     assert.ok(reads.filter(r=>r.path==='/api/v1/projects/active').length > activeReads, 'delete must sync active context')
-    assert.equal(await page.locator('.project-card').getByText('CARD-1-0',{exact:true}).count(),0)
+    assert.equal(await page.locator('.app-nav__project-title').count(),0)
     assert.deepEqual(mutations,['/api/v1/projects/p1-0'])
     assert.deepEqual(errors,[])
     await page.close()
