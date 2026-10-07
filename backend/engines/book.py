@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..core.chapter_titles import clean_chapter_title
+from ..core.filenames import safe_filename, fit_filename
 
 
 # ============================ Encoding ============================
@@ -869,7 +870,7 @@ def base_name(file_name: str) -> str:
 
 
 def sanitize_file_name(name: str) -> str:
-    name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "_", name)
+    name = safe_filename(name)
     name = re.sub(r"\s+", " ", name)
     return name.strip()
 
@@ -1846,10 +1847,10 @@ def make_smart_filenames(chapters: list[dict]) -> list[str]:
         base = f"第 {str(num).zfill(w)} 章 {title}.txt" if title else f"第 {str(num).zfill(w)} 章.txt"
         name = sanitize_file_name(base)
         k = 2
-        while name in used:
-            name = sanitize_file_name(f"{base} {k}")
+        while name.casefold() in used:
+            name = fit_filename(sanitize_file_name(base), disambiguator=f" {k}")
             k += 1
-        used.add(name)
+        used.add(name.casefold())
         out.append(name)
     return out
 

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .deps import AuthContext
 from .project_context import active_project
 from .models import ProjectFile
-from .storage import configured_storage_root, safe_display_name, sha256_file, project_directory_key
+from .storage import configured_storage_root, sha256_file, project_directory_key
 
 
 def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> ProjectFile:
@@ -54,7 +54,7 @@ def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> Project
             object_key=object_key,
             content_type=mimetypes.guess_type(source.name)[0] or "application/octet-stream",
             kind="legacy",
-            original_name=safe_display_name(source.name),
+            original_name=source.name,
             **item_values,
         )
         db.add(item)

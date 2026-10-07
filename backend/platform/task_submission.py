@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
+from ..core.filenames import workspace_audio_identity
 from .models import OutboxEvent, Project, ProjectFile, Task, User, UserQuotaAccount, utcnow
 from .storage import lock_storage_migration, storage_migration
 from .task_lifecycle import append_task_event
@@ -162,6 +163,11 @@ def submit_task_record(
             "smart_split_long_chapters": split.smart_split_long_chapters,
             "length_target": split.length_target,
         }
+    # Compute this server-side; callers cannot choose a lock/scheduler identity.
+    stored_payload.pop("_audio_identity", None)
+    identity = workspace_audio_identity(task_type, stored_payload)
+    if identity is not None:
+        stored_payload["_audio_identity"] = identity
     task = Task(
         owner_id=user.id, project_id=project.id, task_type=task_type,
         payload={**stored_payload, "_request_hash": request_hash}, idempotency_key=idempotency_key,

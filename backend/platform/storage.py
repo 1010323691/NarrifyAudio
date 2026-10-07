@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path
 
 from sqlalchemy import text
@@ -10,9 +9,7 @@ from sqlalchemy.orm import Session
 from .platform_settings import settings
 from .models import SystemConfig, Project
 from ..core.safe_filesystem import is_link_or_junction
-
-
-_SAFE_NAME = re.compile(r"[^\w.()\- ]+", re.UNICODE)
+from ..core.filenames import safe_filename, fit_filename, legacy_storage_name
 
 
 def lock_storage_migration(db: Session, *, shared: bool = False) -> bool:
@@ -33,9 +30,12 @@ def storage_migration(db: Session) -> SystemConfig | None:
 
 
 def safe_display_name(name: str) -> str:
-    candidate = Path(name or "upload.bin").name
-    candidate = _SAFE_NAME.sub("_", candidate).strip(" .")
-    return candidate[:180].rstrip(" .") or "upload.bin"
+    return safe_filename(Path(name or "upload.bin").name)
+
+
+def storage_username(username: str) -> str:
+    """Keep existing account roots stable; registration rejects unsafe new names."""
+    return legacy_storage_name(username)
 
 
 def configured_storage_root(db: Session | None = None) -> Path:
@@ -57,7 +57,7 @@ def safe_project_workspace_path(db: Session | None, username: str, project_id: s
     if not project_id or Path(project_id).name != project_id or project_id in {".", ".."}:
         return None
     root = configured_storage_root(db).resolve()
-    user_root = root / safe_display_name(username)
+    user_root = root / storage_username(username)
     try:
         candidate = root / project_directory_key(db, username, project_id)
     except ValueError:
@@ -83,9 +83,9 @@ def object_path(object_key: str, root: Path | None = None) -> Path:
 
 def project_directory_key(db: Session | None, username: str, project_id: str) -> str:
     project = db.get(Project, project_id) if db is not None else None
-    key = project.directory_key if project is not None else f"{safe_display_name(username)}/{project_id}"
+    key = project.directory_key if project is not None else f"{storage_username(username)}/{project_id}"
     parts = Path(key).parts
-    if len(parts) != 2 or parts[0] != safe_display_name(username) or any(part in {".", ".."} for part in parts):
+    if len(parts) != 2 or parts[0] != storage_username(username) or any(part in {".", ".."} for part in parts):
         raise ValueError("非法项目目录")
     return key
 
@@ -101,6 +101,8 @@ def artifact_module(task_type: str, name: str = "") -> str:
         return "05_audio_chunk"
     if task_type == "text.format" or task_type == "book.split":
         return "02_split_text"
+    if task_type == "book.analyze":
+        return "00_temp"
     if task_type.startswith(("book.", "script.")):
         return "03_parsed_json"
     if task_type.startswith("audio."):
@@ -117,13 +119,7 @@ def available_file_name(directory: Path, name: str, *, reserved: set[str] | None
     number = 2
     while candidate.casefold() in occupied:
         suffix = f" ({number})"
-        extension = Path(name).suffix
-        stem = Path(name).stem
-        if len(extension) + len(suffix) >= 180:
-            # Extremely long extensions cannot fit alongside a disambiguator.
-            stem, extension = name, ""
-        stem_limit = 180 - len(suffix) - len(extension)
-        candidate = f"{stem[:stem_limit]}{suffix}{extension}"
+        candidate = fit_filename(name, disambiguator=suffix)
         number += 1
     return candidate
 
@@ -163,5 +159,4 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
 

@@ -31,7 +31,7 @@ from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Project
 from ..platform.engine_task_submission import active_durable_targets, submit_legacy_engine_task
-from ..platform.storage import configured_storage_root, safe_display_name
+from ..platform.storage import configured_storage_root, storage_username
 
 log = logging.getLogger("audiobook.music")
 
@@ -187,7 +187,7 @@ def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depe
             .where(Project.deleted_at.is_(None))
         ).all()
         for workspace, username in workspaces:
-            workspace_root = root / safe_display_name(username) / workspace.id
+            workspace_root = root / storage_username(username) / workspace.id
             if workspace_root.is_symlink() or workspace_root.parent.is_symlink():
                 continue
             try:

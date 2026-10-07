@@ -36,6 +36,9 @@ def _username(value: str | None, email: str) -> str:
     candidate = (value or email.split("@", 1)[0]).strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{5,19}", candidate):
         raise HTTPException(422, "用户名必须为 6–20 位小写字母、数字、点、下划线或连字符")
+    from ..core.filenames import safe_filename
+    if safe_filename(candidate) != candidate:
+        raise HTTPException(422, "用户名不能使用 Windows 保留名称或以点结尾")
     return candidate
 
 
@@ -62,6 +65,9 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
         raise HTTPException(409, "邮箱已注册")
     if db.scalar(select(User).where(User.username == username)) is not None:
         raise HTTPException(409, "用户名已被占用")
+    from ..platform.storage import storage_username
+    if any(storage_username(existing) == storage_username(username) for existing in db.scalars(select(User.username))):
+        raise HTTPException(409, "用户名存储目录已被占用")
     user = User(email=email, username=username, display_name=payload.display_name.strip(), password_hash=hash_password(payload.password), role="user")
     db.add(user)
     db.flush()

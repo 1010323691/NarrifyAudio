@@ -771,14 +771,16 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     ready rule as ``/voices``: an alias or a usable voice entry). ``complete`` marks a file
     whose every synthesizable segment is done (the 已合成 badge; a file with no synthesizable
     segments never gets it). Degrades to a zero row when the file is missing / corrupt /
-    empty, or no workspace is set.
+    empty, or no workspace is set. ``is_script`` distinguishes script arrays
+    (including empty ones) from analysis reports and unreadable files.
 
     ``out_dir`` (the package dir) switches the completion count to the batched
     ``Batch.count_completion(out_dir=…)`` existence check; omitted, the per-entry rule runs.
     """
     out = {"name": name, "display_name": _chapter_display_name(name, layout),
            "total": 0, "completed": 0, "remaining": 0,
-           "complete": False, "speakers": 0, "ready": 0, "missing": []}
+           "complete": False, "speakers": 0, "ready": 0, "missing": [],
+           "is_script": False}
     src = resolve_parsed_json(name)
     if not src.exists():
         return out
@@ -786,7 +788,15 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
         data = json.loads(src.read_text("utf-8"))
     except Exception:  # noqa: BLE001 — a corrupt / empty script just reports zeros
         return out
-    if not isinstance(data, list) or not data:
+    # Legacy book-analysis reports share this directory with scripts. Identify
+    # scripts by their contents, not by a filename suffix or their segment count.
+    if not isinstance(data, list) or not all(
+        isinstance(entry, dict) and isinstance(entry.get("text", ""), str)
+        for entry in data
+    ):
+        return out
+    out["is_script"] = True
+    if not data:
         return out
     segs = Batch.build_segments(data)
     pkg_dir = out_dir or layout.audio_chunk / Batch.package_for(src)
@@ -1249,9 +1259,9 @@ def preview_chapter(name: str) -> dict:
             prev_speaker = speaker
             prev_pause_after = row.get("pause_after")
 
-    from ..engines.tts_manifest import _safe_package_name
-    safe = _safe_package_name(pkg)
-    timeline_exists = bool(layout.bgm and (layout.bgm / "timelines" / f"{safe}.json").is_file())
+    from ..core.filenames import package_aliases
+    stems = package_aliases(pkg)
+    timeline_exists = bool(layout.bgm and any((layout.bgm / "timelines" / f"{stem}.json").is_file() for stem in stems))
     seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
     sa = seg_data.get(pkg)
     segment_stale = False
@@ -1265,7 +1275,7 @@ def preview_chapter(name: str) -> dict:
     # 本页暂不消费（BGM 页有独立分析态入口），预留供将来「BGM 段落分析已过期」提示。
     downstream = {
         "merged": chapter_audio is not None,
-        "mixed": bool(layout.bgm and (layout.bgm / f"{safe}.mp3").is_file()),
+        "mixed": bool(layout.bgm and any((layout.bgm / f"{stem}.mp3").is_file() for stem in stems)),
         "timeline": timeline_exists,
         "segment_stale": segment_stale,
     }
@@ -1398,15 +1408,14 @@ def _preview_effective_triple(row: dict, edit: PreviewEdit) -> tuple[str, str, s
 def _preview_downstream_deletions(layout, pkg: str, failures: list[dict]) -> list[str]:
     """Delete this chapter's downstream artifacts (06 merge / 08 mix / 08 timeline). Each
     failure is recorded, never raised — the caller surfaces it as ``downstream_dirty``."""
-    from ..engines.tts_manifest import _safe_package_name
-    safe = _safe_package_name(pkg)
+    from ..core.filenames import package_aliases
     targets = [
         ("merged", p) for p in Batch.merged_output_paths(layout, pkg)
     ]
-    targets += [
-        ("mixed", layout.bgm / f"{safe}.mp3"),
-        ("timeline", layout.bgm / "timelines" / f"{safe}.json"),
-    ]
+    targets += [target for stem in package_aliases(pkg) for target in (
+        ("mixed", layout.bgm / f"{stem}.mp3"),
+        ("timeline", layout.bgm / "timelines" / f"{stem}.json"),
+    )]
     invalidated = []
     for artifact, path in targets:
         try:

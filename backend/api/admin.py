@@ -17,7 +17,7 @@ from ..platform.platform_settings import settings
 from ..platform.database import SessionLocal, get_db
 from ..platform.deps import require_admin, require_admin_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
-from ..platform.storage import configured_storage_root, lock_storage_migration, safe_display_name, storage_migration
+from ..platform.storage import configured_storage_root, lock_storage_migration, storage_username, storage_migration
 from ..platform.system_config import client_logs_enabled, update_feature_defaults_cache
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.worker_registry import is_stale
@@ -285,7 +285,7 @@ def _update_storage_settings(payload: StorageRootUpdate, actor: User, db: Sessio
     moved: list[tuple[Path, Path]] = []
     directory_keys = {item.directory_key for item in db.scalars(select(Project)).all()}
     directory_keys.update(
-        f"{safe_display_name(username)}/{project.id}"
+        f"{storage_username(username)}/{project.id}"
         for project, username in db.execute(
             select(Project, User.username).join(User, User.id == Project.owner_id)
         ).all()

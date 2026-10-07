@@ -109,7 +109,7 @@ interface FileRow {
 
 const rows = computed<FileRow[]>(() => {
   const byName = new Map(statuses.value.map((s) => [s.name, s]))
-  return fileNames.value.map(
+  return fileNames.value.filter((name) => byName.get(name)?.is_script !== false).map(
     (n) =>
       byName.get(n) ?? {
         name: n,
@@ -160,9 +160,10 @@ async function refreshRows() {
       ? await withinScope(batchStatusFiles(names), isCurrent)
       : { files: [] }
     if (request !== rowsRequest) return
-    fileNames.value = names
+    const nonScripts = new Set(response.files.filter((row) => row.is_script === false).map((row) => row.name))
+    fileNames.value = names.filter((name) => !nonScripts.has(name))
     statuses.value = response.files ?? []
-    for (const key of Object.keys(selected)) if (!names.includes(key)) delete selected[key]
+    for (const key of Object.keys(selected)) if (!fileNames.value.includes(key)) delete selected[key]
     syncScript()
   } catch (e: any) {
     if (!isCurrent()) return
@@ -191,7 +192,7 @@ const selected = reactive<Record<string, boolean>>({})
 let lastSynced = pipeline.activeScript
 if (pipeline.activeScript) selected[pipeline.activeScript] = true
 
-const selectedNames = computed(() => fileNames.value.filter((n) => selected[n]))
+const selectedNames = computed(() => rows.value.filter((row) => selected[row.name]).map((row) => row.name))
 
 function syncScript() {
   const first = selectedNames.value[0] ?? ''

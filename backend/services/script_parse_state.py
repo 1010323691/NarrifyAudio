@@ -31,9 +31,9 @@ from ..platform.storage import (
     object_path,
     project_workspace_path,
     project_directory_key,
-    safe_display_name,
     sha256_file,
 )
+from ..core.filenames import filename_aliases, legacy_storage_name
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..platform.task_submission import TaskSubmissionError, submit_task_record
 from .task_operations import owned_project
@@ -106,6 +106,15 @@ def _split_files(db: Session, user: User, project_id: str) -> dict[str, ProjectF
     }
 
 
+def _resolve_split_name(rows: dict[str, ProjectFile], name: str) -> ProjectFile | None:
+    if name in rows:
+        return rows[name]
+    spellings = set(filename_aliases(name))
+    matches = {item.id: item for key, item in rows.items()
+               if key in spellings or Path(item.object_key).name in spellings}
+    return next(iter(matches.values())) if len(matches) == 1 else None
+
+
 def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -> ProjectFile:
     """Register a legacy split file that predates the file table.
 
@@ -115,7 +124,7 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
     project instead of the active-workspace pointer (the anti-pattern this
     contract replaces)."""
     object_key = (
-        f"{project_directory_key(db, user.username, project.id)}/{_SPLIT_MODULE}/{safe_display_name(path.name)}"
+        f"{project_directory_key(db, user.username, project.id)}/{_SPLIT_MODULE}/{path.name}"
     )
     values = {
         "size_bytes": path.stat().st_size,
@@ -135,7 +144,7 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
             object_key=object_key,
             content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
             kind="legacy",
-            original_name=safe_display_name(path.name),
+            original_name=path.name,
             **values,
         )
         db.add(item)
@@ -195,9 +204,11 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
     )
     if not split_rows and not disk_names:
         return {"mode": "empty"}
-    # 磁盘名与表名只差一层 safe_display_name（发布落盘走存储侧清洗，，/—→_）；
-    # 判定 disk_only 必须对齐两种口径，否则含符号的章节会按表名与磁盘名各出现一次。
-    known_disk_names = {name for name in split_rows} | {safe_display_name(name) for name in split_rows}
+    # Recorded paths win. Only missing original spellings use legacy disk aliases.
+    known_disk_names = set(split_rows) | {Path(item.object_key).name for item in split_rows.values()}
+    for name, item in split_rows.items():
+        if Path(item.object_key).name not in disk_names:
+            known_disk_names.add(legacy_storage_name(name))
     return {
         "mode": "legacy",
         "legacy_files": [
@@ -329,37 +340,33 @@ def _build_file_states(
     result, judged against the CURRENT input digest. Task execution state and
     result availability are separate axes: a failed re-parse with an older
     still-valid result reports both (status failed + result usable)."""
-    # source_name 是提交时的表名（发布后为清洗名，legacy/历史数据可能是旧
-    # 原始名），状态名是清单名（version = 引擎原始名）——名字只差一层清洗即
-    # 同一文件：精确名与清洗名双索引，否则提交成功后行永远「待解析」、结果
-    # 不可见（与 submit_run / 在途判定同款对齐）。
     tasks = _parse_tasks(db, user.id, project.id)
-    latest_task: dict[str, Task] = {}
-    latest_task_by_disk: dict[str, Task] = {}
-    latest_success: dict[str, Task] = {}
-    latest_success_by_disk: dict[str, Task] = {}
-    for task in tasks:
-        name = str((task.payload or {}).get("source_name") or "")
-        if not name:
-            continue
-        disk_name = safe_display_name(name)
-        latest_task.setdefault(name, task)
-        latest_task_by_disk.setdefault(disk_name, task)
-        if task.status == "succeeded":
-            latest_success.setdefault(name, task)
-            latest_success_by_disk.setdefault(disk_name, task)
-
     split_rows = _split_files(db, user, project.id)
     split_rows_by_id = {item.id: item for item in split_rows.values()}
-    # 与 submit_run 同款别名索引：名字经 safe_display_name 后命中同一行。
-    disk_index: dict[str, str] = {}
-    for key in split_rows:
-        disk_index.setdefault(safe_display_name(key), key)
+    latest_by_id: dict[str, Task] = {}
+    success_by_id: dict[str, Task] = {}
+    latest_by_name: dict[str, Task] = {}
+    success_by_name: dict[str, Task] = {}
+    for task in tasks:
+        payload = task.payload or {}
+        name = str(payload.get("source_name") or "")
+        input_id = str(payload.get("input_file_id") or "")
+        item = split_rows_by_id.get(input_id)
+        if item is None:
+            item = _resolve_split_name(split_rows, name)
+        if item is not None:
+            latest_by_id.setdefault(item.id, task)
+            if task.status == "succeeded":
+                success_by_id.setdefault(item.id, task)
+        if name:
+            latest_by_name.setdefault(name, task)
+            if task.status == "succeeded":
+                success_by_name.setdefault(name, task)
     storage_root = configured_storage_root(db)
 
-    success_lookup = _latest_success_results(db, [task.id for task in latest_success.values()])
+    success_lookup = _latest_success_results(db, [task.id for task in tasks if task.status == "succeeded"])
     success_meta: dict[str, dict | None] = {
-        task.id: success_lookup.get(task.id) for task in latest_success.values()
+        task.id: success_lookup.get(task.id) for task in tasks if task.status == "succeeded"
     }
     # Result artifacts must still exist in the file table (republish keeps the
     # row alive; a deleted / never-catalogued artifact fails verification).
@@ -372,13 +379,10 @@ def _build_file_states(
 
     states: list[dict] = []
     for name in names:
-        input_item = split_rows.get(name) or split_rows.get(disk_index.get(safe_display_name(name), ""))
+        input_item = _resolve_split_name(split_rows, name)
         input_sha = input_item.sha256 if input_item is not None else None
 
-        # 任务 / 结果查找同样按别名对齐：先精确名，再清洗名（状态名与任务
-        # source_name 只差一层存储清洗时是同一文件）。
-        disk_name = safe_display_name(name)
-        task = latest_task.get(name) or latest_task_by_disk.get(disk_name)
+        task = latest_by_id.get(input_item.id) if input_item is not None else latest_by_name.get(name)
         latest = None
         if task is not None:
             latest = {
@@ -390,7 +394,7 @@ def _build_file_states(
                 "finished_at": _iso(task.finished_at),
             }
 
-        success = latest_success.get(name) or latest_success_by_disk.get(disk_name)
+        success = success_by_id.get(input_item.id) if input_item is not None else success_by_name.get(name)
         result = None
         result_status: str | None = None
         if success is not None:
@@ -528,21 +532,12 @@ def submit_run(
     if not wanted:
         raise ScriptParseError(422, "请选择要解析的章节。")
 
-    # 存储侧清洗漂移兼容：版本列表（manifest）携带引擎原始名（，/— 保留），
-    # 文件表与磁盘则是 safe_display_name 清洗后的名字（，/—→_）——
-    # write_task_outcome 已对产出名做清洗、发布照抄进表与磁盘；legacy 补登 /
-    # 历史数据可能反过来把原始名存进表。名字只差这一层清洗即同一文件
-    # （object_key 相同）——按别名挂进 split_rows，不判成缺失。
-    # 幂等边界：safe_display_name 先 strip 再截断 180，截断尾恰落在空格/点上的
-    # 超长名字 safe(safe(x)) != safe(x)；章节名远短于上限，实际不可达。
-    disk_index: dict[str, str] = {}
-    for key in split_rows:
-        disk_index.setdefault(safe_display_name(key), key)
+    # Resolve against recorded disk paths; never equate two new punctuation names.
     for name, _sha in wanted:
         if name not in split_rows:
-            alias = disk_index.get(safe_display_name(name))
-            if alias is not None:
-                split_rows[name] = split_rows[alias]
+            item = _resolve_split_name(split_rows, name)
+            if item is not None:
+                split_rows[name] = item
 
     missing = [name for name, _ in wanted if name not in split_rows]
     if missing:
@@ -569,8 +564,9 @@ def submit_run(
     wanted = deduped
 
     active = _active_parse_names(db, user.id, project.id)
-    active_disk = {safe_display_name(n) for n in active}
-    in_flight = [name for name, _sha in wanted if safe_display_name(name) in active_disk]
+    active_ids = {item.id for name in active
+                  if (item := _resolve_split_name(split_rows, name)) is not None}
+    in_flight = [name for name, _sha in wanted if split_rows[name].id in active_ids or name in active]
     if in_flight:
         raise ScriptParseError(409, "以下章节已有解析任务在进行：" + "、".join(sorted(in_flight)[:5]))
 

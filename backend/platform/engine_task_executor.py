@@ -15,6 +15,7 @@ from ..core.safe_filesystem import file_identity
 from ..platform.database import SessionLocal
 from ..platform.models import User
 from ..platform.storage import safe_display_name, task_attempt_path
+from ..core.filenames import unique_filename
 from ..platform.task_registry import TASK_TYPES
 from ..platform.task_types import LEGACY_ENGINE_TASK_TYPES
 from ..platform.task_validation import legacy_task_payload_error
@@ -244,6 +245,7 @@ def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     base = safe_display_name(str(payload.get("base") or "audio"))
     archive = io.BytesIO()
     files = payload.get("files") or []
+    reserved_names: set[str] = set()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
         for index, item in enumerate(files, 1):
             if cancellation_requested(claim):
@@ -254,13 +256,15 @@ def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
             source = (workspace / relative).resolve()
             if not source.is_relative_to(workspace.resolve()) or not source.is_file():
                 raise TaskExecutionError("input_missing", "待打包文件不存在")
-            name = safe_display_name(str(item.get("name") or source.name))
+            name = unique_filename(str(item.get("name") or source.name), reserved_names)
+            reserved_names.add(name)
             record = deliveries[relative.as_posix()]
             _check_delivery_identity(source, record)
             output.write(source, arcname=name)
             _check_delivery_identity(source, record)
             update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
-        result = write_task_outcome(
+    # Closing the archive writes its central directory before publication.
+    result = write_task_outcome(
         claim,
         f"{base}.zip",
         "application/zip",

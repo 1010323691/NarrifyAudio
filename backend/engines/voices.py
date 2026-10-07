@@ -55,6 +55,7 @@ from pathlib import Path
 from ..core import pathio
 from ..core.config import get_config
 from ..core.file_lock import exclusive_file_lock
+from ..core.filenames import safe_filename
 from ..core.task_control import TaskCancelled
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..platform.quota import QuotaInsufficientError
@@ -828,7 +829,8 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
     # base + 子批序号 (rows of one sub-batch share the seed), so candidates differ from
     # each other and repeat runs differ from each other. The namespace is stable across
     # this run's watchdog restarts, which is what makes breakpoint adoption possible.
-    ns_map = {sp: time.time_ns() for sp in selected}
+    namespace = time.time_ns()
+    ns_map = {sp: namespace + index for index, sp in enumerate(selected)}
     base_seed = secrets.randbelow(2 ** 31)
 
     # One job per (character, candidate k): the character's short ref text + its voice
@@ -844,7 +846,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
             ref_text = pick_ref_text([t for _i, t in samples.get(sp, [])]) \
                 or f"{sp} speaks in a clear, natural voice."
         for k in range(1, _target(sp) + 1):
-            final_out = layout.voice_profiles / "designed_voices" / f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav"
+            final_out = layout.voice_profiles / "designed_voices" / safe_filename(f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav")
             allocate_workspace_stage = getattr(handle, "allocate_workspace_stage", None)
             staged_out = allocate_workspace_stage(final_out) if callable(allocate_workspace_stage) else final_out
             job = {"sp": sp, "k": k, "description": description, "ref_text": ref_text, "out": str(staged_out)}
