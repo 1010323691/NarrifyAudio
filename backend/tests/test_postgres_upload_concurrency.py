@@ -7,7 +7,7 @@ import tempfile
 import threading
 import uuid
 
-import httpx
+import httpx2 as httpx
 import pytest
 from fastapi import Depends, FastAPI
 from sqlalchemy import create_engine, event, select
