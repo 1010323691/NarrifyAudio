@@ -683,3 +683,28 @@ test('pooled chapter completion stays visible while the coordinator retains its 
   h.taskStore.projectTasks[0].progress = 25
   assert.equal(h.workRows.value[0].statusLabel, '合成中')
 })
+
+test('partially settled chapters keep a stable partial badge after the member task settles', () => {
+  const h = harness('BatchTTS')
+  h.fileNames.value = ['chapter.json', 'missing.json', 'stale.json', 'done.json']
+  h.statuses.value = [
+    file('chapter.json', false),
+    { ...file('missing.json', false), missing: ['A'] },
+    { ...file('stale.json', false), stale_speakers: ['A'] },
+    file('done.json', true),
+  ]
+  // No task at all: the 3/10 segments on disk are the chapter's settled state.
+  assert.equal(h.workRows.value[0].statusLabel, '部分完成')
+  assert.equal(h.workRows.value[0].statusVariant, 'warning')
+  assert.equal(h.workRows.value[1].statusLabel, '缺少声音')
+  assert.equal(h.workRows.value[2].statusLabel, '待重合成')
+  assert.equal(h.workRows.value[3].statusLabel, '已完成')
+  // The member task reached its terminal state: the badge must not fall back to 待合成.
+  h.taskStore.projectTasks = [{ id: 'chapter', module: 'tts-batch', label: '音频合成 · chapter.json', seq: 1,
+    status: 'succeeded', progress: 100, logs: [], current: '', result: {} }]
+  assert.equal(h.workRows.value[0].statusLabel, '部分完成')
+  // A re-synth run on the partial chapter keeps the active label.
+  h.taskStore.projectTasks[0].status = 'running'
+  h.taskStore.projectTasks[0].progress = 50
+  assert.equal(h.workRows.value[0].statusLabel, '合成中')
+})
