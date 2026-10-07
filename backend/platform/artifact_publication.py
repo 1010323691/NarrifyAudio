@@ -72,6 +72,36 @@ class PublicationJournal:
             os.fsync(stream.fileno())
         os.replace(pending, self.path)
 
+    def add_many(self, finals: list[Path]) -> list[int]:
+        """Durably register a batch before moving any files (one fsync).
+
+        Unstarted entries are safe to reconcile: existing originals have no
+        backup yet, and new targets do not exist yet. Guarded/checkpoint writes
+        continue to use add(), since their metadata changes after publication.
+        """
+        entries = list(self.entries)
+        indices = []
+        for final in finals:
+            resolved = final.resolve()
+            if not resolved.is_relative_to(self.root):
+                raise ValueError("Publication target is outside the storage root")
+            index = len(entries)
+            backup = self.path.parent / f"publication-backup-{index}.bin"
+            if backup.exists():
+                raise RuntimeError(f"Publication backup already exists: {backup}")
+            entries.append((resolved, backup, resolved.exists(), False))
+            indices.append(index)
+        if indices:
+            self._write(entries)
+            self.entries = entries
+        return indices
+
+    def remove_many(self, finals: list[Path]) -> None:
+        for index in self.add_many(finals):
+            final, backup, had_original, _guard = self.entries[index]
+            if had_original:
+                os.replace(final, backup)
+
     def publish(self, index: int, source: Path) -> None:
         final, backup, had_original, guard = self.entries[index]
         final.parent.mkdir(parents=True, exist_ok=True)

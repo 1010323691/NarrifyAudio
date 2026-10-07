@@ -1298,7 +1298,11 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
         transaction_journal = journals[0] if len(journals) == 1 else PublicationJournalBundle(journals)
         with publication_transaction(transaction_journal, prepared=existing is not None):
             published: list[dict[str, Any]] = []
-            for item in outputs:
+            book_indices = journal.add_many([
+                object_path(publication_keys[(item.publish_module, safe_display_name(item.output_name).casefold())], configured_storage_root(db))
+                for item in outputs
+            ]) if claim.task_type == "book.split" and all(item.publish_module for item in outputs) else None
+            for output_index, item in enumerate(outputs):
                 file_record = None
                 if item.publish_module:
                     object_key = publication_keys[(item.publish_module, safe_display_name(item.output_name).casefold())]
@@ -1315,7 +1319,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     name = available_file_name(directory, item.output_name, reserved=reserved_names)
                     object_key = project_object_key(user.username, task.project_id, output_id, name, db=db, task_type=task.task_type)
                 final_path = object_path(object_key, configured_storage_root(db))
-                journal.publish(journal.add(final_path), item.temp_path)
+                journal.publish(book_indices[output_index] if book_indices is not None else journal.add(final_path), item.temp_path)
                 if item.publish_module and file_record is not None:
                     file_record.original_name = item.output_name
                     file_record.content_type = item.content_type
@@ -1349,8 +1353,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 journal.publish(journal.add(item.final_path), item.temp_path)
             for target in outcome.side_effect_deletes:
                 journal.remove(target)
-            for target in stale_book_paths:
-                journal.remove(target)
+            journal.remove_many(stale_book_paths)
             result_payload = dict(outcome.metadata) if outcome.result_only else {
                 "file_id": published[0]["file_id"],
                 "object_key": published[0]["object_key"],

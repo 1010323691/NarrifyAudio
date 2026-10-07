@@ -1285,3 +1285,27 @@ def test_length_split_segment_naming_uses_smart_convention():
     assert names[1] == "第 002 章.txt"
     assert all(B.is_generated_split_output_name(n) for n in names)
     assert len(names) == res["segment_count"]
+
+
+def test_printed_contents_are_not_chapter_boundaries():
+    headers = [f'第{i}话 标题{i}' for i in range(1, 9)]
+    body = '\n\n'.join(h + '\n\n' + '\n\n'.join(smart_body(30, i)) for i, h in enumerate(headers))
+    text = 'CONTENTS\n\n' + '\n\n'.join(headers) + '\n\n' + body
+    chapters = B.analyze_text(text)['chapters']
+    assert len(chapters) == len(headers)
+    repaired = B.smart_repair(text, chapters, split_long_chapters=True)
+    assert len(repaired['chapters']) == len(headers)
+    assert ''.join(text[c['start']:c['end']] for c in repaired['chapters']) == text
+
+
+def test_short_chapters_without_repeated_body_titles_are_preserved():
+    text = '\n\n'.join(f'第{i}章 标题{i}\n\n短正文。' for i in range(1, 8))
+    assert len(B.analyze_text(text)['chapters']) == 7
+
+
+def test_short_entries_do_not_shrink_mechanical_split_target():
+    text, chapters = balanced_fixture([20] * 8 + [1000] * 5 + [20000])
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    assert result['status'] != 'error'
+    assert len(result['chapters']) < 40
+    assert ''.join(text[c['start']:c['end']] for c in result['chapters']) == text
