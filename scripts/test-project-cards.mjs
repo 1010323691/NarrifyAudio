@@ -156,3 +156,15 @@ test('deleting an active project still synchronizes shared context after navigat
   assert.equal(applied.length,1)
   assert.equal(context.deletingProjectId.value,'')
 })
+test('page watcher cannot read a list while hidden, deactivated or logged out', async () => {
+  const source = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
+  const fn = source.slice(source.indexOf('async function loadProjectPage()'), source.indexOf('function projectState('))
+  for (const mode of ['hidden','inactive','logout']) {
+    let reads = 0
+    const module = {exports:{}}
+    const context = {module,exports:module.exports,viewActive:mode !== 'inactive',document:{hidden:mode === 'hidden'},auth:{user:mode === 'logout' ? null : {id:'u'}},listProjectPage:()=>{reads++}}
+    runInNewContext(ts.transpileModule(fn + '\nexports.page = loadProjectPage', {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,context)
+    await module.exports.page()
+    assert.equal(reads,0,mode)
+  }
+})

@@ -59,6 +59,7 @@ watch(projectPage, () => { pageProjects.value = null; loading.value = true; if (
 let projectPageRequest = 0
 let projectPageAbort: AbortController | null = null
 async function loadProjectPage() {
+  if (!viewActive || document.hidden || !auth.user) return
   projectPageAbort?.abort()
   projectPageAbort = new AbortController()
   const signal = projectPageAbort.signal
