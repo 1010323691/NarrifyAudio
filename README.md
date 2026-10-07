@@ -423,3 +423,39 @@ $backupFile = Join-Path '.backups' ('narrify-' + (Get-Date -Format 'yyyyMMdd-HHm
 同一项目的冲突写任务在领取前排队，避免正常的长模型调用引发 30 秒文件锁超时及重复尝试；其他项目与非冲突任务继续被领取。同一项目不同章节的合并/混音仍可并行。任务数据一致性要求造成的等待与模型占用机械执行槽的等待分别处理。
 
 LLM 并发设置为全机共享的同时请求上限（沿用 `generation.parse_worker_concurrency` 配置键），文本解析、角色分析、BGM 段落分析和音乐标签推荐共用，不随模型 Worker 进程数叠加。默认 4 个模型 Worker 各提供 2 个 LLM 任务通道；同一项目不同章节的 BGM 分析可并行，同章的分析、混音、合并以及整项目写操作仍互斥。单章内部的分析批次依赖上一批场景上下文，按顺序执行。
+
+
+## 项目工作空间目录
+
+托管项目使用 `存储根目录/用户名/项目名称/`。数据库中的项目 ID 和文件 ID 保持稳定；物理路径统一读取 `Project.directory_key`，不能拼接项目 ID。
+
+项目根目录只包含：
+
+```text
+00_temp/           临时文件；Worker 的任务尝试与发布日志位于 tasks/ 下
+01_input/          上传原文
+02_split_text/     排版文本、拆分章节
+03_parsed_json/    书籍分析、剧本解析及音频分析
+04_voice_profiles/ 角色与声音资料
+05_audio_chunk/    合成音频片段
+06_audio_merge/    合并音频
+07_output/         成品及其他持久输出
+08_bgm/            BGM 分析、音乐建议与混音资料
+config/            项目设置
+logs/              项目日志
+```
+
+上传同名文件以及需要保留历史的任务结果使用 `文件 (2).扩展名` 等数字后缀，不再按文件 UUID 创建目录。显式发布到制作模块的任务仍沿用该模块的更新语义。项目名称遵循 Windows 文件夹命名限制，目录名称不区分大小写。项目存在未完成任务时禁止重命名；重命名同步更新数据库、任务参数、历史结果和 JSON 配置中的路径。回收站中的项目使用 `项目名称（回收站 N）`，恢复时重新使用项目名称；同名冲突沿用 `（恢复）` 后缀。
+
+### 旧数据迁移
+
+先停止 API 和 Worker，备份数据库，使用应用相同的 `NARRIFY_*` 环境变量执行：
+
+```bash
+.venv/bin/python -m alembic upgrade head
+.venv/bin/python -m backend.services.workspace_migration
+```
+
+Windows 使用 `.\.venv\Scripts\python.exe` 执行同样的模块命令。
+
+迁移保留文件内容、项目 ID 和文件 ID，更新索引及历史路径。根目录中未登记的旧文件保留在 `07_output/历史文件` 下，不将其作为临时缓存清理。旧任务目录移入 `00_temp/tasks`。存储根目录的 `.layout-migrations/` 保存事务回滚日志；迁移中断后，重新执行命令会恢复未提交的文件移动。不要手动删除未完成的迁移日志。

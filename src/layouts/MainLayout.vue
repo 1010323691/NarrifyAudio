@@ -10,7 +10,7 @@ const auth = useAuthStore()
 const route = useRoute()
 // 工作台型页面（整章预览）请求全宽容器：内容撑满 app-main，不再受 1440px 居中约束。
 const fullBleed = computed(() => route.meta.fullBleed === true)
-const projectScope = computed(() => `${auth.user?.id || 'guest'}:${project.activeProjectId}`)
+const projectScope = computed(() => `${auth.user?.id || 'guest'}:${project.activeProjectId}:${project.current?.path || ''}`)
 
 // 跨标签页失鲜自愈：另一标签可能已切换/删除活动项目（PR 评审 #1），本标签回到
 // 前台时重新解析一次，让 keep-alive 作用域、侧边栏与任务过滤跟服务端对齐。

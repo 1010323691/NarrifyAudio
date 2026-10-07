@@ -21,6 +21,7 @@ from ..services.projects import (
     restore_project,
 )
 from ..platform.storage import project_workspace_path
+from ..platform.workspace_layout import validate_project_name
 from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
 from ..core.request_context import bind_workspace
 
@@ -89,18 +90,21 @@ def _lock_project_name_scope(db: Session, user: User) -> None:
 
 @router.post("", status_code=201)
 def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
-    name = payload.name.strip()
+    try:
+        name = validate_project_name(payload.name)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     _lock_project_name_scope(db, user)
     if db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.deleted_at.is_(None))) is not None:
         raise HTTPException(409, "项目名称已存在")
-    project = create_project_record(
-        db, owner_id=user.id, username=user.username,
-        name=name, description=payload.description.strip(),
-    )
     try:
+        project = create_project_record(
+            db, owner_id=user.id, username=user.username,
+            name=name, description=payload.description.strip(),
+        )
         project_workspace_path(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
         db.commit()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         db.rollback()
         raise HTTPException(422, f"无法创建项目工作空间目录：{exc}") from exc
     db.refresh(project)
@@ -141,6 +145,9 @@ def restore_trashed_project(project_id: str, user: User = Depends(require_csrf),
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(409, "项目名称刚刚被其他项目占用，请刷新回收站后重试。") from exc
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(project)
     return _project_json(project, user)
 
@@ -175,16 +182,24 @@ def select_active_project(
 def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
     if payload.name is not None:
         _lock_project_name_scope(db, user)
-    project = _owned_project(db, user, project_id)
+    project = _owned_project(db, user, project_id, lock=True)
     if payload.name is not None:
         name = payload.name.strip()
         duplicate = db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.id != project.id, Project.deleted_at.is_(None)))
         if duplicate is not None:
             raise HTTPException(409, "项目名称已存在")
-        rename_project(db, project, name)
+        try:
+            rename_project(db, project, validate_project_name(name))
+        except (ValueError, OSError) as exc:
+            db.rollback()
+            raise HTTPException(409, str(exc)) from exc
     if payload.description is not None:
         project.description = payload.description.strip()
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(project)
     return _project_json(project, user)
 

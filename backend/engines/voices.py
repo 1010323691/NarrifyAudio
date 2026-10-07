@@ -579,7 +579,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         handle.log("警告：未配置 LLM 模型——未提供提示词的角色将使用兜底描述。", "WARNING")
 
     layout = get_or_prepare_layout()
-    foundation_lock = layout.workspace / ".tasks" / "foundation-publication.lock"
+    foundation_lock = layout.temp / "tasks" / "foundation-publication.lock"
     with exclusive_file_lock(foundation_lock):
         vc_path, voice_config = _load_voice_config(handle)
 

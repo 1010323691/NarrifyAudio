@@ -30,10 +30,12 @@ PROJECT_CATEGORY_LABELS = {
 }
 
 
-def project_storage_path(root: Path, username: str, project_id: str) -> Path | None:
+def project_storage_path(root: Path, username: str, directory_key: str) -> Path | None:
     """Resolve an indexed workspace without following a user-controlled path."""
     resolved_root = root.resolve()
-    candidate = root / safe_display_name(username) / project_id
+    candidate = root / directory_key
+    if len(Path(directory_key).parts) != 2 or Path(directory_key).parts[0] != safe_display_name(username):
+        return None
     if candidate.is_symlink() or candidate.parent.is_symlink():
         return None
     try:
@@ -89,7 +91,7 @@ def scan_project_directory(workspace: Path, *, active: bool = False) -> dict:
 def music_use_counts(workspaces: list[tuple[Project, str]], root: Path) -> dict[str, int]:
     counts: dict[str, int] = {}
     for workspace, username in workspaces:
-        path = project_storage_path(root, username, workspace.id)
+        path = project_storage_path(root, username, workspace.directory_key)
         if path is None or not path.is_dir():
             continue
         for name, count in read_bgm_usage(path).items():

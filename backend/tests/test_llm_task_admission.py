@@ -31,7 +31,7 @@ def admission_db(monkeypatch, tmp_path):
             db.add(User(id=owner, username=owner, email=f"{owner}@example.invalid", password_hash="test"))
             db.flush()
             db.add(UserQuotaAccount(user_id=owner))
-            db.add(Project(id=f"project-{owner}", owner_id=owner, name=owner, directory_key=owner))
+            db.add(Project(id=f"project-{owner}", owner_id=owner, name=owner, directory_key=f"{owner}/{owner}"))
         db.add(SystemConfig(key="application.features", value={"generation": {"parse_worker_concurrency": 8}}))
     yield sessions, tmp_path
     engine.dispose()

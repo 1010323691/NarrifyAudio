@@ -34,7 +34,7 @@ def _create_workspace(client: TestClient) -> tuple[str, str, Path]:
     assert workspaces.status_code == 200, workspaces.text
     workspace_id = workspaces.json()[0]["id"]
     with SessionLocal() as db:
-        path = configured_storage_root(db) / user["username"] / workspace_id
+        path = configured_storage_root(db) / workspaces.json()[0]["directory_key"]
     return response.json()["csrf_token"], workspace_id, path
 
 

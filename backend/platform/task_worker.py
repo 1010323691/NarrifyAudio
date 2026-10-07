@@ -63,10 +63,13 @@ from .storage import (
     configured_storage_root,
     object_path,
     project_object_key,
+    artifact_module,
+    available_file_name,
     safe_display_name,
     sha256_file,
     task_attempt_path,
     project_workspace_path,
+    project_directory_key,
     lock_storage_migration,
     storage_migration,
 )
@@ -236,7 +239,7 @@ def _workspace_engine_lock(claim: TaskClaim):
         if user is None:
             raise TaskExecutionError("owner_not_found", "Task owner is missing")
         workspace = project_workspace_path(db, user.username, claim.project_id)
-    lock_path = workspace / ".tasks" / "workspace-engine.lock"
+    lock_path = workspace / "00_temp" / "tasks" / "workspace-engine.lock"
     identity = _workspace_audio_identity(claim.task_type, claim.payload)
     foundation = _foundation_identity(claim.task_type, claim.payload)
     parallel_audio = identity is not None
@@ -245,11 +248,11 @@ def _workspace_engine_lock(claim: TaskClaim):
             locks.enter_context((shared_file_lock if parallel_audio or foundation is not None else exclusive_file_lock)(lock_path))
             if foundation is not None:
                 locks.enter_context(exclusive_file_lock(
-                    workspace / ".tasks" / f"foundation-{uuid5(NAMESPACE_URL, foundation).hex}.lock"))
+                    workspace / "00_temp" / "tasks" / f"foundation-{uuid5(NAMESPACE_URL, foundation).hex}.lock"))
             if parallel_audio:
                 # Merge, mix, analysis and matching of the same chapter share this lock through
                 # complete_claim/rollback, including the delivery metadata commit.
-                chapter_lock = workspace / ".tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
+                chapter_lock = workspace / "00_temp" / "tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
                 locks.enter_context(exclusive_file_lock(chapter_lock))
             with SessionLocal() as db:
                 task, attempt = _attempt_is_current(db, claim)
@@ -1184,7 +1187,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
         stale_book_paths: list[Path] = []
         module_outputs = {item.publish_module for item in outputs if item.publish_module}
         for module in module_outputs:
-            module_prefix = f"{safe_display_name(user.username)}/{task.project_id}/{module}/"
+            module_prefix = f"{project_directory_key(db, user.username, task.project_id)}/{module}/"
             for existing in db.scalars(
                 select(ProjectFile).where(
                     ProjectFile.owner_id == task.owner_id,
@@ -1240,12 +1243,19 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             for item in outputs:
                 file_record = None
                 if item.publish_module:
-                    object_key = f"{safe_display_name(user.username)}/{task.project_id}/{item.publish_module}/{safe_display_name(item.output_name)}"
+                    object_key = f"{project_directory_key(db, user.username, task.project_id)}/{item.publish_module}/{safe_display_name(item.output_name)}"
                     file_record = db.scalar(select(ProjectFile).where(ProjectFile.object_key == object_key))
                     output_id = file_record.id if file_record is not None else new_id()
                 else:
                     output_id = new_id()
-                    object_key = project_object_key(user.username, task.project_id, output_id, item.output_name)
+                    module = artifact_module(task.task_type, item.output_name)
+                    directory = project_workspace_path(db, user.username, task.project_id) / module
+                    # Serialize publication names for concurrent tasks in this project.
+                    db.scalar(select(Project.id).where(Project.id == task.project_id).with_for_update())
+                    reserved = set(db.scalars(select(ProjectFile.object_key).where(ProjectFile.project_id == task.project_id)))
+                    reserved_names = {Path(key).name for key in reserved if Path(key).parent.as_posix() == f"{project_directory_key(db, user.username, task.project_id)}/{module}"}
+                    name = available_file_name(directory, item.output_name, reserved=reserved_names)
+                    object_key = project_object_key(user.username, task.project_id, output_id, name, db=db, task_type=task.task_type)
                 final_path = object_path(object_key, configured_storage_root(db))
                 journal.publish(journal.add(final_path), item.temp_path)
                 if item.publish_module and file_record is not None:
@@ -1315,7 +1325,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             release_attempt_holds(task.id, attempt.id, db=db)
             append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
             db.commit()
-        storage_root = configured_storage_root(db) / safe_display_name(user.username) / task.project_id
+        storage_root = project_workspace_path(db, user.username, task.project_id)
         for module, legacy_path in legacy_module_paths:
             try:
                 legacy_path.unlink(missing_ok=True)

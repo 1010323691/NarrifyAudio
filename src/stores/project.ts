@@ -28,6 +28,7 @@ export const useProjectStore = defineStore('project', () => {
 
   function applyCurrent(value: ProjectContext) {
     const changed = (value.project_id || '') !== activeProjectId.value
+      || (value.path || '') !== (current.value?.path || '')
     if (changed) {
       // The user task stream stays global; page selectors follow the active project.
       useTaskStore().bindProject(value.project_id || null)

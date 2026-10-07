@@ -30,6 +30,7 @@ from ..platform.storage import (
     configured_storage_root,
     object_path,
     project_workspace_path,
+    project_directory_key,
     safe_display_name,
     sha256_file,
 )
@@ -114,7 +115,7 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
     project instead of the active-workspace pointer (the anti-pattern this
     contract replaces)."""
     object_key = (
-        f"{safe_display_name(user.username)}/{project.id}/{_SPLIT_MODULE}/{safe_display_name(path.name)}"
+        f"{project_directory_key(db, user.username, project.id)}/{_SPLIT_MODULE}/{safe_display_name(path.name)}"
     )
     values = {
         "size_bytes": path.stat().st_size,

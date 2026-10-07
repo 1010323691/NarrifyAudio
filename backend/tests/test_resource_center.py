@@ -39,7 +39,7 @@ def workspace(client):
     body = registered.json()
     project = client.get("/api/v1/projects").json()[0]
     with SessionLocal() as db:
-        root = configured_storage_root(db) / body["user"]["username"] / project["id"]
+        root = configured_storage_root(db) / project["directory_key"]
     return {"csrf": body["csrf_token"], "owner": body["user"]["id"], "project": project["id"], "root": root}
 
 
@@ -522,7 +522,7 @@ def test_cross_project_search_deep_pages_have_stable_natural_order(client, works
         _write(workspace["root"], f"02_split_text/第{n}章.txt", b"same")
     created = client.post("/api/v1/projects", headers={"X-CSRF-Token": workspace["csrf"]}, json={"name": "第二本"}).json()
     second = created["id"]
-    second_root = workspace["root"].parent / second
+    second_root = workspace["root"].parent / Path(created["directory_key"]).name
     for n in range(1, 65):
         _write(second_root, f"02_split_text/第{n}章.txt", b"same")
     task_id = _submit(client, workspace, "resources.scan", {"project_ids": [workspace["project"], second]})
