@@ -497,7 +497,7 @@ const workRows = computed(() => rows.value.map(row => {
     workName: row.display_name || row.name.replace(/\.json$/i, ''),
     workState: active ? 'active' : failed ? 'failed' : completed ? 'done' : partial ? 'pending' : row.missing.length ? 'blocked' : row.stale_speakers?.length ? 'stale' : 'pending',
     statusLabel: active ? activeEntryLabel(entryTask!, '合成中') : failed ? '合成失败' : completed ? '已完成' : partial ? '部分完成' : row.missing.length ? '缺少声音' : row.stale_speakers?.length ? '待重合成' : '待合成',
-    statusVariant: (failed ? 'destructive' : completed ? 'success' : active || partial || row.missing.length ? 'warning' : 'secondary') as 'destructive' | 'warning' | 'success' | 'secondary',
+    statusVariant: (failed ? 'destructive' : active ? 'warning' : completed ? 'success' : partial || row.missing.length ? 'warning' : 'secondary') as 'destructive' | 'warning' | 'success' | 'secondary',
   }
 }))
 const scopeRows = computed(() => rows.value.filter((row) => selected[row.name]))

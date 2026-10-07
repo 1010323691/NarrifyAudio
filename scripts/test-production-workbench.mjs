@@ -560,15 +560,20 @@ test('synthesis entry status overrides old complete output and follows the actua
   const row = { id: 'chapter', module: 'tts-batch', label: '音频合成（2 段） · 第一章：重试.json', seq: 1, status: 'pending', progress: 0, logs: [], result: {} }
   h.taskStore.projectTasks = [row]
   assert.equal(h.workRows.value[0].statusLabel, '排队中')
+  assert.equal(h.workRows.value[0].statusVariant, 'warning')
   assert.equal(h.workRows.value[1].statusLabel, '已完成')
+  assert.equal(h.workRows.value[1].statusVariant, 'success')
   h.taskStore.projectTasks[0].status = 'running'
   assert.equal(h.workRows.value[0].statusLabel, '合成中')
+  assert.equal(h.workRows.value[0].statusVariant, 'warning')
   h.taskStore.projectTasks[0].status = 'paused'
   assert.equal(h.workRows.value[0].statusLabel, '已暂停')
   h.taskStore.projectTasks[0].status = 'timeout'
   assert.equal(h.workRows.value[0].statusLabel, '合成失败')
+  assert.equal(h.workRows.value[0].statusVariant, 'destructive')
   h.taskStore.projectTasks[0].status = 'succeeded'
   assert.equal(h.workRows.value[0].statusLabel, '已完成')
+  assert.equal(h.workRows.value[0].statusVariant, 'success')
   await vue.nextTick()
 })
 
