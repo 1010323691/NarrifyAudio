@@ -963,6 +963,17 @@ def test_synthesize_resume_skips_done(workspace, monkeypatch):
     assert _segments_written(captured) == [1]  # only the not-yet-done segment is synthesized
 
 
+def test_display_hint_does_not_change_voice_params_or_signature():
+    config = {"A": {"type": "clone", "ref_audio": "own.wav"},
+              "B": {"type": "clone", "ref_audio": "other.wav"}}
+    before = tts_batch.voice_params("A", config)
+    signature = tts_batch.voice_signature("A", config)
+    config["A"]["alias_of"] = "B"
+    config["B"]["alias_of"] = "A"
+    assert tts_batch.voice_params("A", config) == before
+    assert tts_batch.voice_signature("A", config) == signature
+
+
 def test_voice_signature_change_resynthesizes_only_changed_speaker(workspace):
     """A changed active reference invalidates every old segment for that speaker."""
     out_dir = workspace / "05_audio_chunk" / "s"
@@ -2682,19 +2693,19 @@ def test_voice_batches_split_selected_characters_and_filter_new_only(workspace, 
     api.prepare_foundations(api.PrepareFoundationsRequest(script="__all__", new_only=True), _durable_ctx(), object())
     assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["主角"]]
     api.make_clones(api.MakeClonesRequest(script="__all__", candidate_count=2, new_only=True), _durable_ctx(), object())
-    assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["配角"]]
+    assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["配角"], ["别名"]]
     api.prepare_foundations(api.PrepareFoundationsRequest(script="__all__", speakers=["旁白", "配角"]), _durable_ctx(), object())
     assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["旁白"], ["配角"]]
     assert all(entry["payload"]["speakers"][0] in entry["label"] for entry in submitted[-1]["entries"])
 
 
-def test_clone_new_only_folds_alias_lines_into_candidate_budget(workspace, monkeypatch):
+def test_clone_new_only_keeps_hint_roles_independent(workspace, monkeypatch):
     import backend.api.tts as api
     monkeypatch.setattr(api, "list_voices", lambda script: {"speakers": [
         {"name": "主角", "line_count": 1, "foundation_status": "done", "alias_of": "", "candidates": [{}, {}]},
         {"name": "别名", "line_count": 1000, "foundation_status": "done", "alias_of": "主角", "candidates": []},
     ]})
-    assert api._voice_task_speakers("__all__", None, True, clone=True) == ["主角"]
+    assert api._voice_task_speakers("__all__", None, True, clone=True) == ["别名"]
 
 
 @pytest.mark.parametrize("name", ["book_analysis.json", "book_analysis (2).json", "custom_report.json"])

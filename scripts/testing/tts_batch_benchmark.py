@@ -72,18 +72,9 @@ def inspect_trial(content, returncode, cap):
 
 def load_inputs(project, speaker, ceilings):
     vc = json.loads((project / "04_voice_profiles/voice_config.json").read_text(encoding="utf-8"))
-    name, seen = speaker, set()
-    while True:
-        if name in seen:
-            raise ValueError("speaker alias cycle")
-        seen.add(name)
-        voice = vc.get(name)
-        if not isinstance(voice, dict):
-            raise ValueError("speaker has no voice configuration")
-        alias = voice.get("alias_of") or voice.get("alias")
-        if not alias:
-            break
-        name = alias
+    voice = vc.get(speaker)
+    if not isinstance(voice, dict):
+        raise ValueError("speaker has no voice configuration")
     if voice.get("type") != "clone":
         raise ValueError("this benchmark requires a completed clone voice")
     voice = dict(voice)
@@ -267,7 +258,7 @@ class Benchmark:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, required=True, help="project workspace; read-only")
-    parser.add_argument("--speaker", required=True, help="one completed clone voice (aliases resolved)")
+    parser.add_argument("--speaker", required=True, help="one role with its own completed clone voice")
     parser.add_argument("--output", type=Path, default=ROOT / ".narrify/benchmarks/tts")
     parser.add_argument("--ceilings", default=DEFAULT_CEILINGS, help="bounded chars:rows search ceilings")
     parser.add_argument("--seeds", type=int, nargs="+", default=[41, 42, 43])

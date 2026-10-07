@@ -111,7 +111,7 @@ def project_completion(root: Path, *, section: str | None = None) -> dict:
     def voice_ready(name: str):
         entry = voices.get(name) or {}
         return isinstance(entry, dict) and bool(
-            entry.get("alias_of") or entry.get("type") == "custom"
+            entry.get("type") == "custom"
             or (entry.get("type") == "clone" and entry.get("ref_audio"))
             or (entry.get("type") == "design" and str(entry.get("description") or "").strip()))
 

@@ -459,24 +459,8 @@ def _add_ffmpeg_to_path(ffmpeg: str) -> None:
 
 
 def _resolve_alias(speaker: str, voice_config: dict) -> str:
-    """Follow the ``alias_of`` chain to the canonical speaker name (port of
-    ``ProjectManager._resolve_alias``). Cycle-guarded, capped at 8 hops."""
-    if not speaker:
-        return speaker
-    name = speaker
-    seen = set()
-    for _ in range(8):
-        if name in seen:
-            break
-        seen.add(name)
-        entry = voice_config.get(name, {}) or {}
-        alias = entry.get("alias_of") or entry.get("alias")
-        if not alias:
-            break
-        if not isinstance(alias, str) or alias.strip() == "" or alias == name:
-            break
-        name = alias
-    return name
+    """Voice hints never redirect synthesis to a different role."""
+    return (speaker or "").strip()
 
 
 def _build_clone_prompt(model, voice_data: dict, root: str, speaker: str):

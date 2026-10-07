@@ -35,6 +35,15 @@ def _row(chars, **kw):
     return base
 
 
+def test_display_hints_never_redirect_worker_voice():
+    tw = _load_worker()
+    config = {"A": {"alias_of": "B", "type": "custom"},
+              "B": {"alias_of": "A", "type": "clone"}}
+    assert tw._resolve_alias("A", config) == "A"
+    assert tw._resolve_alias("B", config) == "B"
+    assert tw._needed_types([{"speaker": "A"}], config) == {"custom"}
+
+
 # ---------------------------------------------------------------------------
 # --restore-stack — watchdog demotion records and the per-batch auto-restore
 # ---------------------------------------------------------------------------

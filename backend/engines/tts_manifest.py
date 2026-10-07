@@ -13,19 +13,8 @@ from ..core.filenames import package_stem, package_aliases
 
 
 def _canonical_voice_name(speaker: str, voice_config: dict) -> str:
-    """Resolve the same alias chain that the TTS worker uses."""
-    name = (speaker or "").strip()
-    seen = set()
-    for _ in range(8):
-        if not name or name in seen:
-            break
-        seen.add(name)
-        entry = voice_config.get(name) or {}
-        alias = entry.get("alias_of") or entry.get("alias")
-        if not isinstance(alias, str) or not alias.strip() or alias == name:
-            break
-        name = alias.strip()
-    return name
+    """Persist each role's own voice identity, ignoring display hints."""
+    return (speaker or "").strip()
 
 
 def _canonical_voice_path(value) -> str:

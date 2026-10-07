@@ -105,7 +105,9 @@ def test_normalize_speaker_name_contract():
         (('John   Smith',), 'john smith'),
         ((123,), ''),
         ((None,), ''),
-        (('张三',), ''),
+        (('张三',), '张三'),
+        (('熊猫A',), '熊猫a'),
+        (('aＫ',), 'ak'),
     ]:
         assert normalize_speaker_name(*args) == expected, args
 
@@ -149,9 +151,110 @@ def test_canonical_name_resolution():
     # canonical empty raw
     assert _resolve_to_canonical("", ["John"]) is None
 
-    # canonical cjk unresolvable
-    # CJK normalises to "" on both sides, so it can never be resolved this way.
+    # Different CJK names remain distinct.
     assert _resolve_to_canonical("张三", ["李四"]) is None
+
+
+def test_auto_aliases_preserve_distinct_chinese_roles():
+    config = {"NARRATOR": {"type": "foundation"}, "熊猫A": {"type": "foundation"}}
+    unique, aliases = V._fold_aliases(_Handle(), ["NARRATOR", "熊猫A", "aＫ", "小熊猫"], config)
+    assert unique == ["NARRATOR", "熊猫A", "aＫ", "小熊猫"]
+    assert "NARRATOR" not in aliases and "aＫ" not in aliases
+    assert all("alias_of" not in entry for entry in config.values())
+
+
+def test_similar_names_never_create_aliases():
+    config = {"Alice": {"type": "clone"}, "Bob": {"alias_of": "Alice"}}
+    before = json.dumps(config, sort_keys=True)
+    unique, aliases = V._fold_aliases(_Handle(), ["Ａｌｉｃｅ", "alice", "Bob", "A"], config)
+    assert unique == ["Ａｌｉｃｅ", "alice", "Bob", "A"]
+    assert aliases == {"alice": "Alice", "Ａｌｉｃｅ": "Alice"}
+    assert json.dumps(config, sort_keys=True) == before
+    ambiguous = {"Alice": {"type": "foundation"}, "ALICE": {"type": "foundation"}}
+    assert V._fold_aliases(_Handle(), ["alice"], ambiguous)[0] == ["alice"]
+
+
+def test_voice_readiness_uses_own_voice_despite_hint():
+    from backend.api.tts import _voice_ready
+
+    config = {"A": {"alias_of": "B", "type": "foundation"},
+              "B": {"type": "clone", "ref_audio": "other.wav"}}
+    assert not _voice_ready("A", config)
+    config["A"].update(type="clone", ref_audio="own.wav")
+    assert _voice_ready("A", config)
+    config["B"]["alias_of"] = "A"
+    assert _voice_ready("A", config)
+    config["A"]["alias_of"] = "Missing"
+    assert _voice_ready("A", config)
+
+
+def test_hint_cycle_does_not_block_voice_candidates(clone_ws, monkeypatch):
+    _seed_script(clone_ws, {"NARRATOR": 3, "熊猫A": 1})
+    _seed_foundations(clone_ws, ["NARRATOR"], extra={
+        "熊猫A": {"alias_of": "NARRATOR"},
+    })
+    config = _load_vc(clone_ws)
+    config["NARRATOR"]["alias_of"] = "熊猫A"
+    path = clone_ws / "04_voice_profiles" / "voice_config.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    _stub_design_engine(monkeypatch, clone_ws)
+
+    result = V.generate_voice_candidates(_Handle(), speakers=["NARRATOR"], candidate_count=1)
+
+    assert result["ok"] == 1
+    repaired = _load_vc(clone_ws)
+    assert repaired["NARRATOR"]["type"] == "clone"
+    assert repaired["NARRATOR"]["alias_of"] == "熊猫A"
+    assert repaired["熊猫A"]["alias_of"] == "NARRATOR"
+    assert (clone_ws / repaired["NARRATOR"]["ref_audio"]).is_file()
+
+
+def test_similar_names_get_independent_foundations(clone_ws):
+    names = ["Alice", "Ａｌｉｃｅ", "alice", "熊猫A", "aＫ"]
+    _seed_script(clone_ws, dict.fromkeys(names, 1))
+    _seed_foundations(clone_ws, ["Alice"])
+
+    result = V.prepare_foundations(_Handle(), overrides=dict.fromkeys(names, "独立角色声音描述"))
+
+    assert result["count"] == len(names)
+    assert result["aliases"] > 0
+    config = _load_vc(clone_ws)
+    assert set(config) == set(names)
+    assert all(entry["foundation_status"] == "done" and not entry.get("alias_of")
+               for entry in config.values())
+
+
+def test_name_and_profile_hint_is_visible_without_blocking_clone_submission(clone_ws):
+    _seed_script(clone_ws, {"贝尔蒙德": 20, "小贝贝": 2})
+    _seed_foundations(clone_ws, ["贝尔蒙德", "小贝贝"], extra={
+        name: {"type": "foundation", "description": "幼女，女声", "foundation_status": "done"}
+        for name in ["贝尔蒙德", "小贝贝"]
+    })
+    path = clone_ws / "04_voice_profiles" / "voice_config.json"
+    original = path.read_bytes()
+    rows = {row["name"]: row for row in list_voices()["speakers"]}
+    assert rows["小贝贝"]["alias_of"] == "贝尔蒙德"
+    assert rows["小贝贝"]["status"] == "pending"
+    assert tts_api._voice_task_speakers(None, None, False, clone=True) == ["贝尔蒙德", "小贝贝"]
+    assert path.read_bytes() == original
+
+
+def test_foundation_checkpoint_does_not_restore_removed_alias(clone_ws, monkeypatch):
+    _seed_script(clone_ws, {"Alice": 1, "Bob": 1})
+    _seed_foundations(clone_ws, ["Alice"], extra={"Bob": {"alias_of": "Alice"}})
+    original_fold = V._fold_aliases
+
+    def remove_link_after_snapshot(*args):
+        result = original_fold(*args)
+        config = _load_vc(clone_ws)
+        config["Bob"].pop("alias_of")
+        (clone_ws / "04_voice_profiles" / "voice_config.json").write_text(
+            json.dumps(config), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(V, "_fold_aliases", remove_link_after_snapshot)
+    V.prepare_foundations(_Handle(), overrides={"Alice": "独立角色声音描述"})
+    assert "alias_of" not in _load_vc(clone_ws)["Bob"]
 
 
 # --------------------------------------------------------------------------- #
@@ -423,16 +526,15 @@ def test_clone_have_counts():
 
 
 # --------------------------------------------------------------------------- #
-# _effective_line_counts  (alias labels folded into their canonical character)
+# _effective_line_counts  (display hints never combine role budgets)
 # --------------------------------------------------------------------------- #
 
 def test_effective_line_counts_contract():
-    # effective line counts fold alias chain
-    # A's lines are spoken by C's voice (A -> B -> C, two hops): they all land on C.
+    # Hints A -> B -> C must not change any role's own candidate budget.
     order = ["A", "B", "C"]
     samples = {"A": list(range(10)), "B": list(range(5)), "C": list(range(3))}
     vc = {"A": {"alias_of": "B"}, "B": {"alias_of": "C"}, "C": {}}
-    assert _effective_line_counts(order, samples, vc) == {"A": 10, "B": 5, "C": 18}
+    assert _effective_line_counts(order, samples, vc) == {"A": 10, "B": 5, "C": 3}
 
     # effective line counts no aliases unchanged
     order = ["A", "B"]
