@@ -170,6 +170,7 @@ export function useScriptParseWorkbench() {
   const sourceCache = new Map<string, string>()
 
   let loadToken = 0
+  let selectionToken = 0
   let liveTimer: number | undefined
   let stateAbort = new AbortController()
   let resultToken = 0
@@ -330,9 +331,10 @@ export function useScriptParseWorkbench() {
   async function selectRemote(scope: string, q = '') {
     const pid = project.activeProjectId
     const token = loadToken
+    const selectionGeneration = ++selectionToken
     try {
       const response = await getParseSelection(pid, scope, q)
-      if (token !== loadToken || pid !== project.activeProjectId) return
+      if (token !== loadToken || pid !== project.activeProjectId || selectionGeneration !== selectionToken) return
       selected.value = {}
       selectedInputs.clear()
       for (const item of response.items) {
@@ -345,15 +347,21 @@ export function useScriptParseWorkbench() {
           status: item.status === 'failed' ? 'failed' : item.status === 'timeout' ? 'timeout' : item.status === 'cancelled' ? 'cancelled' : item.result_status === 'usable' ? 'done' : item.result_status === 'stale' ? 'stale' : 'pending', label: '待解析', tone: 'muted', task: undefined, taskId: null, progress: 0, error: '', retryable: false,
         })
       }
-    } catch (cause: any) { stateError.value = cause?.message || '选择范围读取失败' }
+    } catch (cause: any) {
+      if (token === loadToken && pid === project.activeProjectId && selectionGeneration === selectionToken) stateError.value = cause?.message || '选择范围读取失败'
+    }
   }
 
   function clearSelection() {
+    selectionToken += 1
     selectedInputs.clear()
     selected.value = {}
   }
 
   function toggleSelect(name: string) {
+    selectionToken += 1
+    selectedInputs.delete(name)
+    inputShaOverrides.delete(name)
     if (selected.value[name]) delete selected.value[name]
     else selected.value[name] = true
   }

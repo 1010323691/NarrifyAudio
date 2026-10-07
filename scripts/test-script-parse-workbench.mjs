@@ -101,7 +101,7 @@ async function setup({ stateFor, run, config, fetchImpl, selection, summaryFor }
   const tasks = reactive({ projectTasks: [], refresh: async () => {}, control: async () => {}, bindProject: () => {} })
   const api = {
     '@/api/script': {
-      getParseSelection: async () => ({ items: typeof selection === 'function' ? selection() : selection ?? [] }),
+      getParseSelection: async () => ({ items: await (typeof selection === 'function' ? selection() : selection ?? []) }),
       getScriptParseSummary: async () => summaryFor ? summaryFor() : ({ total: 0, done_count: 0, active_task_ids: [] }),
       getScriptParseState: async (pid) => {
         calls.state += 1
@@ -591,4 +591,49 @@ test('complete selection protects its input digest while same-input status still
   current = { ...current, result_status: 'stale' }
   await wb.refreshState()
   assert.equal(wb.selectedStaleCount.value, 1)
+})
+
+test('deselecting and manually reselecting a refreshed chapter submits its new digest', async () => {
+  let file = { name: 'c.txt', input: { sha256: 'old' }, latest_task: null, result: null, result_status: null }
+  let submitted = []
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV([file]), pagination: { total: 1, page: 1, page_size: 10, counts: { all: 1 } } }),
+    selection: () => [file],
+    summaryFor: () => ({ total: 1, done_count: 0, active_task_ids: [] }),
+    config: { llm: { model_name: 'test-model' } },
+    run: async (_, targets) => { submitted = targets; return { task_ids: [], files: [] } },
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 1)
+  wb.toggleSelect('c.txt')
+  assert.equal(wb.selectedCount.value, 0)
+  file = { ...file, input: { sha256: 'new' } }
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  wb.toggleSelect('c.txt')
+  assert.equal(wb.selectedCount.value, 1)
+  assert.equal(await wb.startParse(), true)
+  assert.equal(submitted[0].sha256, 'new')
+})
+
+test('clearing or manually changing selection invalidates a delayed complete selection response', async () => {
+  const file = { name: 'c.txt', input: { sha256: 'fresh' }, latest_task: null, result: null, result_status: null }
+  let finish
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV([file]), pagination: { total: 1, page: 1, page_size: 10, counts: { all: 1 } } }),
+    selection: () => new Promise(resolve => { finish = resolve }),
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  wb.clearSelection()
+  finish([file])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 0)
+  wb.selectScope('all')
+  wb.toggleSelect('c.txt')
+  finish([])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 1)
 })
