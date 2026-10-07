@@ -18,8 +18,9 @@ from sqlalchemy.orm import Session
 
 from ..core.paths import WORKSPACE_DIR_NAMES
 from ..core.safe_filesystem import is_link_or_junction
+from ..core.filenames import legacy_storage_name
 from .models import Project, ProjectFile, Task, TaskResult, TaskEvent, TextFormatFlow, SystemConfig, utcnow
-from .storage import available_file_name, artifact_module, configured_storage_root, object_path, safe_display_name, sha256_file
+from .storage import available_file_name, artifact_module, configured_storage_root, object_path, safe_display_name, storage_username, sha256_file
 from .task_lifecycle import ACTIVE_TASK_STATUSES
 
 PROJECT_DIRECTORIES = (*WORKSPACE_DIR_NAMES, "config", "logs")
@@ -41,7 +42,7 @@ def validate_project_name(name: str) -> str:
 
 def named_directory_key(db: Session, username: str, name: str, *, project_id: str | None = None) -> str:
     name = validate_project_name(name)
-    key = f"{safe_display_name(username)}/{name}"
+    key = f"{storage_username(username)}/{name}"
     for other in db.scalars(select(Project)):
         if other.id != project_id and other.directory_key.casefold() == key.casefold():
             raise ProjectDirectoryConflict("项目目录名称已被占用（名称不区分大小写）")
@@ -177,8 +178,8 @@ def relocate_project(db: Session, project: Project, target_key: str, *, normaliz
             new_relative = Path(module) / name
         new_key = f"{target_key}/{new_relative.as_posix()}"
         for legacy_relative in (
-            Path(item.id) / safe_display_name(item.original_name),
-            Path("01_input") / item.id / safe_display_name(item.original_name),
+            Path(item.id) / legacy_storage_name(item.original_name),
+            Path("01_input") / item.id / legacy_storage_name(item.original_name),
             new_relative,
         ):
             replacements[f"{legacy_key}/{legacy_relative.as_posix()}"] = new_key

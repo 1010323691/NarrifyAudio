@@ -219,6 +219,36 @@ const chapter = (stem, ready = true) => ({
   timeline: null,
 })
 
+test('synthesis excludes legacy analysis reports by content and clears their selection', async () => {
+  const names = ['book_analysis.json', 'book_analysis (2).json', 'custom_report.json', 'chapter.json', 'chapter_analysis.json', 'empty.json']
+  const h = harness('BatchTTS', {
+    listDir: async () => ({ items: names.map(name => ({ name, is_dir: false })) }),
+    batchStatusFiles: async () => ({ files: names.map((name, index) => ({
+      ...file(name), is_script: index >= 3, total: index === 5 ? 0 : 10,
+    })) }),
+  })
+  h.selected[names[0]] = true
+  await h.refreshRows()
+  assert.deepEqual(Array.from(h.fileNames.value), names.slice(3))
+  assert.deepEqual(Array.from(h.rows.value, row => row.name), names.slice(3))
+  assert.equal(h.selected[names[0]], undefined)
+  assert.deepEqual(Array.from(h.selectedNames.value), [])
+})
+
+test('synthesis polling excludes a selected file replaced by an analysis report', async () => {
+  let isScript = true
+  const h = harness('BatchTTS', {
+    listDir: async () => ({ items: [{ name: 'chapter.json', is_dir: false }] }),
+    batchStatusFiles: async () => ({ files: [{ ...file('chapter.json'), is_script: isScript }] }),
+  })
+  await h.refreshRows()
+  h.selected['chapter.json'] = true
+  isScript = false
+  await h.refreshStatusesOnly()
+  assert.equal(h.rows.value.length, 0)
+  assert.deepEqual(Array.from(h.selectedNames.value), [])
+})
+
 test('synthesis refresh is atomic and the newest response wins', async () => {
   const first = deferred(),
     second = deferred()

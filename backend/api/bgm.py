@@ -218,9 +218,8 @@ def _source_txt_base(layout) -> str:
         raise HTTPException(400, "未找到源 TXT 文档，无法确定打包文件夹名称。")
     originals = [p for p in candidates if not p.stem.endswith("_排版")]
     source = max(originals or candidates, key=lambda p: (p.stat().st_mtime_ns, p.name))
-    base = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "_", source.stem)
-    base = re.sub(r"\s+", " ", base).strip()
-    return base or "有声书"
+    from ..core.filenames import safe_filename
+    return safe_filename(re.sub(r"\s+", " ", source.stem), fallback="有声书")
 
 
 # --------------------------------------------------------------------------- #

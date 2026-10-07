@@ -9,7 +9,7 @@ from ..core import config as core_config
 from ..core.request_context import bind_workspace, reset_workspace
 from .database import SessionLocal
 from .models import User
-from .storage import safe_display_name, sha256_file, task_attempt_path, project_workspace_path
+from .storage import sha256_file, task_attempt_path, project_workspace_path
 from .task_contracts import TaskClaim, TaskExecutionError, TaskFileOutcome, TaskOutcome
 
 
@@ -55,7 +55,7 @@ def write_task_outcome(
                 extra.append(
                     TaskFileOutcome(
                         temp_path=extra_path,
-                        output_name=safe_display_name(extra_name),
+                        output_name=extra_name,
                         content_type=extra_type,
                         size_bytes=len(extra_data),
                         sha256=sha256_file(extra_path),
@@ -64,7 +64,7 @@ def write_task_outcome(
                 )
         return TaskOutcome(
             temp_path=temp_path,
-            output_name=safe_display_name(output_name),
+            output_name=output_name,
             content_type=content_type,
             size_bytes=len(data),
             sha256=sha256_file(temp_path),
@@ -132,5 +132,4 @@ def engine_result_outcome(claim: TaskClaim, result: Any) -> TaskOutcome:
         data,
         metadata,
     )
-
 

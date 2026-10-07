@@ -1143,6 +1143,7 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
     assert process_task_message({"payload": {"task_id": analyzed_id}}, worker_id="test-worker") == "succeeded"
     analyzed_task = client.get(f"/api/v1/tasks/{analyzed_id}").json()
     assert analyzed_task["status"] == "succeeded"
+    assert "/00_temp/" in analyzed_task["result"]["object_key"]
     assert analyzed_task["result"]["analysis"]["chapter_count"] == 1
     assert analyzed_task["result"]["analysis"]["chapters"][0]["title"] == ""
 

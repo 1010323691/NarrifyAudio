@@ -2192,7 +2192,7 @@ def test_batch_status_multi_counts(workspace):
     assert (t["total"], t["completed"]) == (2, 0)
     assert (t["speakers"], t["ready"], t["missing"]) == (1, 1, [])
     assert z == {"name": "nope.json", "display_name": "nope", "total": 0, "completed": 0, "remaining": 0,
-                 "complete": False, "speakers": 0, "ready": 0, "missing": []}
+                 "complete": False, "speakers": 0, "ready": 0, "missing": [], "is_script": False}
     # a file whose every segment is done (ok + file on disk) earns the 已合成 flag
     _seed_done_package(workspace, "s", [(0, "A", "hello", "0001.mp3"),
                                         (1, "B", "world", "0002.mp3")])
@@ -2308,7 +2308,7 @@ def test_batch_status_multi_no_workspace_degrades(monkeypatch, tmp_path):
         r = batch_status(None, ["a.json", "b.json"])
         assert r == {"files": [
             {"name": n, "display_name": n[:-5], "total": 0, "completed": 0, "remaining": 0,
-             "complete": False, "speakers": 0, "ready": 0, "missing": []}
+             "complete": False, "speakers": 0, "ready": 0, "missing": [], "is_script": False}
             for n in ("a.json", "b.json")]}
     finally:
         core_config.reset_config_cache()
@@ -2517,9 +2517,7 @@ def test_single_file_width_stable_across_watchdog_restart(workspace, monkeypatch
 
 
 def test_safe_package_name_snapshot():
-    """Q5: merge-output and bgm side-file sanitizers collapsed into one function —
-    behavior must match the two old inline copies exactly, including the deliberate
-    differences from ``safe_display_name`` (no 180-char cap, dots preserved)."""
+    """Ordinary package spellings stay stable; long names keep readable aliases."""
     from pathlib import Path
 
     from backend.engines.tts_manifest import merged_output_paths, _safe_package_name
@@ -2532,10 +2530,10 @@ def test_safe_package_name_snapshot():
         "": "audiobook",
         "中文 书名": "中文 书名",
         "dots..kept": "dots..kept",
-        "long" * 50: "long" * 50,
     }
     for raw, expected in cases.items():
         assert _safe_package_name(raw) == expected, raw
+    assert len(_safe_package_name("long" * 50)) <= 176
 
     class _Layout:
         audio_merge = Path("/ws/06_audio_merge")
@@ -2697,3 +2695,33 @@ def test_clone_new_only_folds_alias_lines_into_candidate_budget(workspace, monke
         {"name": "别名", "line_count": 1000, "foundation_status": "done", "alias_of": "主角", "candidates": []},
     ]})
     assert api._voice_task_speakers("__all__", None, True, clone=True) == ["主角"]
+
+
+@pytest.mark.parametrize("name", ["book_analysis.json", "book_analysis (2).json", "custom_report.json"])
+def test_batch_status_identifies_legacy_analysis_reports(workspace, name):
+    from backend.api.tts import batch_status
+    path = workspace / "03_parsed_json" / name
+    path.write_text(json.dumps({"chapters": [], "chapter_count": 0}), encoding="utf-8")
+    report, script = batch_status(scripts=[name, "s.json"])["files"]
+    assert report["is_script"] is False
+    assert report["total"] == 0
+    assert script["is_script"] is True
+    assert script["total"] == 2
+    # A genuine chapter named like a report remains usable, including after a cache hit.
+    path.write_text(json.dumps([_entry("A", "hello")]), encoding="utf-8")
+    assert batch_status(scripts=[name])["files"][0]["is_script"] is True
+
+
+@pytest.mark.parametrize(("content", "is_script"), [
+    ("[]", True),
+    ('[{"speaker":"A","text":""}]', True),
+    ("invalid JSON", False),
+    ('["invalid entry"]', False),
+    ('[{"text": 123}]', False),
+])
+def test_batch_status_script_identity_is_independent_of_segment_count(workspace, content, is_script):
+    from backend.api.tts import batch_status
+    (workspace / "03_parsed_json" / "zero.json").write_text(content, encoding="utf-8")
+    row = batch_status(scripts=["zero.json"])["files"][0]
+    assert row["is_script"] is is_script
+    assert row["total"] == 0

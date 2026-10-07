@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..core import pathio
 from ..core.paths import get_or_prepare_layout, resolve_layout
+from ..core.filenames import package_stem, package_aliases
 
 
 def _canonical_voice_name(speaker: str, voice_config: dict) -> str:
@@ -204,25 +205,15 @@ def restore_cached_voice_versions(entries: dict, expected_voice_params: dict | N
     return restored
 
 
-_FORBIDDEN_PACKAGE_CHARS = '\\/:*?"<>|'
-_DEFAULT_PACKAGE_NAME = "audiobook"
-
-
 def _safe_package_name(name: str) -> str:
-    """Filesystem-safe package name for merge outputs and bgm side files.
-
-    Do not swap in ``platform.storage.safe_display_name``: it takes
-    ``Path(name).name``, truncates at 180 chars and strips dots, so files that
-    already exist on disk would change name.
-    """
-    safe = "".join("_" if c in _FORBIDDEN_PACKAGE_CHARS else c for c in name).strip()
-    return safe or _DEFAULT_PACKAGE_NAME
+    """Canonical stem shared with merge target naming and task locks."""
+    return package_stem(name)
 
 
 def merged_output_paths(layout, package: str):
     """Generated merge outputs for a package (only exact, derived file names)."""
-    safe = _safe_package_name(package)
-    return [layout.audio_merge / f"{safe}.mp3", layout.audio_merge / f"{safe}.wav"]
+    return [layout.audio_merge / f"{safe}{extension}"
+            for safe in package_aliases(package) for extension in (".mp3", ".wav")]
 
 
 def defer_or_delete(handle, path: Path) -> None:
@@ -289,8 +280,7 @@ def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
                 pathio.rewrite_json_file(manifest_path, data)
             outputs = merged_output_paths(layout, manifest_path.parent.name)
             if layout.bgm is not None:
-                safe = _safe_package_name(manifest_path.parent.name)
-                outputs.append(layout.bgm / f"{safe}.mp3")
+                outputs.extend(layout.bgm / f"{safe}.mp3" for safe in package_aliases(manifest_path.parent.name))
             for output in outputs:
                 defer_workspace_delete = getattr(handle, "defer_workspace_delete", None)
                 if callable(defer_workspace_delete):

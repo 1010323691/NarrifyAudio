@@ -91,6 +91,8 @@ def legacy_project(db, tmp_path):
     db.add(result)
     (root / "03_parsed_json").mkdir()
     (root / "03_parsed_json" / old.name).write_text("existing")
+    (root / "00_temp").mkdir()
+    (root / "00_temp" / old.name).write_text("existing analysis")
     (root / ".tasks").mkdir()
     (root / ".tasks" / "receipt.json").write_text("{}")
     db.commit()
@@ -103,11 +105,12 @@ def test_migration_preserves_versions_rewrites_paths_and_cleans_root(db, tmp_pat
     db.commit()
     root = tmp_path / project.directory_key
     assert set(entry.name for entry in root.iterdir()) == set(PROJECT_DIRECTORIES)
-    assert file.object_key == "reader/旧书/03_parsed_json/chapter_analysis (2).json"
+    assert file.object_key == "reader/旧书/00_temp/chapter_analysis (2).json"
     assert result.result["object_key"] == file.object_key
     assert task.payload["path"] == str(tmp_path / file.object_key)
     assert json.loads((tmp_path / file.object_key).read_text())["source_path"] == str(root / "01_input" / "source.txt")
     assert (root / "03_parsed_json" / "chapter_analysis.json").read_text() == "existing"
+    assert (root / "00_temp" / "chapter_analysis.json").read_text() == "existing analysis"
     assert (root / "00_temp" / "tasks" / "receipt.json").is_file()
     assert not old.exists()
     rewritten = tmp_path / file.object_key
@@ -333,3 +336,12 @@ def test_workspace_storage_syntax_with_python310_when_available():
         *map(str, sources),
     ], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(("task_type", "module"), [
+    ("book.analyze", "00_temp"),
+    ("book.split", "02_split_text"),
+    ("script.parse", "03_parsed_json"),
+])
+def test_text_artifact_modules_keep_analysis_out_of_scripts(task_type, module):
+    assert storage.artifact_module(task_type, "book_analysis.json") == module

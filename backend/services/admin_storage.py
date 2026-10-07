@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..platform.models import Project
-from ..platform.storage import safe_display_name
+from ..platform.storage import storage_username
 from .project_filesystem import iter_regular_project_files
 
 
@@ -34,7 +34,7 @@ def project_storage_path(root: Path, username: str, directory_key: str) -> Path 
     """Resolve an indexed workspace without following a user-controlled path."""
     resolved_root = root.resolve()
     candidate = root / directory_key
-    if len(Path(directory_key).parts) != 2 or Path(directory_key).parts[0] != safe_display_name(username):
+    if len(Path(directory_key).parts) != 2 or Path(directory_key).parts[0] != storage_username(username):
         return None
     if candidate.is_symlink() or candidate.parent.is_symlink():
         return None

@@ -19,6 +19,7 @@ from ..platform.storage import configured_storage_root, project_input_object_key
 from . import _common
 from ..platform.resource_delivery import require_delivery, DeliveryDenied
 from ..core.safe_filesystem import safe_regular_path
+from ..core.filenames import safe_filename, legacy_storage_name
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -111,14 +112,18 @@ def _serve_file(module, name, request, ctx, db, *, download):
         raise HTTPException(404, "尚未设置工作空间")
     d = _module_dir(module).resolve()
     p = (d / name).resolve()
-    if (not p.is_relative_to(d) or not p.is_file()) and safe_display_name(name) != name:
-        # 存储侧清洗漂移回退：文件表存引擎原始名（保留 ，/—），磁盘名经
-        # safe_display_name 清洗（→_）——精确名未命中时按清洗名（逐段，与发布
-        # 时逐文件清洗一致）再解析一次。
-        fallback = "/".join(safe_display_name(seg) for seg in name.split("/"))
-        p2 = (d / fallback).resolve()
-        if p2.is_relative_to(d) and p2.is_file():
-            p = p2
+    if not p.is_relative_to(d) or not p.is_file():
+        # Exact names win; legacy aliases are usable only when unambiguous.
+        candidates = set()
+        for sanitize in (safe_filename, legacy_storage_name):
+            fallback = "/".join(sanitize(seg) for seg in name.split("/"))
+            p2 = (d / fallback).resolve()
+            if p2.is_relative_to(d) and p2.is_file():
+                candidates.add(p2)
+        if len(candidates) > 1:
+            raise HTTPException(409, "文件名匹配多个历史文件，请使用文件列表中的实际名称")
+        if candidates:
+            p = candidates.pop()
     if not p.is_relative_to(d) or not p.is_file():
         raise HTTPException(400, "非法路径")
     try:
