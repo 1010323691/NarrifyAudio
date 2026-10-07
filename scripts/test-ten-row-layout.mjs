@@ -19,14 +19,23 @@ try {
     if (path.startsWith('/api/files/list/03_parsed')) {
       body.items = Array.from({ length: 24 }, (_, i) => ({ ...body.items[0], name: `chapter-${i}.json` }))
     }
+    if (path.startsWith('/api/files/list/05_audio_chunk')) {
+      body.items = Array.from({ length: 24 }, (_, i) => ({ ...body.items[0], name: `pkg-${i}.json`, is_dir: true }))
+    }
+    if (path === '/api/tts/merge-status') {
+      body.packages = Array.from({ length: 24 }, (_, i) => ({ ...body.packages[0], name: `pkg-${i}.json` }))
+    }
+    if (path === '/api/bgm/chapters') {
+      body.chapters = Array.from({ length: 24 }, (_, i) => ({ ...body.chapters[0], stem: `chapter-${i}` }))
+    }
     return route.fulfill({ status: body === null ? 503 : 200, contentType: 'application/json', body: JSON.stringify(body ?? {}) })
   })
   await page.route('https://fonts.googleapis.com/**', route => route.abort())
-  for (const path of ['script', 'batch']) {
+  for (const path of ['script', 'batch', 'merge', 'bgm']) {
     await page.goto(`${base}/#/${path}`)
     // Routes are lazy-loaded: wait for this route's own table, not the previous
     // route's table that is still on screen while the chunk compiles.
-    const tableSelector = path === 'batch' ? '.production-scroll table.workbench-table' : 'table.wb-chapter-table'
+    const tableSelector = path === 'script' ? 'table.wb-chapter-table' : '.production-scroll table.workbench-table'
     await page.waitForSelector(tableSelector)
     const table = page.locator(tableSelector)
     await table.locator('tbody tr').nth(9).waitFor()
