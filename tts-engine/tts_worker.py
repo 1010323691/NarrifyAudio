@@ -66,6 +66,11 @@ import sys
 import threading
 import time
 
+# Direct script execution puts only tts-engine on sys.path. The shared limits
+# module is stdlib-only: importing it never loads API, database or model code.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from backend.core.tts_batch_limits import AUTO_BATCH_MAX, AUTO_BATCH_POINTS
+
 # transformers reconfigures its root logger on first import: it resets the level to
 # WARNING, attaches its own stderr handler and disables propagation — which stomps any
 # ``logging.getLogger("transformers").setLevel(...)`` set earlier in this process (the
@@ -108,13 +113,6 @@ FRAME_CAP_FLOOR = 128
 def max_new_tokens_for_chars(chars: int) -> int:
     """The decode cap for a sub-batch whose longest row is ``chars`` chars long."""
     return min(MAX_NEW_TOKENS, max(FRAME_CAP_FLOOR, int(chars) * FRAME_CAP_PER_CHAR))
-
-# Production auto-batch safety tiers measured on the RTX 5090 reference workload.
-# The longest row in a candidate batch selects the first tier whose character
-# ceiling is at least that row length; rows are already sorted by length, so this
-# keeps padding and the batch cap aligned without interpolation.
-AUTO_BATCH_POINTS = ((5, 340), (20, 272), (50, 224), (100, 128), (150, 96), (200, 80))
-AUTO_BATCH_MAX = 340
 
 # Live "still generating" heartbeat (see run_with_watchdog): the first line ~FIRST seconds in,
 # then one every INTERVAL seconds while a sub-batch decodes. It reports *measured* elapsed time
@@ -626,7 +624,7 @@ def auto_batch_cap_for_chars(n_chars):
     """Return the measured safety tier for a row's character count.
 
     Matching is upward: a row uses the first measured character ceiling that is
-    greater than or equal to its length (for example, 10 -> 272 and 75 -> 128).
+    greater than or equal to its length (for example, 10 -> 216 and 75 -> 114).
     Counts beyond the last measured ceiling use the last, most conservative tier.
     """
     n = max(0, int(n_chars))

@@ -20,10 +20,12 @@ from __future__ import annotations
 import json
 import hashlib
 import time
+
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core.tts_batch_limits import AUTO_BATCH_CAPS, AUTO_BATCH_MAX
 from ..core import pathio
 from ..core.config import get_config
 from ..core.paths import get_or_prepare_layout, resolve_parsed_json
@@ -57,7 +59,7 @@ MIN_CONCURRENCY = 1
 MAX_CONCURRENCY = 128
 # The automatic curve's global ceiling is the measured 5-char anchor; it does not
 # extrapolate beyond the recorded range.
-AUTO_MAX_CONCURRENCY = 340
+AUTO_MAX_CONCURRENCY = AUTO_BATCH_MAX
 
 # 增量 manifest 的落盘节流：内存态逐条更新，整份 JSON 重写最多每 2 秒一次（取消 / 引擎失败 /
 # 看门狗重启 / 收尾仍强制落盘）。每行都整份重写 1MB 会在磁盘 / 杀软扫描负载下拖住行处理主
@@ -103,7 +105,7 @@ def oom_demotion_cap(current_cap: int, actual_rows: int, auto: bool) -> int:
     """Step below the actual failed batch, never restoring an OOM ceiling."""
     ceiling = min(current_cap, actual_rows) if actual_rows > 0 else current_cap
     if auto:
-        for tier in (340, 272, 224, 128, 96, 80):
+        for tier in AUTO_BATCH_CAPS:
             if tier < ceiling:
                 return tier
     return max(1, ceiling // 2)
