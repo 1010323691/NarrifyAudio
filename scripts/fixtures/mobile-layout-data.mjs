@@ -40,6 +40,7 @@ export function layoutResponse(path, role) {
   if(path==='/api/v1/tasks/center/summary')return {items:[{category:'script',task_count:24,project_count:1,active_count:0}]};
   if(path==='/api/v1/tasks/center/groups')return {items:[{...taskCenterCounts,project_id:'demo',project_name:project.name,latest:1791244800,latest_status:'succeeded'}],total:1,page:1,page_size:5};
   if(path==='/api/v1/tasks/center/items')return {items:Array.from({length:24},(_,i)=>({id:`task-${i}`,project_id:'demo',project_name:project.name,task_type:'script.parse',label:`第${i+1}章 ${name}`,status:'succeeded',progress:1,current:'',error:'',created:1791244800,created_at:project.created_at})),counts:taskCenterCounts,total:24,page:1,page_size:50};
+  if(path==='/api/v1/tasks/overview')return {statuses:[],failures:[],failure_count:0};
   if(path==='/api/v1/tasks/history')return {items:[{id:'task',project_id:'demo',project_name:project.name,task_type:'script.parse',label:name,status:'succeeded',progress:1,current:'',error:'',created:1791244800,created_at:project.created_at}],next_cursor:null};
   if(path==='/api/v1/projects')return [project];
   if(path==='/api/v1/projects/trash')return [{...project,deleted_at:project.created_at,expires_at:'2026-11-01T00:00:00Z'}];
