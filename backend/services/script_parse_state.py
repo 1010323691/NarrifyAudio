@@ -17,6 +17,7 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -225,24 +226,17 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
     }
 
 
-def _parse_tasks(db: Session, owner_id: str, project_id: str, names: list[str] | None = None, input_ids: list[str] | None = None) -> list[Task]:
-    """Every script.parse task of the project, newest first. The result
-    relationship stays lazy — a parse result is megabytes of entries and the
-    aggregate never touches ``task.result`` (it reads scalars via JSON item
-    extraction below), so it is never loaded."""
-    return list(
-        db.scalars(
-            select(Task)
-            .where(
-                Task.owner_id == owner_id,
-                Task.project_id == project_id,
-                Task.task_type == _PARSE_TASK_TYPE,
-                or_(Task.payload["source_name"].as_string().in_([alias for name in names for alias in filename_aliases(name)]),
-                    Task.payload["input_file_id"].as_string().in_(input_ids or [])) if names is not None else True,
-            )
-            .order_by(Task.created_at.desc(), Task.id.desc())
-        ).all()
-    )
+def _parse_tasks(db: Session, owner_id: str, project_id: str, names: list[str] | None = None, input_ids: list[str] | None = None) -> list[SimpleNamespace]:
+    """Read only task scalars/identity: no config payload, result or events."""
+    rows = db.execute(select(Task.id, Task.status, Task.progress, Task.error_message,
+        Task.created_at, Task.finished_at, Task.payload["source_name"].as_string().label("source_name"),
+        Task.payload["input_file_id"].as_string().label("input_file_id"))
+        .where(Task.owner_id == owner_id, Task.project_id == project_id, Task.task_type == _PARSE_TASK_TYPE,
+            or_(Task.payload["source_name"].as_string().in_([alias for name in names for alias in filename_aliases(name)]),
+                Task.payload["input_file_id"].as_string().in_(input_ids or [])) if names is not None else True)
+        .order_by(Task.created_at.desc(), Task.id.desc())).mappings().all()
+    return [SimpleNamespace(**{k: v for k, v in row.items() if k not in {"source_name", "input_file_id"}},
+        payload={"source_name": row["source_name"], "input_file_id": row["input_file_id"]}) for row in rows]
 
 
 def _active_parse_names(db: Session, owner_id: str, project_id: str) -> set[str]:
@@ -451,7 +445,7 @@ def _file_lite(item: ProjectFile) -> dict:
     }
 
 
-def get_state(db: Session, user: User, project_id: str, *, page: int | None = None, page_size: int = 10, query: str = "", filter: str = "all", keys_only: bool = False) -> dict:
+def get_state(db: Session, user: User, project_id: str, *, page: int | None = None, page_size: int = 10, query: str = "", filter: str = "all", keys_only: bool = False, summary_only: bool = False) -> dict:
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise ScriptParseError(404, "项目不存在")
@@ -464,6 +458,15 @@ def get_state(db: Session, user: User, project_id: str, *, page: int | None = No
         names = [f["name"] for f in source["legacy_files"]] + list(source.get("disk_only") or [])
     else:
         names = []
+    if summary_only:
+        # Independent read model: exact whole-book controls, never full row bodies.
+        states = _build_file_states(db, user, project, names)
+        active = [(item.get("latest_task") or {}) for item in states
+                  if (item.get("latest_task") or {}).get("status") in ACTIVE_TASK_STATUSES]
+        done = sum(item.get("result_status") == "usable" and
+                   (item.get("latest_task") or {}).get("status") not in ACTIVE_TASK_STATUSES | {"failed", "timeout", "cancelled"}
+                   for item in states)
+        return {"total": len(names), "done_count": done, "active_task_ids": list(dict.fromkeys(t["id"] for t in active))}
     if page is None and not query and filter == "all" and not keys_only:
         return {"source": source, "text_format_busy": _text_format_busy(db, user.id, project.id),
                 "files": _build_file_states(db, user, project, names)}

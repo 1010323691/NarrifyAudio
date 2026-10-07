@@ -195,3 +195,39 @@ def test_admin_task_page_reads_no_payload_or_logs(scope):
     assert reads and all('tasks.payload' not in s for s in reads)
     assert all('task_events' not in s and 'task_results' not in s for s in statements)
     assert len(statements) <= 4
+
+
+def test_parse_summary_is_global_uses_two_status_axes_and_is_owner_scoped(scope, monkeypatch):
+    db, ctx, _ = scope
+    names = [f'c{i}.txt' for i in range(30)]
+    monkeypatch.setattr(script_parse_state, '_source_section', lambda *_: {'mode': 'version', 'version': {'files': [{'name': n} for n in names]}})
+    states = [{'name': n, 'result_status': 'usable', 'latest_task': None} for n in names]
+    states[-1]['latest_task'] = {'id': 'active', 'status': 'running'}
+    states[-2]['latest_task'] = {'id': 'failed', 'status': 'failed'}
+    states[-3]['result_status'] = 'stale'
+    checked = []
+    monkeypatch.setattr(script_parse_state, '_build_file_states', lambda _db, _user, _project, requested: checked.extend(requested) or states)
+    result = script_parse_state.get_state(db, ctx.user, 'book', page=2, filter='pending', summary_only=True)
+    assert result == {'total': 30, 'done_count': 27, 'active_task_ids': ['active']}
+    assert checked == names
+    with pytest.raises(script_parse_state.ScriptParseError):
+        script_parse_state.get_state(db, ctx.user, 'foreign', summary_only=True)
+
+
+def test_parse_task_status_reads_scalars_without_full_payload_events_or_results(scope):
+    db, ctx, _ = scope
+    db.add(Task(id='parse', owner_id=ctx.user.id, project_id='book', task_type='script.parse', status='running', payload={'source_name': 'c.txt', 'large': 'x'*10000}))
+    db.commit()
+    owner_id = ctx.user.id
+    statements = []
+    def capture(conn, cursor, statement, parameters, context, many): statements.append(statement.lower())
+    event.listen(db.bind, 'before_cursor_execute', capture)
+    try:
+        rows = script_parse_state._parse_tasks(db, owner_id, 'book', ['c.txt'])
+    finally:
+        event.remove(db.bind, 'before_cursor_execute', capture)
+    assert len(rows) == 1
+    assert rows[0].payload == {'source_name': 'c.txt', 'input_file_id': None}
+    assert len(statements) == 1
+    assert ', tasks.payload as' not in statements[0] and ', tasks.payload \n' not in statements[0]
+    assert 'task_events' not in statements[0] and 'task_results' not in statements[0]

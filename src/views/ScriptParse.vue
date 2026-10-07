@@ -36,7 +36,7 @@ const router = useRouter()
 const { projectSet } = useProjectGate()
 
 const {
-  state, stateError, loading, submitting,
+  state, stateError, summaryError, controlsReady, loading, submitting,
   rows, filteredRows, filteredTotal, pagedRows, pageCount, page, pageSize,
   filter, query, chapterNumPad,
   total, doneCount, pendingCount, busy,
@@ -178,15 +178,16 @@ onBeforeUnmount(() => {
         <p>该版本分册文本已被后续处理覆盖，请先到「排版与分册」重新处理后再解析。</p>
       </Alert>
 
+      <Alert v-if="summaryError" variant="destructive">{{ summaryError }} <Button variant="outline" size="sm" @click="refreshState">重试全书状态</Button></Alert>
       <!-- 统计栏 -->
       <WorkbenchContextBar v-if="state">
         <template #icon><Loader2 v-if="busy" class="animate-spin" /><ScanText v-else /></template>
-        <template #title>{{ busy ? '解析进行中' : total === 0 ? '尚无可解析章节' : pendingCount > 0 ? '部分章节待解析' : '全部章节已解析' }}</template>
+        <template #title>{{ !controlsReady ? '正在读取全书状态' : busy ? '解析进行中' : total === 0 ? '尚无可解析章节' : (pendingCount ?? 0) > 0 ? '部分章节待解析' : '全部章节已解析' }}</template>
         <template #description>{{ busy ? '可离开页面，回来自动继续' : total === 0 ? '请先在「排版与分册」生成章节' : '勾选章节后点击底部「开始解析」' }}</template>
         <template #metrics>
           <div class="workbench-context-metric"><strong>{{ total }}</strong>全部章节</div>
-          <div class="workbench-context-metric"><strong :class="{ '!text-amber-600 dark:!text-amber-400': pendingCount > 0 }">{{ pendingCount }}</strong>待解析</div>
-          <div class="workbench-context-metric"><strong>{{ doneCount }}</strong>已完成</div>
+          <div class="workbench-context-metric"><strong :class="{ '!text-amber-600 dark:!text-amber-400': (pendingCount ?? 0) > 0 }">{{ pendingCount ?? '…' }}</strong>待解析</div>
+          <div class="workbench-context-metric"><strong>{{ doneCount ?? '…' }}</strong>已完成</div>
         </template>
         <template #actions>
           <WorkbenchStatus v-if="state.text_format_busy" variant="warning">排版与分册进行中</WorkbenchStatus>
@@ -207,7 +208,7 @@ onBeforeUnmount(() => {
               v-model:query="query"
               v-model:filter="filter"
               placeholder="搜索章节号或标题"
-              :filters="[{ key: 'all', label: '全部', count: total }, { key: 'pending', label: '待解析', count: pendingCount }, { key: 'done', label: '已完成', count: doneCount }]"
+              :filters="[{ key: 'all', label: '全部', count: total }, { key: 'pending', label: '待解析', count: pendingCount ?? undefined }, { key: 'done', label: '已完成', count: doneCount ?? undefined }]"
               :loading="loading"
               :refresh-disabled="!projectSet"
               @refresh="refreshState()"
@@ -320,8 +321,8 @@ onBeforeUnmount(() => {
       <Button
         variant="outline"
         size="sm"
-        :disabled="doneCount === 0"
-        :title="doneCount === 0 ? '还没有可配音的解析结果' : '前往角色配音'"
+        :disabled="!controlsReady || !doneCount"
+        :title="!doneCount ? '还没有可配音的解析结果' : '前往角色配音'"
         @click="router.push('/voices')"
       >
         前往角色配音

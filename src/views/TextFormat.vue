@@ -45,7 +45,7 @@ const {
   selectedKey, marksBusy, preview,
   pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
   isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
-  retryFailedStage, toggleMark, selectChapter, startFlow, refreshState,
+  retryFailedStage, toggleMark, selectChapter, startFlow, refreshState, ensureChapterPage, navigateChapter,
 } = useTextFormatWorkbench()
 
 const captureScope = useWorkbenchScope()
@@ -286,10 +286,7 @@ watch(drawerOpen, (open) => {
   }
 })
 
-function ensurePageFor(key: string) {
-  const idx = filteredChapters.value.findIndex((c) => c.key === key)
-  if (idx >= 0) page.value = Math.floor(idx / pageSize.value) + 1
-}
+function ensurePageFor(key: string) { ensureChapterPage(key) }
 
 // 列表与详情同步定位：选中变化（上/下一章、键盘、核对后自动跳过）时，
 // 章节表翻页（既有逻辑）之外再把选中行滚入可视区并高亮，避免左右脱节。
@@ -316,16 +313,7 @@ const sameGroupCount = computed(() => {
   return (version.value?.chapters ?? []).filter((c) => c.orig_num === sameOrigNum.value).length
 })
 
-function moveSelection(delta: number) {
-  const list = filteredChapters.value
-  if (!list.length) return
-  const idx = list.findIndex((c) => c.key === selectedKey.value)
-  const next = list[(idx + delta + list.length) % list.length]
-  if (next) {
-    ensurePageFor(next.key ?? '')
-    selectChapter(next.key ?? null)
-  }
-}
+function moveSelection(delta: number) { void navigateChapter(delta) }
 
 function onKeyNav(event: KeyboardEvent) {
   if (event.key === 'ArrowUp') {
@@ -377,11 +365,11 @@ const detailFileName = computed(() => (currentChapter.value ? chapterFile(curren
 
 const detailHasPrev = computed(() => {
   const idx = filteredChapters.value.findIndex((c) => c.key === selectedKey.value)
-  return idx > 0
+  return idx > 0 || page.value > 1
 })
 const detailHasNext = computed(() => {
   const idx = filteredChapters.value.findIndex((c) => c.key === selectedKey.value)
-  return idx >= 0 && idx < filteredChapters.value.length - 1
+  return idx >= 0 && (idx < filteredChapters.value.length - 1 || page.value < pageCount.value)
 })
 const canReadVersion = computed(() => version.value?.version_status === 'current')
 const adjustedCount = adjustedTotal

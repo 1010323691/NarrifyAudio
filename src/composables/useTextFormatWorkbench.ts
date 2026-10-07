@@ -74,6 +74,8 @@ export function useTextFormatWorkbench() {
   let previewAbort = new AbortController()
   let actionGeneration = 0
   let loadToken = 0
+  let navigating = false
+  let internalPageChange = false
   let pumpRunning = false
 
   // --- derived ------------------------------------------------------------
@@ -168,7 +170,7 @@ export function useTextFormatWorkbench() {
   })
   watch([filter, query, reasonFilter, sameOrigNum], () => { page.value = 1 })
 
-  watch([page, pageSize, query, filter, reasonFilter, sameOrigNum], () => { if (pagination.value) void refreshState({ recover: false }) })
+  watch([page, pageSize, query, filter, reasonFilter, sameOrigNum], () => { if (pagination.value && !internalPageChange) void refreshState({ recover: false }) }, { flush: 'sync' })
 
   const currentChapter = computed(() => chapters.value.find((c) => c.key === selectedKey.value) ?? null)
   /** 选中章节在同原编号组里的规模与位置（按正文顺序）；「重复」类原因的结论卡与
@@ -229,6 +231,33 @@ export function useTextFormatWorkbench() {
       if (token === loadToken && project.activeProjectId === projectId && !listAbort.signal.aborted) stateError.value = error?.message || '章节列表暂未更新'
       return false
     }
+  }
+
+  function ensureChapterPage(key: string) {
+    if (pagination.value) return
+    const index = filteredChapters.value.findIndex(chapter => chapter.key === key)
+    if (index >= 0) page.value = Math.floor(index / pageSize.value) + 1
+  }
+
+  async function navigateChapter(delta: number) {
+    if (navigating || !filteredChapters.value.length) return
+    const list = filteredChapters.value
+    const index = list.findIndex(chapter => chapter.key === selectedKey.value)
+    const nextIndex = index + delta
+    if (!pagination.value || (nextIndex >= 0 && nextIndex < list.length) || pageCount.value === 1) {
+      const next = list[(nextIndex + list.length) % list.length]
+      if (next) { ensureChapterPage(next.key ?? ''); selectedKey.value = next.key ?? null }
+      return
+    }
+    navigating = true
+    try {
+      internalPageChange = true
+      page.value = delta > 0 ? page.value < pageCount.value ? page.value + 1 : 1 : page.value > 1 ? page.value - 1 : pageCount.value
+      internalPageChange = false
+      if (!(await refreshState({ recover: false }))) return
+      const next = delta > 0 ? filteredChapters.value[0] : filteredChapters.value.at(-1)
+      selectedKey.value = next?.key ?? null
+    } finally { navigating = false }
   }
 
   /** Ask the server to evaluate the flow and idempotently submit the next
@@ -465,6 +494,7 @@ export function useTextFormatWorkbench() {
 
   function resetWorkbench() {
     actionGeneration += 1
+    navigating = false
     loading.value = false
     loadToken += 1
     listAbort.abort()
@@ -519,7 +549,7 @@ export function useTextFormatWorkbench() {
     pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
     isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
     // actions
-    resume, refreshState, startFlow, retryFailedStage, toggleMark, loadPreview,
+    resume, refreshState, startFlow, retryFailedStage, toggleMark, loadPreview, ensureChapterPage, navigateChapter,
     selectChapter: (key: string | null) => { selectedKey.value = key },
   }
 }

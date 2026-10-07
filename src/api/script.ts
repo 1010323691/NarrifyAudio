@@ -102,3 +102,8 @@ export function scriptParseResultUrl(projectId: string, fileId: string): string 
 export function getParseSelection(projectId: string, filter: string, q = ''): Promise<{ items: { name: string; result_status?: 'usable' | 'stale' | 'unverified' | null; status?: string | null; input: ScriptParseInput | null }[] }> {
   return http.get(`/api/v1/projects/${projectId}/script-parse/state?${listQuery({ page: 1, page_size: 10, q, filter })}&keys_only=true`)
 }
+
+export interface ScriptParseSummary { total: number; done_count: number; active_task_ids: string[] }
+export function getScriptParseSummary(projectId: string, signal?: AbortSignal): Promise<ScriptParseSummary> {
+  return http.get(`/api/v1/projects/${projectId}/script-parse/summary`, { signal })
+}

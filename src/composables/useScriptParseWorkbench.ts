@@ -17,7 +17,7 @@ import { useToast } from '@/components/ui/toast'
 import { ApiError } from '@/api/client'
 import {
   cancelParseBatch,
-  getScriptParseState,
+  getScriptParseState, getScriptParseSummary, type ScriptParseSummary,
   getParseSelection,
   runScriptParse,
   scriptParseResultUrl,
@@ -139,7 +139,10 @@ export function useScriptParseWorkbench() {
   // --- server-side state -----------------------------------------------------
   const state = ref<ScriptParseState | null>(null)
   const selectedRowCache = new Map<string, ParseRow>()
+  const authoritativeSelections = new Set<string>()
   const stateError = ref('')
+  const summary = ref<ScriptParseSummary | null>(null)
+  const summaryError = ref('')
   const loading = ref(false)
   const submitting = ref(false)
 
@@ -257,13 +260,23 @@ export function useScriptParseWorkbench() {
 
   // --- stats / selection --------------------------------------------------------
   const total = computed(() => state.value?.pagination?.counts.all ?? rows.value.length)
-  const doneCount = computed(() => rows.value.filter((r) => r.status === 'done').length)
-  const pendingCount = computed(() => total.value - doneCount.value)
-  const busy = computed(() => rows.value.some((r) => r.status === 'active'))
+  const controlsReady = computed(() => !state.value?.pagination || summary.value != null)
+  const doneCount = computed(() => state.value?.pagination ? summary.value?.done_count ?? null : rows.value.filter((r) => r.status === 'done').length)
+  const pendingCount = computed(() => doneCount.value == null ? null : Math.max(0, total.value - doneCount.value))
+  const activeIds = computed(() => {
+    const snapshots = taskStore.projectTasks
+    const ids = new Set<string>([...(summary.value?.active_task_ids ?? []), ...rows.value.filter(r => r.status === 'active' && r.taskId).map(r => r.taskId!)])
+    for (const task of snapshots) {
+      if (task.module === 'script' && ACTIVE.has(task.status)) ids.add(task.id)
+      else if (!ACTIVE.has(task.status)) ids.delete(task.id)
+    }
+    return ids
+  })
+  const busy = computed(() => activeIds.value.size > 0)
 
-  watch(rows, current => { for (const row of current) selectedRowCache.set(row.chapter.name, row) }, { flush: 'sync' })
+  watch(rows, current => { for (const row of current) if (!authoritativeSelections.has(row.chapter.name)) selectedRowCache.set(row.chapter.name, row) }, { flush: 'sync' })
   const selectedRows = computed(() => Object.keys(selected.value).filter(name => selected.value[name]).map(name =>
-    rows.value.find(row => row.chapter.name === name) ?? selectedRowCache.get(name)).filter((row): row is ParseRow => !!row))
+    selectedRowCache.get(name) ?? rows.value.find(row => row.chapter.name === name)).filter((row): row is ParseRow => !!row))
   const selectedCount = computed(() => selectedRows.value.length)
   const selectedDoneCount = computed(() => selectedRows.value.filter((r) => r.status === 'done').length)
   const selectedStaleCount = computed(() => selectedRows.value.filter((r) => r.status === 'stale').length)
@@ -295,8 +308,8 @@ export function useScriptParseWorkbench() {
   }
 
   function selectFiltered() {
+    if (!project.activeProjectId || busy.value || loading.value || stateError.value || !controlsReady.value) return
     if (state.value?.pagination) { void selectRemote(filter.value, query.value); return }
-    if (!project.activeProjectId || busy.value || loading.value || stateError.value) return
     selected.value = {}
     for (const row of filteredRows.value) {
       if (row.status !== 'active') selected.value[row.chapter.name] = true
@@ -310,10 +323,14 @@ export function useScriptParseWorkbench() {
       const response = await getParseSelection(pid, scope, q)
       if (token !== loadToken || pid !== project.activeProjectId) return
       selected.value = {}
+      authoritativeSelections.clear()
       for (const item of response.items) {
         selected.value[item.name] = true
-        if (!selectedRowCache.has(item.name)) selectedRowCache.set(item.name, {
-          chapter: { name: item.name, input: item.input, seq: 0, numStr: '', title: item.name, chars: 0, latest_task: null, result: null, result_status: null },
+        authoritativeSelections.add(item.name)
+        inputShaOverrides.delete(item.name)
+        const previous = selectedRowCache.get(item.name)
+        selectedRowCache.set(item.name, {
+          chapter: { ...(previous?.chapter ?? { seq: 0, numStr: '', title: item.name, chars: 0 }), name: item.name, input: item.input, latest_task: null, result: null, result_status: item.result_status ?? null },
           status: item.status === 'failed' ? 'failed' : item.status === 'timeout' ? 'timeout' : item.status === 'cancelled' ? 'cancelled' : item.result_status === 'usable' ? 'done' : item.result_status === 'stale' ? 'stale' : 'pending', label: '待解析', tone: 'muted', task: undefined, taskId: null, progress: 0, error: '', retryable: false,
         })
       }
@@ -321,6 +338,7 @@ export function useScriptParseWorkbench() {
   }
 
   function clearSelection() {
+    authoritativeSelections.clear()
     selected.value = {}
   }
 
@@ -547,7 +565,10 @@ export function useScriptParseWorkbench() {
     const pid = project.activeProjectId
     if (!pid) {
       state.value = null
-    selectedRowCache.clear()
+      summary.value = null
+      summaryError.value = ''
+      selectedRowCache.clear()
+      authoritativeSelections.clear()
       return false
     }
     const token = ++loadToken
@@ -558,6 +579,14 @@ export function useScriptParseWorkbench() {
       const next = await getScriptParseState(pid, stateAbort.signal, { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value })
       if (token !== loadToken || project.activeProjectId !== pid) return false
       applyState(next)
+      if (next.pagination) {
+        const signal = stateAbort.signal
+        void getScriptParseSummary(pid, signal).then(value => {
+          if (!signal.aborted && token === loadToken && project.activeProjectId === pid) { summary.value = value; summaryError.value = '' }
+        }).catch((error: any) => {
+          if (!signal.aborted && token === loadToken && project.activeProjectId === pid) summaryError.value = error?.message || '全书状态暂未更新'
+        })
+      }
       if (page.value > pageCount.value) page.value = pageCount.value
       return true
     } catch (e: any) {
@@ -573,7 +602,6 @@ export function useScriptParseWorkbench() {
 
   /** 在途任务离开活跃态（成功/失败/取消/超时）→ 合并在 600ms 内整表刷新：
    *  单章先完成立即刷新该章状态/预览，不等整批（review #4）。 */
-  const activeIds = computed(() => new Set(rows.value.filter((r) => r.status === 'active').map((r) => r.taskId)))
   watch(activeIds, (now, prev) => {
     if (!prev) return
     const dropped = [...prev].filter((id) => id != null && !now.has(id))
@@ -586,11 +614,11 @@ export function useScriptParseWorkbench() {
   const canSubmit = computed(() => {
     const st = state.value
     const staleBlocked = st?.source.mode === 'version' && st?.source.version?.version_status === 'stale'
-    return !!project.activeProjectId && !!st && !st.text_format_busy && !staleBlocked
+    return controlsReady.value && !!project.activeProjectId && !!st && !st.text_format_busy && !staleBlocked
   })
 
   async function startParse(): Promise<boolean> {
-    if (busy.value || submitting.value || !selectedCount.value) return false
+    if (!controlsReady.value || busy.value || submitting.value || !selectedCount.value) return false
     if (!project.activeProjectId) return false
     if (state.value?.text_format_busy) {
       toast({ title: '排版与分册任务正在进行，暂不能提交解析', variant: 'destructive' })
@@ -638,7 +666,7 @@ export function useScriptParseWorkbench() {
 
   /** 【取消全部】：一次取消所有在途解析任务（端点失败回退逐任务取消）。 */
   async function cancelAll() {
-    const ids = rows.value.filter((r) => r.status === 'active' && r.taskId).map((r) => r.taskId as string)
+    const ids = [...activeIds.value]
     if (!ids.length) return
     try {
       await cancelParseBatch(ids)
@@ -682,7 +710,10 @@ export function useScriptParseWorkbench() {
     sourceToken += 1
     sourceAbort.abort()
     state.value = null
+    summary.value = null
+    summaryError.value = ''
     selectedRowCache.clear()
+    authoritativeSelections.clear()
     stateError.value = ''
     selected.value = {}
     selectedName.value = null
@@ -741,7 +772,7 @@ export function useScriptParseWorkbench() {
 
   return {
     // state
-    state, stateError, loading, submitting,
+    state, stateError, summaryError, controlsReady, loading, submitting,
     rows, chapters, filteredRows, pagedRows, pageCount, page, pageSize,
     filteredTotal: computed(() => state.value?.pagination?.total ?? filteredRows.value.length),
     filter, query, chapterNumPad, chapterLabel,

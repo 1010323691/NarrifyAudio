@@ -75,6 +75,15 @@ def get_script_parse_state(
         raise
 
 
+@router.get("/{project_id}/script-parse/summary")
+def get_script_parse_summary(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return get_state(db, user, project_id, summary_only=True)
+    except ScriptParseError as error:
+        _raise(error)
+        raise
+
+
 @router.post("/{project_id}/script-parse/run")
 def post_script_parse_run(
     project_id: str,
