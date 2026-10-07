@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useListPage } from '@/composables/useListPage'
+import type { ListQuery } from '@/api/listPaging'
 import {
   computed,
   onActivated,
@@ -17,8 +19,7 @@ import { useWorkbenchRefresh } from '@/composables/useWorkbenchRefresh'
 import { useWorkbenchTaskControl } from '@/composables/useWorkbenchTaskControl'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
-import { mergeStatusPackages, runMerge, ttsStatus } from '@/api/tts'
-import { listDir } from '@/api/files'
+import { mergeList, runMerge, ttsStatus } from '@/api/tts'
 import { previewUrl } from '@/utils/fileops'
 import type { MergePackageStatus, MergeResult, TaskSnapshot, TTSStatus } from '@/types'
 
@@ -52,6 +53,8 @@ const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
 
 const status = ref<TTSStatus | null>(null)
+const listPage = useListPage(refreshRows, () => { pkgNames.value = []; pkgStats.value = {}; diskMp3.value = {}; mergedNames.value = {}; clearSelection() })
+const listPagination = listPage.pagination
 let rowsRequest = 0
 const rowsRefresh = useWorkbenchRefresh(refreshRows, 250)
 function scheduleRowsRefresh() { rowsRefresh.schedule() }
@@ -97,7 +100,7 @@ interface MergeRow {
 // （total 全完成，total 取源解析 JSON 口径）> 已合成 C/T 段。WAV 兜底产物不算已合并。
 const rows = computed<MergeRow[]>(() => {
   const { active, failed } = tasksByPkg.value
-  return pkgNames.value.map((pkg) => {
+  return [...new Set([...pkgNames.value, ...Object.keys(selected)])].map((pkg) => {
     const task = active.get(pkg)
     const stat = pkgStats.value[pkg]
     // A previous merged MP3 is invalid as soon as synthesis is incomplete (for example
@@ -146,7 +149,7 @@ const rows = computed<MergeRow[]>(() => {
   })
 })
 
-const selectedNames = computed(() => pkgNames.value.filter((p) => !!selected[p]))
+const selectedNames = computed(() => Object.keys(selected).filter((p) => !!selected[p]))
 const readyPkgs = computed(() => rows.value.filter((r) => r.ready).map((r) => r.pkg))
 const mergedSelectedCount = computed(
   () => rows.value.filter((r) => r.mergedState && selected[r.pkg]).length,
@@ -166,28 +169,22 @@ async function refreshRows() {
   rowsLoading.value = true
   rowsError.value = ''
   try {
-    const [chunks, mergedDir] = await withinScope(
-      Promise.all([listDir('05_audio_chunk'), listDir('06_audio_merge')]),
-      isCurrent,
-    )
-    const names = chunks.items.filter((i) => i.is_dir).map((i) => i.name)
-    const response = names.length
-      ? await withinScope(mergeStatusPackages(names), isCurrent)
-      : { packages: [] }
+    const response = await withinScope(mergeList(listPage.query, listPage.begin(), false, Object.keys(selected)), isCurrent)
     if (request !== rowsRequest) return
+    listPage.received(response.pagination)
+    for (const key of response.missing_selected ?? []) delete selected[key]
+    const names = response.packages.map(row => row.name)
     const mp3s: Record<string, string> = {}
-    for (const item of mergedDir.items)
-      if (!item.is_dir && item.name.endsWith('.mp3'))
-        mp3s[item.name.replace(/\.mp3$/, '')] = item.name
+    for (const row of response.packages) if (row.merged_filename) mp3s[row.name] = row.merged_filename
     pkgNames.value = names
-    diskMp3.value = mp3s
-    pkgStats.value = Object.fromEntries(response.packages.map((stat) => [stat.name, stat]))
+    diskMp3.value = { ...Object.fromEntries(Object.entries(diskMp3.value).filter(([key]) => selected[key])), ...mp3s }
+    pkgStats.value = { ...Object.fromEntries(Object.entries(pkgStats.value).filter(([key]) => selected[key])), ...Object.fromEntries(response.packages.map(row => [row.name, row])) }
     const { active } = tasksByPkg.value
     // Input completeness continues to gate every artifact, including old disk files.
     mergedNames.value = Object.fromEntries(
       names.filter((name) => !active.has(name) && mp3s[name]).map((name) => [name, mp3s[name]]),
     )
-    for (const key of Object.keys(selected)) if (!names.includes(key)) delete selected[key]
+
   } catch (e: any) {
     if (!isCurrent()) return
 
@@ -213,11 +210,12 @@ function onSelectChange(pkg: string, e: Event) {
 }
 
 function selectReady() {
-  selectFiltered(readyPkgs.value)
+  void selectRemote({ ...listPage.query, q: '', filter: 'ready' })
 }
 
 function selectAllIncludingDone() {
-  selectFiltered(rows.value.filter((row) => row.stat?.complete && !row.task).map((row) => row.pkg))
+  if (!listPagination.value) selectFiltered(rows.value.filter(row => row.stat?.complete && !row.task).map(row => row.pkg))
+  else void selectRemote({ ...listPage.query, q: '', filter: 'all' })
 }
 
 function clearAll() {
@@ -375,7 +373,7 @@ onActivated(() => {
 
 const engineReady = computed(() => !!(status.value?.ready ?? status.value?.implemented))
 const workRows = computed(() =>
-  rows.value.map((row) => ({
+  rows.value.filter(row => pkgNames.value.includes(row.pkg)).map((row) => ({
     ...row,
     workKey: row.pkg,
     workName: row.stat?.display_name || row.pkg,
@@ -395,6 +393,18 @@ const selectionReady = computed(
     selectedNames.value.length > 0 &&
     rows.value.filter((row) => selected[row.pkg]).every((row) => row.stat?.complete && !row.task),
 )
+async function selectRemote(query: ListQuery) {
+  const isCurrent = captureScope()
+  try {
+    const response = await withinScope(mergeList(query, undefined, true), isCurrent)
+    clearSelection()
+    for (const row of response.packages) if (row.complete && row.work_state !== 'running') {
+      pkgStats.value[row.name] = row
+      if (row.merged_filename) diskMp3.value[row.name] = row.merged_filename
+      selected[row.name] = true
+    }
+  } catch (e: any) { if (isCurrent()) rowsError.value = e?.message || '读取选择范围失败' }
+}
 function selectFiltered(names: string[]) {
   clearSelection()
   for (const name of names) selected[name] = true
@@ -438,6 +448,7 @@ onBeforeUnmount(stopScheduledRefresh)
       </WorkbenchContextBar>
     </div>
     <ProductionWorkbench
+      remote :pagination="listPagination" @request-page="listPage.request" @select-scope="selectRemote"
       :rows="workRows"
       :selected="selected"
       :loading="rowsLoading"
@@ -466,7 +477,7 @@ onBeforeUnmount(stopScheduledRefresh)
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="rowsLoading || !!rowsError || submitting || !readyPkgs.length"
+          :disabled="rowsLoading || !!rowsError || submitting || !(listPagination?.counts.all ?? readyPkgs.length)"
           @click="selectReady"
           >选择首次合并</Button
         ><Button

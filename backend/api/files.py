@@ -3,6 +3,7 @@ download / preview (fetched by the browser; also the source of preview text)."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy import select
@@ -20,6 +21,8 @@ from . import _common
 from ..platform.resource_delivery import require_delivery, DeliveryDenied
 from ..core.safe_filesystem import safe_regular_path
 from ..core.filenames import safe_filename, legacy_storage_name
+
+from ..services.list_paging import path_page
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -42,6 +45,9 @@ def _module_dir(module: str) -> Path:
 def list_module(
     module: str,
     recursive: bool = Query(False),
+    page: Annotated[int | None, Query(ge=1)] = None,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    q: str = "", extensions: str = "", exclude_suffix: str = "", kind: str = "all",
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -54,6 +60,9 @@ def list_module(
     if not d.exists():
         return {"path": str(d), "items": []}
     paths = sorted(d.rglob("*") if recursive else d.iterdir())
+    pagination = None
+    if page is not None:
+        paths, pagination = path_page([p for p in paths if not recursive or not p.is_dir()], d, page, page_size, q, extensions, exclude_suffix, kind)
     catalog: dict[str, ProjectFile] = {}
     project = active_project(db, ctx.user, ctx.session)
     if project is not None:
@@ -64,7 +73,7 @@ def list_module(
                 select(ProjectFile).where(
                     ProjectFile.owner_id == ctx.user.id,
                     ProjectFile.project_id == project.id,
-                    ProjectFile.object_key.like(prefix + "%"),
+                    ProjectFile.object_key.in_([prefix + p.relative_to(d).as_posix() for p in paths]) if page is not None else ProjectFile.object_key.like(prefix + "%"),
                     ProjectFile.deleted_at.is_(None),
                 )
             ).all()
@@ -92,7 +101,7 @@ def list_module(
             if cataloged is not None:
                 item.update({"id": cataloged.id, "file_id": cataloged.id, "project_id": cataloged.project_id})
         items.append(item)
-    return {"path": str(d), "items": items}
+    return {"path": str(d), "items": items, **({"pagination": pagination} if pagination else {})}
 
 
 @router.get("/download/{module}/{name:path}")

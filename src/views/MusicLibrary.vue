@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 音乐库（全局资源，工作空间外、跨工程共享）——曲目上传 / 试听 / 打标 / AI 推荐 /
 // 批量操作 / 标签管理。页面不经 ProjectGateAlert（与工作空间无关）。
+import { useListPage } from '@/composables/useListPage'
+import Pager from '@/views/textformat/Pager.vue'
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm, showPrompt } from '@/components/ui/dialog'
@@ -17,6 +19,7 @@ import {
   deleteTag,
   deleteTrack,
   getLibrary,
+  getMusicSelection,
   moveTracks,
   musicPreviewUrl,
   renameFolder,
@@ -96,6 +99,11 @@ const CAT_BADGE: Record<MusicTagCategory, string> = {
 // ---------------------------------------------------------------------------
 
 const lib = ref<MusicLibrary | null>(null)
+const listPage = useListPage(refresh, () => { lib.value = null; pageNames.value = []; clearSelection() })
+const pagination = listPage.pagination
+const page = ref(1)
+const pageNames = ref<string[]>([])
+const tagCounts = ref<Record<string, Record<string, number>>>({})
 const loading = ref(true)
 const loadError = ref('')
 const uploading = ref(false)
@@ -174,39 +182,33 @@ function extOf(name: string): string {
 async function refresh() {
   loading.value = true
   loadError.value = ''
+  const signal = listPage.begin()
   try {
-    lib.value = await getLibrary()
-    // 清掉已消失曲目的勾选（仅 UI 状态，不触碰任何数据）。
-    const names = new Set(Object.keys(lib.value.tracks))
-    for (const k of Object.keys(selected)) if (!names.has(k)) delete selected[k]
+    const response = await getLibrary({ page: page.value, page_size: 20, q: search.value }, signal, musicFilters())
+    if (signal.aborted) return
+    loadError.value = ''
+    const retainedTracks = Object.fromEntries(Object.entries(lib.value?.tracks ?? {}).filter(([name]) => selected[name]))
+    const retainedSuggestions = Object.fromEntries(Object.entries(lib.value?.suggestions ?? {}).filter(([name]) => selected[name]))
+    pageNames.value = Object.keys(response.tracks)
+    lib.value = { ...response, tracks: { ...retainedTracks, ...response.tracks }, suggestions: { ...retainedSuggestions, ...response.suggestions } }
+    listPage.received(response.pagination, page); tagCounts.value = response.tag_counts ?? {}
   } catch (e: any) {
-    loadError.value = e?.message || '加载失败'
+    if (!signal.aborted) loadError.value = e?.message || '加载失败'
   } finally {
-    loading.value = false
+    if (!signal.aborted) loading.value = false
   }
 }
 
 const allTracks = computed(() =>
-  Object.entries(lib.value?.tracks ?? {}).sort((a, b) => a[0].localeCompare(b[0])),
+  Object.entries(lib.value?.tracks ?? {}).filter(([name]) => pageNames.value.includes(name)).sort((a, b) => a[0].localeCompare(b[0])),
 )
-const trackList = computed(() => {
-  // 视图前置过滤（搜索/标签过滤作用于「当前视图内曲目」，现有逻辑不动）。
-  let list = allTracks.value
-  const folderName = view.value.kind === 'folder' ? view.value.name : null
-  if (folderName !== null) list = list.filter(([, t]) => t.folder === folderName)
-  else if (view.value.kind === 'unclassified') list = list.filter(([, t]) => !t.folder)
-  const q = search.value.trim().toLowerCase()
-  if (q) list = list.filter(([n]) => n.toLowerCase().includes(q))
-  if (tagFilter.value) {
-    const [cat, ...rest] = tagFilter.value.split(':')
-    const tag = rest.join(':')
-    list = list.filter(
-      ([, t]) => Array.isArray(t.tags?.[cat as MusicTagCategory]) && t.tags[cat as MusicTagCategory].includes(tag),
-    )
-  }
-  return list
-})
-const enabledCount = computed(() => allTracks.value.filter(([, t]) => t.enabled).length)
+const trackList = computed(() => allTracks.value)
+const enabledCount = computed(() => pagination.value?.counts.enabled ?? 0)
+function musicFilters() {
+  return { folder: view.value.kind === 'folder' ? view.value.name : view.value.kind === 'unclassified' || view.value.kind === 'root' ? '' : undefined, tag: tagFilter.value }
+}
+watch([search, tagFilter, view], () => { page.value = 1; void refresh() })
+watch(page, () => { void refresh() })
 
 const filterOptions = computed(() => {
   const out: { value: string; label: string }[] = []
@@ -226,13 +228,19 @@ const allVisibleSelected = computed(
 )
 const selectedNames = computed(() => Object.keys(selected))
 
-function toggleSelectAll(e: Event) {
+async function toggleSelectAll(e: Event) {
   const on = (e.target as HTMLInputElement).checked
-  for (const n of visibleNames.value) {
-    if (on) selected[n] = true
-    else delete selected[n]
-  }
+  const signal = listPage.begin()
+  try {
+    const response = await getMusicSelection({ q: search.value }, musicFilters(), signal)
+    if (signal.aborted) return
+    if (lib.value && on) {
+      Object.assign(lib.value.tracks, response.tracks); Object.assign(lib.value.suggestions ??= {}, response.suggestions)
+    }
+    for (const name of response.names) { if (on) selected[name] = true; else delete selected[name] }
+  } catch (e: any) { if (!signal.aborted) loadError.value = e?.message || '选择范围读取失败' }
 }
+
 function clearSelection() {
   for (const k of Object.keys(selected)) delete selected[k]
 }
@@ -780,9 +788,7 @@ const newTag = reactive<Record<MusicTagCategory, string>>({ scene: '', mood: '',
 const tagInfo = ref<{ cat: MusicTagCategory; name: string; count: number } | null>(null)
 
 function usageCount(cat: MusicTagCategory, name: string): number {
-  return Object.values(lib.value?.tracks ?? {}).filter(
-    (t) => Array.isArray(t.tags?.[cat]) && t.tags[cat].includes(name),
-  ).length
+  return tagCounts.value[cat]?.[name] ?? 0
 }
 function showTagInfo(cat: MusicTagCategory, name: string) {
   tagInfo.value = { cat, name, count: usageCount(cat, name) }
@@ -930,12 +936,12 @@ onActivated(() => {
             {{ loadError }} <button class="underline" @click="refreshAll">重新加载</button>
           </Alert>
 
-          <div v-else-if="allTracks.length" class="grid gap-4 xl:grid-cols-[13rem_minmax(0,1fr)]">
+          <div v-if="(pagination?.counts.all ?? allTracks.length) > 0" class="grid gap-4 xl:grid-cols-[13rem_minmax(0,1fr)]">
             <aside class="space-y-3 xl:sticky xl:top-4 xl:self-start">
               <div class="rounded-lg border bg-muted/20 p-2">
                 <p class="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">资源视图</p>
-                <button type="button" class="library-view-item" :class="view.kind === 'all' ? 'library-view-item-active' : ''" @click="goAll"><Music class="h-4 w-4" />全部音乐 <span>{{ allTracks.length }}</span></button>
-                <button type="button" class="library-view-item" :class="view.kind === 'unclassified' ? 'library-view-item-active' : ''" @click="goUnclassified"><Folder class="h-4 w-4" />未分类 <span>{{ allTracks.length - folders.reduce((total, f) => total + folderCount(f.name), 0) }}</span></button>
+                <button type="button" class="library-view-item" :class="view.kind === 'all' ? 'library-view-item-active' : ''" @click="goAll"><Music class="h-4 w-4" />全部音乐 <span>{{ pagination?.counts.all ?? allTracks.length }}</span></button>
+                <button type="button" class="library-view-item" :class="view.kind === 'unclassified' ? 'library-view-item-active' : ''" @click="goUnclassified"><Folder class="h-4 w-4" />未分类 <span>{{ (pagination?.counts.all ?? allTracks.length) - folders.reduce((total, f) => total + folderCount(f.name), 0) }}</span></button>
               </div>
               <div class="rounded-lg border p-2">
                 <div class="flex items-center justify-between px-2 pb-1.5"><p class="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">收藏集</p><Button variant="ghost" size="sm" class="h-7 w-7 p-0" title="新建收藏集" :disabled="folderBusy" @click="openCreateFolderDialog"><Plus class="h-4 w-4" /></Button></div>
@@ -1002,10 +1008,10 @@ onActivated(() => {
               </Button>
               <span class="ml-auto text-xs text-muted-foreground">
                 <template v-if="view.kind === 'root'">
-                  共 {{ allTracks.length }} 首 · 启用 {{ enabledCount }}
+                  共 {{ pagination?.counts.all ?? allTracks.length }} 首 · 启用 {{ enabledCount }}
                 </template>
                 <template v-else>
-                  当前视图 {{ trackList.length }} / {{ allTracks.length }} 首 · 启用 {{ enabledCount }}（全库）
+                  当前视图 {{ pagination?.total ?? trackList.length }} / {{ pagination?.counts.all ?? allTracks.length }} 首 · 启用 {{ enabledCount }}（全库）
                 </template>
               </span>
             </div>
@@ -1037,7 +1043,7 @@ onActivated(() => {
               >
                 <Music class="h-4 w-4 text-muted-foreground" />
                 <span class="text-sm font-medium">全部音乐</span>
-                <span class="text-xs text-muted-foreground">{{ allTracks.length }} 首 · 含全部文件夹的曲目</span>
+                <span class="text-xs text-muted-foreground">{{ pagination?.counts.all ?? allTracks.length }} 首 · 含全部文件夹的曲目</span>
                 <ChevronRight class="ml-auto h-4 w-4 text-muted-foreground" />
               </button>
 
@@ -1350,6 +1356,7 @@ onActivated(() => {
               </TableBody>
             </Table>
 
+            <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / 20))" :total="pagination?.total ?? 0" :page-size="20" unit="首" @update:page="page = $event" />
             <p v-if="!trackList.length" class="text-sm text-muted-foreground">
               <template v-if="view.kind === 'folder'">
                 「{{ view.name }}」下没有曲目——点「批量上传」，或把 mp3 / wav / flac 直接拖入本卡片（文件将归属该文件夹）。
@@ -1361,7 +1368,7 @@ onActivated(() => {
             </p>
             </div>
           </div>
-          <div v-else-if="!loading" class="space-y-2 py-6 text-center">
+          <div v-else-if="!loading && !loadError" class="space-y-2 py-6 text-center">
             <p class="text-sm text-muted-foreground">音乐库为空——上传 mp3 / wav / flac 开始（也可直接拖入文件）。</p>
             <Button class="mx-auto" :disabled="uploading" @click="doUpload()">
               <Loader2 v-if="uploading" class="h-4 w-4 animate-spin" />

@@ -10,7 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Annotated
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,7 @@ from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_legacy_engine_tasks
 from ..platform.task_validation import is_safe_bgm_stem
+from ..services.list_paging import entry_states, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name
 from . import _common
 
@@ -100,7 +102,10 @@ def _segment_validated_stems(layout, stems: list[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 @router.get("/chapters")
-def list_chapters() -> dict:
+def list_chapters(page: Annotated[int | None, Query(ge=1)] = None,
+                  page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+                  q: str = "", filter: str = "all", keys_only: bool = False,
+                  ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
     """One row per ``02_split_text`` stem (sorted), joined with the 08_bgm
     caches and the disk facts the frontend badges need:
 
@@ -117,7 +122,11 @@ def list_chapters() -> dict:
     data = Bgm.load_assignments(layout)
     chapters = data.get("chapters") or {}
     rows = []
-    for stem in Bgm.list_chapter_stems(layout):
+    stems = [stem for stem in Bgm.list_chapter_stems(layout) if q.strip().casefold() in stem.casefold()]
+    total = len(stems)
+    if page is not None and filter == "all" and not keys_only:
+        stems = page_slice(stems, page, page_size)
+    for stem in stems:
         e = chapters.get(stem)
         e_out = None
         music_missing = False
@@ -194,6 +203,7 @@ def list_chapters() -> dict:
             "stem": stem,
             "display_name": chapter_display_name(stem, layout),
             "narration_exists": Bgm._find_narration(layout, stem) is not None,
+            "narration_filename": (narration.name if (narration := Bgm._find_narration(layout, stem)) else None),
             "mix_exists": (layout.bgm / f"{stem}.mp3").is_file(),
             "assignment": e_out,
             "music_missing": music_missing,
@@ -202,7 +212,22 @@ def list_chapters() -> dict:
             "segment_music_missing": segment_music_missing,
         })
     # 「llm」（章节级标签匹配）已下线：现网数据里的旧 mode 值读作 random。
-    return {"chapters": rows, "mode": "segment" if data.get("mode") == "segment" else "random"}
+    if page is not None:
+        states = entry_states(db, ctx, ["bgm.mix", "bgm.segment", "bgm.match"])
+        def row_state(r):
+            if states.get(r["stem"]) == "active": return "running"
+            if states.get(r["stem"]) == "failed" or r["music_missing"] or r["segment_music_missing"]: return "error"
+            if not r["narration_exists"]: return "blocked"
+            if r["mix_exists"]: return "done"
+            segment = data.get("mode") == "segment" or (r["assignment"] or {}).get("segment")
+            ready = bool(r["timeline"]) and not (r["segment_analysis"] or {}).get("stale") if segment else bool(r["assignment"])
+            return "ready" if ready else "pending"
+        if filter != "all":
+            rows = [r for r in rows if row_state(r) == filter]
+            total = len(rows)
+            if not keys_only: rows = page_slice(rows, page, page_size)
+    return {"chapters": rows, "mode": "segment" if data.get("mode") == "segment" else "random",
+            **({"pagination": page_meta(total, page, page_size)} if page is not None else {})}
 
 
 def _source_txt_base(layout) -> str:

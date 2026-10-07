@@ -6,12 +6,12 @@ import threading
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ..platform.platform_settings import settings
 from ..platform.database import SessionLocal, get_db
@@ -33,6 +33,9 @@ from ..services.admin_storage import (
 )
 
 
+
+from ..services.admin_lists import event_page
+from ..services.list_paging import page_meta
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -419,8 +422,23 @@ def get_runtime_settings(_: User = Depends(require_admin)) -> dict:
 
 
 @router.get("/users")
-def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
-    users = db.scalars(select(User).order_by(User.created_at.desc())).all()
+def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db),
+               page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+               search: str = "", role: str = "all", state: str = "all", sort: str = "default"):
+    statement = select(User)
+    if search.strip():
+        term = "%" + search.strip() + "%"
+        statement = statement.where(User.username.ilike(term) | User.display_name.ilike(term) | User.email.ilike(term))
+    if role != "all": statement = statement.where(User.role == role)
+    if state != "all": statement = statement.where(User.is_active.is_(state == "active"))
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    if sort == "name": statement = statement.order_by(User.username, User.id)
+    elif sort == "storage":
+        usage = select(ProjectFile.owner_id, func.sum(ProjectFile.size_bytes).label("size")).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.owner_id).subquery()
+        statement = statement.outerjoin(usage, usage.c.owner_id == User.id).order_by(func.coalesce(usage.c.size, 0).desc(), User.id)
+    else: statement = statement.order_by(User.created_at.desc(), User.id)
+    if page is not None: statement = statement.offset((page-1)*page_size).limit(page_size)
+    users = db.scalars(statement).all()
     projects = dict(db.execute(select(Project.owner_id, func.count()).where(Project.deleted_at.is_(None)).group_by(Project.owner_id)).all())
     last_seen = dict(db.execute(select(UserSession.user_id, func.max(UserSession.last_seen_at)).group_by(UserSession.user_id)).all())
     file_usage = {
@@ -432,19 +450,24 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
     }
     quota_accounts = {account.user_id: account for account in db.scalars(select(UserQuotaAccount)).all()}
     workspace_usage: dict[str, dict[str, int]] = {}
-    root = configured_storage_root(db)
-    workspace_rows = db.execute(
-        select(Project, User.id, User.username).join(User, User.id == Project.owner_id)
-        .where(Project.deleted_at.is_(None))
-    ).all()
-    for workspace, user_id, username in workspace_rows:
-        usage = workspace_usage.setdefault(user_id, {"storage_bytes": 0, "project_file_count": 0})
-        path = project_storage_path(root, username, workspace.id)
-        if path is not None:
-            measured = scan_project_directory(path)
-            usage["storage_bytes"] += measured["size_bytes"]
-            usage["project_file_count"] += measured["file_count"]
-    return [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name,
+    if page is not None:
+        # The paged list reports catalog counts, never walks audio workspaces.
+        workspace_usage = {user_id: {"storage_bytes": value["size_bytes"], "project_file_count": value["count"]}
+                           for user_id, value in file_usage.items()}
+    else:
+        root = configured_storage_root(db)
+        workspace_rows = db.execute(
+            select(Project, User.id, User.username).join(User, User.id == Project.owner_id)
+            .where(Project.deleted_at.is_(None), User.id.in_([u.id for u in users]))
+        ).all()
+        for workspace, user_id, username in workspace_rows:
+            usage = workspace_usage.setdefault(user_id, {"storage_bytes": 0, "project_file_count": 0})
+            path = project_storage_path(root, username, workspace.id)
+            if path is not None:
+                measured = scan_project_directory(path)
+                usage["storage_bytes"] += measured["size_bytes"]
+                usage["project_file_count"] += measured["file_count"]
+    items = [{"id": item.id, "email": item.email, "username": item.username, "display_name": item.display_name,
              "role": item.role, "is_active": item.is_active, "created_at": item.created_at.isoformat(),
              "last_seen_at": last_seen[item.id].isoformat() if item.id in last_seen else None,
              "project_count": projects.get(item.id, 0),
@@ -455,6 +478,8 @@ def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db)) 
              "available_units": quota_accounts[item.id].available_units if item.id in quota_accounts else 0,
              "reserved_units": quota_accounts[item.id].reserved_units if item.id in quota_accounts else 0,
              "consumed_units": quota_accounts[item.id].consumed_units if item.id in quota_accounts else 0} for item in users]
+
+    return {"items": items, "pagination": page_meta(total, page, page_size, {"all": total, "active_admins": db.scalar(select(func.count()).select_from(User).where(User.role == "admin", User.is_active.is_(True))) or 0})} if page is not None else items
 
 
 @router.patch("/users/{user_id}")
@@ -544,8 +569,11 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
 
 @router.get("/tasks")
 def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
+                   page: Annotated[int | None, Query(ge=1)] = None,
                    _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
-    query = select(Task)
+    query = select(Task).options(load_only(Task.id, Task.owner_id, Task.project_id, Task.task_type,
+        Task.status, Task.progress, Task.error_code, Task.error_message, Task.created_at, Task.updated_at,
+        Task.started_at, Task.finished_at, raiseload=True))
     status_groups = {
         "queued": ("pending", "queued", "retrying"),
         "running": ("running", "cancelling"),
@@ -561,13 +589,15 @@ def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
         term = f"%{search.strip()}%"
         query = query.where(Task.id.ilike(term) | Task.task_type.ilike(term) | Task.project_id.ilike(term) |
                             Task.owner_id.in_(select(User.id).where(User.username.ilike(term))))
-    rows = db.scalars(query.order_by(Task.created_at.desc()).limit(max(1, min(limit, 100)))).all()
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    size = max(1, min(limit, 100))
+    rows = db.scalars(query.order_by(Task.created_at.desc(), Task.id.desc()).offset(((page or 1)-1)*size).limit(size)).all()
     owners = {item.id: item.username for item in db.scalars(select(User)).all()}
     attempts = {}
     if rows:
         for attempt in db.scalars(select(TaskAttempt).where(TaskAttempt.task_id.in_([row.id for row in rows])).order_by(TaskAttempt.attempt_no.desc())).all():
             attempts.setdefault(attempt.task_id, attempt)
-    return [
+    items = [
         {
             "id": item.id,
             "owner_id": item.owner_id,
@@ -587,6 +617,9 @@ def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
         }
         for item in rows
     ]
+
+
+    return {"items": items, "pagination": page_meta(total, page, size)} if page is not None else items
 
 
 @router.get("/task-metrics")
@@ -892,8 +925,11 @@ def performance(_: User = Depends(require_admin), db: Session = Depends(get_db))
 
 @router.get("/events")
 def admin_events(level: str = "all", module: str = "all", search: str = "", limit: int = 50, since_hours: int = 24,
+                 page: Annotated[int | None, Query(ge=1)] = None,
                  _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict]:
     limit = max(1, min(limit, 100))
+    if page is not None:
+        return event_page(db, page, limit, level, module, search, since_hours, api_snapshot(window_seconds=min(300, max(60, since_hours * 60)))["recent_errors"])
     cutoff = utcnow() - timedelta(hours=max(1, min(since_hours, 24 * 30)))
     task_rows = db.scalars(select(Task).where(Task.status.in_(("failed", "timeout")), Task.updated_at >= cutoff).order_by(Task.updated_at.desc()).limit(100)).all()
     audit_rows = db.scalars(select(AuditLog).where(AuditLog.created_at >= cutoff).order_by(AuditLog.created_at.desc()).limit(100)).all()

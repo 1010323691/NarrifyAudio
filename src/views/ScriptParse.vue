@@ -37,7 +37,7 @@ const { projectSet } = useProjectGate()
 
 const {
   state, stateError, loading, submitting,
-  rows, filteredRows, pagedRows, pageCount, page, pageSize,
+  rows, filteredRows, filteredTotal, pagedRows, pageCount, page, pageSize,
   filter, query, chapterNumPad,
   total, doneCount, pendingCount, busy,
   selected, selectedCount, selectedDoneCount, selectedStaleCount,
@@ -254,7 +254,7 @@ onBeforeUnmount(() => {
               class="border-t px-4 py-2"
               :page="page"
               :page-count="pageCount"
-              :total="filteredRows.length"
+              :total="filteredTotal"
               :page-size="pageSize"
               :page-size-options="[10, 20, 50]"
               @update:page="(p: number) => (page = p)"

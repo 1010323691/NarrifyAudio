@@ -38,13 +38,13 @@ function harness(listVoices) {
       const code = ts.transpileModule(readFileSync(new URL(`../src/composables/${base}.ts`, import.meta.url), 'utf8'), {
         compilerOptions: { module: ts.ModuleKind.CommonJS },
       }).outputText
-      runInNewContext(code, { module, exports: module.exports, DOMException, require: resolve })
+      runInNewContext(code, { module, exports: module.exports, DOMException, AbortController, require: resolve })
       cache.set(base, module.exports)
     }
     return cache.get(base)
   }
   function resolve(name) {
-    if ((name.includes('useWorkbench') || name.includes('useLabelDerivedTasks'))) return loadComposable(name)
+    if (((name.includes('useListPage') || name.includes('useWorkbench')) || name.includes('useLabelDerivedTasks'))) return loadComposable(name)
     return dependencies(name)
   }
   function dependencies(name) {
@@ -56,9 +56,9 @@ function harness(listVoices) {
   }
   const module = { exports: {} }
   runInNewContext(compiled, {
-    module, exports: module.exports, document, setTimeout, clearTimeout,
+    module, exports: module.exports, AbortController, document, setTimeout, clearTimeout,
     require(name) {
-      if ((name.includes('useWorkbench') || name.includes('useLabelDerivedTasks'))) return loadComposable(name)
+      if (((name.includes('useListPage') || name.includes('useWorkbench')) || name.includes('useLabelDerivedTasks'))) return loadComposable(name)
       if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onBeforeUnmount() {} }
       if (name === 'vue-router') return { useRouter: () => ({ push() {} }) }
       if (name === '@/api/tts') return api

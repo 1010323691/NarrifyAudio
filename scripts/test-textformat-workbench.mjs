@@ -495,7 +495,9 @@ test('manual state refresh explicitly requests a read-only server snapshot', asy
     },
   })
   assert.equal(await wb.refreshState({ recover: false }), true)
-  assert.deepEqual(readOptions, { recover: false })
+  assert.equal(readOptions.recover, false)
+  assert.deepEqual(JSON.parse(JSON.stringify(readOptions.list)), { page: 1, page_size: 10, q: '', filter: 'all' })
+  assert.ok(readOptions.signal)
   assert.equal(wb.nextTask.value.progress, 30)
   assert.equal(calls.post, 0)
   assert.equal(calls.wait, 0)

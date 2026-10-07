@@ -1,3 +1,4 @@
+import { listQuery, type ListPagination } from '@/api/listPaging'
 import { API_BASE, http } from './client'
 
 export interface ResourceCategory {
@@ -41,6 +42,7 @@ export interface ResourceExport {
   available: boolean
 }
 export interface ResourceOverview {
+  pagination?: ListPagination
   projects: ResourceProject[]
   categories: ResourceCategory[]
   storage: { project_bytes: number; project_complete: boolean; trash_bytes: number; trash_complete: boolean; export_bytes: number }
@@ -117,8 +119,11 @@ function queryString(params: Record<string, unknown>): string {
   }
   return query.toString()
 }
-export function getResourceOverview(options?: RequestInit): Promise<ResourceOverview> {
-  return http.get('/api/v1/resources', options)
+export function getResourceOverview(options?: RequestInit, query?: { page: number; page_size: number; q: string; sort: string; project_id?: string }): Promise<ResourceOverview> {
+  return http.get(`/api/v1/resources?${listQuery(undefined, query)}`, options)
+}
+export function getResourceProjectIds(options?: RequestInit): Promise<{ project_ids: string[] }> {
+  return http.get('/api/v1/resources?keys_only=true', options)
 }
 export function getResourceEntries(query: ResourceQuery, options?: RequestInit): Promise<ResourceEntries> {
   return http.get(`/api/v1/resources/entries?${queryString({ ...query })}`, options)

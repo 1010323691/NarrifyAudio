@@ -16,13 +16,13 @@ function harness(overrides = {}, initialTab = 'users') {
   let poll = () => {}
   const module = { exports: {} }
   runInNewContext(compiled, {
-    module, exports: module.exports, setInterval(fn) { poll = fn; return 1 }, clearInterval() {}, document: { visibilityState: 'visible' },
+    module, exports: module.exports, AbortController, setInterval(fn) { poll = fn; return 1 }, clearInterval() {}, document: { visibilityState: 'visible' },
     require(name) {
       if (name === 'vue') return { ...vue, onMounted(fn) { mounted.push(fn) }, onActivated() {}, onDeactivated(fn) { deactivated.push(fn) }, onBeforeUnmount() {} }
       if (name === 'vue-router') return { useRoute: () => route }
       if (name === '@/stores/clientDisplay') return { useClientDisplayStore: () => ({ load: async () => {} }) }
       if (name === '@/components/ui/toast') return { useToast: () => ({ push() {} }) }
-      if (name === '@/api/admin') return { listUsers: async () => [], getStorageSettings: async () => ({ root_path: '' }), getQuotaSettings: async () => ({ initial_units: 0 }), getRuntimeSettings: async () => ({}), ...overrides }
+      if (name === '@/api/admin') return { userPage: async (...args) => ({ items: await (overrides.listUsers ?? (async () => []))(...args) }), listUsers: async () => [], getStorageSettings: async () => ({ root_path: '' }), getQuotaSettings: async () => ({ initial_units: 0 }), getRuntimeSettings: async () => ({}), ...overrides }
       return { default: {} }
     },
   })

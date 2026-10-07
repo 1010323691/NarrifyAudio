@@ -49,7 +49,7 @@ export const useProjectStore = defineStore('project', () => {
       try {
         const [activeResult, projectsResult] = await Promise.allSettled([
           projectApi.getActiveProject(),
-          projectApi.listProjects(),
+          projectApi.listProjects({ page: 1, page_size: 12 }),
         ])
         if (requestGeneration !== generation) return current.value
         let scopeChanged = false

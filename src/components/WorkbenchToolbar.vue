@@ -5,7 +5,7 @@ import { Search, RefreshCw } from 'lucide-vue-next'
 defineProps<{
   query: string
   filter: string
-  filters: { key: string; label: string; count: number }[]
+  filters: { key: string; label: string; count?: number }[]
   placeholder?: string
   loading?: boolean
   refreshDisabled?: boolean

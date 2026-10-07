@@ -11,7 +11,7 @@ import { uploadFile } from '@/api/files'
 import { useProjectStore } from '@/stores/project'
 import { useAuthStore } from '@/stores/auth'
 import { formatNumber } from '@/utils/format'
-import { stageLabel, chapterBriefLabel, chapterNumWidth, reasonLabel } from '@/utils/bookLabels'
+import { stageLabel, chapterBriefLabel, reasonLabel } from '@/utils/bookLabels'
 import type { TextToggles } from '@/types'
 import type { SplitMode } from '@/api/textFormat'
 
@@ -39,8 +39,8 @@ const { push: toast } = useToast()
 
 // Top-level bindings: template refs must be unwrapped at the setup level.
 const {
-  phase, flow, version, nextTask, activeTasks, loading, pipelineProgress,
-  filteredChapters, pagedChapters, pageCount, page, pageSize,
+  phase, flow, version, nextTask, activeTasks, loading, stateError, pipelineProgress,
+  filteredChapters, filteredTotal, chapterTotal, adjustedTotal, numPad, pagedChapters, pageCount, page, pageSize,
   filter, query, reasonFilter, sameOrigNum, reasonOptions,
   selectedKey, marksBusy, preview,
   pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
@@ -384,11 +384,11 @@ const detailHasNext = computed(() => {
   return idx >= 0 && idx < filteredChapters.value.length - 1
 })
 const canReadVersion = computed(() => version.value?.version_status === 'current')
-const adjustedCount = computed(() => version.value?.chapters.filter((c) => c.adjusted).length ?? 0)
+const adjustedCount = adjustedTotal
 const chooseLabel = computed(() => uploading.value ? '正在上传…' : '添加源文档')
 
 // 章节号补齐位数：以最大章节号位数为标准（339 章 → 第001章）
-const chapterNumPad = computed(() => chapterNumWidth(version.value?.chapters ?? []))
+const chapterNumPad = numPad
 
 // 已核对 key 集合：表格「核对状态」徽标随标记实时变化（pending 是后端静态字段）。
 const markedKeySet = computed(() => new Set(version.value?.review_marks ?? []))
@@ -437,6 +437,7 @@ onBeforeUnmount(() => {
 
     <div class="workbench-controls" tabindex="0" role="region" aria-label="制作条件与流程">
       <ProjectGateAlert />
+      <Alert v-if="stateError" variant="destructive">{{ stateError }} <Button variant="outline" size="sm" @click="refreshChapters">重试读取</Button></Alert>
 
       <!-- 文件栏：ready 阶段并入结果摘要行，独立行只在其余阶段展示，省出的高度留给章节列表 -->
       <WorkbenchContextBar v-if="!(phase === 'ready' && version)">
@@ -476,7 +477,7 @@ onBeforeUnmount(() => {
         </template>
         <template #metrics>
           <div class="workbench-context-metric"><strong>{{ formatNumber(version.total_chars) }}</strong>总字数</div>
-          <div class="workbench-context-metric"><strong>{{ version.chapters.length }}</strong>最终章节</div>
+          <div class="workbench-context-metric"><strong>{{ chapterTotal }}</strong>最终章节</div>
           <div class="workbench-context-metric"><strong class="!text-amber-600 dark:!text-amber-400">{{ pendingCount }}</strong>待核对</div>
           <div class="workbench-context-metric"><strong class="!text-emerald-600 dark:!text-emerald-400">{{ markedCount }}</strong>已核对</div>
         </template>
@@ -542,7 +543,7 @@ onBeforeUnmount(() => {
               :filter="sameOrigNum == null ? filter : ''"
               @update:filter="filter = $event as typeof filter"
               placeholder="搜索章节号或标题"
-              :filters="[{ key: 'all', label: '全部', count: version.chapters.length }, { key: 'pending', label: '待核对', count: pendingCount }, { key: 'adjusted', label: '已调整', count: adjustedCount }]"
+              :filters="[{ key: 'all', label: '全部', count: chapterTotal }, { key: 'pending', label: '待核对', count: pendingCount }, { key: 'adjusted', label: '已调整', count: adjustedCount }]"
               :loading="loading || refreshing"
               :refresh-disabled="!projectSet"
               @refresh="refreshChapters"
@@ -583,7 +584,7 @@ onBeforeUnmount(() => {
               class="border-t px-4 py-2"
               :page="page"
               :page-count="pageCount"
-              :total="filteredChapters.length"
+              :total="filteredTotal"
               :page-size="pageSize"
               :page-size-options="[10, 20, 50]"
               @update:page="(p: number) => (page = p)"

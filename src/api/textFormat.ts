@@ -4,6 +4,8 @@
  * All state lives in the backend (TextFormatFlow + task records); this client
  * only submits user intents (start/continue/retry marks) and reads.
  */
+import type { ListPagination, ListQuery } from '@/api/listPaging'
+import { listQuery } from '@/api/listPaging'
 import { API_BASE, http } from './client'
 
 export interface WorkbenchMatter {
@@ -18,6 +20,8 @@ export interface WorkbenchMatter {
 }
 
 export interface WorkbenchChapter {
+  file?: { file_id?: string; name: string; chars: number } | null
+  dup_info?: { count: number; index: number } | null
   key: string | null
   seq: number
   num: number | null
@@ -115,6 +119,7 @@ export interface WorkbenchNextTask {
 }
 
 export interface WorkbenchState {
+  pagination?: ListPagination
   flow: WorkbenchFlow | null
   version: WorkbenchVersion | null
   next_task: WorkbenchNextTask | null
@@ -144,12 +149,14 @@ export interface FlowRequest {
 
 const base = (projectId: string) => `/api/v1/projects/${projectId}/text-format`
 
-export function getWorkbenchState(projectId: string, options?: { recover?: boolean }): Promise<WorkbenchState> {
-  return http.get<WorkbenchState>(base(projectId) + '/state' + (options?.recover === false ? '?recover=false' : ''))
+export function getWorkbenchState(projectId: string, options?: { recover?: boolean; list?: ListQuery; reason?: string; origNum?: number | null; signal?: AbortSignal }): Promise<WorkbenchState> {
+  const query = options?.list ? listQuery(options.list, { reason: options.reason ?? '', ...(options.origNum != null ? { orig_num: String(options.origNum) } : {}) }) : ''
+  const params = [query, options?.recover === false ? 'recover=false' : ''].filter(Boolean).join('&')
+  return http.get<WorkbenchState>(base(projectId) + '/state' + (params ? `?${params}` : ''), { signal: options?.signal })
 }
 
-export function postWorkbenchFlow(projectId: string, body: FlowRequest): Promise<WorkbenchState> {
-  return http.post<WorkbenchState>(base(projectId) + '/flow', body)
+export function postWorkbenchFlow(projectId: string, body: FlowRequest, list?: ListQuery): Promise<WorkbenchState> {
+  return http.post<WorkbenchState>(base(projectId) + '/flow' + (list ? `?${listQuery(list)}` : ''), body)
 }
 
 export function postReviewMark(projectId: string, taskId: string, chapterKey: string): Promise<{ chapter_key: string }> {

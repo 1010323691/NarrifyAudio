@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 
 import anyio
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -20,7 +20,7 @@ from ..platform.security import session_is_valid_for_user
 from ..platform.task_identity import one_row_per_entry
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.task_submission import task_dict
-from ..services import task_views
+from ..services import task_center, task_views
 from .task_operations import (
     TaskBatchControl,
     TaskSubmit,
@@ -184,6 +184,29 @@ def stream_user_tasks(
     )
 
 
+@router.get("/center/summary")
+def task_center_summary(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    return task_center.summary(db, user.id)
+
+
+@router.get("/center/groups")
+def task_center_groups(category: str, page: int = Query(1, ge=1),
+                       user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return task_center.groups(db, user.id, category, page)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/center/items")
+def task_center_items(category: str, project_id: str, filter: str = "all", page: int = Query(1, ge=1),
+                      user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return task_center.items(db, user.id, category, project_id, filter, page)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @router.get("/{task_id}")
 def get_task(task_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_id == user.id))
@@ -278,6 +301,6 @@ def retry_task(task_id: str, user: User = Depends(require_csrf), db: Session = D
 
 @router.post("/batch-control")
 def batch_control_tasks(
-    payload: TaskBatchControl, user: User = Depends(require_csrf), db: Session = Depends(get_db),
+    payload: TaskBatchControl, compact: bool = False, user: User = Depends(require_csrf), db: Session = Depends(get_db),
 ) -> dict:
-    return batch_control_tasks_for_user(payload, user=user, db=db)
+    return batch_control_tasks_for_user(payload, user=user, db=db, compact=compact)

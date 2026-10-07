@@ -1,3 +1,4 @@
+import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 import { http } from './client'
 import type {
   TTSStatus,
@@ -42,9 +43,16 @@ export function generateVoiceCandidates(opts: GenerateVoiceCandidatesOptions = {
 }
 
 /** 角色配音：detected characters + voice-config state + preview paths (for a given script). */
-export function listVoices(script?: string): Promise<VoicesListResult> {
-  const q = script ? `?script=${encodeURIComponent(script)}` : ''
-  return http.get<VoicesListResult>(`/api/tts/voices${q}`)
+export function listVoices(script?: string, options?: ListQuery, signal?: AbortSignal, summaryOnly = false, keysOnly = false): Promise<VoicesListResult & { pagination?: ListPagination }> {
+  return http.get(`/api/tts/voices?${listQuery(options, { script, summary_only: summaryOnly || undefined, keys_only: keysOnly || undefined })}`, { signal })
+}
+export function batchList(options: ListQuery, signal?: AbortSignal, keysOnly = false, selected: string[] = []): Promise<BatchStatusFiles & { pagination?: ListPagination; missing_selected?: string[] }> {
+  const url = `/api/tts/batch-list?${listQuery(options, { keys_only: keysOnly || undefined })}`
+  return selected.length ? http.post(url, selected, { signal }) : http.get(url, { signal })
+}
+export function mergeList(options: ListQuery, signal?: AbortSignal, keysOnly = false, selected: string[] = []): Promise<MergeStatusPackages & { pagination?: ListPagination; missing_selected?: string[] }> {
+  const url = `/api/tts/merge-list?${listQuery(options, { keys_only: keysOnly || undefined })}`
+  return selected.length ? http.post(url, selected, { signal }) : http.get(url, { signal })
 }
 
 /** 角色配音：记录用户对某角色克隆候选的选择（单选一个为最终音色；audioId 为 null =

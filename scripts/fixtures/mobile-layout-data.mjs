@@ -36,6 +36,10 @@ export function layoutResponse(path, role) {
   if(path==='/api/auth/me') return {user:{id:role,role,username:'mobile-test',display_name:'手机测试账户',email:'test@example.invalid',is_active:true}};
   if(path==='/api/config') return config;
   if(path==='/api/v1/projects/active')return {set:true,exists:true,is_default:false,project_id:'demo',project_name:project.name,path:'',dirs:{}};
+  const taskCenterCounts = {task_count:24,succeeded_count:24,active_count:0,pausable_count:0,resumable_count:0};
+  if(path==='/api/v1/tasks/center/summary')return {items:[{category:'script',task_count:24,project_count:1,active_count:0}]};
+  if(path==='/api/v1/tasks/center/groups')return {items:[{...taskCenterCounts,project_id:'demo',project_name:project.name,latest:1791244800,latest_status:'succeeded'}],total:1,page:1,page_size:5};
+  if(path==='/api/v1/tasks/center/items')return {items:Array.from({length:24},(_,i)=>({id:`task-${i}`,project_id:'demo',project_name:project.name,task_type:'script.parse',label:`第${i+1}章 ${name}`,status:'succeeded',progress:1,current:'',error:'',created:1791244800,created_at:project.created_at})),counts:taskCenterCounts,total:24,page:1,page_size:50};
   if(path==='/api/v1/tasks/history')return {items:[{id:'task',project_id:'demo',project_name:project.name,task_type:'script.parse',label:name,status:'succeeded',progress:1,current:'',error:'',created:1791244800,created_at:project.created_at}],next_cursor:null};
   if(path==='/api/v1/projects')return [project];
   if(path==='/api/v1/projects/trash')return [{...project,deleted_at:project.created_at,expires_at:'2026-11-01T00:00:00Z'}];
@@ -44,8 +48,8 @@ export function layoutResponse(path, role) {
   if(path.endsWith('/script-parse/state'))return {source:{mode:'version',version},text_format_busy:false,files:version.files.map(f=>({name:f.name,input:{name:f.name,sha256:'hash',size:3000},latest_task:null,result:null,result_status:null}))};
   if(path.startsWith('/api/files/list/'))return {path:'',items:[{name:name+(path.includes('03_parsed')?'.json':path.includes('audio')?'.mp3':'.txt'),is_dir:path.includes('05_audio'),size:3000}]};
   if(path.startsWith('/api/tts/preview/chapter/'))return {name:name+'.json',package:name,lines:Array.from({length:12},(_,index)=>({index,speaker:'长角色名称',text:'用于检查手机端台词编辑区域的长文本。'.repeat(4),instruct:'平静',audio:'',audio_mtime_ns:null,duration:null,ok:false,reason:'',staged:null,start_offset:null})),chapter_audio:null,timeline_exists:false,downstream:{merged:false,mixed:false,timeline:false,segment_stale:false}};
-  if(path==='/api/tts/batch-status')return {files:[{name:name+'.json',total:20,completed:10,complete:false,speakers:3,ready:3,missing:[]}]};
-  if(path==='/api/tts/merge-status')return {packages:[{name,total:20,completed:10,remaining:10,complete:false}]};
+  if(path==='/api/tts/batch-status'||path==='/api/tts/batch-list')return {files:[{name:name+'.json',total:20,completed:10,complete:false,speakers:3,ready:3,missing:[]}]};
+  if(path==='/api/tts/merge-status'||path==='/api/tts/merge-list')return {packages:[{name,total:20,completed:10,remaining:10,complete:false}]};
   if(path==='/api/tts/voices')return {has_script:true,script_path:'',voice_config_path:'',speakers:Array.from({length:24},(_,i)=>({name:'长角色名称'+i,line_count:30,status:'pending',foundation_status:'none',clone_status:'none',type:'',alias_of:'',gender:'male',description:'角色描述',preview:'',candidates:[],selected_audio_id:null}))};
   if(path==='/api/tts/status')return {implemented:true,ready:true,message:''};
   if(path==='/api/bgm/chapters')return {chapters:[{stem:name,narration_exists:true,mix_exists:false,assignment:null,music_missing:false,segment_analysis:null,timeline:null,segment_music_missing:false}],mode:'random'};

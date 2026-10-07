@@ -1,13 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onActivated, onDeactivated, onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, RefreshCw, Search, WalletCards } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
-import { getQuota, listQuotaTransactions, type QuotaBalance, type QuotaTransaction } from '@/api/quota'
-import { getProjectSummary, listProjects } from '@/api/project'
-import { listProjectFiles } from '@/api/projectFiles'
+import { getQuota, quotaTransactionPage, type QuotaBalance, type QuotaTransaction } from '@/api/quota'
+import { useListPage } from '@/composables/useListPage'
 import { formatBytes as formatBytesBase, type BytesFormat } from '@/utils/format'
 
 const balance = ref<QuotaBalance | null>(null)
@@ -20,34 +19,29 @@ const search = ref('')
 const transactionFilter = ref('all')
 const page = ref(1)
 const pageSize = 20
+let balanceAbort: AbortController | null = null
+const listPage = useListPage(loadTransactions, () => { balanceAbort?.abort(); transactions.value = []; balance.value = null; dailyAmounts.value = []; storageBytes.value = null })
+const pagination = listPage.pagination
+const dailyAmounts = ref<number[]>([])
 
 const dailyUsage = computed(() => {
   const today = new Date()
   const days = Array.from({ length: 7 }, (_, offset) => {
     const date = new Date(today)
     date.setDate(today.getDate() - (6 - offset))
-    const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
-    const amount = transactions.value.filter((row) => ['consume', 'settle'].includes(row.kind) && (() => {
-      const created = new Date(row.created_at)
-      return `${created.getFullYear()}-${created.getMonth()}-${created.getDate()}` === key
-    })()).reduce((sum, row) => sum + Math.abs(row.amount), 0)
+    const amount = dailyAmounts.value[offset] ?? 0
     return { label: date.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }), amount }
   })
   const max = Math.max(1, ...days.map((day) => day.amount))
   return days.map((day) => ({ ...day, height: day.amount ? Math.max(6, day.amount / max * 100) : 0 }))
 })
-const hasUsage = computed(() => transactions.value.some((row) => ['consume', 'settle'].includes(row.kind)))
-const filteredTransactions = computed(() => transactions.value.filter((row) => {
-  const matchesType = transactionFilter.value === 'all'
-    || (transactionFilter.value === 'consume' ? ['consume', 'settle'].includes(row.kind) : row.kind === transactionFilter.value)
-  const text = `${row.note || ''} ${row.task_id || ''} ${row.operation_type || ''} ${row.resource_type || ''}`.toLocaleLowerCase()
-  return matchesType && (!search.value.trim() || text.includes(search.value.trim().toLocaleLowerCase()))
-}))
-const pagedTransactions = computed(() => filteredTransactions.value.slice((page.value - 1) * pageSize, page.value * pageSize))
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredTransactions.value.length / pageSize)))
-watch([search, transactionFilter], () => { page.value = 1 })
+const hasUsage = computed(() => dailyAmounts.value.some(amount => amount > 0))
+const transactionTotal = computed(() => pagination.value?.total ?? 0)
+const pagedTransactions = computed(() => transactions.value)
+const pageCount = computed(() => Math.max(1, Math.ceil(transactionTotal.value / pageSize)))
+watch([search, transactionFilter], () => { page.value = 1; void loadTransactions() })
+watch(page, () => { void loadTransactions() })
 
-// 本页大小口径：未采集显示占位文案，零/负值统一 0 B，KB 及以上 1 位小数
 const USAGE_BYTES: BytesFormat = { emptyText: '未采集', lowRange: 'clamp', decimals: 'always-one' }
 function formatBytes(value: number | null) {
   return formatBytesBase(value, USAGE_BYTES)
@@ -62,32 +56,31 @@ function formatDate(value: string) {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
 }
 
+async function loadTransactions() {
+  const signal = listPage.begin()
+  try {
+    const response = await quotaTransactionPage({ page: page.value, page_size: pageSize, q: search.value, filter: transactionFilter.value }, signal)
+    if (signal.aborted) return
+    transactions.value = response.items; listPage.received(response.pagination, page)
+    dailyAmounts.value = response.daily; storageBytes.value = response.registered_storage_bytes
+  } catch (e: any) { if (!signal.aborted) error.value = e?.message || '使用记录暂时无法读取。' }
+}
 async function load() {
-  loading.value = !balance.value
-  refreshing.value = true
-  error.value = ''
-  const [balanceResult, transactionResult, projectsResult] = await Promise.allSettled([
-    getQuota(), listQuotaTransactions(), listProjects(),
+  balanceAbort?.abort()
+  balanceAbort = new AbortController()
+  const signal = balanceAbort.signal
+  loading.value = !balance.value; refreshing.value = true; error.value = ''
+  await Promise.allSettled([
+    getQuota(signal).then(value => { if (!signal.aborted) { balance.value = value; loading.value = false } }).catch(e => { if (!signal.aborted) error.value = e.message }),
+    loadTransactions(),
   ])
-  if (balanceResult.status === 'fulfilled') balance.value = balanceResult.value
-  else error.value = balanceResult.reason?.message || '额度暂时无法读取。'
-  if (transactionResult.status === 'fulfilled') transactions.value = transactionResult.value
-  else if (!error.value) error.value = transactionResult.reason?.message || '使用记录暂时无法读取。'
-  if (projectsResult.status === 'fulfilled') {
-    const usage = await Promise.all(projectsResult.value.map(async (project) => {
-      try { return (await getProjectSummary(project.id)).size_bytes }
-      catch {
-        try { return (await listProjectFiles(project.id)).reduce((sum, file) => sum + file.size_bytes, 0) }
-        catch { return null }
-      }
-    }))
-    storageBytes.value = usage.every((value) => value !== null) ? usage.reduce<number>((sum, value) => sum + (value || 0), 0) : null
-  } else storageBytes.value = null
-  refreshing.value = false
-  loading.value = false
+  if (!signal.aborted) { loading.value = false; refreshing.value = false }
 }
 
 onMounted(load)
+onActivated(load)
+onDeactivated(() => balanceAbort?.abort())
+onBeforeUnmount(() => balanceAbort?.abort())
 </script>
 
 <template>
@@ -111,7 +104,7 @@ onMounted(load)
         <Card class="usage-card"><span>可用额度</span><strong>{{ loading ? '…' : balance?.available_units ?? '…' }}</strong><small>LLM 与 TTS 实际调用计量</small></Card>
         <Card class="usage-card"><span>预留额度</span><strong>{{ loading ? '…' : balance?.reserved_units ?? '…' }}</strong><small>正在运行或排队的任务</small></Card>
         <Card class="usage-card"><span>累计消耗</span><strong>{{ loading ? '…' : balance?.consumed_units ?? '…' }}</strong><small>已记录的 LLM 与 TTS 实际处理量</small></Card>
-        <Card class="usage-card"><span>项目存储</span><strong>{{ loading ? '…' : formatBytes(storageBytes) }}</strong><small>只统计本人项目</small></Card>
+        <Card class="usage-card"><span>项目存储</span><strong>{{ loading ? '…' : formatBytes(storageBytes) }}</strong><small>本人项目已登记文件</small></Card>
       </section>
 
       <Card class="usage-note"><strong>用量口径</strong><p>LLM 按最终有效输出量扣减；TTS 按实际输入内容预留，并对成功合成的部分扣减、退回未执行部分。Prompt、Token、请求次数和音频时长不计费。</p></Card>
@@ -129,7 +122,7 @@ onMounted(load)
 
       <section class="usage-section">
         <div class="section-heading usage-transaction-heading">
-          <div><h2>额度明细</h2><span class="muted">最近 {{ transactions.length }} 条记录</span></div>
+          <div><h2>额度明细</h2><span class="muted">共 {{ transactionTotal }} 条记录</span></div>
           <div class="usage-filters">
             <label class="usage-search"><Search class="h-4 w-4" /><input v-model="search" aria-label="搜索额度明细" placeholder="搜索说明、任务编号或模型" /></label>
             <select v-model="transactionFilter" aria-label="筛选额度明细类型"><option value="all">全部类型</option><option value="consume">额度消耗</option><option value="reserve">额度预留</option><option value="release">额度退回</option><option value="admin_adjust">额度调整</option></select>
@@ -138,7 +131,7 @@ onMounted(load)
         <Card v-if="loading" class="usage-empty">正在读取…</Card>
         <Card v-else-if="pagedTransactions.length" class="usage-table-card"><div class="usage-table"><table class="workbench-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>额度</th><th>可用余额</th></tr></thead>
           <tbody><tr v-for="row in pagedTransactions" :key="row.id"><td>{{ formatDate(row.created_at) }}</td><td>{{ row.resource_type ? `${row.operation_type || '模型调用'}（${row.resource_type}）` : transactionLabel(row.kind) }}</td><td>{{ row.resource_type === 'LLM' ? '模型输出' : row.resource_type === 'TTS' ? '合成输入' : row.note || row.task_id || '—' }}</td><td>{{ ['consume', 'settle'].includes(row.kind) ? `-${row.char_count ?? Math.abs(row.amount)}` : `${row.amount > 0 ? '+' : ''}${row.amount}` }}</td><td>{{ row.available_after ?? '—' }}</td></tr></tbody></table></div>
-          <div class="usage-pagination"><span>第 {{ (page - 1) * pageSize + 1 }}–{{ Math.min(page * pageSize, filteredTransactions.length) }} 条，共 {{ filteredTransactions.length }} 条</span><div><Button size="sm" variant="outline" :disabled="page <= 1" aria-label="上一页" @click="page--"><ChevronLeft class="h-4 w-4" /></Button><span>{{ page }} / {{ pageCount }}</span><Button size="sm" variant="outline" :disabled="page >= pageCount" aria-label="下一页" @click="page++"><ChevronRight class="h-4 w-4" /></Button></div></div>
+          <div class="usage-pagination"><span>第 {{ (page - 1) * pageSize + 1 }}–{{ Math.min(page * pageSize, transactionTotal) }} 条，共 {{ transactionTotal }} 条</span><div><Button size="sm" variant="outline" :disabled="page <= 1" aria-label="上一页" @click="page--"><ChevronLeft class="h-4 w-4" /></Button><span>{{ page }} / {{ pageCount }}</span><Button size="sm" variant="outline" :disabled="page >= pageCount" aria-label="下一页" @click="page++"><ChevronRight class="h-4 w-4" /></Button></div></div>
         </Card>
         <Card v-else class="usage-empty">{{ transactions.length ? '没有符合筛选条件的记录。' : '暂无额度明细。开始处理任务后，记录会显示在这里。' }}</Card>
       </section>

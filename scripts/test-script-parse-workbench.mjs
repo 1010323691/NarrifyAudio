@@ -95,12 +95,13 @@ function harness(overrides = {}, extraGlobals = {}) {
 /** 搭台：project（真实 store）+ task store（可脚本化的桩）+ script api（可脚本化的桩）。
  *  `config` 由 getConfig 桩直接给出——setCurrent 会异步触发 settings.load()，
  *  手改 settings.config 会被那次加载覆盖（与真实「配置随工程」行为对齐）。 */
-async function setup({ stateFor, run, config, fetchImpl } = {}) {
+async function setup({ stateFor, run, config, fetchImpl, selection } = {}) {
   const calls = { state: 0, run: 0, cancel: 0, patch: 0 }
   const toasts = []
   const tasks = reactive({ projectTasks: [], refresh: async () => {}, control: async () => {}, bindProject: () => {} })
   const api = {
     '@/api/script': {
+      getParseSelection: async () => ({ items: selection ?? [] }),
       getScriptParseState: async (pid) => {
         calls.state += 1
         if (stateFor) return stateFor(pid, calls.state)
@@ -488,4 +489,24 @@ test('filtered selection includes completed chapters only when they match the se
   wb.filter.value = 'pending'
   wb.selectFiltered()
   assert.deepEqual(Object.keys(wb.selected.value), ['002.txt'])
+})
+
+
+test('a ten-row parse page still submits all 125 explicitly selected chapters', async () => {
+  const files = Array.from({ length: 125 }, (_, i) => ({ name: `chapter-${i}.txt`, input: { sha256: `sha-${i}` }, latest_task: null, result: null, result_status: null }))
+  const visible = stateV(files.slice(0, 10))
+  visible.pagination = { total: 125, page: 1, page_size: 10, counts: { all: 125 } }
+  let submitted = []
+  const { wb } = await setup({
+    stateFor: async () => visible, selection: files,
+    config: { llm: { model_name: 'test-model' } },
+    run: async (pid, targets) => { submitted = targets; return { task_ids: [], files: [] } },
+  })
+  await wb.refreshState()
+  assert.equal(wb.rows.value.length, 10)
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 125)
+  assert.equal(await wb.startParse(), true)
+  assert.deepEqual(Array.from(submitted, row => row.name), files.map(row => row.name))
 })

@@ -1,3 +1,4 @@
+import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 // Music library API (全局音乐库；后端 /api/music)。
 // 瘦客户端：只做 HTTP 封装，无处理逻辑。
 
@@ -13,8 +14,11 @@ import type {
 } from '@/types'
 
 /** The full index (tag registry + all tracks). */
-export function getLibrary(): Promise<MusicLibrary> {
-  return http.get<MusicLibrary>('/api/music/library')
+export function getLibrary(options?: Partial<ListQuery>, signal?: AbortSignal, extra: { folder?: string; tag?: string; enabled_only?: boolean } = {}): Promise<MusicLibrary & { pagination?: ListPagination; tag_counts?: Record<string, Record<string, number>> }> {
+  return http.get(`/api/music/library?${listQuery(options, extra)}`, { signal })
+}
+export function getMusicSelection(options: Partial<ListQuery>, extra: { folder?: string; tag?: string }, signal?: AbortSignal): Promise<{ names: string[]; tracks: Record<string, MusicTrack>; suggestions: MusicLibrary['suggestions'] }> {
+  return http.get(`/api/music/library?${listQuery(options, { ...extra, keys_only: true })}`, { signal })
 }
 
 /** Preview (audio) URL for a library track — the library is NOT served via the

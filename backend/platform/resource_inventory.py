@@ -146,14 +146,24 @@ def source_version(db: Session, owner_id: str, project_id: str) -> str:
     return f"{project.updated_at.isoformat() if project else ''}:{task.id if task else ''}:{task.updated_at.isoformat() if task else ''}:{cleanup.id if cleanup else ''}:{cleanup.updated_at.isoformat() if cleanup else ''}"
 
 
-def overview(db: Session, user: User) -> dict:
+def overview(db: Session, user: User, *, page: int | None = None, page_size: int = 12, query: str = "", sort: str = "recent", project_id: str | None = None) -> dict:
     projects = db.scalars(select(Project).where(Project.owner_id == user.id).order_by(Project.updated_at.desc())).all()
+    all_projects = projects
+    snapshots = {p.id: current_snapshot(db, user.id, p.id) for p in all_projects} if page is not None else {}
+    total = 0
+    if page is not None:
+        visible = [p for p in all_projects if p.deleted_at is None and query.strip().casefold() in p.name.casefold()]
+        if sort == "name": visible.sort(key=lambda p: (p.name.casefold(), p.id))
+        elif sort == "size": visible.sort(key=lambda p: (-(snapshots[p.id][1].get("size_bytes", 0) if snapshots[p.id] else -1), p.id))
+        else: visible.sort(key=lambda p: ((snapshots[p.id][1].get("latest_modified_at") or "") if snapshots[p.id] else "", p.id), reverse=True)
+        total = len(visible)
+        projects = [p for p in all_projects if p.id == project_id and p.deleted_at is None] if project_id else visible[(page-1)*page_size:page*page_size]
     rows = []
     trash_bytes = 0
     trash_unknown = 0
     scans = db.scalars(select(Task).where(Task.owner_id == user.id, Task.task_type == "resources.scan").order_by(Task.created_at.desc()).limit(100)).all()
     for project in projects:
-        snapshot = current_snapshot(db, user.id, project.id)
+        snapshot = snapshots.get(project.id) if page is not None else current_snapshot(db, user.id, project.id)
         summary = snapshot[1] if snapshot else None
         if project.deleted_at is not None:
             if summary:
@@ -188,7 +198,12 @@ def overview(db: Session, user: User) -> dict:
         })
     exports = list_exports(db, user)
     categories: dict[str, dict] = {}
-    for row in rows:
+    aggregate_rows = [{"snapshot": snapshots[p.id][1] if snapshots[p.id] else None} for p in all_projects if p.deleted_at is None] if page is not None else rows
+    if page is not None:
+        trash_rows = [snapshots[p.id][1] if snapshots[p.id] else None for p in all_projects if p.deleted_at is not None]
+        trash_bytes = sum(r["size_bytes"] for r in trash_rows if r)
+        trash_unknown = sum(not r or not r["complete"] for r in trash_rows)
+    for row in aggregate_rows:
         if not row["snapshot"]:
             continue
         for item in row["snapshot"]["categories"]:
@@ -198,11 +213,12 @@ def overview(db: Session, user: User) -> dict:
     return {
         "projects": rows, "categories": sorted(categories.values(), key=lambda item: -item["size_bytes"]),
         "storage": {
-            "project_bytes": sum(row["snapshot"]["size_bytes"] for row in rows if row["snapshot"]),
-            "project_complete": all(row["snapshot"] and row["snapshot"]["complete"] for row in rows),
+            "project_bytes": sum(row["snapshot"]["size_bytes"] for row in aggregate_rows if row["snapshot"]),
+            "project_complete": all(row["snapshot"] and row["snapshot"]["complete"] for row in aggregate_rows),
             "trash_bytes": trash_bytes, "trash_complete": trash_unknown == 0,
             "export_bytes": sum(item["stored_bytes"] for item in exports),
         }, "exports": exports,
+        **({"pagination": {"total": total, "page": page, "page_size": page_size, "counts": {"all": sum(p.deleted_at is None for p in all_projects), "complete": sum(bool(r["snapshot"] and r["snapshot"]["complete"]) for r in aggregate_rows)}}} if page is not None else {}),
     }
 
 

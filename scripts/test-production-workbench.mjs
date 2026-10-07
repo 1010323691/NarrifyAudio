@@ -124,6 +124,20 @@ function harness(view, api = {}) {
     '@/components/ui/dialog': { showConfirm: async () => true },
     '@/api/files': { listDir: async () => ({ items: [] }), ...api },
     '@/api/tts': {
+      batchList: async () => {
+        const directory = await (api.listDir ?? (async () => ({ items: [] })))('03_parsed_json')
+        const names = directory.items.filter(row => !row.is_dir && /\.json$/i.test(row.name) && !/_checked\.json$/i.test(row.name)).map(row => row.name)
+        const response = await (api.batchStatusFiles ?? (async () => ({ files: [] })))(names)
+        const byName = new Map(response.files.map(row => [row.name, row]))
+        return { files: names.map(name => byName.get(name) ?? file(name)) }
+      },
+      mergeList: async () => {
+        const directory = await (api.listDir ?? (async () => ({ items: [] })))('05_audio_chunk')
+        const names = directory.items.filter(row => row.is_dir).map(row => row.name)
+        const merged = await (api.listDir ?? (async () => ({ items: [] })))('06_audio_merge')
+        const response = await (api.mergeStatusPackages ?? (async () => ({ packages: [] })))(names)
+        return { packages: response.packages.map(row => ({ ...row, merged_filename: merged.items.find(item => item.name === row.name + '.mp3')?.name })) }
+      },
       batchStatusFiles: async () => ({ files: [] }),
       mergeStatusPackages: async () => ({ packages: [] }),
       runBatch: async (value) => {
@@ -154,6 +168,7 @@ function harness(view, api = {}) {
       module,
       exports: module.exports,
       DOMException,
+      AbortController,
       console,
       setInterval: () => 1,
       clearInterval() {},
@@ -163,7 +178,7 @@ function harness(view, api = {}) {
       window: { setTimeout, clearTimeout },
       require(name) {
         if (overrides[name]) return overrides[name]
-        if (name.includes('useWorkbench') || name.includes('useLabelDerivedTasks')) {
+        if (name.includes('useListPage') || name.includes('useWorkbench') || name.includes('useLabelDerivedTasks')) {
           const base = name.split('/').pop()
           if (!cache.has(base))
             cache.set(
@@ -181,10 +196,10 @@ function harness(view, api = {}) {
   }
   const exports = {
     BatchTTS:
-      'refreshRows, refreshStatusesOnly, fileNames, statuses, filesError, filesLoading, rows, workRows, selected, selectedNames, selectedRemaining, selectedTotal, doRun, doRunAll, status, busy, retryBatch, taskId, taskBatch, task',
+      'refreshRows, refreshStatusesOnly, fileNames, statuses, filesError, filesLoading, rows, workRows, selected, selectedNames, selectedRemaining, selectedTotal, doRun, doRunAll, selectRemote, listPage, status, busy, retryBatch, taskId, taskBatch, task',
     Merge:
-      'refreshRows, pkgNames, pkgStats, diskMp3, rows, workRows, selected, selectedNames, selectionReady, selectAllIncludingDone, doRun, rowsLoading, rowsError',
-    BGM: 'refreshRows, chapterRows, rows, workRows, selected, selectedMixable, doMix, doMixRow, loading, loadError, mode, switchMode, matchFeedback, doRematchSelected',
+      'refreshRows, pkgNames, pkgStats, diskMp3, rows, workRows, selected, selectedNames, selectionReady, selectAllIncludingDone, selectRemote, listPage, doRun, rowsLoading, rowsError',
+    BGM: 'refreshRows, chapterRows, rows, workRows, selected, selectedMixable, doMix, doMixRow, loading, loadError, mode, selectRemote, listPage, switchMode, matchFeedback, doRematchSelected',
   }
   const script = readFileSync(new URL(`../src/views/${view}.vue`, import.meta.url), 'utf8').match(
     /<script setup lang="ts">([\s\S]*?)<\/script>/,
@@ -742,4 +757,70 @@ test('partially settled chapters keep a stable partial badge after the member ta
   h.taskStore.projectTasks[0].status = 'running'
   h.taskStore.projectTasks[0].progress = 50
   assert.equal(h.workRows.value[0].statusLabel, '合成中')
+})
+
+const pageMeta = (total, page = 1) => ({ total, page, page_size: 10, counts: { all: total } })
+
+test('synthesis requests one page; full filtered selection submits all 125 entries', async () => {
+  const all = Array.from({ length: 125 }, (_, i) => file(`chapter-${i}.json`))
+  const reads = []
+  const h = harness('BatchTTS', {
+    listDir: () => assert.fail('the page must never enumerate the entire directory'),
+    batchList: async (query, _signal, keysOnly) => {
+      reads.push({ ...query, keysOnly })
+      return { files: keysOnly ? all : all.slice((query.page - 1) * 10, query.page * 10), pagination: pageMeta(125, query.page) }
+    },
+  })
+  await h.refreshRows()
+  assert.equal(h.fileNames.value.length, 10)
+  assert.equal(reads.length, 1)
+  h.selected[all[0].name] = true
+  h.listPage.query.page = 2
+  await h.refreshRows()
+  assert.equal(h.fileNames.value[0], 'chapter-10.json')
+  assert.deepEqual(Array.from(h.selectedNames.value), ['chapter-0.json'])
+  await h.selectRemote({ page: 1, page_size: 10, q: '', filter: 'pending' })
+  assert.equal(h.selectedNames.value.length, 125)
+  h.status.value = { ready: true }
+  await h.doRun()
+  assert.equal(h.calls.find(call => call.scripts)?.scripts.length, 125)
+  assert.equal(reads.at(-1).keysOnly, true)
+})
+
+test('merge pagination keeps cross-page selection and bulk includes existing outputs', async () => {
+  const all = Array.from({ length: 61 }, (_, i) => ({ ...file(`package-${i}`, true), merged_filename: i === 0 ? 'package-0.mp3' : null }))
+  const h = harness('Merge', {
+    listDir: () => assert.fail('merge only reads the current page'),
+    mergeList: async (query, _signal, keysOnly) => ({ packages: keysOnly ? all : all.slice((query.page - 1) * 10, query.page * 10), pagination: pageMeta(all.length, query.page) }),
+  })
+  await h.refreshRows()
+  h.selected['package-0'] = true
+  h.listPage.query.page = 2
+  await h.refreshRows()
+  assert.equal(h.selectedNames.value[0], 'package-0')
+  assert.equal(h.selectionReady.value, true)
+  await h.selectRemote({ page: 1, page_size: 10, q: '', filter: 'all' })
+  assert.equal(h.selectedNames.value.length, 61)
+  await h.doRun()
+  assert.equal(h.calls.find(call => call.packages)?.packages.length ?? h.calls.find(Array.isArray)?.length, 61)
+})
+
+test('BGM bulk target reads are explicit and are never restricted to the current page', async () => {
+  const all = Array.from({ length: 87 }, (_, i) => chapter(`chapter-${i}`))
+  const reads = []
+  const h = harness('BGM', {
+    getChapters: async (query, _signal, keysOnly) => {
+      reads.push(keysOnly)
+      return { chapters: keysOnly ? all : all.slice((query.page - 1) * 10, query.page * 10), pagination: pageMeta(all.length, query.page), mode: 'random' }
+    },
+    getLibrary: () => assert.fail('music picker data must stay lazy'),
+  })
+  await h.refreshRows()
+  assert.equal(reads.length, 1)
+  assert.equal(Boolean(reads[0]), false)
+  assert.equal(h.chapterRows.value.length, 10)
+  await h.selectRemote({ page: 1, page_size: 10, q: '', filter: 'all' }, 'mix')
+  assert.equal(h.selectedMixable.value.length, 87)
+  await h.doMix()
+  assert.equal(h.calls.find(Array.isArray)?.length, 87)
 })

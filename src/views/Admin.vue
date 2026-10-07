@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import Pager from '@/views/textformat/Pager.vue'
+import type { ListPagination } from '@/api/listPaging'
 import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AdminStatCard from '@/components/admin/AdminStatCard.vue'
 import AdminTable from '@/components/admin/AdminTable.vue'
@@ -65,6 +67,14 @@ const userRole = ref('all')
 const userState = ref('all')
 const userSort = ref('default')
 const userPage = ref(1)
+const taskPage = ref(1)
+const eventPage = ref(1)
+const resourcePage = ref(1)
+watch(resourcePage, () => { if (tab.value === 'resources') void load() })
+const usersPagination = ref<ListPagination>()
+const tasksPagination = ref<ListPagination>()
+const eventsPagination = ref<ListPagination>()
+let listAbort: AbortController | null = null
 const selectedUser = ref<api.AdminUser | null>(null)
 const quotaAmount = ref('')
 const taskSearch = ref('')
@@ -111,6 +121,7 @@ async function runAction(action: () => Promise<void>) {
 let timer: ReturnType<typeof setInterval> | null = null
 
 const matchingUsers = computed(() => {
+  if (usersPagination.value) return users.value
   const query = userSearch.value.trim().toLowerCase()
   const rows = users.value.filter(row =>
     `${row.username} ${row.display_name} ${row.email}`.toLowerCase().includes(query)
@@ -124,8 +135,8 @@ const matchingUsers = computed(() => {
 })
 const userFiltered = computed(() => !!userSearch.value || userRole.value !== 'all' || userState.value !== 'all')
 function clearUserFilters() { userSearch.value = ''; userRole.value = 'all'; userState.value = 'all' }
-const userPages = computed(() => Math.max(1, Math.ceil(matchingUsers.value.length / 20)))
-const shownUsers = computed(() => matchingUsers.value.slice((userPage.value - 1) * 20, userPage.value * 20))
+const userPages = computed(() => Math.max(1, Math.ceil((usersPagination.value?.total ?? matchingUsers.value.length) / 20)))
+const shownUsers = computed(() => usersPagination.value ? matchingUsers.value : matchingUsers.value.slice((userPage.value - 1) * 20, userPage.value * 20))
 
 function aggregateTypes(prefixes: string[]) {
   const rows = performance.value?.tasks.by_type ?? []
@@ -147,6 +158,11 @@ const resourceCategories = computed(() => resources.value?.project_storage?.cate
 const cleanupCandidates = computed(() => resources.value?.project_storage?.cleanup_candidates)
 
 watch([userSearch, userRole, userState, userSort], () => { userPage.value = 1 })
+watch([userPage, userSearch, userRole, userState, userSort], () => { if (tab.value === 'users' && usersPagination.value) void load() })
+watch([taskPage, taskStatus, taskSearch], () => { if (tab.value === 'tasks') void load() })
+watch([eventPage, logLevel, logModule, logHours, logSearch], () => { if (tab.value === 'logs') void load() })
+watch([taskStatus, taskSearch], () => { taskPage.value = 1 })
+watch([logLevel, logModule, logHours, logSearch], () => { eventPage.value = 1 })
 watch(userPages, pages => { userPage.value = Math.min(userPage.value, pages) })
 function date(value?: string | null) { return value ? new Date(value).toLocaleString('zh-CN') : '—' }
 // 管理端大小口径：缺失显示「未采集」，<1024 原样（含负值），KB+ 一律 1 位小数
@@ -181,6 +197,8 @@ async function load() {
 async function loadData() {
   const currentTab = tab.value
   const ticket = ++loadEpoch
+  listAbort?.abort(); listAbort = new AbortController()
+  const signal = listAbort.signal
   loading.value = true
   error.value = ''
   try {
@@ -196,14 +214,15 @@ async function loadData() {
       performance.value = result
     }
     else if (currentTab === 'users') {
-      const result = await api.listUsers()
+      const result = await api.userPage({ page: userPage.value, search: userSearch.value, role: userRole.value, state: userState.value, sort: userSort.value }, signal)
       if (ticket !== loadEpoch) return
-      users.value = result
+      users.value = result.items; usersPagination.value = result.pagination
     }
     else if (currentTab === 'resources') {
-      const result = await api.getResources()
+      const result = await api.getResources(true, resourcePage.value)
       if (ticket !== loadEpoch) return
       resources.value = result
+      if (result.pagination) resourcePage.value = Math.min(resourcePage.value, Math.max(1, Math.ceil(result.pagination.total / result.pagination.page_size)))
     }
     else if (currentTab === 'settings') {
       await clientDisplay.load()
@@ -218,15 +237,17 @@ async function loadData() {
       if (ticket !== loadEpoch) return
       runtime.value = limits
     } else if (currentTab === 'tasks') {
-      const [rows, metrics] = await Promise.all([api.listTasks(taskStatus.value, taskSearch.value), api.getTaskMetrics()])
+      void api.getTaskMetrics().then(metrics => { if (ticket === loadEpoch) taskMetrics.value = metrics }).catch(() => {})
+      const rows = await api.taskPage(taskStatus.value, taskSearch.value, taskPage.value, signal)
       if (ticket !== loadEpoch) return
-      tasks.value = rows
-      taskMetrics.value = metrics
-      if (selectedTask.value) selectedTask.value = rows.find(row => row.id === selectedTask.value?.id) ?? selectedTask.value
+      tasks.value = rows.items; tasksPagination.value = rows.pagination
+      if (rows.pagination) taskPage.value = Math.min(taskPage.value, Math.max(1, Math.ceil(rows.pagination.total / rows.pagination.page_size)))
+      if (selectedTask.value) selectedTask.value = rows.items.find(row => row.id === selectedTask.value?.id) ?? selectedTask.value
     } else {
-      const result = await api.getEvents(logLevel.value, logModule.value, logSearch.value, logHours.value)
+      const result = await api.eventPage(logLevel.value, logModule.value, logSearch.value, logHours.value, eventPage.value, signal)
       if (ticket !== loadEpoch) return
-      events.value = result
+      events.value = result.items; eventsPagination.value = result.pagination
+      if (result.pagination) eventPage.value = Math.min(eventPage.value, Math.max(1, Math.ceil(result.pagination.total / result.pagination.page_size)))
     }
     if (ticket === loadEpoch) { loadedTabs.value.add(currentTab); lastUpdated.value[currentTab] = new Date().toLocaleTimeString('zh-CN') }
   } catch (cause: any) {
@@ -243,8 +264,8 @@ onMounted(() => {
   }, 15000)
 })
 onActivated(() => { if (!active) { active = true; void load() } })
-onDeactivated(() => { active = false; loadEpoch++; loading.value = false })
-onBeforeUnmount(() => { loadEpoch++; if (timer) clearInterval(timer) })
+onDeactivated(() => { listAbort?.abort(); active = false; loadEpoch++; loading.value = false })
+onBeforeUnmount(() => { listAbort?.abort(); loadEpoch++; if (timer) clearInterval(timer) })
 
 async function toggleClientLogs() {
   try {
@@ -269,7 +290,7 @@ async function saveRoot() {
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 function lastAdmin(user: api.AdminUser) {
-  return user.role === 'admin' && user.is_active && users.value.filter(row => row.role === 'admin' && row.is_active).length <= 1
+  return user.role === 'admin' && user.is_active && (usersPagination.value?.counts.active_admins ?? users.value.filter(row => row.role === 'admin' && row.is_active).length) <= 1
 }
 async function changeUser(user: api.AdminUser, patch: { is_active?: boolean; role?: 'user' | 'admin' }) {
   if (!await showConfirm(`确认更改 ${user.username} 的${patch.role ? '角色' : '状态'}？`, { title: '确认修改用户' })) return
@@ -304,8 +325,9 @@ async function retryTask(task: api.AdminTask) {
   catch (cause: any) { error.value = cause?.message || String(cause) }
 }
 async function cleanupTemp() {
+  if (resources.value?.light) resources.value = await api.getResources(false)
   const candidates = cleanupCandidates.value
-  if (!candidates?.count) return
+  if (!candidates?.count) { toast({ title: '没有可清理的过期临时文件' }); return }
   if (!await showConfirm(`仅清理不活跃工作空间内超过 ${candidates.older_than_days} 天的临时缓存文件，预计 ${candidates.count} 个、${bytes(candidates.size_bytes)}。此操作不可恢复，继续？`, { title: '清理临时缓存', destructive: true })) return
   try {
     const result = await api.cleanupStaleTemp()
@@ -432,21 +454,21 @@ async function cleanupTemp() {
       </section>
 
       <section v-if="tab === 'users'" class="admin-section">
-        <div class="admin-title"><p>{{ matchingUsers.length }} 位用户 · 每页 20 条</p>
+        <div class="admin-title"><p>{{ usersPagination?.total ?? matchingUsers.length }} 位用户 · 每页 20 条</p>
           <div class="controls"><Input v-model="userSearch" aria-label="搜索用户" placeholder="搜索用户名或邮箱" class="search" />
             <select v-model="userRole" aria-label="用户角色"><option value="all">全部角色</option><option value="admin">管理员</option><option value="user">普通用户</option></select>
             <select v-model="userState" aria-label="账户状态"><option value="all">全部状态</option><option value="active">已启用</option><option value="disabled">已禁用</option></select>
-            <select v-model="userSort" aria-label="用户排序"><option value="default">默认排序</option><option value="name">用户名</option><option value="recent">最近注册</option><option value="storage">存储占用最多</option></select>
+            <select v-model="userSort" aria-label="用户排序"><option value="default">默认排序</option><option value="name">用户名</option><option value="recent">最近注册</option><option value="storage">已登记存储最多</option></select>
             <Button v-if="userFiltered" variant="ghost" size="sm" @click="clearUserFilters">清空筛选</Button>
           </div>
         </div>
-        <Card><CardContent class="admin-table-content"><AdminTable table-class="wide-table"><thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近登录</th><th>使用量</th><th>项目 / 工作空间</th><th>存储占用</th><th class="user-actions">操作</th></tr></thead>
+        <Card><CardContent class="admin-table-content"><AdminTable table-class="wide-table"><thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近登录</th><th>使用量</th><th>项目 / 工作空间</th><th>{{ usersPagination ? '已登记存储' : '存储占用' }}</th><th class="user-actions">操作</th></tr></thead>
           <tbody><tr v-for="user in shownUsers" :key="user.id" :aria-selected="selectedUser?.id === user.id"><td><strong>{{ user.display_name || user.username }}</strong><small>{{ user.username }} · {{ user.email }}</small></td>
             <td><div class="badge-stack"><StatusPill :label="user.role === 'admin' ? '管理员' : '用户'" :tone="user.role === 'admin' ? 'positive' : 'neutral'" /><StatusPill :label="user.is_active ? '启用' : '禁用'" :tone="user.is_active ? 'positive' : 'negative'" /></div></td>
             <td>{{ date(user.created_at) }}<small>最近 {{ date(user.last_seen_at) }}</small></td>
             <td>{{ user.consumed_units ?? 0 }} 已用<small>{{ user.reserved_units ?? 0 }} 预留 · {{ user.available_units ?? 0 }} 可用</small></td>
             <td>{{ user.project_count ?? 0 }} 个项目</td>
-            <td>{{ bytes(user.storage_bytes) }}<small>{{ user.project_file_count ?? '未采集' }} 个目录文件 · {{ user.file_count ?? 0 }} 个已登记</small></td>
+            <td>{{ bytes(user.storage_bytes) }}<small>{{ user.file_count ?? 0 }} 个已登记文件</small></td>
             <td class="user-actions"><Button variant="outline" size="sm" @click="selectedUser = user">管理</Button></td></tr></tbody></AdminTable>
           <AdminEmptyState v-if="!shownUsers.length" title="没有匹配的用户" description="尝试其他用户名或邮箱，或清空搜索条件。"><Button v-if="userFiltered" variant="outline" size="sm" @click="clearUserFilters">清空搜索</Button></AdminEmptyState>
           <div v-if="matchingUsers.length" class="pager"><Button variant="outline" size="sm" :disabled="userPage <= 1" @click="userPage--">上一页</Button>{{ userPage }} / {{ userPages }}<Button variant="outline" size="sm" :disabled="userPage >= userPages" @click="userPage++">下一页</Button></div>
@@ -454,7 +476,7 @@ async function cleanupTemp() {
         <AdminDrawer v-if="selectedUser" :title="selectedUser.username" @close="selectedUser = null"><div class="admin-form">
           <p v-if="error" role="alert" class="admin-error">{{ error }}</p>
           <p class="mono">{{ selectedUser.id }}</p><p>{{ selectedUser.email }} · {{ selectedUser.display_name || selectedUser.username }}</p>
-          <p>项目：{{ selectedUser.project_count ?? 0 }} · 实际存储：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
+          <p>项目：{{ selectedUser.project_count ?? 0 }} · {{ usersPagination ? '已登记存储' : '实际存储' }}：{{ bytes(selectedUser.storage_bytes) }}（已登记文件 {{ bytes(selectedUser.file_bytes) }}）</p>
           <p>额度：{{ selectedUser.consumed_units ?? 0 }} 已用 · {{ selectedUser.reserved_units ?? 0 }} 预留 · {{ selectedUser.available_units ?? 0 }} 可用</p>
           <div class="controls"><Button variant="outline" :disabled="actionBusy || lastAdmin(selectedUser)" @click="runAction(async () => { if (selectedUser) await changeUser(selectedUser, { role: selectedUser.role === 'admin' ? 'user' : 'admin' }) })">{{ selectedUser.role === 'admin' ? '移除管理员' : '设为管理员' }}</Button><Button variant="outline" :disabled="actionBusy || lastAdmin(selectedUser)" @click="runAction(async () => { if (selectedUser) await changeUser(selectedUser, { is_active: !selectedUser.is_active }) })">{{ selectedUser.is_active ? '禁用用户' : '启用用户' }}</Button></div>
           <p v-if="lastAdmin(selectedUser)" class="admin-muted">此账户是最后一位启用的管理员，无法移除权限或禁用。</p>
@@ -475,15 +497,16 @@ async function cleanupTemp() {
             <AdminTable table-class="resource-category-table"><thead><tr><th>类别</th><th>文件数</th><th>大小</th></tr></thead><tbody><tr v-for="row in resourceCategories" :key="row.kind"><td>{{ row.label }}</td><td>{{ row.count }}</td><td>{{ bytes(row.size_bytes) }}</td></tr></tbody></AdminTable>
             <p v-if="!resourceCategories.length" class="admin-empty">此 API 版本尚未提供工作空间扫描数据</p>
           </CardContent></Card>
-          <Card><CardHeader><CardTitle>用户占用 · 前 20</CardTitle></CardHeader><CardContent>
+          <Card><CardHeader><CardTitle>用户占用 · 每页 20</CardTitle></CardHeader><CardContent>
             <AdminTable table-class="resource-users-table"><thead><tr><th>用户</th><th>工作空间</th><th>文件数</th><th>实际占用</th><th>登记文件</th></tr></thead>
               <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '未采集' }}</td><td>{{ resources.project_storage ? row.file_count ?? 0 : '未采集' }}</td><td>{{ resources.project_storage ? bytes(row.size_bytes) : '未采集' }}</td><td>{{ row.registered_file_count ?? row.count ?? '未采集' }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr></tbody></AdminTable>
+            <Pager :page="resourcePage" :page-count="Math.max(1, Math.ceil((resources.pagination?.total ?? 0) / 20))" :total="resources.pagination?.total ?? 0" :page-size="20" unit="位用户" @update:page="resourcePage = $event" />
             <p v-if="!resources.users.length" class="admin-empty">暂无用户资源</p>
           </CardContent></Card>
         </div>
         <Card><CardHeader><CardTitle>临时文件清理</CardTitle></CardHeader><CardContent class="cleanup-row">
           <div><p><strong>{{ cleanupCandidates?.count ?? '未采集' }}</strong> 个超过 {{ cleanupCandidates?.older_than_days ?? 7 }} 天的临时文件 · {{ bytes(cleanupCandidates?.size_bytes) }}</p><small>仅清理不活跃工作空间中的普通临时文件；跳过特殊文件和正在运行任务的工作空间。</small></div>
-          <Button variant="outline" :disabled="!cleanupCandidates?.count || loading || actionBusy" @click="runAction(cleanupTemp)"><Trash2 class="h-4 w-4" />清理过期临时文件</Button>
+          <Button variant="outline" :disabled="(!resources?.light && !cleanupCandidates?.count) || loading || actionBusy" @click="runAction(cleanupTemp)"><Trash2 class="h-4 w-4" />清理过期临时文件</Button>
         </CardContent></Card>
         <p class="admin-muted">扫描范围：{{ resources.root_path }} · 模型或日志位于工作空间以外时，不包含在空间分类中。</p>
       </section>
@@ -527,6 +550,7 @@ async function cleanupTemp() {
         <div class="metric-grid task-summary"><AdminStatCard label="排队中"><template #value>{{ metricCount(taskStatusSummary, 'pending', 'queued', 'retrying') }}</template></AdminStatCard><AdminStatCard label="运行中"><template #value>{{ metricCount(taskStatusSummary, 'running', 'cancelling') }}</template></AdminStatCard><AdminStatCard label="已完成"><template #value>{{ metricCount(taskStatusSummary, 'succeeded') }}</template></AdminStatCard><AdminStatCard label="失败 / 超时"><template #value>{{ metricCount(taskStatusSummary, 'failed', 'timeout') }}</template></AdminStatCard><AdminStatCard label="已取消"><template #value>{{ metricCount(taskStatusSummary, 'cancelled') }}</template></AdminStatCard></div>
         <Card><CardContent class="admin-table-content"><AdminTable table-class="wide-table"><thead><tr><th>类型 / ID</th><th>用户</th><th>项目</th><th>状态</th><th>Worker</th><th>创建时间</th><th class="user-actions">操作</th></tr></thead>
           <tbody><tr v-for="task in tasks" :key="task.id" :aria-selected="selectedTask?.id === task.id"><td><strong>{{ task.task_type }}</strong><small class="mono">{{ task.id }}</small></td><td>{{ task.owner_username }}</td><td class="mono">{{ task.project_id?.slice(0, 8) ?? '—' }}</td><td><StatusPill :label="statusLabel(task.status)" :tone="tone(task.status)" /></td><td class="clip" :title="task.worker_id ?? ''">{{ task.worker_id || '—' }}</td><td>{{ date(task.created_at) }}</td><td class="user-actions"><Button variant="outline" size="sm" @click="selectedTask = task">详情</Button></td></tr></tbody></AdminTable><AdminEmptyState v-if="!tasks.length" title="没有匹配的任务" description="调整状态或搜索条件后重新筛选。" /></CardContent></Card>
+        <Pager :page="taskPage" :page-count="Math.max(1, Math.ceil((tasksPagination?.total ?? 0) / 50))" :total="tasksPagination?.total ?? 0" :page-size="50" unit="条" @update:page="taskPage = $event" />
         <AdminDrawer v-if="selectedTask" title="任务详情" @close="selectedTask = null"><div class="admin-form">
           <p v-if="error" role="alert" class="admin-error">{{ error }}</p>
           <p class="mono">{{ selectedTask.id }}</p><p>{{ selectedTask.task_type }} · {{ selectedTask.owner_username }} · 项目 {{ selectedTask.project_id ?? '—' }}</p>
@@ -547,6 +571,7 @@ async function cleanupTemp() {
         </div>
         <Card><CardContent class="admin-table-content"><AdminTable><thead><tr><th>时间</th><th>级别</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
           <tbody><tr v-for="entry in events" :key="entry.id"><td>{{ date(entry.time) }}</td><td><StatusPill :label="entry.level === 'error' ? '异常' : entry.level" :tone="entry.level === 'error' ? 'negative' : 'neutral'" /></td><td>{{ entry.module }}</td><td>{{ entry.type }}</td><td class="clip" :title="entry.message">{{ entry.message }}</td></tr></tbody></AdminTable><AdminEmptyState v-if="!events.length" title="当前范围内没有记录" description="尝试扩大时间范围或调整筛选条件。" /></CardContent></Card>
+      <Pager :page="eventPage" :page-count="Math.max(1, Math.ceil((eventsPagination?.total ?? 0) / 50))" :total="eventsPagination?.total ?? 0" :page-size="50" unit="条" @update:page="eventPage = $event" />
       </section>
       </div>
     </div>

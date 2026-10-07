@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from ..platform.database import get_db
 from ..platform.deps import require_authenticated_user
 from ..platform.file_response import file_response
-from ..platform.models import User
+from ..platform.models import User, Project
+from sqlalchemy import select
 from ..platform.resource_inventory import ResourceError, list_entries, overview, resolve_resource
 from ..platform.resource_tasks import cleanup_preview
 from ..services.resource_center import export_file, preview_file
@@ -27,8 +28,13 @@ def _translate(operation):
 
 
 @router.get("")
-def get_resources(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
-    return _translate(lambda: overview(db, user))
+def get_resources(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
+                  page: int | None = Query(None, ge=1), page_size: int = Query(12, ge=1, le=100),
+                  q: str = "", sort: str = "recent", project_id: str | None = None, keys_only: bool = False) -> dict:
+    if not isinstance(page, int): page = None
+    if keys_only:
+        return {"project_ids": list(db.scalars(select(Project.id).where(Project.owner_id == user.id, Project.deleted_at.is_(None))).all())}
+    return _translate(lambda: overview(db, user, page=page, page_size=page_size, query=q, sort=sort, project_id=project_id))
 
 
 @router.get("/entries")

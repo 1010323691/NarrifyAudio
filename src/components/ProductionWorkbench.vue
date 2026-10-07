@@ -3,6 +3,7 @@
   lang="ts"
   generic="T extends { workKey: string; workName: string; workState: string }"
 >
+import type { ListPagination, ListQuery } from '@/api/listPaging'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import Button from '@/components/ui/Button.vue'
 import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
@@ -12,6 +13,8 @@ import { useWorkbenchDialog } from '@/composables/useWorkbenchDialog'
 import { useTenRowHeight } from '@/composables/useTenRowHeight'
 
 const props = defineProps<{
+  remote?: boolean
+  pagination?: ListPagination
   rows: T[]
   selected: Record<string, boolean>
   filters: { key: string; label: string }[]
@@ -25,6 +28,8 @@ const props = defineProps<{
   label: string
 }>()
 const emit = defineEmits<{
+  requestPage: [query: ListQuery]
+  selectScope: [query: ListQuery]
   refresh: []
   select: [key: string, event: Event]
   selectFiltered: [keys: string[]]
@@ -43,15 +48,15 @@ const shell = ref<HTMLElement | null>(null)
 let media: MediaQueryList | null = null
 let returnFocus: HTMLElement | null = null
 const filtered = computed(() =>
-  props.rows.filter(
+  props.remote ? props.rows : props.rows.filter(
     (row) =>
       (filter.value === 'all' || row.workState === filter.value) &&
       row.workName.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase()),
   ),
 )
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)))
+const pageCount = computed(() => Math.max(1, Math.ceil((props.remote ? props.pagination?.total ?? 0 : filtered.value.length) / pageSize.value)))
 const visible = computed(() =>
-  filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
+  props.remote ? filtered.value : filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
 )
 const focused = computed(
   () => filtered.value.find((row) => row.workKey === focusedKey.value) ?? null,
@@ -75,6 +80,13 @@ watch(
   },
   { immediate: true },
 )
+watch([page, pageSize, query, filter], () => {
+  if (props.remote) emit('requestPage', { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value })
+})
+function selectScope() {
+  if (props.remote) emit('selectScope', { page: 1, page_size: pageSize.value, q: query.value, filter: filter.value })
+  else emit('selectFiltered', eligible.value.map(row => row.workKey))
+}
 function updateNarrow() {
   narrow.value = media?.matches ?? false
   if (!narrow.value) detailOpen.value = false
@@ -130,7 +142,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
       <WorkbenchToolbar
         v-model:query="query"
         v-model:filter="filter"
-        :filters="[{ key: 'all', label: '全部', count: rows.length }, ...filters.map(item => ({ ...item, count: rows.filter(row => row.workState === item.key).length }))]"
+        :filters="[{ key: 'all', label: '全部', count: remote ? pagination?.counts.all : rows.length }, ...filters.map(item => ({ ...item, count: remote ? pagination?.counts[item.key] : rows.filter(row => row.workState === item.key).length }))]"
         :loading="loading"
         @refresh="emit('refresh')"
       >
@@ -138,14 +150,9 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
           <Button
             variant="ghost"
             size="sm"
-            :disabled="disabled || loading || !!loadError || !eligible.length"
-            @click="
-              emit(
-                'selectFiltered',
-                eligible.map((row) => row.workKey),
-              )
-            "
-            >选择筛选结果（{{ eligible.length }}）</Button
+            :disabled="disabled || loading || !!loadError || (remote ? !pagination?.total : !eligible.length)"
+            @click="selectScope"
+            >选择筛选结果（{{ remote ? pagination?.total ?? 0 : eligible.length }}）</Button
           >
           <slot name="selection" />
         </template>
@@ -231,7 +238,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
         class="border-t px-3 py-2"
         :page="page"
         :page-count="pageCount"
-        :total="filtered.length"
+        :total="remote ? pagination?.total ?? 0 : filtered.length"
         :page-size="pageSize"
         :page-size-options="[10, 20, 50]"
         unit="项"

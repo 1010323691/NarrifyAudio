@@ -2,6 +2,9 @@
 // 背景音乐（阶段 7）：段落分析（LLM 缓存）→ 匹配（随机 / 段落级时间轴）→ 最终混音。
 // 行 / 派生 / SSE / F5 全复刻 Merge.vue 范本：任务按 label 尾部「：{stem}」派生式重挂
 // （无本地 job 列表、不依赖后端注册表），终态经 getter 式 watch 驱动行刷新。
+import Pager from '@/views/textformat/Pager.vue'
+import { useListPage } from '@/composables/useListPage'
+import type { ListQuery } from '@/api/listPaging'
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useWorkbenchDialog } from '@/composables/useWorkbenchDialog'
@@ -23,7 +26,6 @@ import {
 } from '@/api/bgm'
 import { previewUrl, downloadFile } from '@/utils/fileops'
 import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
-import { listDir } from '@/api/files'
 import { getLibrary, musicPreviewUrl } from '@/api/music'
 import type {
   BgmChapterRow,
@@ -91,12 +93,15 @@ const mode = ref('random')
 // 段落级模式是当前页面的交互状态，不会在每次任务完成后写回 assignments.mode。
 // 因此章节列表刷新只能在首次加载时从后端初始化，不能覆盖用户刚选的模式。
 let modeInitialized = false
-const lib = ref<MusicLibrary | null>(null)
+const lib = ref<(MusicLibrary & { pagination?: import('@/api/listPaging').ListPagination }) | null>(null)
+const listPage = useListPage(refreshRows, () => { chapterRows.value = []; selectedRowCache.clear(); lib.value = null; narrationFiles.value = {}; selectStems([]) })
+const listPagination = listPage.pagination
 let rowsRequest = 0
 const loading = ref(false)
 const loadError = ref('')
 const error = ref('')
 const selected = reactive<Record<string, boolean>>({})
+const selectedRowCache = new Map<string, BgmChapterRow>()
 const submitting = ref(false)
 const packaging = ref(false)
 const packagePreparing = ref(false)
@@ -138,7 +143,7 @@ function segmentTimelineReady(row: BgmChapterRow): boolean {
 // > 段落已分析 / 段落分析已失效 > 未匹配。
 const rows = computed<BgmRow[]>(() => {
   const { active, failed } = tasksByStem.value
-  return chapterRows.value.map((d) => {
+  return [...chapterRows.value, ...[...selectedRowCache.values()].filter(r => selected[r.stem] && !chapterRows.value.some(c => c.stem === r.stem))].map((d) => {
     const a = active.get(d.stem)
     const mixTask = a?.module === 'bgm-mix' ? a : undefined
     const segmentTask = a?.module === 'bgm-segment' ? a : undefined
@@ -219,7 +224,7 @@ const rows = computed<BgmRow[]>(() => {
 })
 
 const selectedNames = computed(() =>
-  chapterRows.value.filter((r) => !!selected[r.stem]).map((r) => r.stem),
+  Object.keys(selected).filter(stem => selected[stem]),
 )
 const selectedMixedNames = computed(() =>
   rows.value
@@ -260,29 +265,16 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
 
   if (!projectSet.value) return
   const request = ++rowsRequest
-  const reloadLibrary = options.reloadLibrary ?? true
+  void options
   loading.value = true
   loadError.value = ''
   try {
-    const [res, libRes, narrationDir] = await withinScope(
-      Promise.all([
-        getChapters(),
-        reloadLibrary ? getLibrary() : Promise.resolve(lib.value),
-        listDir('06_audio_merge'),
-      ]),
-      isCurrent,
-    )
-    // 内容未变的行沿用旧对象引用：批量完成时每章一次刷新会整体重拉 300+ 行，
-    // 若每次整表换引用，v-memo 行会全部失效重渲。stringify 比对（~毫秒级）换掉
-    // 整列表 DOM patch，只有真正变化的行更新。
+    const res = await withinScope(getChapters(listPage.query, listPage.begin()), isCurrent)
     if (request !== rowsRequest) return
+    listPage.received(res.pagination)
     const files: Record<string, string> = {}
-    for (const item of narrationDir.items) {
-      if (item.is_dir || !/\.(mp3|wav)$/i.test(item.name)) continue
-      const stem = item.name.replace(/\.(mp3|wav)$/i, '')
-      if (!files[stem] || item.name.toLowerCase().endsWith('.mp3')) files[stem] = item.name
-    }
-    narrationFiles.value = files
+    for (const row of res.chapters) if (row.narration_filename) files[row.stem] = row.narration_filename
+    narrationFiles.value = { ...Object.fromEntries(Object.entries(narrationFiles.value).filter(([key]) => selected[key])), ...files }
     const prevByStem = new Map(chapterRows.value.map((r) => [r.stem, r]))
     chapterRows.value = res.chapters.map((c) => {
       const prev = prevByStem.get(c.stem)
@@ -293,10 +285,8 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
       mode.value = res.mode === 'segment' ? 'segment' : 'random'
       modeInitialized = true
     }
-    if (reloadLibrary) lib.value = libRes
-    for (const k of Object.keys(selected)) {
-      if (!chapterRows.value.some((r) => r.stem === k)) delete selected[k]
-    }
+    for (const row of res.chapters) selectedRowCache.set(row.stem, row)
+    for (const key of selectedRowCache.keys()) if (!selected[key] && !res.chapters.some(row => row.stem === key)) selectedRowCache.delete(key)
   } catch (e: any) {
     if (!isCurrent()) return
 
@@ -329,10 +319,10 @@ function selectStems(stems: string[]) {
   for (const stem of stems) selected[stem] = true
 }
 function selectPendingAnalysis() {
-  selectStems(pendingAnalysisStems.value)
+  void selectRemote({ ...listPage.query, q: '', filter: 'all' }, 'analysis')
 }
 function selectPendingMix() {
-  selectStems(pendingMixStems.value)
+  void selectRemote({ ...listPage.query, q: '', filter: 'all' }, 'mix')
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +675,33 @@ async function doLock(stem: string, locked: boolean) {
 // ---------------------------------------------------------------------------
 const manualStem = ref<string | null>(null)
 const manualPick = ref<string | null>(null)
+const manualPage = ref(1)
+const manualQuery = ref('')
+const manualTotal = ref(0)
+let manualAbort: AbortController | null = null
+let manualRequest = 0
+const manualLoading = ref(false)
+const manualError = ref('')
+const manualRetry = ref(0)
+watch(manualQuery, () => { manualPage.value = 1 })
+watch([manualStem, manualPage, manualQuery, manualRetry], async () => {
+  manualAbort?.abort()
+  const request = ++manualRequest
+  if (!manualStem.value) return
+  manualAbort = new AbortController()
+  const isCurrent = captureScope()
+  manualLoading.value = true; manualError.value = ''
+  try {
+    const value = await withinScope(getLibrary({ page: manualPage.value, page_size: 10, q: manualQuery.value }, manualAbort.signal, { enabled_only: true }), isCurrent)
+    if (request === manualRequest) {
+      lib.value = value; manualTotal.value = value.pagination?.total ?? 0
+      manualPage.value = Math.min(manualPage.value, Math.max(1, Math.ceil(manualTotal.value / 10)))
+    }
+  } catch (e: any) { if (request === manualRequest && isCurrent() && !manualAbort.signal.aborted) manualError.value = e?.message || '曲目暂未更新' }
+  finally { if (request === manualRequest) manualLoading.value = false }
+})
+onBeforeUnmount(() => manualAbort?.abort())
+onDeactivated(() => manualAbort?.abort())
 const manualLock = ref(false)
 const manualBusy = ref(false)
 
@@ -692,6 +709,7 @@ let manualOpener: HTMLElement | null = null
 let timelineOpener: HTMLElement | null = null
 function openManual(row: BgmRow, event?: Event) {
   manualOpener = (event?.currentTarget as HTMLElement | null) ?? document.activeElement as HTMLElement
+  manualPage.value = 1; manualQuery.value = ''
   manualStem.value = row.stem
   manualPick.value = row.data.assignment?.music ?? null
   manualLock.value = row.data.assignment?.locked ?? false
@@ -879,7 +897,7 @@ const selectedMixable = computed(() =>
   rows.value.filter((row) => selected[row.stem] && row.mixable).map((row) => row.stem),
 )
 const workRows = computed(() =>
-  rows.value.map((row) => ({
+  rows.value.filter(row => chapterRows.value.some(c => c.stem === row.stem)).map((row) => ({
     ...row,
     workKey: row.stem,
     workName: row.data.display_name || row.stem,
@@ -896,6 +914,20 @@ const workRows = computed(() =>
               : 'pending',
   })),
 )
+async function selectRemote(query: ListQuery, scope?: 'analysis' | 'mix') {
+  const isCurrent = captureScope()
+  try {
+    const response = await withinScope(getChapters(query, undefined, true), isCurrent)
+    for (const row of response.chapters) selectedRowCache.set(row.stem, row)
+    const eligible = response.chapters.filter(row => {
+      if (!scope) return true
+      if (row.mix_exists || tasksByStem.value.active.has(row.stem)) return false
+      return scope === 'analysis' ? (mode.value === 'segment' ? !row.segment_analysis || row.segment_analysis.stale : !row.assignment)
+        : row.narration_exists && !row.music_missing && !row.segment_music_missing && (mode.value === 'segment' || row.assignment?.segment ? segmentTimelineReady(row) : !!row.assignment)
+    })
+    selectStems(eligible.map(row => row.stem))
+  } catch (e: any) { if (isCurrent()) loadError.value = e?.message || '读取选择范围失败' }
+}
 function selectFiltered(names: string[]) {
   selectStems(names)
 }
@@ -977,6 +1009,7 @@ onBeforeUnmount(() => {
       </WorkbenchContextBar>
     </div>
     <ProductionWorkbench
+      remote :pagination="listPagination" @request-page="listPage.request" @select-scope="selectRemote"
       :rows="workRows"
       :selected="selected"
       :loading="loading"
@@ -1007,13 +1040,13 @@ onBeforeUnmount(() => {
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="loading || !!loadError || submitting || matching || !pendingAnalysisStems.length"
+          :disabled="loading || !!loadError || submitting || matching || !(listPagination?.counts.all ?? pendingAnalysisStems.length)"
           @click="selectPendingAnalysis"
           >{{ mode === 'segment' ? '选择待分析' : '选择未匹配' }}</Button
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="loading || !!loadError || submitting || matching || !pendingMixStems.length"
+          :disabled="loading || !!loadError || submitting || matching || !(listPagination?.counts.all ?? pendingMixStems.length)"
           @click="selectPendingMix"
           >选择待混音</Button
         ><Button
@@ -1089,7 +1122,7 @@ onBeforeUnmount(() => {
           <p v-if="row.data.assignment?.reason" class="mt-2 break-words text-muted-foreground">
             匹配依据：{{ row.data.assignment.reason }}
           </p>
-          <p v-if="!manualTracks.length" class="mt-2 text-muted-foreground">
+          <p v-if="lib && (lib.pagination?.counts.enabled ?? manualTracks.length) === 0" class="mt-2 text-muted-foreground">
             音乐库暂无启用曲目。请联系管理员维护音乐库，也可手动指定无 BGM。
           </p>
           <div class="mt-3 flex flex-wrap gap-2">
@@ -1280,6 +1313,7 @@ onBeforeUnmount(() => {
         <p class="mt-1 text-xs text-muted-foreground">
           选择曲目后，该章节将使用手动指定的音乐；锁定后不会被重新匹配。
         </p>
+        <input v-model="manualQuery" class="mt-3 h-8 w-full rounded border bg-background px-2 text-xs" placeholder="搜索曲目…" />
         <ScrollArea class="mt-3 h-72 rounded-md border">
           <div class="space-y-1 p-2">
             <label
@@ -1309,11 +1343,14 @@ onBeforeUnmount(() => {
               <span class="min-w-0 flex-1 truncate text-sm" :title="tr.name">{{ tr.name }}</span>
               <MiniAudioPlayer :src="musicPreviewUrl(tr.name)" />
             </label>
-            <p v-if="!manualTracks.length" class="px-2 py-3 text-xs text-muted-foreground">
+            <p v-if="manualError" role="alert" class="px-2 py-3 text-xs text-destructive">{{ manualError }} <button class="underline" @click="manualRetry++">重试</button></p>
+            <p v-if="manualLoading" class="px-2 py-3 text-xs text-muted-foreground">正在读取曲目…</p>
+            <p v-if="!manualLoading && !manualError && !manualTracks.length" class="px-2 py-3 text-xs text-muted-foreground">
               音乐库中没有启用的曲目——请先到「音乐库」上传并启用。
             </p>
           </div>
         </ScrollArea>
+        <Pager :page="manualPage" :page-count="Math.max(1, Math.ceil(manualTotal / 10))" :total="manualTotal" :page-size="10" unit="首" @update:page="manualPage = $event" />
         <label class="mt-3 flex items-center gap-2 text-sm">
           <input
             type="checkbox"

@@ -234,3 +234,17 @@ test('historical completed operations stay in storage instead of crowding the re
   assert.equal(h.center.operationTasks.value.length, 1)
   h.close()
 })
+
+
+test('refreshing all resources submits every owned project despite a twelve-project page', async () => {
+  const ids = Array.from({ length: 57 }, (_, i) => `project-${i}`)
+  const h = harness({
+    getResourceOverview: async () => ({ projects: ids.slice(0, 12).map(project_id => ({ project_id, name: project_id, stale: false })), exports: [], pagination: { total: 57, page: 1, page_size: 12, counts: { all: 57 } } }),
+    getResourceProjectIds: async () => ({ project_ids: ids }),
+  }, {})
+  await flush()
+  await h.center.refreshResources()
+  assert.equal(h.center.overview.value.projects.length, 12)
+  assert.deepEqual(Array.from(h.calls.submits.at(-1).payload.project_ids), ids)
+  h.close()
+})

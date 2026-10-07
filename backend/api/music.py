@@ -16,7 +16,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Query
+from typing import Annotated
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -32,6 +33,8 @@ from ..platform.deps import AuthContext, get_auth_context, require_admin
 from ..platform.models import User, Project
 from ..platform.engine_task_submission import active_durable_targets, submit_legacy_engine_task
 from ..platform.storage import configured_storage_root, storage_username
+
+from ..services.list_paging import page_meta, page_slice
 
 log = logging.getLogger("audiobook.music")
 
@@ -165,7 +168,10 @@ class ApplySuggestionsReq(BaseModel):
 # --------------------------------------------------------------------------- #
 
 @router.get("/library")
-def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db)) -> dict:
+def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db),
+                page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+                q: str = "", folder: str | None = None, tag: str = "", include_usage: bool = False,
+                keys_only: bool = False, enabled_only: bool = False) -> dict:
     """The full index (incl. the ``folders`` section + each track's ``folder``
     field) + ``folder_counts`` + pending AI suggestions (read-only).
 
@@ -178,9 +184,18 @@ def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depe
     """
     idx = music_engine.load_index()
     sugg = music_engine.load_suggestions().get("tracks") or {}
+    names = sorted(n for n, t in idx["tracks"].items() if
+                   (folder is None or t.get("folder", "") == folder) and (not enabled_only or t.get("enabled", False)) and q.strip().casefold() in n.casefold() and
+                   (not tag or (":" in tag and tag.split(":", 1)[1] in (t.get("tags") or {}).get(tag.split(":", 1)[0], []))))
+    counts = {"all": len(idx["tracks"]), "enabled": sum(bool(t.get("enabled")) for t in idx["tracks"].values())}
+    pagination = page_meta(len(names), page or 1, page_size, counts)
+    if keys_only:
+        return {"names": names, "pagination": pagination, "tracks": {n: idx["tracks"][n] for n in names}, "suggestions": {n: sugg[n] for n in names if n in sugg}}
+    names = page_slice(names, page, page_size) if page is not None else names
+    tag_counts = {cat: {tag: sum(tag in (t.get("tags") or {}).get(cat, []) for t in idx["tracks"].values()) for tag in tags} for cat, tags in idx.get("tags", {}).items()}
     usage_counts: dict[str, int] = {}
     is_admin = getattr(getattr(ctx, "user", None), "role", None) == "admin"
-    if is_admin and hasattr(db, "execute"):
+    if is_admin and (page is None or include_usage) and hasattr(db, "execute"):
         root = configured_storage_root(db).resolve()
         workspaces = db.execute(
             select(Project, User.username).join(User, User.id == Project.owner_id)
@@ -208,11 +223,12 @@ def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depe
                     usage_counts[music_name] = usage_counts.get(music_name, 0) + 1
     tracks = {
         name: {**track, "size_bytes": _track_size(name),
-               "use_count": usage_counts.get(name, 0) if is_admin else None}
-        for name, track in idx["tracks"].items()
+               "use_count": usage_counts.get(name, 0) if is_admin and (page is None or include_usage) else None}
+        for name, track in ((n, idx["tracks"][n]) for n in names)
     }
     return {**idx, "tracks": tracks, "folder_counts": music_engine.folder_counts(idx),
-            "suggestions": {n: e for n, e in sugg.items() if n in idx["tracks"]}}
+            "suggestions": {n: e for n, e in sugg.items() if n in names}, "tag_counts": tag_counts,
+            **({"pagination": pagination} if page is not None else {})}
 
 
 @router.post("/upload", dependencies=[Depends(require_admin)])

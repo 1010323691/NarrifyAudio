@@ -57,19 +57,23 @@ def legacy_status(status: str) -> str:
 
 
 def durable_label(task: DurableTask) -> str:
-    payload = task.payload if isinstance(task.payload, dict) else {}
+    return task_display_label(task.task_type, task.payload)
+
+
+def task_display_label(task_type: str, payload: dict | None) -> str:
+    payload = payload if isinstance(payload, dict) else {}
     if payload.get("label"):
         return str(payload["label"])
     source = str(payload.get("source_name") or payload.get("output_name") or "")
-    if task.task_type == "script.parse":
+    if task_type == "script.parse":
         return f"文本解析（{source or '文件'}）"
-    if task.task_type == "audio.silences":
+    if task_type == "audio.silences":
         return f"停顿检测：{source or '音频'}"
-    if task.task_type == "audio.cut":
+    if task_type == "audio.cut":
         return f"音频分集：{source or '音频'}"
-    if task.task_type.startswith("resources."):
-        return {"resources.scan": "资源清单扫描", "resources.package": "资源文件打包", "resources.cleanup": "过期缓存清理"}.get(task.task_type, "资源管理")
-    return f"持久化任务：{task.task_type}"
+    if task_type.startswith("resources."):
+        return {"resources.scan": "资源清单扫描", "resources.package": "资源文件打包", "resources.cleanup": "过期缓存清理"}.get(task_type, "资源管理")
+    return f"持久化任务：{task_type}"
 
 
 def task_events(db: Session, task_id: str) -> list[TaskEvent]:

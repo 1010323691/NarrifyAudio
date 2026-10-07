@@ -1,3 +1,4 @@
+import { listQuery, type ListPagination } from '@/api/listPaging'
 import { http } from './client'
 
 export interface GpuSchedulerConfig {
@@ -89,6 +90,8 @@ export interface ApiSnapshot {
   endpoints: { route: string; requests: number; server_errors: number; error_rate: number; average_ms: number; p95_ms: number }[]
 }
 export interface AdminResources {
+  light?: boolean
+  pagination?: ListPagination
   root_path: string; disk_total_bytes: number; disk_used_bytes: number; disk_free_bytes: number
   projects: number; files: { kind: string; count: number; size_bytes: number }[]
   users: { username: string; project_count?: number; file_count?: number; count?: number; size_bytes: number; registered_file_count?: number; registered_file_bytes?: number }[]
@@ -98,7 +101,7 @@ export interface AdminResources {
     cleanup_candidates?: { count: number; size_bytes: number; older_than_days: number }
   }
   scope: string
-  music_library: { count: number; size_bytes: number; assigned_chapters?: number }
+  music_library: { count: number; size_bytes: number | null; assigned_chapters?: number }
 }
 
 export interface RuntimeSettings {
@@ -241,7 +244,7 @@ export function listTasks(status = 'all', search = '', limit = 50): Promise<Admi
 
 export function getOverview(): Promise<AdminOverview> { return http.get(`/api/v1/admin/overview?tz_offset_minutes=${new Date().getTimezoneOffset()}`) }
 export function getPerformance(): Promise<AdminPerformance> { return http.get('/api/v1/admin/performance') }
-export function getResources(): Promise<AdminResources> { return http.get('/api/v1/admin/resources') }
+export function getResources(light = true, page = 1): Promise<AdminResources> { return http.get(`/api/v1/admin/resources?light=${light}&page=${page}`) }
 export function getEvents(level = 'all', module = 'all', search = '', sinceHours = 24): Promise<AdminEvent[]> {
   const query = new URLSearchParams({ level, module, search, since_hours: String(sinceHours) })
   return http.get(`/api/v1/admin/events?${query}`)
@@ -261,4 +264,14 @@ export function retryTask(id: string): Promise<{ id: string; status: string; att
 
 export function cleanupStaleTemp(): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {
   return http.post('/api/v1/admin/resources/cleanup-temp')
+}
+
+export function userPage(options: { page: number; search: string; role: string; state: string; sort: string }, signal?: AbortSignal): Promise<{ items: AdminUser[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/users?${listQuery(undefined, options)}`, { signal })
+}
+export function taskPage(status: string, search: string, page: number, signal?: AbortSignal): Promise<{ items: AdminTask[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/tasks?${listQuery(undefined, { status, search, page })}`, { signal })
+}
+export function eventPage(level: string, module: string, search: string, since_hours: number, page: number, signal?: AbortSignal): Promise<{ items: AdminEvent[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/events?${listQuery(undefined, { level, module, search, since_hours, page })}`, { signal })
 }

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, literal, or_, select
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.expression import ColumnElement
 
@@ -59,6 +59,7 @@ def one_row_per_entry() -> ColumnElement:
         select(newer.id).where(
             newer.owner_id == Task.owner_id,
             newer.project_id == Task.project_id,
+            newer.task_type == Task.task_type,
             same_entry_predicate(newer),
             newer.status != "cancelled",
             or_(
@@ -102,6 +103,7 @@ def superseded_ids_hidden_by(
             newer.id.in_(ids),
             newer.owner_id == Task.owner_id,
             newer.project_id == Task.project_id,
+            newer.task_type == Task.task_type,
             same_entry_predicate(newer),
             newer.status != "cancelled",
             or_(
@@ -117,3 +119,40 @@ def superseded_ids_hidden_by(
         .limit(limit)
     ).all()
     return set(rows)
+
+
+def current_entry_ids(user_id: str, task_types: Iterable[str], project_id: str | None = None):
+    """Set-based equivalent of one_row_per_entry for task-center aggregates.
+
+    Rank non-cancelled runs per registry identity, keeping every active row.
+    Missing subjects and unregistered types partition by ID, so no guessed
+    identity can hide a row. Filter failed rows AFTER ranking: a failed newer
+    run still supersedes its predecessor under the shared entry semantics.
+    Scope filters are safe before ranking because predecessors must have the
+    same owner, project and type. Returning IDs keeps payloads inside SQL.
+    """
+    types = tuple(task_types)
+    specs = [TASK_TYPES[name] for name in types if name in TASK_TYPES]
+    width = max((len(spec.entry_identity) for spec in specs), default=0)
+    identity_columns = [case(*[
+        (Task.task_type == spec.name, identity_value(Task, spec.entry_identity[index]))
+        for spec in specs if index < len(spec.entry_identity)
+    ], else_=NO_IDENTITY) for index in range(width)]
+    has_subject = case(*[
+        (Task.task_type == spec.name,
+         or_(*[identity_value(Task, key) != NO_IDENTITY for key in spec.entry_identity])
+         if spec.entry_identity else True)
+        for spec in specs
+    ], else_=False) if specs else literal(False)
+    unique_subject = case((has_subject, None), else_=Task.id)
+    ranked = select(
+        Task.id, Task.status,
+        func.row_number().over(
+            partition_by=[Task.owner_id, Task.project_id, Task.task_type, unique_subject, *identity_columns],
+            order_by=[Task.created_at.desc(), Task.id.desc()],
+        ).label("entry_rank"),
+    ).where(Task.owner_id == user_id, Task.task_type.in_(types), Task.status != "cancelled")
+    if project_id is not None:
+        ranked = ranked.where(Task.project_id == project_id)
+    rows = ranked.subquery("ranked_entries")
+    return select(rows.c.id).where(or_(rows.c.status.in_(ACTIVE_TASK_STATUSES), rows.c.entry_rank == 1))

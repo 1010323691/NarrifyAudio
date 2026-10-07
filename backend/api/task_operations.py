@@ -73,10 +73,13 @@ def retry_task(task_id: str, *, user: User, db: Session) -> dict:
     return task_dict(task)
 
 
-def batch_control_tasks(payload: TaskBatchControl, *, user: User, db: Session) -> dict:
+def batch_control_tasks(payload: TaskBatchControl, *, user: User, db: Session, compact: bool = False) -> dict:
     try:
         tasks = control_task_category(db, user.id, payload.project_id, payload.category, payload.action)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    changed = len(tasks)
     db.commit()
-    return {"changed": len(tasks), "tasks": [task_dict(task) for task in tasks]}
+    if compact:
+        return {"changed": changed}
+    return {"changed": changed, "tasks": [task_dict(task) for task in tasks]}

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useListPage } from '@/composables/useListPage'
+import type { ListQuery } from '@/api/listPaging'
 import {
   computed,
   onActivated,
@@ -20,10 +22,9 @@ import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
-import { listDir } from '@/api/files'
-import { batchStatusFiles, submitBatchReset, runBatch, ttsStatus, listVoices } from '@/api/tts'
+import { batchStatusFiles, submitBatchReset, runBatch, ttsStatus, listVoices, batchList } from '@/api/tts'
 import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
-import type { BatchFileStatus, BatchResult, FileItem, TTSStatus } from '@/types'
+import type { BatchFileStatus, BatchResult, TTSStatus } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
@@ -51,6 +52,8 @@ const waitForTask = useDurableTaskWait()
 const settings = useSettingsStore()
 const status = ref<TTSStatus | null>(null)
 const filesError = ref('')
+const listPage = useListPage(refreshRows, () => { fileNames.value = []; statuses.value = []; selectedRowCache.clear(); clearSelection() })
+const listPagination = listPage.pagination
 let rowsRequest = 0
 let statsRequest = 0
 
@@ -74,11 +77,11 @@ async function refreshVoiceSummary() {
     return
   }
   try {
-    const response = await withinScope(listVoices('__all__'), isCurrent)
+    const response = await withinScope(listVoices('__all__', undefined, undefined, true), isCurrent)
     if (request !== voiceSummaryRequest) return
     voiceSummary.value = {
-      total: response.speakers.length,
-      ready: response.speakers.filter((speaker) => speaker.status === 'ready').length,
+      total: response.pagination?.counts.all ?? response.speakers.length,
+      ready: response.pagination?.counts.ready ?? response.speakers.filter((speaker) => speaker.status === 'ready').length,
     }
   } catch {
     if (isCurrent() && request === voiceSummaryRequest) voiceSummary.value = null
@@ -87,12 +90,6 @@ async function refreshVoiceSummary() {
 
 // The same filter WorkspaceEntryPicker applied: plain .json files, excluding the two-checks
 // shared product (<stem>_checked.json).
-function matches(i: FileItem): boolean {
-  if (i.is_dir) return false
-  const low = i.name.toLowerCase()
-  return low.endsWith('.json') && !low.endsWith('_checked.json')
-}
-
 /** A 待合成 row: the directory's file name + its live stats (zeros when stats are missing). */
 interface FileRow {
   name: string
@@ -107,9 +104,10 @@ interface FileRow {
   stale_speakers?: string[]
 }
 
+const selectedRowCache = new Map<string, BatchFileStatus>()
 const rows = computed<FileRow[]>(() => {
-  const byName = new Map(statuses.value.map((s) => [s.name, s]))
-  return fileNames.value.filter((name) => byName.get(name)?.is_script !== false).map(
+  const byName = new Map([...selectedRowCache, ...statuses.value.map((s) => [s.name, s] as const)])
+  return [...new Set([...fileNames.value, ...Object.keys(selected)])].filter((name) => byName.get(name)?.is_script !== false).map(
     (n) =>
       byName.get(n) ?? {
         name: n,
@@ -134,6 +132,7 @@ async function refreshStatusesOnly() {
   try {
     const response = await withinScope(batchStatusFiles([...fileNames.value]), isCurrent)
     if (request !== statsRequest) return
+    for (const row of response.files ?? []) if (row.is_script === false) { delete selected[row.name]; selectedRowCache.delete(row.name) }
     statuses.value = response.files ?? []
     filesError.value = ''
   } catch (e: any) {
@@ -153,17 +152,16 @@ async function refreshRows() {
   filesLoading.value = true
   filesError.value = ''
   try {
-    const directory = await withinScope(listDir('03_parsed_json'), isCurrent)
+    const response = await withinScope(batchList(listPage.query, listPage.begin(), false, Object.keys(selected)), isCurrent)
     if (request !== rowsRequest) return
-    const names = directory.items.filter(matches).map((i) => i.name)
-    const response = names.length
-      ? await withinScope(batchStatusFiles(names), isCurrent)
-      : { files: [] }
-    if (request !== rowsRequest) return
-    const nonScripts = new Set(response.files.filter((row) => row.is_script === false).map((row) => row.name))
-    fileNames.value = names.filter((name) => !nonScripts.has(name))
-    statuses.value = response.files ?? []
-    for (const key of Object.keys(selected)) if (!fileNames.value.includes(key)) delete selected[key]
+    listPage.received(response.pagination)
+    for (const key of response.missing_selected ?? []) delete selected[key]
+    if (!response.pagination) for (const key of Object.keys(selected)) if (!response.files.some(row => row.name === key)) delete selected[key]
+    fileNames.value = response.files.filter(row => row.is_script !== false).map(row => row.name)
+    for (const row of response.files) if (row.is_script === false) { delete selected[row.name]; selectedRowCache.delete(row.name) }
+    statuses.value = response.files
+    for (const row of response.files) selectedRowCache.set(row.name, row)
+    for (const key of selectedRowCache.keys()) if (!selected[key] && !fileNames.value.includes(key)) selectedRowCache.delete(key)
     syncScript()
   } catch (e: any) {
     if (!isCurrent()) return
@@ -192,7 +190,7 @@ const selected = reactive<Record<string, boolean>>({})
 let lastSynced = pipeline.activeScript
 if (pipeline.activeScript) selected[pipeline.activeScript] = true
 
-const selectedNames = computed(() => rows.value.filter((row) => selected[row.name]).map((row) => row.name))
+const selectedNames = computed(() => Object.keys(selected).filter(name => selected[name]))
 
 function syncScript() {
   const first = selectedNames.value[0] ?? ''
@@ -221,10 +219,17 @@ watch(
 // it is still useful for 重新合成).
 const pendingRows = computed(() => rows.value.filter((r) => !r.complete))
 
-function selectPending() {
-  for (const name of Object.keys(selected)) delete selected[name]
-  for (const row of pendingRows.value) selected[row.name] = true
-  syncScript()
+function selectPending() { void selectRemote({ ...listPage.query, q: '', filter: 'pending' }, true) }
+async function selectRemote(query: ListQuery, pending = false) {
+  const isCurrent = captureScope()
+  try {
+    const response = await withinScope(batchList(pending ? { ...query, filter: 'all' } : query, undefined, true), isCurrent)
+    clearSelection()
+    for (const row of response.files) if (row.is_script !== false && (!pending || !row.complete)) {
+      selectedRowCache.set(row.name, row); selected[row.name] = true
+    }
+    syncScript()
+  } catch (e: any) { if (isCurrent()) filesError.value = e?.message || '读取选择范围失败' }
 }
 
 function selectAllFiles() {
@@ -479,7 +484,7 @@ watch(
 
 // ---------------------------------------------------------------------------
 
-const workRows = computed(() => rows.value.map(row => {
+const workRows = computed(() => rows.value.filter(row => fileNames.value.includes(row.name)).map(row => {
   const entryTask = tasksByFile.value.get(row.name)
   const settled = entryTask?.status === 'running' && entryTask.progress === 100
     ? entryTask.current : ''
@@ -578,6 +583,7 @@ async function retryBatch() {
       </WorkbenchContextBar>
     </div>
     <ProductionWorkbench
+      remote :pagination="listPagination" @request-page="listPage.request" @select-scope="selectRemote"
       :rows="workRows"
       :selected="selected"
       :loading="filesLoading"
@@ -606,7 +612,7 @@ async function retryBatch() {
         ><Button
           variant="ghost"
           size="sm"
-          :disabled="filesLoading || !!filesError || busy || !pendingRows.length"
+          :disabled="filesLoading || !!filesError || busy || !(listPagination?.counts.all ?? pendingRows.length)"
           @click="selectPending"
           >选择待合成</Button
         ><Button variant="ghost" size="sm" :disabled="filesLoading || !!filesError || busy || !rows.length" @click="selectAllFiles"

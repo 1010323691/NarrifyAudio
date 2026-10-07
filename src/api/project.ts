@@ -1,3 +1,4 @@
+import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 import { http } from './client'
 import type { ProjectContext } from '@/types'
 
@@ -58,8 +59,12 @@ export function createProject(name: string): Promise<ProjectSummary> {
   return http.post('/api/v1/projects', { name })
 }
 
-export function listProjects(): Promise<ProjectSummary[]> {
-  return http.get('/api/v1/projects')
+export async function listProjects(options?: Partial<ListQuery>): Promise<ProjectSummary[]> {
+  const response = await http.get<ProjectSummary[] | { items: ProjectSummary[] }>(`/api/v1/projects?${listQuery(options)}`)
+  return Array.isArray(response) ? response : response.items
+}
+export function listProjectPage(options: Partial<ListQuery>, signal?: AbortSignal, trashed = false): Promise<{ items: TrashedProjectSummary[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/projects${trashed ? '/trash' : ''}?${listQuery(options)}`, { signal })
 }
 
 export function listTrashedProjects(): Promise<TrashedProjectSummary[]> {
