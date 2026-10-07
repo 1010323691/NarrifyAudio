@@ -211,3 +211,118 @@ def test_registration_rejects_collision_with_legacy_username(filename_client):
         "password": "test-pass-1234", "display_name": "New",
     })
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize("same_source", [True, False])
+def test_legacy_republication_requires_matching_source(filename_client, same_source):
+    from backend.platform.database import SessionLocal
+    from backend.platform.models import Task, TaskResult, ProjectFile, Project
+    from backend.platform.storage import object_path
+    from backend.platform.task_worker import claim_task, complete_claim
+    from backend.platform.task_engine_support import write_task_outcome
+    from backend.platform.task_contracts import TaskExecutionError
+    account, project = _register(filename_client)
+    response = filename_client.post("/api/v1/tasks", headers={"X-CSRF-Token": account["csrf_token"]}, json={
+        "project_id": project, "task_type": "tts.merge", "payload": {"package": "chapter"},
+        "idempotency_key": uuid.uuid4().hex,
+    })
+    assert response.status_code == 201
+    task_id = response.json()["id"]
+    with SessionLocal.begin() as db:
+        task = db.get(Task, task_id)
+        task.task_type = "text.format"
+        task.payload = {"input_file_id": "current-source"}
+        key = db.get(Project, project).directory_key + "/02_split_text/a_.txt"
+        file = ProjectFile(owner_id=task.owner_id, project_id=project, original_name="a_.txt",
+                           object_key=key, content_type="text/plain", size_bytes=8,
+                           sha256=hashlib.sha256(b"original").hexdigest(), kind="artifact")
+        db.add(file)
+        old = Task(owner_id=task.owner_id, project_id=project, task_type="text.format", status="succeeded",
+                   payload={"input_file_id": "current-source" if same_source else "other-source"},
+                   idempotency_key=uuid.uuid4().hex)
+        db.add(old)
+        db.flush()
+        db.add(TaskResult(task_id=old.id, result={"file_id": file.id, "object_key": key}))
+        file_id = file.id
+        path = object_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"original")
+    claim = claim_task(task_id, "filename-test")
+    assert claim is not None
+    outcome = write_task_outcome(claim, "a?.txt", "text/plain", b"new", {}, publish_module="02_split_text")
+    if same_source:
+        assert complete_claim(claim, outcome) is True
+        assert path.read_bytes() == b"new"
+        with SessionLocal() as db:
+            assert db.get(ProjectFile, file_id).original_name == "a?.txt"
+    else:
+        with pytest.raises(TaskExecutionError, match="名称冲突"):
+            complete_claim(claim, outcome)
+        assert path.read_bytes() == b"original"
+        with SessionLocal.begin() as db:
+            db.get(Task, task_id).status = "cancelled"
+
+
+@pytest.mark.parametrize("file_exists", [False, True])
+def test_deleted_target_case_change_reuses_row_only_without_disk_conflict(filename_client, file_exists):
+    from backend.platform.database import SessionLocal
+    from backend.platform.models import Task, ProjectFile, Project, utcnow
+    from backend.platform.storage import object_path
+    from backend.platform.task_worker import claim_task, complete_claim
+    from backend.platform.task_engine_support import write_task_outcome
+    from backend.platform.task_contracts import TaskExecutionError
+    from sqlalchemy import select
+    account, project = _register(filename_client)
+    response = filename_client.post("/api/v1/tasks", headers={"X-CSRF-Token": account["csrf_token"]}, json={
+        "project_id": project, "task_type": "tts.merge", "payload": {"package": "chapter"},
+        "idempotency_key": uuid.uuid4().hex,
+    })
+    assert response.status_code == 201
+    task_id = response.json()["id"]
+    with SessionLocal.begin() as db:
+        task = db.get(Task, task_id)
+        task.task_type = "book.split"
+        key = db.get(Project, project).directory_key + "/02_split_text/第 1 章 title.txt"
+        file = ProjectFile(owner_id=task.owner_id, project_id=project, original_name="第 1 章 title.txt",
+                           object_key=key, content_type="text/plain", size_bytes=8,
+                           sha256=hashlib.sha256(b"original").hexdigest(), kind="artifact", deleted_at=utcnow())
+        db.add(file)
+        db.flush()
+        file_id = file.id
+        path = object_path(key)
+        if file_exists:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"original")
+    claim = claim_task(task_id, "filename-test")
+    assert claim is not None
+    outcome = write_task_outcome(claim, "第 1 章 Title.txt", "text/plain", b"new", {}, publish_module="02_split_text")
+    if file_exists:
+        with pytest.raises(TaskExecutionError, match="名称冲突"):
+            complete_claim(claim, outcome)
+        assert path.read_bytes() == b"original"
+        with SessionLocal.begin() as db:
+            db.get(Task, task_id).status = "cancelled"
+    else:
+        assert complete_claim(claim, outcome) is True
+        assert path.read_bytes() == b"new"
+        with SessionLocal() as db:
+            files = list(db.scalars(select(ProjectFile).where(ProjectFile.project_id == project)))
+            assert len(files) == 1 and files[0].id == file_id
+            assert files[0].original_name == "第 1 章 Title.txt"
+            assert files[0].deleted_at is None
+        # Subsequent splitting must retain this actual disk casing instead of
+        # treating the revived output as a stale chapter and removing it.
+        with SessionLocal.begin() as db:
+            repeat = Task(owner_id=account["user"]["id"], project_id=project,
+                          task_type="book.split", payload={}, idempotency_key=uuid.uuid4().hex)
+            db.add(repeat)
+            db.flush()
+            repeat_id = repeat.id
+        repeat_claim = claim_task(repeat_id, "filename-test")
+        assert repeat_claim is not None
+        repeat_outcome = write_task_outcome(repeat_claim, "第 1 章 Title.txt", "text/plain", b"again", {},
+                                           publish_module="02_split_text")
+        assert complete_claim(repeat_claim, repeat_outcome) is True
+        assert path.read_bytes() == b"again"
+        with SessionLocal() as db:
+            assert db.get(ProjectFile, file_id).deleted_at is None

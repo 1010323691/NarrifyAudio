@@ -21,7 +21,7 @@ from ..core.config import TextConfig
 from ..core import config as core_config
 from ..core.file_lock import exclusive_file_lock, shared_file_lock
 from ..core.paths import WORKSPACE_DIRS
-from ..core.filenames import workspace_audio_identity
+from ..core.filenames import workspace_audio_identity, legacy_storage_name
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.task_control import TaskCancelled
 from ..engines.book import (
@@ -1137,6 +1137,29 @@ def _cleanup_outcome(outcome: TaskOutcome) -> None:
         extra.temp_path.unlink(missing_ok=True)
 
 
+def _same_artifact_source(db, task: Task, previous: ProjectFile) -> bool:
+    """A legacy cleaned name needs source evidence before it can be overwritten."""
+    source_ids = task.payload.get("input_file_ids") or [task.payload.get("input_file_id")]
+    source_ids = set(source_ids) - {None, ""}
+    if not source_ids:
+        return False
+    for old_task, result in db.execute(
+        select(Task, TaskResult).join(TaskResult, TaskResult.task_id == Task.id).where(
+            Task.project_id == task.project_id,
+            Task.task_type == task.task_type,
+            Task.status == "succeeded",
+        )
+    ):
+        old_sources = old_task.payload.get("input_file_ids") or [old_task.payload.get("input_file_id")]
+        if set(old_sources) - {None, ""} != source_ids:
+            continue
+        metadata = result.result or {}
+        outputs = [metadata, *(metadata.get("files") or [])]
+        if any(isinstance(output, dict) and output.get("file_id") == previous.id for output in outputs):
+            return True
+    return False
+
+
 def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
     with SessionLocal() as db:
         task, attempt = _attempt_is_current(db, claim)
@@ -1170,10 +1193,16 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             _cleanup_outcome(outcome)
             raise TaskExecutionError("invalid_publish_module", "任务产物目录配置无效")
         targets: set[tuple[str, str]] = set()
+        records = (
+            list(db.scalars(select(ProjectFile).where(ProjectFile.project_id == task.project_id)))
+            if any(item.publish_module for item in outputs) else []
+        )
         recorded_targets = {
             item.object_key.casefold(): item
-            for item in db.scalars(select(ProjectFile).where(ProjectFile.project_id == task.project_id))
-        } if any(item.publish_module for item in outputs) else {}
+            for item in records if item.deleted_at is None
+        }
+        deleted_targets = {item.object_key.casefold(): item for item in records if item.deleted_at is not None}
+        publication_keys: dict[tuple[str, str], str] = {}
         for item in outputs:
             if item.publish_module:
                 target = (item.publish_module, safe_display_name(item.output_name).casefold())
@@ -1184,12 +1213,31 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 targets.add(target)
                 key = f"{project_directory_key(db, user.username, task.project_id)}/{item.publish_module}/{safe_display_name(item.output_name)}"
                 previous = recorded_targets.get(key.casefold())
-                if previous is not None and (
-                    previous.object_key != key or previous.original_name != item.output_name
-                ):
+                if previous is not None and previous.original_name == item.output_name:
+                    # A revived tombstone can retain an older disk casing.
+                    key = previous.object_key
+                if previous is None:
+                    deleted = deleted_targets.get(key.casefold())
+                    if deleted is not None:
+                        deleted_path = object_path(deleted.object_key, configured_storage_root(db))
+                        if deleted_path.exists() or deleted_path.is_symlink():
+                            previous = deleted
+                        else:
+                            # Reuse the tombstone's exact key (and row), including
+                            # on case-insensitive databases/filesystems.
+                            key = deleted.object_key
+                legacy_republication = previous is not None and (
+                    previous.original_name != item.output_name
+                    and previous.original_name == legacy_storage_name(item.output_name)
+                    and _same_artifact_source(db, task, previous)
+                )
+                if previous is not None and (previous.object_key != key or (
+                    previous.original_name != item.output_name and not legacy_republication
+                )):
                     db.rollback()
                     _cleanup_outcome(outcome)
                     raise TaskExecutionError("output_name_collision", "任务产物与已有文件名称冲突，未覆盖原文件")
+                publication_keys[target] = key
         legacy_module_paths: list[tuple[str, Path]] = []
         stale_book_paths: list[Path] = []
         module_outputs = {item.publish_module for item in outputs if item.publish_module}
@@ -1212,7 +1260,10 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     existing.deleted_at = utcnow()
                     legacy_module_paths.append((module, object_path(existing.object_key, configured_storage_root(db))))
             if claim.task_type == "book.split" and module == "02_split_text":
-                output_names = {safe_display_name(item.output_name) for item in outputs if item.publish_module == module}
+                output_names = {
+                    Path(publication_keys[(module, safe_display_name(item.output_name).casefold())]).name
+                    for item in outputs if item.publish_module == module
+                }
                 for existing in db.scalars(
                     select(ProjectFile).where(
                         ProjectFile.owner_id == task.owner_id,
@@ -1250,7 +1301,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             for item in outputs:
                 file_record = None
                 if item.publish_module:
-                    object_key = f"{project_directory_key(db, user.username, task.project_id)}/{item.publish_module}/{safe_display_name(item.output_name)}"
+                    object_key = publication_keys[(item.publish_module, safe_display_name(item.output_name).casefold())]
                     file_record = db.scalar(select(ProjectFile).where(ProjectFile.object_key == object_key))
                     output_id = file_record.id if file_record is not None else new_id()
                 else:
