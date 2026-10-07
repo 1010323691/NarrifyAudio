@@ -61,7 +61,7 @@ def _add_split_file(db, user_id: str, project_id: str, username: str, name: str,
         project_id=project_id,
         owner_id=user_id,
         original_name=name,
-        object_key=f"{username}/{project_id}/02_split_text/{name}",
+        object_key=f"{db.get(Project, project_id).directory_key}/02_split_text/{name}",
         content_type="text/plain",
         kind="output",
         size_bytes=len(name),
@@ -79,7 +79,7 @@ def _add_artifact(db, user_id: str, project_id: str, username: str, name: str, s
         project_id=project_id,
         owner_id=user_id,
         original_name=name,
-        object_key=f"{username}/{project_id}/03_parsed_json/{name}",
+        object_key=f"{db.get(Project, project_id).directory_key}/03_parsed_json/{name}",
         content_type="application/json",
         kind="output",
         size_bytes=len(name),
@@ -449,7 +449,7 @@ def test_run_catalogs_legacy_disk_file_without_table_row(client: TestClient):
     _grant_quota(user_id)
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.email == email))
-        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
         split_dir.mkdir(parents=True, exist_ok=True)
         path = split_dir / "legacy-chapter.txt"
         path.write_text("第一章内容", encoding="utf-8")
@@ -481,7 +481,7 @@ def test_run_catalog_preserves_published_original_name(client: TestClient):
     disk_name = "第 005 章 九州_欢族.txt"
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.email == email))
-        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
         split_dir.mkdir(parents=True, exist_ok=True)
         path = split_dir / disk_name
         path.write_text("章节内容", encoding="utf-8")
@@ -490,7 +490,7 @@ def test_run_catalog_preserves_published_original_name(client: TestClient):
             project_id=project_id,
             owner_id=user_id,
             original_name=raw_name,
-            object_key=f"{user.username}/{project_id}/02_split_text/{disk_name}",
+            object_key=f"{db.get(Project, project_id).directory_key}/02_split_text/{disk_name}",
             content_type="text/plain",
             kind="artifact",
             size_bytes=4,
@@ -547,7 +547,7 @@ def test_state_legacy_disk_only_aligns_with_storage_sanitization(client: TestCli
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.email == email))
         _add_split_file(db, user_id, project_id, user.username, raw_name, _sha("s"))
-        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
         split_dir.mkdir(parents=True, exist_ok=True)
         (split_dir / disk_name).write_text("章节内容", encoding="utf-8")
         db.commit()
@@ -567,7 +567,7 @@ def test_download_falls_back_to_storage_sanitized_name(client: TestClient):
     disk_name = "第 005 章 九州_欢族.txt"
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.email == email))
-        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
         split_dir.mkdir(parents=True, exist_ok=True)
         (split_dir / disk_name).write_text("章节内容", encoding="utf-8")
         db.commit()
@@ -589,7 +589,7 @@ def test_catalog_managed_file_collision_keeps_original_name(client: TestClient):
     disk_name = "第 007 章 清明_故人.txt"
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.email == email))
-        split_dir = configured_storage_root(db) / user.username / project_id / "02_split_text"
+        split_dir = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
         split_dir.mkdir(parents=True, exist_ok=True)
         path = split_dir / disk_name
         path.write_text("章节内容", encoding="utf-8")
@@ -598,7 +598,7 @@ def test_catalog_managed_file_collision_keeps_original_name(client: TestClient):
             project_id=project_id,
             owner_id=user_id,
             original_name=raw_name,
-            object_key=f"{user.username}/{project_id}/02_split_text/{disk_name}",
+            object_key=f"{db.get(Project, project_id).directory_key}/02_split_text/{disk_name}",
             content_type="text/plain",
             kind="artifact",
             size_bytes=4,

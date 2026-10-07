@@ -18,6 +18,10 @@ from ..platform.models import (
     WorkerHeartbeat, new_id, utcnow,
 )
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
+from ..platform.workspace_layout import (
+    ProjectDirectoryConflict, named_directory_key, relocate_project, ensure_project_directories,
+)
+from ..platform.storage import project_workspace_path
 
 
 class ActiveProjectTasksError(ValueError):
@@ -34,11 +38,13 @@ def create_project(
     db: Session, *, owner_id: str, username: str, name: str, description: str = "",
 ) -> Project:
     """Create one project record with a stable key for its storage directory."""
+    key = named_directory_key(db, username, name)
     project_id = new_id()
     project = Project(id=project_id, owner_id=owner_id, name=name, description=description,
-                      directory_key=f"{username}/{project_id}")
+                      directory_key=key)
     db.add(project)
     db.flush()
+    ensure_project_directories(project_workspace_path(db, username, project.id))
     return project
 
 
@@ -57,6 +63,9 @@ def ensure_project_idle(db: Session, project: Project) -> None:
 
 
 def rename_project(db: Session, project: Project, name: str) -> None:
+    key = named_directory_key(db, project.owner.username, name, project_id=project.id)
+    if key != project.directory_key:
+        relocate_project(db, project, key)
     project.name = name
 
 
@@ -75,6 +84,16 @@ def as_utc(value: datetime) -> datetime:
 def move_project_to_trash(db: Session, project: Project) -> None:
     """Hide a project while retaining its files and database records for recovery."""
     ensure_project_idle(db, project)
+    number = 1
+    while True:
+        try:
+            key = named_directory_key(db, project.owner.username, f"{project.name[:140]}（回收站 {number}）", project_id=project.id)
+            break
+        except ValueError:
+            if number >= 1000:
+                raise
+            number += 1
+    relocate_project(db, project, key)
     project.deleted_at = utcnow()
     db.execute(update(UserSession).where(UserSession.active_project_id == project.id).values(active_project_id=None))
 
@@ -83,27 +102,28 @@ def restore_project(db: Session, project: Project) -> None:
     """Restore a trashed project before its one-calendar-month expiry."""
     if project.deleted_at is None or add_calendar_month(as_utc(project.deleted_at)) <= utcnow():
         raise ValueError("项目已超过回收期限")
-    duplicate = db.scalar(select(Project.id).where(
-        Project.owner_id == project.owner_id,
-        Project.name == project.name,
-        Project.id != project.id,
-        Project.deleted_at.is_(None),
-    ).limit(1))
-    if duplicate is not None:
-        base_name = project.name
-        number = 1
-        while True:
-            suffix = "（恢复）" if number == 1 else f"（恢复 {number}）"
-            candidate = f"{base_name[:160 - len(suffix)]}{suffix}"
-            duplicate = db.scalar(select(Project.id).where(
-                Project.owner_id == project.owner_id,
-                Project.name == candidate,
-                Project.deleted_at.is_(None),
-            ).limit(1))
-            if duplicate is None:
-                project.name = candidate
+    occupied_names = {
+        name.casefold() for name in db.scalars(select(Project.name).where(
+            Project.owner_id == project.owner_id,
+            Project.id != project.id,
+            Project.deleted_at.is_(None),
+        ))
+    }
+    base_name = project.name
+    candidate = base_name
+    number = 0
+    while True:
+        if candidate.casefold() not in occupied_names:
+            try:
+                key = named_directory_key(db, project.owner.username, candidate, project_id=project.id)
                 break
-            number += 1
+            except ProjectDirectoryConflict:
+                pass
+        number += 1
+        suffix = "（恢复）" if number == 1 else f"（恢复 {number}）"
+        candidate = f"{base_name[:160 - len(suffix)]}{suffix}"
+    project.name = candidate
+    relocate_project(db, project, key)
     project.deleted_at = None
 
 

@@ -107,6 +107,21 @@ test('project refresh clears pipeline state when the active project changes', as
   assert.equal(project.activeProjectId, 'B')
 })
 
+test('renaming the active workspace invalidates cached paths with the same project id', async () => {
+  const load = harness({ '@/api/project': {
+    getActiveProject: async () => ({ set: true, project_id: 'A', path: '/reader/New name' }),
+    listProjects: async () => [],
+  } })
+  const project = load('@/stores/project').useProjectStore()
+  const pipeline = load('@/stores/pipelineState').usePipelineStateStore()
+  project.setCurrent({ set: true, project_id: 'A', path: '/reader/Old name' })
+  pipeline.activeScript = '/reader/Old name/03_parsed_json/chapter.json'
+  await project.refresh()
+  assert.equal(pipeline.activeScript, '')
+  assert.equal(project.activeProjectId, 'A')
+  assert.equal(project.current.path, '/reader/New name')
+})
+
 test('A to B to A project switches clear each previous pipeline result', async () => {
   const load = harness({ '@/api/project': {
     selectProject: async (id) => ({ set: true, project_id: id }),

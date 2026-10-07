@@ -66,7 +66,7 @@ def _project(client: TestClient, csrf: str, name: str | None = None) -> dict:
 
 def _workspace(username: str, project_id: str) -> Path:
     with SessionLocal() as db:
-        return configured_storage_root(db) / username / project_id
+        return configured_storage_root(db) / db.get(Project, project_id).directory_key
 
 
 def _trash(client: TestClient, csrf: str, project_id: str) -> None:
@@ -109,7 +109,7 @@ def test_project_trash_retains_files_hides_tasks_and_restores_them(client: TestC
     assert listed.status_code == 200, listed.text
     assert [item["id"] for item in listed.json()] == [project["id"]]
     assert listed.json()[0]["expires_at"]
-    assert retained_file.read_bytes() == b"audio stays while trashed"
+    assert (_workspace(username, project["id"]) / "07_output" / "keep.wav").read_bytes() == b"audio stays while trashed"
     assert task.id not in {row["id"] for row in client.get("/api/v1/tasks").json()}
 
     restored = client.post(
@@ -208,7 +208,7 @@ def test_expired_project_purge_removes_database_rows_and_resumes_staged_cleanup(
             TaskResult(task_id=task.id, result={"ok": True}),
             ProjectFile(
                 project_id=project["id"], owner_id=user_id,
-                original_name="first.wav", object_key=f"{username}/{project['id']}/07_output/first.wav",
+                original_name="first.wav", object_key=f"{db.get(Project, project['id']).directory_key}/07_output/first.wav",
                 content_type="audio/wav", size_bytes=5, sha256="a" * 64, kind="artifact",
             ),
             QuotaHold(
@@ -310,3 +310,15 @@ def test_project_retention_retries_once_after_startup_skip(monkeypatch: pytest.M
     _project_retention_loop(stop)
     assert len(calls) == 2
     assert stop.waits == [60, 24 * 60 * 60]
+
+
+def test_restore_casefold_conflict_returns_success_instead_of_expired_status(client: TestClient):
+    _user_id, _username, csrf = _account(client)
+    original = _project(client, csrf, "Book")
+    _trash(client, csrf, original["id"])
+    _project(client, csrf, "book")
+    _project(client, csrf, "book（恢复）")
+    restored = client.post(f"/api/v1/projects/{original['id']}/restore", headers={"X-CSRF-Token": csrf})
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["name"] == "Book（恢复 2）"
+    assert restored.json()["directory_key"].endswith("/Book（恢复 2）")

@@ -696,6 +696,8 @@ def test_foundation_pause_does_not_hold_sibling_publication_lock(clone_ws, monke
         assert paused.result(timeout=3)["results"][0]["ok"]
     assert _load_vc(clone_ws)["A"]["description"] == "A refreshed voice"
     assert _load_vc(clone_ws)["B"]["description"] == "B refreshed voice"
+    assert not (clone_ws / ".tasks").exists()
+    assert (clone_ws / "00_temp" / "tasks").is_dir()
 
 
 def test_foundation_cancelled_before_publication_preserves_config(clone_ws):

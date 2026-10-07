@@ -52,7 +52,7 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -
     for project, username in projects:
         row = users.setdefault(username, {"project_count": 0, "size_bytes": 0, "file_count": 0})
         row["project_count"] += 1
-        path = project_storage_path(root, username, project.id)
+        path = project_storage_path(root, username, project.directory_key)
         measured = scan_project_directory(path, active=project.id in active_project_ids) if path is not None else {
             "size_bytes": 0, "file_count": 0, "categories": {}, "cleanup_count": 0, "cleanup_bytes": 0,
         }
@@ -109,7 +109,7 @@ def cleanup_stale_temp(actor: User = Depends(require_admin_csrf), db: Session = 
     for project, username in projects:
         if project.id in active_project_ids:
             continue
-        project_path = project_storage_path(root, username, project.id)
+        project_path = project_storage_path(root, username, project.directory_key)
         if project_path is None:
             continue
         temp_dir = project_path / "00_temp"

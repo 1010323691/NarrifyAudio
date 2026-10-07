@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .deps import AuthContext
 from .project_context import active_project
 from .models import ProjectFile
-from .storage import configured_storage_root, safe_display_name, sha256_file
+from .storage import configured_storage_root, safe_display_name, sha256_file, project_directory_key
 
 
 def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> ProjectFile:
@@ -33,7 +33,7 @@ def catalog_managed_file(source: Path, ctx: AuthContext, db: Session) -> Project
     except ValueError as exc:
         raise ValueError("文件不属于当前用户的托管工作空间") from exc
     object_key = relative.as_posix()
-    prefix = f"{safe_display_name(ctx.user.username)}/{project.id}/"
+    prefix = f"{project_directory_key(db, ctx.user.username, project.id)}/"
     if not object_key.startswith(prefix):
         raise ValueError("文件不属于当前项目")
     item = db.scalar(

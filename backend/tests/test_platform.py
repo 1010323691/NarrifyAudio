@@ -215,7 +215,7 @@ def test_durable_bgm_packaging_publishes_downloadable_archive(client: TestClient
     with SessionLocal() as db:
         workspace = project_workspace_path(db, first["user"]["username"], project["id"])
     bgm_dir = workspace / "08_bgm"
-    bgm_dir.mkdir(parents=True)
+    bgm_dir.mkdir(parents=True, exist_ok=True)
     (bgm_dir / "chapter-1.mp3").write_bytes(b"audio-one")
     (bgm_dir / "chapter-2.mp3").write_bytes(b"audio-two")
     for name in ("chapter-1.mp3", "chapter-2.mp3"):
@@ -1164,8 +1164,8 @@ def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestC
     )
     assert split_submitted.status_code == 201, split_submitted.text
     split_id = split_submitted.json()["id"]
-    stale_key = f"{first['user']['username']}/{project['id']}/02_split_text/\u65e7\u4e66 \u5168\u4e66.txt"
-    manual_key = f"{first['user']['username']}/{project['id']}/02_split_text/manual.txt"
+    stale_key = f"{project['directory_key']}/02_split_text/\u65e7\u4e66 \u5168\u4e66.txt"
+    manual_key = f"{project['directory_key']}/02_split_text/manual.txt"
     with SessionLocal() as db:
         for name, key in (("\u65e7\u4e66 \u5168\u4e66.txt", stale_key), ("manual.txt", manual_key)):
             stale_path = object_path(key, configured_storage_root(db))
@@ -2734,7 +2734,7 @@ def test_shared_music_and_workspace_result_publish_atomically(client, monkeypatc
             output = db.scalar(select(ProjectFile).where(ProjectFile.project_id == project["id"], ProjectFile.kind == "artifact"))
             assert json.loads(object_path(output.object_key, configured_storage_root(db)).read_text())["scene"] == ["test"]
     assert not list(library.rglob("publication.json"))
-    assert not list((workspace / ".tasks").rglob("publication.json"))
+    assert not list((workspace / "00_temp" / "tasks").rglob("publication.json"))
 
 
 def test_workspace_busy_tasks_stay_queued_while_other_work_is_claimed(client, monkeypatch):
@@ -2793,3 +2793,59 @@ def test_workspace_admission_preserves_parallel_chapters_and_defers_same_target(
     assert claim_task(writer,'exclusive-writer') is None
     claim=claim_fair_task('parallel-merge',task_types=('tts.merge','bgm.mix','tts.reset'))
     assert claim and claim.task_id==different
+
+
+def test_concurrent_same_named_uploads_use_flat_readable_names_without_overwriting(client: TestClient):
+    from concurrent.futures import ThreadPoolExecutor
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    def upload(content):
+        return client.post(
+            "/api/files/upload", headers={"X-CSRF-Token": csrf},
+            files={"file": ("same.txt", content, "text/plain")},
+        )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(upload, [b"first version", b"second version"]))
+    assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
+    paths = [Path(response.json()["path"]) for response in responses]
+    assert {path.name for path in paths} == {"same.txt", "same (2).txt"}
+    assert all(path.parent.name == "01_input" for path in paths)
+    assert {path.read_bytes() for path in paths} == {b"first version", b"second version"}
+    assert len({response.json()["file_id"] for response in responses}) == 2
+
+
+@pytest.mark.parametrize("name", ["a" * 176 + ".txt", "a" * 180])
+def test_long_same_named_uploads_and_worker_outputs_keep_file_indexes(client: TestClient, name):
+    first = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploads = []
+    for content in (b"first", b"second"):
+        response = client.post("/api/files/upload", headers={"X-CSRF-Token": csrf},
+                               files={"file": (name, content, "text/plain")})
+        assert response.status_code == 200, response.text
+        uploads.append(response.json())
+    paths = [Path(item["path"]) for item in uploads]
+    assert paths[0] != paths[1]
+    assert {path.read_bytes() for path in paths} == {b"first", b"second"}
+    with SessionLocal() as db:
+        for item in uploads:
+            record = db.get(ProjectFile, item["file_id"])
+            assert object_path(record.object_key, configured_storage_root(db)) == Path(item["path"])
+    output_ids = []
+    for item in uploads:
+        submitted = client.post("/api/v1/tasks", headers={"X-CSRF-Token": csrf}, json={
+            "project_id": project_id, "task_type": "text.format",
+            "payload": {"input_file_id": item["file_id"], "output_name": name},
+            "idempotency_key": uuid.uuid4().hex,
+        })
+        assert submitted.status_code == 201, submitted.text
+        task_id = submitted.json()["id"]
+        assert process_task_message({"payload": {"task_id": task_id}}, worker_id="long-name-worker") == "succeeded"
+        output_ids.append(client.get(f"/api/v1/tasks/{task_id}").json()["result"]["file_id"])
+    with SessionLocal() as db:
+        outputs = [db.get(ProjectFile, id) for id in output_ids]
+        assert outputs[0].object_key != outputs[1].object_key
+        assert {object_path(row.object_key, configured_storage_root(db)).read_text().strip() for row in outputs} == {
+            "first", "second",
+        }

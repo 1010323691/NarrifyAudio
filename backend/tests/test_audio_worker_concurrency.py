@@ -384,6 +384,10 @@ def test_foundation_claims_allow_distinct_characters(audio_project, monkeypatch)
 
 def test_eight_foundations_overlap_and_preserve_every_checkpoint(audio_project, monkeypatch):
     from backend.engines import voices
+    # This filesystem/checkpoint regression deliberately holds eight claims.
+    # Other modules in this xdist process may leave active LLM rows behind;
+    # reserve capacity here instead of depending on their execution order.
+    monkeypatch.setattr("backend.platform.task_admission.parse_worker_concurrency", lambda **_kwargs: 32)
     submit, workspace = audio_project
     names = [f"role-{index}" for index in range(8)]
     script = workspace / "03_parsed_json" / "roles.json"

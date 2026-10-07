@@ -11,7 +11,7 @@ from backend.platform.task_contracts import TaskCancelledError, TaskClaim
 
 @pytest.mark.parametrize('cancel_after', [1, 2])
 def test_cancelled_progress_callback_removes_all_attempt_outputs(tmp_path, monkeypatch, cancel_after):
-    attempt_dir = tmp_path / 'user' / 'project' / '.tasks' / 'task' / 'attempt'
+    attempt_dir = tmp_path / 'user' / 'project' / '00_temp' / 'tasks' / 'task' / 'attempt'
     db = SimpleNamespace(get=lambda _model, _owner_id: SimpleNamespace(username='user'))
     claim = TaskClaim(
         task_id='task', attempt_id='attempt', attempt_no=1, lease_token='lease',
