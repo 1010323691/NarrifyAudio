@@ -4,7 +4,20 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, toValue, watch, ty
 export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: MaybeRefOrGetter<number>) {
   const fittedHeight = ref(40)
   let observer: ResizeObserver | null = null
-  let mutationObserver: MutationObserver | null = null
+  let tableObserver: MutationObserver | null = null
+  let rowsObserver: MutationObserver | null = null
+  let rowsTarget: HTMLElement | null = null
+  // The skeleton tbody is replaced wholesale when rows load, so a tbody-level
+  // observer goes stale: the table-level childList observer catches the swap,
+  // and attachRows re-targets the row observer to the live tbody.
+  function attachRows(element: HTMLTableElement) {
+    const tbody = element.tBodies[0] ?? null
+    if (tbody === rowsTarget) return
+    rowsObserver?.disconnect()
+    rowsObserver = new MutationObserver(measure)
+    if (tbody) rowsObserver.observe(tbody, { childList: true })
+    rowsTarget = tbody
+  }
   function measure() {
     const element = table.value
     const viewport = element?.parentElement
@@ -38,23 +51,27 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
       if (excess && fitted > 27 + excess) fitted = Math.max(minimum, Math.floor((fitted - excess) * 64) / 64)
     }
     fittedHeight.value = fitted
+    // A measured tbody swap leaves the row observer on the removed node.
+    attachRows(element)
   }
   onMounted(() => {
     observer = new ResizeObserver(measure)
     watch(table, element => {
       observer?.disconnect()
-      mutationObserver?.disconnect()
-      if (element?.parentElement) observer?.observe(element.parentElement)
-      if (element?.tHead) observer?.observe(element.tHead)
-      // Rows and their container arrive after the table mounts (the skeleton
-      // tbody is replaced by the data tbody when rows load): watch the table
-      // subtree so any row or tbody replacement re-fits the height.
-      mutationObserver = new MutationObserver(measure)
-      if (element) mutationObserver.observe(element, { childList: true, subtree: true })
+      tableObserver?.disconnect()
+      rowsObserver?.disconnect()
+      rowsTarget = null
+      tableObserver = new MutationObserver(measure)
+      if (element) {
+        if (element.parentElement) observer?.observe(element.parentElement)
+        if (element.tHead) observer?.observe(element.tHead)
+        tableObserver.observe(element, { childList: true })
+        attachRows(element)
+      }
       measure()
     }, { immediate: true, flush: 'post' })
   })
   watch(() => toValue(pageSize), async () => { await nextTick(); measure() })
-  onBeforeUnmount(() => { observer?.disconnect(); mutationObserver?.disconnect() })
+  onBeforeUnmount(() => { observer?.disconnect(); tableObserver?.disconnect(); rowsObserver?.disconnect() })
   return computed(() => toValue(pageSize) === 10 ? `${fittedHeight.value}px` : undefined)
 }
