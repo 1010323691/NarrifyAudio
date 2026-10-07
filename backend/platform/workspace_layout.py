@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from ..core.paths import WORKSPACE_DIR_NAMES
 from ..core.safe_filesystem import is_link_or_junction
 from .models import Project, ProjectFile, Task, TaskResult, TaskEvent, TextFormatFlow, SystemConfig, utcnow
-from .storage import available_file_name, artifact_module, configured_storage_root, object_path, safe_display_name
+from .storage import available_file_name, artifact_module, configured_storage_root, object_path, safe_display_name, sha256_file
 from .task_lifecycle import ACTIVE_TASK_STATUSES
 
 PROJECT_DIRECTORIES = (*WORKSPACE_DIR_NAMES, "config", "logs")
@@ -266,6 +266,7 @@ def relocate_project(db: Session, project: Project, target_key: str, *, normaliz
                 rewritten = _rewrite(value, replacements, root)
                 if rewritten != value:
                     setattr(row, column.name, rewritten)
+    indexed_files = {item.object_key: item for item in files}
     for path in target.rglob("*.json"):
         if is_link_or_junction(path) or any(is_link_or_junction(parent) for parent in path.parents if parent != root):
             continue
@@ -278,3 +279,7 @@ def relocate_project(db: Session, project: Project, target_key: str, *, normaliz
         if rewritten != value:
             save({"op": "write", "path": str(path), "before": base64.b64encode(before).decode("ascii")})
             path.write_text(json.dumps(rewritten, ensure_ascii=False, indent=2), encoding="utf-8")
+            item = indexed_files.get(path.relative_to(root).as_posix())
+            if item is not None:
+                item.size_bytes = path.stat().st_size
+                item.sha256 = sha256_file(path)

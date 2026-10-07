@@ -80,7 +80,8 @@ def legacy_project(db, tmp_path):
     old.parent.mkdir(parents=True)
     old.write_text(json.dumps({"source_path": str(root / "01_input" / "source.txt")}))
     file = ProjectFile(project_id=project.id, owner_id=user.id, original_name=old.name,
-                       object_key=f"{project.directory_key}/file-id/{old.name}", kind="artifact", sha256="a" * 64)
+                       object_key=f"{project.directory_key}/file-id/{old.name}", kind="artifact",
+                       size_bytes=old.stat().st_size, sha256=storage.sha256_file(old))
     db.add(file)
     db.flush()
     task = Task(owner_id=user.id, project_id=project.id, task_type="book.analyze", status="succeeded", payload={"path": str(old)})
@@ -109,18 +110,43 @@ def test_migration_preserves_versions_rewrites_paths_and_cleans_root(db, tmp_pat
     assert (root / "03_parsed_json" / "chapter_analysis.json").read_text() == "existing"
     assert (root / "00_temp" / "tasks" / "receipt.json").is_file()
     assert not old.exists()
+    rewritten = tmp_path / file.object_key
+    assert file.size_bytes == rewritten.stat().st_size
+    assert file.sha256 == storage.sha256_file(rewritten)
 
 
 def test_database_rollback_restores_original_directory_and_file_bytes(db, tmp_path):
     project, file, task, result, old = legacy_project(db, tmp_path)
     before = old.read_bytes()
+    original_size, original_sha = file.size_bytes, file.sha256
     relocate_project(db, project, "reader/旧书", normalize=True)
     db.flush()
     db.rollback()
     assert old.read_bytes() == before
     assert project.directory_key == "reader/legacy-id"
     assert task.payload["path"] == str(old)
+    assert file.size_bytes == original_size == old.stat().st_size
+    assert file.sha256 == original_sha == storage.sha256_file(old)
     assert not (tmp_path / "reader/旧书").exists()
+
+
+def test_rename_updates_cataloged_json_fingerprint(db, tmp_path):
+    project = new_project(db, "Old")
+    path = tmp_path / project.directory_key / "03_parsed_json" / "analysis.json"
+    path.write_text(json.dumps({"source": str(path.parent.parent / "01_input" / "book.txt")}))
+    file = ProjectFile(project_id=project.id, owner_id=project.owner_id,
+                       original_name=path.name, kind="artifact",
+                       object_key=path.relative_to(tmp_path).as_posix(),
+                       size_bytes=path.stat().st_size, sha256=storage.sha256_file(path))
+    db.add(file)
+    db.commit()
+    old_sha = file.sha256
+    rename_project(db, project, "New longer name")
+    db.commit()
+    rewritten = tmp_path / file.object_key
+    assert file.size_bytes == rewritten.stat().st_size
+    assert file.sha256 == storage.sha256_file(rewritten) != old_sha
+    assert "New longer name" in json.loads(rewritten.read_text())["source"]
 
 
 def test_trash_frees_name_and_restore_moves_to_readable_collision_name(db, tmp_path):

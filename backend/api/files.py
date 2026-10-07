@@ -140,7 +140,7 @@ def _serve_file(module, name, request, ctx, db, *, download):
 
 
 @router.post("/upload")
-async def upload_file(
+def upload_file(
     file: UploadFile = File(...),
     filename: str | None = Form(None),
     ctx: AuthContext = Depends(get_auth_context),
@@ -181,7 +181,9 @@ async def upload_file(
             except FileExistsError:
                 dest = layout.input / available_file_name(layout.input, name)
         with handle:
-            while chunk := await file.read(1024 * 1024):
+            # FastAPI runs this synchronous endpoint in its worker pool. Keep
+            # row-lock waits and disk reads there, never on the event loop.
+            while chunk := file.file.read(1024 * 1024):
                 digest_size += len(chunk)
                 if digest_size > settings.max_upload_bytes:
                     raise HTTPException(413, "文件超过大小限制")
