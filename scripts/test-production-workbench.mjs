@@ -471,3 +471,199 @@ test('switching project discards a cached chapter batch', async () => {
   assert.equal(h.taskId.value, null)
   assert.equal(h.task.value, null)
 })
+
+test('batch snapshot retention does not traverse unrelated stream buffers', async () => {
+  const h = harness('BatchTTS')
+  h.taskBatch.track(['tracked'])
+  const unrelated = { id: 'unrelated', status: 'running' }
+  Object.defineProperty(unrelated, 'llm_stream', {
+    enumerable: true,
+    get() { throw new Error('unrelated stream was deeply traversed') },
+  })
+  h.taskStore.projectTasks = [unrelated, {
+    id: 'tracked', status: 'running', logs: [], progress: 0, result: {},
+  }]
+  await vue.nextTick()
+  assert.equal(h.task.value.id, 'tracked')
+})
+
+test('large role batch progress never traverses log history or completed results', async () => {
+  const h = harness('BatchTTS')
+  const rows = Array.from({ length: 1000 }, (_, index) => ({
+    id: `role-${index}`, status: 'running', progress: 0, logs: [], current: '',
+    result: {}, label: `role-${index}`,
+  }))
+  let historyReads = 0
+  for (const row of rows) {
+    Object.defineProperty(row.result, 'speakers', {
+      enumerable: true, get() { historyReads++; return ['A'] },
+    })
+    row.logs.push({ t: 1, level: 'INFO', get msg() { historyReads++; return 'history' } })
+  }
+  h.taskStore.projectTasks = rows
+  h.taskBatch.track(rows.map(row => row.id))
+  await vue.nextTick()
+  for (let index = 0; index < 100; index++) {
+    h.taskStore.projectTasks[index].progress = 0.5
+    assert.ok(h.task.value.progress > 0)
+  }
+  assert.equal(historyReads, 0)
+  assert.equal(h.task.value.result.speakers[0], 'A')
+  assert.equal(h.task.value.logs.length, 1000)
+  assert.equal(historyReads, 2000)
+  h.taskStore.projectTasks[0].progress = 1
+  assert.ok(h.task.value.progress > 0)
+  assert.equal(h.task.value.logs.length, 1000)
+  assert.equal(h.task.value.result.speakers[0], 'A')
+  assert.equal(historyReads, 2000)
+})
+
+test('hidden live log panel does not evaluate a batch log getter', async () => {
+  const display = vue.reactive({ logsEnabled: false })
+  let logReads = 0
+  const task = vue.reactive({ status: 'running', progress: 0, get logs() {
+    logReads++
+    return [{ t: 1, msg: 'hello', level: 'INFO' }]
+  } })
+  const props = vue.reactive({ task })
+  const source = readFileSync(new URL('../src/components/ui/LiveLogPanel.vue', import.meta.url), 'utf8')
+    .match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
+  function evaluate(source, dependencies) {
+    const module = { exports: {} }
+    const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    runInNewContext(code, { module, exports: module.exports, defineProps: () => props,
+      require: dependencies, requestAnimationFrame() {} })
+    return module.exports
+  }
+  const follow = evaluate(readFileSync(new URL('../src/utils/logFollow.ts', import.meta.url), 'utf8'), () => vue)
+  evaluate(source, name => {
+    if (name === 'vue') return vue
+    if (name === '@/stores/clientDisplay') return { useClientDisplayStore: () => display }
+    if (name === '@/utils/logFollow') return follow
+    return { default: {} }
+  })
+  for (let index = 0; index < 100; index++) {
+    task.progress = index / 100
+    await vue.nextTick()
+  }
+  assert.equal(logReads, 0)
+  display.logsEnabled = true
+  await vue.nextTick()
+  assert.equal(logReads, 1)
+})
+
+
+test('synthesis entry status overrides old complete output and follows the actual chapter task', async () => {
+  const h = harness('BatchTTS')
+  h.fileNames.value = ['第一章：重试.json', 'other.json']
+  h.statuses.value = [file('第一章：重试.json', true), file('other.json', true)]
+  const row = { id: 'chapter', module: 'tts-batch', label: '音频合成（2 段） · 第一章：重试.json', seq: 1, status: 'pending', progress: 0, logs: [], result: {} }
+  h.taskStore.projectTasks = [row]
+  assert.equal(h.workRows.value[0].statusLabel, '排队中')
+  assert.equal(h.workRows.value[1].statusLabel, '已完成')
+  h.taskStore.projectTasks[0].status = 'running'
+  assert.equal(h.workRows.value[0].statusLabel, '合成中')
+  h.taskStore.projectTasks[0].status = 'paused'
+  assert.equal(h.workRows.value[0].statusLabel, '已暂停')
+  h.taskStore.projectTasks[0].status = 'timeout'
+  assert.equal(h.workRows.value[0].statusLabel, '合成失败')
+  h.taskStore.projectTasks[0].status = 'succeeded'
+  assert.equal(h.workRows.value[0].statusLabel, '已完成')
+  await vue.nextTick()
+})
+
+test('matching is attached to its chapter before the old assignment or mixed audio is shown', () => {
+  const h = harness('BGM')
+  h.chapterRows.value = [chapter('第一章：标题')]
+  h.taskStore.projectTasks = [{ id: 'match', module: 'bgm', task_type: 'bgm.match', label: 'BGM 匹配（random） · 第一章：标题', status: 'pending', seq: 1 }]
+  assert.equal(h.rows.value[0].label, '排队中')
+  assert.equal(h.rows.value[0].task.id, 'match')
+  assert.equal(h.rows.value[0].mixable, false)
+  h.taskStore.projectTasks[0].status = 'running'
+  assert.equal(h.rows.value[0].label, '匹配中')
+  h.taskStore.projectTasks[0].status = 'timeout'
+  assert.equal(h.rows.value[0].label, '匹配失败')
+})
+
+test('large visible batch log tails never read every old message or timestamp', () => {
+  const h = harness('BatchTTS')
+  let reads = 0
+  const rows = Array.from({ length: 100 }, (_, i) => ({ id: `log-${i}`, label: `${i}`, status: 'running', progress: 0, result: {},
+    logs: Array.from({ length: 1000 }, (_, j) => ({ level: 'INFO', get t() { reads++; return j * 100 + i }, msg: `${i}:${j}` })),
+  }))
+  h.taskStore.projectTasks = rows
+  h.taskBatch.track(rows.map(row => row.id))
+  const logs = h.task.value.logs
+  assert.equal(logs.length, 1000)
+  assert.equal(logs[0].msg, '[0] 0:990')
+  assert.equal(logs.at(-1).msg, '[99] 99:999')
+  assert.ok(reads < 50000, `only the displayed tail should be merged, read ${reads}`)
+})
+
+
+test('matching feedback reports the running chapter while the remaining chapters queue', () => {
+  const h = harness('BGM')
+  h.taskStore.projectTasks = [
+    { id: 'queued', task_type: 'bgm.match', status: 'pending' },
+    { id: 'running', task_type: 'bgm.match', status: 'running' },
+  ]
+  assert.match(h.matchFeedback.value, /正在执行/)
+})
+
+test('project switch releases synthesis launch gating and removes the old selection', () => {
+  const h = harness('BatchTTS')
+  h.busy.value = true
+  h.fileNames.value = ['one.json']
+  h.statuses.value = [file('one.json')]
+  h.selected['one.json'] = true
+  h.project.activeProjectId = 'project-b'
+  assert.equal(h.busy.value, false)
+  assert.equal(h.rows.value.length, 0)
+  assert.equal(h.selectedNames.value.length, 0)
+})
+
+test('expensive task refreshes coalesce and never overlap across completion bursts', async () => {
+  const project = vue.reactive({ activeProjectId: 'A' })
+  const pending = deferred()
+  const timers = new Map()
+  let id = 0, reads = 0
+  const module = { exports: {} }
+  const compiled = ts.transpileModule(readFileSync(new URL('../src/composables/useWorkbenchRefresh.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  }).outputText
+  runInNewContext(compiled, { module, exports: module.exports,
+    setTimeout(fn) { timers.set(++id, fn); return id }, clearTimeout(key) { timers.delete(key) },
+    require(name) {
+      if (name === 'vue') return { ...vue, onBeforeUnmount() {}, onDeactivated() {} }
+      if (name.endsWith('useWorkbenchScope')) return { useWorkbenchScope: () => () => {
+        const original = project.activeProjectId
+        return () => original === project.activeProjectId
+      } }
+      if (name.endsWith('/auth')) return { useAuthStore: () => ({ user: { id: 'user' } }) }
+      if (name.endsWith('/project')) return { useProjectStore: () => project }
+      assert.fail(name)
+    },
+  })
+  const refresh = module.exports.useWorkbenchRefresh(async () => {
+    reads++
+    if (reads === 1) await pending.promise
+  }, 250)
+  for (let i = 0; i < 100; i++) refresh.schedule()
+  assert.equal(timers.size, 1)
+  const run = timers.values().next().value
+  timers.clear()
+  const first = run()
+  for (let i = 0; i < 100; i++) refresh.schedule()
+  assert.equal(reads, 1)
+  assert.equal(timers.size, 0)
+  pending.resolve()
+  await first
+  assert.equal(timers.size, 1)
+  const followup = timers.values().next().value
+  timers.clear()
+  await followup()
+  assert.equal(reads, 2)
+  refresh.schedule()
+  project.activeProjectId = 'B'
+  assert.equal(timers.size, 0)
+})

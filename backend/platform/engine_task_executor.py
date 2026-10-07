@@ -48,20 +48,29 @@ def _check_delivery_identity(path, record):
     if not unchanged:
         raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化，请重新制作或选择成品。")
 
+def _voice_entry_result(payload: dict, result: dict) -> dict:
+    """Single-role records must not repeat the whole book's character list."""
+    speakers = payload.get("speakers")
+    if isinstance(speakers, list) and len(speakers) == 1:
+        return {**result, "speakers": speakers}
+    return result
+
+
 def _run_voices_foundation(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import voices
-    return voices.prepare_foundations(
+    result = voices.prepare_foundations(
         handle,
         payload.get("speakers"),
         bool(payload.get("new_only")),
         payload.get("overrides") or {},
         payload.get("script"),
     )
+    return _voice_entry_result(payload, result)
 
 
 def _run_voices_clone(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import voices
-    return voices.generate_voice_candidates(
+    result = voices.generate_voice_candidates(
         handle,
         payload.get("speakers"),
         bool(payload.get("new_only")),
@@ -69,6 +78,7 @@ def _run_voices_clone(handle, claim: TaskClaim, payload: dict, side_effect_outpu
         payload.get("script"),
         payload.get("candidate_count"),
     )
+    return _voice_entry_result(payload, result)
 
 
 def _run_tts_batch(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
@@ -168,10 +178,18 @@ def _run_bgm_match(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
             volume_tiers=cfg.bgm.segment_volume_tiers,
             handle=handle,
         )
-    return bgm_engine.match_stems(
+    result = bgm_engine.match_stems(
         get_or_prepare_layout(), stems, mode, cfg.bgm.min_match_score,
         handle=handle,
     )
+
+    if len(stems) == 1 and isinstance(result.get("assignments"), dict):
+        assignments = result["assignments"]
+        chapters = assignments.get("chapters") or {}
+        result = {**result, "assignments": {**assignments, "chapters": {
+            stem: chapters[stem] for stem in stems if stem in chapters
+        }}}
+    return result
 
 
 def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:

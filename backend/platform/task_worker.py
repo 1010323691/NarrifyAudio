@@ -115,10 +115,27 @@ WORKSPACE_MUTATING_TASK_TYPES = {
 def _workspace_audio_identity(task_type: str, payload: dict) -> str | None:
     key = {"tts.merge": "package", "bgm.mix": "stem", "bgm.segment": "stem"}.get(task_type)
     subject = payload.get(key) if key else None
+    if task_type == "bgm.match":
+        chapters = payload.get("chapters")
+        subject = chapters[0] if isinstance(chapters, list) and len(chapters) == 1 else None
     if not isinstance(subject, str) or not subject.strip():
         return None
     filename = merged_audio_filename(subject) if task_type == "tts.merge" else f"{subject}.mp3"
     return filename.casefold()
+
+
+def _foundation_identity(task_type: str, payload: dict) -> str | None:
+    speakers = payload.get("speakers")
+    if task_type == "voices.foundation" and isinstance(speakers, list) and len(speakers) == 1:
+        return speakers[0] if isinstance(speakers[0], str) and speakers[0].strip() else None
+    return None
+
+
+def _single_foundation(row):
+    return ((row.task_type == "voices.foundation")
+            & row.payload["speakers"][0].as_string().is_not(None)
+            & (row.payload["speakers"][0].as_string() != "")
+            & row.payload["speakers"][1].as_string().is_(None))
 
 
 def _workspace_claim_eligibility(now):
@@ -131,17 +148,22 @@ def _workspace_claim_eligibility(now):
             package = func.replace(package, char, "_")
         return case(
             (row.task_type == "tts.merge", func.trim(package)),
+            ((row.task_type == "bgm.match")
+             & row.payload["chapters"][1].as_string().is_(None), row.payload["chapters"][0].as_string()),
             else_=row.payload["stem"].as_string(),
         )
 
     candidate_subject, active_subject = subject(Task), subject(active)
     compatible = (
-        Task.task_type.in_(("tts.merge", "bgm.mix", "bgm.segment"))
-        & active.task_type.in_(("tts.merge", "bgm.mix", "bgm.segment"))
+        Task.task_type.in_(("tts.merge", "bgm.mix", "bgm.segment", "bgm.match"))
+        & active.task_type.in_(("tts.merge", "bgm.mix", "bgm.segment", "bgm.match"))
         & (func.trim(candidate_subject) != "")
         & (func.trim(active_subject) != "")
         & (func.lower(candidate_subject) != func.lower(active_subject))
     )
+    compatible = compatible | (_single_foundation(Task) & _single_foundation(active)
+                               & (Task.payload["speakers"][0].as_string()
+                                  != active.payload["speakers"][0].as_string()))
     conflict = select(active.id).join(TaskAttempt, TaskAttempt.task_id == active.id).where(
         active.project_id == Task.project_id,
         active.owner_id == Task.owner_id,
@@ -155,10 +177,26 @@ def _workspace_claim_eligibility(now):
     return or_(Task.task_type.not_in(WORKSPACE_MUTATING_TASK_TYPES), ~conflict)
 
 
+def _foundation_claim_eligibility():
+    """The per-project role limit also applies after splitting a batch into rows."""
+    active = aliased(Task)
+    count = select(func.count()).select_from(active).where(
+        active.project_id == Task.project_id,
+        active.owner_id == Task.owner_id,
+        active.task_type == "voices.foundation",
+        active.status.in_(("running", "paused", "cancelling")),
+        active.id != Task.id,
+    ).correlate(Task).scalar_subquery()
+    configured = func.coalesce(Task.payload["config"]["generation"]["max_concurrency"].as_integer(), 3)
+    limit = case((configured < 1, 1), else_=configured)
+    return or_(~func.coalesce(_single_foundation(Task), False), count < limit)
+
+
 def _workspace_claim_available(db, task: Task, now) -> bool:
     if task.task_type not in WORKSPACE_MUTATING_TASK_TYPES:
         return True
     identity = _workspace_audio_identity(task.task_type, task.payload)
+    foundation = _foundation_identity(task.task_type, task.payload)
     active = db.scalars(select(Task).join(TaskAttempt, TaskAttempt.task_id == Task.id).where(
         Task.project_id == task.project_id,
         Task.owner_id == task.owner_id,
@@ -169,9 +207,12 @@ def _workspace_claim_available(db, task: Task, now) -> bool:
         TaskAttempt.lease_expires_at > now,
     )).all()
     return all(
-        identity is not None
+        (foundation is not None
+         and (other_foundation := _foundation_identity(row.task_type, row.payload)) is not None
+         and foundation != other_foundation)
+        or (identity is not None
         and (other := _workspace_audio_identity(row.task_type, row.payload)) is not None
-        and identity != other
+        and identity != other)
         for row in active
     )
 
@@ -197,12 +238,16 @@ def _workspace_engine_lock(claim: TaskClaim):
         workspace = project_workspace_path(db, user.username, claim.project_id)
     lock_path = workspace / ".tasks" / "workspace-engine.lock"
     identity = _workspace_audio_identity(claim.task_type, claim.payload)
+    foundation = _foundation_identity(claim.task_type, claim.payload)
     parallel_audio = identity is not None
     try:
         with ExitStack() as locks:
-            locks.enter_context((shared_file_lock if parallel_audio else exclusive_file_lock)(lock_path))
+            locks.enter_context((shared_file_lock if parallel_audio or foundation is not None else exclusive_file_lock)(lock_path))
+            if foundation is not None:
+                locks.enter_context(exclusive_file_lock(
+                    workspace / ".tasks" / f"foundation-{uuid5(NAMESPACE_URL, foundation).hex}.lock"))
             if parallel_audio:
-                # Merge, mix and analysis of the same chapter share this lock through
+                # Merge, mix, analysis and matching of the same chapter share this lock through
                 # complete_claim/rollback, including the delivery metadata commit.
                 chapter_lock = workspace / ".tasks" / f"audio-{uuid5(NAMESPACE_URL, identity).hex}.lock"
                 locks.enter_context(exclusive_file_lock(chapter_lock))
@@ -295,6 +340,10 @@ def claim_task(
             db.rollback()
             return None
 
+        if db.scalar(select(Task.id).where(Task.id == task.id, _foundation_claim_eligibility())) is None:
+            db.rollback()
+            return None
+
         if task.task_type in LLM_TASK_TYPES and not llm_task_capacity_available(db, exclude_task_id=task.id):
             db.rollback()
             return None
@@ -368,6 +417,7 @@ def claim_fair_task(
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
+        eligible_tasks = eligible_tasks & _foundation_claim_eligibility()
         # Resuming live attempts are continued by their existing execution thread.
         live_attempt = select(TaskAttempt.id).where(
             TaskAttempt.task_id == Task.id, TaskAttempt.status == "running",
@@ -1345,6 +1395,32 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
     quota_token = set_quota_context(claim.owner_id, claim.task_id, claim.attempt_id)
     gpu_token = bind_claim(claim)
     stop = threading.Event()
+    batch_claims = [claim]
+    batch_finished = set()
+    batch_outcomes = {}
+
+    def finish_clone(member, result):
+        from .task_engine_support import engine_result_outcome
+        outcome = batch_outcomes.get(member.task_id)
+        if outcome is None:
+            outcome = engine_result_outcome(member, result)
+            batch_outcomes[member.task_id] = outcome
+        try:
+            completed = complete_claim(member, outcome)
+            if completed is None:
+                return False
+            if not completed:
+                fail_claim(member, TaskCancelledError())
+        except BaseException:
+            _cleanup_outcome(outcome)
+            raise
+        batch_finished.add(member.task_id)
+        batch_outcomes.pop(member.task_id, None)
+        return True
+
+    def cancel_clone(member):
+        fail_claim(member, TaskCancelledError())
+        batch_finished.add(member.task_id)
 
     def report_worker(status: str, task_id: str | None) -> None:
         try:
@@ -1359,8 +1435,12 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         interval = max(1.0, min(10.0, settings.task_lease_seconds / 3))
         while not stop.wait(interval):
             try:
+                current = list(batch_claims)
                 if not heartbeat_claim(claim):
                     return
+                for member in current[1:]:
+                    if member.task_id not in batch_finished:
+                        heartbeat_claim(member)
             except Exception:
                 # A transient DB hiccup must not kill the lease-renewal thread: a
                 # dead heartbeat is exactly how a live task loses its lease and gets
@@ -1377,7 +1457,34 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                     fail_claim(claim, TaskCancelledError())
                     return "cancelled"
                 return "skipped"
-            outcome = execute_claim(claim)
+            execution_batch = claim.payload.get("execution_batch")
+            if claim.task_type == "voices.clone" and len(claim.payload.get("speakers", [])) == 1:
+                # The project fence is held before claiming the rest. Other
+                # Workers leave these rows queued; only this batch owner may
+                # bypass the project conflict for matching immutable inputs.
+                with SessionLocal() as db:
+                    siblings = db.scalars(select(Task).where(
+                        Task.owner_id == claim.owner_id, Task.project_id == claim.project_id,
+                        Task.task_type == "voices.clone", Task.id != claim.task_id,
+                        Task.status.in_(("pending", "queued", "retrying")),
+                        Task.payload["execution_batch"].as_string() == execution_batch,
+                    ).order_by(Task.created_at, Task.id)).all()
+                    sibling_entries = [(row.id, row.payload["speakers"][0]) for row in siblings if
+                                   len(row.payload.get("speakers", [])) == 1 and
+                                   {k: v for k, v in row.payload.items() if k not in {"speakers", "label", "_request_hash"}}
+                                   == {k: v for k, v in claim.payload.items() if k not in {"speakers", "label", "_request_hash"}}]
+                claimed_speakers = {claim.payload["speakers"][0]}
+                for task_id, speaker in sibling_entries:
+                    if speaker in claimed_speakers:
+                        continue
+                    member = claim_task(task_id, claim.worker_id, defer_workspace_conflicts=False)
+                    if member is not None:
+                        batch_claims.append(member)
+                        claimed_speakers.add(speaker)
+                from .clone_batch_execution import execute_clone_batch
+                outcome = execute_clone_batch(batch_claims, finish_clone, cancel_clone)
+            else:
+                outcome = execute_claim(claim)
             if cancellation_requested(claim):
                 _cleanup_outcome(outcome)
                 raise TaskCancelledError()
@@ -1423,6 +1530,15 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         fail_claim(claim, TaskExecutionError("worker_error", str(exc), retryable=True))
         return "worker_error"
     finally:
+        # A failed/killed shared child leaves unfinished rows independently
+        # retryable. Already settled role tasks remain completed checkpoints.
+        for member in batch_claims[1:]:
+            if member.task_id not in batch_finished:
+                unfinished_outcome = batch_outcomes.pop(member.task_id, None)
+                if unfinished_outcome is not None:
+                    _cleanup_outcome(unfinished_outcome)
+                fail_claim(member, TaskCancelledError() if cancellation_requested(member) else
+                           TaskExecutionError("clone_batch_interrupted", "共享克隆批次已中断，等待重试", retryable=True))
         stop.set()
         heartbeat.join(timeout=2)
         report_worker("idle", None)

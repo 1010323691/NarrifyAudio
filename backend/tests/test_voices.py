@@ -561,7 +561,7 @@ def main():
             done += 1
             if capture:
                 with open(capture, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({"mode": "design-batch", "index": j["index"],
+                    f.write(json.dumps({"mode": "design-batch", "index": j["index"], "pid": os.getpid(),
                                         "out": out, "seed": row_seed,
                                         "seed_arg": seed_base, "concurrency": concurrency,
                                         "rows_per_batch": rows_per_batch},
@@ -665,6 +665,64 @@ def _stub_design_engine(monkeypatch, ws, fail="", rows_per_batch=0, watchdog="",
 
 def _load_vc(ws):
     return json.loads((ws / "04_voice_profiles" / "voice_config.json").read_text("utf-8"))
+
+
+def test_foundation_pause_does_not_hold_sibling_publication_lock(clone_ws, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    _seed_script(clone_ws, {"A": 3, "B": 3})
+    _seed_foundations(clone_ws, ["A", "B"])
+    parked, resume = Event(), Event()
+    real_lock = V.exclusive_file_lock
+    monkeypatch.setattr(V, "exclusive_file_lock", lambda path: real_lock(path, timeout=0.5))
+
+    class PausedHandle(_Handle):
+        def check(self):
+            parked.set()
+            assert resume.wait(5), "test did not resume the paused character"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        paused = pool.submit(V.prepare_foundations, PausedHandle(), speakers=["A"],
+                             overrides={"A": "A refreshed voice"})
+        try:
+            assert parked.wait(3)
+            sibling = pool.submit(V.prepare_foundations, _Handle(), speakers=["B"],
+                                  overrides={"B": "B refreshed voice"})
+            assert sibling.result(timeout=3)["results"][0]["ok"]
+            assert _load_vc(clone_ws)["B"]["description"] == "B refreshed voice"
+        finally:
+            resume.set()
+        assert paused.result(timeout=3)["results"][0]["ok"]
+    assert _load_vc(clone_ws)["A"]["description"] == "A refreshed voice"
+    assert _load_vc(clone_ws)["B"]["description"] == "B refreshed voice"
+
+
+def test_foundation_cancelled_before_publication_preserves_config(clone_ws):
+    _seed_script(clone_ws, {"A": 3})
+    _seed_foundations(clone_ws, ["A"])
+    before = _load_vc(clone_ws)
+
+    class CancelledHandle(_Handle):
+        cancelled = True
+
+    with pytest.raises(TaskCancelled):
+        V.prepare_foundations(CancelledHandle(), speakers=["A"],
+                             overrides={"A": "Replacement voice"})
+    assert _load_vc(clone_ws) == before
+
+
+def test_clone_eight_candidate_batch_uses_configured_ceiling(clone_ws, monkeypatch):
+    _seed_script(clone_ws, {"A": 3})
+    _seed_foundations(clone_ws, ["A"])
+    _, capture = _stub_design_engine(monkeypatch, clone_ws, rows_per_batch=8)
+    result = V.generate_voice_candidates(_Handle(), speakers=["A"],
+                                         concurrency=8, candidate_count=8)
+    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    assert result["ok"] == 1
+    assert len(calls) == 8
+    assert all(row["concurrency"] == row["rows_per_batch"] == 8 for row in calls)
+    assert len(_load_vc(clone_ws)["A"]["candidates"]) == 8
 
 
 class _Handle:

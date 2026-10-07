@@ -33,7 +33,7 @@ const ACTIVE = ['pending', 'running']
 const isActive = computed(() => (props.task ? ACTIVE.includes(props.task.status) : false))
 
 // Follow the log to its bottom while the user is reading the tail (newest line is last).
-const { bind: bindLog } = useLogAutoFollow(() => logs.value)
+const { bind: bindLog } = useLogAutoFollow(() => clientDisplay.logsEnabled ? logs.value : [])
 
 const boxClass = computed(() => cn('rounded-md border bg-muted/40', props.maxHeightClass || 'h-72'))
 

@@ -8,7 +8,7 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const vue = require('vue')
 const source = readFileSync(new URL('../src/views/Voices.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1]
-const compiled = ts.transpileModule(source + '\nexport { loadVoices, speakers, prompts, voicesLoading, voicesLoadError, hasScript, regenFoundation, doClones, openMerge, closeMerge, openPicker, closePicker, openMergeConfirm, overlayKeydown, pickerPanel, mergePanel, mergeConfirmPanel, mergeConfirm, mergeTarget, mergeBusy, pickerBusy };', {
+const compiled = ts.transpileModule(source + '\nexport { cloneBadge, cloneBatch, cloneSubmitting, cloneBusy, foundationBadge, foundationBatch, foundationSubmitting, doFoundations, reattachTasks, scheduleProgressRefresh, clearProgressRefresh, loadVoices, speakers, prompts, voicesLoading, voicesLoadError, hasScript, regenFoundation, doClones, openMerge, closeMerge, openPicker, closePicker, openMergeConfirm, overlayKeydown, pickerPanel, mergePanel, mergeConfirmPanel, mergeConfirm, mergeTarget, mergeBusy, pickerBusy };', {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText
 
@@ -21,6 +21,9 @@ function harness(listVoices) {
   const project = vue.reactive({ activeProjectId: 'project-a' })
   const auth = vue.reactive({ user: { id: 'user-a' } })
   const calls = []
+  const taskStore = vue.reactive({ projectTasks: [], activeTasks(module) {
+    return this.projectTasks.filter(row => ['pending', 'running', 'paused'].includes(row.status) && (!module || row.module === module))
+  }, refresh: async () => {} })
   const document = { activeElement: null }
   const api = {
     listVoices,
@@ -41,21 +44,21 @@ function harness(listVoices) {
     return cache.get(base)
   }
   function resolve(name) {
-    if (name.includes('useWorkbench')) return loadComposable(name)
+    if ((name.includes('useWorkbench') || name.includes('useLabelDerivedTasks'))) return loadComposable(name)
     return dependencies(name)
   }
   function dependencies(name) {
     if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onDeactivated() {}, onBeforeUnmount() {} }
     if (name === '@/stores/auth') return { useAuthStore: () => auth }
     if (name === '@/stores/project') return { useProjectStore: () => project }
-    if (name === '@/stores/task') return { useTaskStore: () => ({ projectTasks: [], activeTasks: () => [], refresh: async () => {} }) }
+    if (name === '@/stores/task') return { useTaskStore: () => taskStore }
     return { default: {} }
   }
   const module = { exports: {} }
   runInNewContext(compiled, {
-    module, exports: module.exports, document,
+    module, exports: module.exports, document, setTimeout, clearTimeout,
     require(name) {
-      if (name.includes('useWorkbench')) return loadComposable(name)
+      if ((name.includes('useWorkbench') || name.includes('useLabelDerivedTasks'))) return loadComposable(name)
       if (name === 'vue') return { ...vue, onMounted() {}, onActivated() {}, onBeforeUnmount() {} }
       if (name === 'vue-router') return { useRouter: () => ({ push() {} }) }
       if (name === '@/api/tts') return api
@@ -63,15 +66,129 @@ function harness(listVoices) {
       if (name === '@/stores/project') return { useProjectStore: () => project }
       if (name === '@/stores/settings') return { useSettingsStore: () => ({ loaded: true }) }
       if (name === '@/stores/pipelineState') return { usePipelineStateStore: () => vue.reactive({ activeScript: '' }) }
-      if (name === '@/stores/task') return { useTaskStore: () => ({ projectTasks: [], activeTasks: () => [], refresh: async () => {} }) }
+      if (name === '@/stores/task') return { useTaskStore: () => taskStore }
       if (name === '@/composables/useProjectGate') return { useProjectGate: () => ({ projectSet: vue.ref(true) }) }
       if (name === '@/components/ui/toast') return { useToast: () => ({ push() {} }) }
       return { default: {} }
     },
   })
-  return { ...module.exports, project, auth, calls, document }
+  return { ...module.exports, project, auth, calls, document, taskStore, api }
 }
 const result = name => ({ has_script: true, speakers: [{ name }], script_path: '', voice_config_path: '' })
+
+const foundationRow = (name, status, seq = 1) => ({
+  id: `foundation-${name}-${seq}`, module: 'voices-foundation',
+  label: `语音推理基础 · ${name}`, status, seq, progress: status === 'succeeded' ? 1 : 0,
+  current: '', logs: [], result: {},
+})
+
+test('regeneration immediately replaces the old completed badge for its selected role', async () => {
+  const h = harness(async () => result('A'))
+  const waiting = deferred()
+  h.api.prepareFoundations = () => waiting.promise
+  const a = { name: 'A', foundation_status: 'done' }
+  const b = { name: 'B', foundation_status: 'done' }
+  assert.equal(h.foundationBadge(a).label, '已完成')
+  const request = h.doFoundations({ speakers: ['A'] })
+  assert.equal(h.foundationBadge(a).label, '处理中')
+  assert.equal(h.foundationBadge(a).spin, true)
+  assert.equal(h.foundationBadge(b).label, '已完成')
+  waiting.reject(new Error('submit failed'))
+  await request
+  assert.equal(h.foundationBadge(a).label, '已完成')
+  assert.equal(h.foundationSubmitting.value, false)
+})
+
+test('each foundation row completes independently while other regenerated roles are running', async () => {
+  const h = harness(async () => result('A'))
+  const a = { name: 'A', foundation_status: 'done' }
+  const b = { name: 'B', foundation_status: 'done' }
+  h.taskStore.projectTasks = [foundationRow('A', 'pending'), foundationRow('B', 'pending')]
+  h.foundationBatch.track(h.taskStore.projectTasks.map(row => row.id))
+  assert.equal(h.foundationBadge(a).label, '排队中')
+  h.taskStore.projectTasks[0].status = 'running'
+  assert.equal(h.foundationBadge(a).label, '处理中')
+  h.taskStore.projectTasks[0].status = 'succeeded'
+  h.taskStore.projectTasks[1].status = 'running'
+  assert.equal(h.foundationBadge(a).label, '已完成')
+  assert.equal(h.foundationBadge(a).spin, false)
+  assert.equal(h.foundationBadge(b).label, '处理中')
+  await vue.nextTick()
+  h.clearProgressRefresh()
+  // Replay can age out a completed character while the batch is still running.
+  h.taskStore.projectTasks = [h.taskStore.projectTasks[1]]
+  assert.equal(h.foundationBadge(a).label, '已完成')
+  assert.equal(h.foundationBadge(b).label, '处理中')
+})
+
+test('replayed tasks override previous completion and use the latest character attempt', async () => {
+  const h = harness(async () => result('A'))
+  const a = { name: 'A', foundation_status: 'done' }
+  h.taskStore.projectTasks = [foundationRow('A', 'succeeded', 1), foundationRow('A', 'running', 2)]
+  h.reattachTasks()
+  assert.equal(h.foundationBadge(a).label, '处理中')
+  h.taskStore.projectTasks[1].status = 'paused'
+  assert.equal(h.foundationBadge(a).label, '已暂停')
+  assert.equal(h.foundationBadge(a).spin, false)
+  h.taskStore.projectTasks[1].status = 'failed'
+  assert.equal(h.foundationBadge(a).label, '失败')
+  h.taskStore.projectTasks.push(foundationRow('A', 'running', 3))
+  assert.equal(h.foundationBadge(a).label, '处理中')
+  h.taskStore.projectTasks[2].status = 'cancelled'
+  assert.equal(h.foundationBadge(a).label, '已完成')
+  h.clearProgressRefresh()
+})
+
+test('new-only submission leaves completed roles untouched', async () => {
+  const h = harness(async () => result('A'))
+  const waiting = deferred()
+  h.api.prepareFoundations = () => waiting.promise
+  h.speakers.value = [{ name: 'A', foundation_status: 'done' }, { name: 'B', foundation_status: 'none' }]
+  const request = h.doFoundations({ new_only: true })
+  assert.equal(h.foundationBadge(h.speakers.value[0]).label, '已完成')
+  assert.equal(h.foundationBadge(h.speakers.value[1]).label, '处理中')
+  waiting.reject(new Error('submit failed'))
+  await request
+  assert.equal(h.foundationBadge(h.speakers.value[1]).label, '未生成')
+})
+
+test('foundation badge distinguishes the character outcome from task completion', () => {
+  const h = harness(async () => result('A'))
+  const row = foundationRow('A', 'succeeded')
+  row.result = { results: [{ speaker: 'A', ok: false }] }
+  h.taskStore.projectTasks = [row]
+  assert.equal(h.foundationBadge({ name: 'A', foundation_status: 'done' }).label, '失败')
+  h.taskStore.projectTasks[0].result = { results: [{ speaker: 'A', ok: true }] }
+  // The SSE completion can arrive before the role-list response.
+  assert.equal(h.foundationBadge({ name: 'A', foundation_status: 'none' }).label, '已完成')
+})
+
+test('progress bursts coalesce and never overlap role refresh requests', async () => {
+  const waiting = deferred()
+  let calls = 0
+  const h = harness(() => { calls++; return waiting.promise })
+  for (let i = 0; i < 100; i++) h.scheduleProgressRefresh()
+  await new Promise(resolve => setTimeout(resolve, 450))
+  assert.equal(calls, 1)
+  for (let i = 0; i < 100; i++) h.scheduleProgressRefresh()
+  await new Promise(resolve => setTimeout(resolve, 450))
+  assert.equal(calls, 1)
+  waiting.resolve(result('new'))
+  await vue.nextTick()
+  await new Promise(resolve => setTimeout(resolve, 450))
+  assert.equal(calls, 2)
+  h.clearProgressRefresh()
+})
+
+test('project switch cancels a scheduled progress refresh', async () => {
+  let calls = 0
+  const h = harness(async () => { calls++; return result('new') })
+  h.scheduleProgressRefresh()
+  h.project.activeProjectId = 'project-b'
+  await vue.nextTick()
+  await new Promise(resolve => setTimeout(resolve, 450))
+  assert.equal(calls, 0)
+})
 
 test('out-of-order role requests retain the newest response and loading state', async () => {
   const first = deferred(), second = deferred()
@@ -231,4 +348,81 @@ test('an in-flight picker without focusable controls does not swallow Tab', asyn
   const shift = key('Tab', true)
   h.overlayKeydown(shift)
   assert.equal(shift.prevented, false)
+})
+
+
+const cloneRow = (name, status, seq = 1) => ({
+  id: `clone-${name}`, module: 'voices-clone', task_type: 'voices.clone', label: `克隆音频 · ${name}`, seq,
+  status, progress: 0, logs: [], result: {},
+})
+test('clone regeneration overrides old completed audio and each role settles independently', async () => {
+  const h = harness(async () => result('A'))
+  const a = { name: 'A', clone_status: 'done' }, b = { name: 'B', clone_status: 'done' }
+  h.taskStore.projectTasks = [cloneRow('A', 'pending'), cloneRow('B', 'running')]
+  h.cloneBatch.track(['clone-A', 'clone-B'])
+  assert.equal(h.cloneBadge(a).label, '排队中')
+  assert.equal(h.cloneBadge(b).label, '制作中')
+  h.taskStore.projectTasks[0].status = 'succeeded'
+  h.taskStore.projectTasks[0].result = { results: [{ speaker: 'A', ok: true }] }
+  await vue.nextTick()
+  assert.equal(h.cloneBadge(a).label, '已完成')
+  assert.equal(h.cloneBadge(b).label, '制作中')
+  h.taskStore.projectTasks[1].status = 'paused'
+  assert.equal(h.cloneBadge(b).label, '已暂停')
+  h.taskStore.projectTasks[1].status = 'cancelling'
+  assert.equal(h.cloneBadge(b).label, '取消中')
+  h.taskStore.projectTasks[1].status = 'failed'
+  assert.equal(h.cloneBadge(b).label, '失败')
+})
+
+test('clone outcome failure overrides an old usable take and timeout releases batch gating', async () => {
+  const h = harness(async () => result('A'))
+  const row = cloneRow('A', 'succeeded')
+  row.result = { results: [{ speaker: 'A', ok: false }] }
+  h.taskStore.projectTasks = [row]
+  h.cloneBatch.track([row.id])
+  assert.equal(h.cloneBadge({ name: 'A', clone_status: 'done' }).label, '失败')
+  h.taskStore.projectTasks[0].status = 'running'
+  await vue.nextTick()
+  h.cloneBusy.value = true
+  h.taskStore.projectTasks[0].status = 'timeout'
+  await vue.nextTick()
+  assert.equal(h.cloneBusy.value, false)
+})
+
+test('1000 clone tasks refresh in bursts without traversing historical logs', async () => {
+  let requests = 0, historyReads = 0
+  const h = harness(async () => { requests++; return result('A') })
+  const rows = Array.from({ length: 1000 }, (_, index) => {
+    const row = cloneRow(`role-${index}`, index === 0 ? 'running' : 'pending')
+    row.logs = [Object.defineProperty({}, 'msg', {
+      enumerable: true, get() { historyReads++; return 'historical log' },
+    })]
+    return row
+  })
+  h.taskStore.projectTasks = rows
+  h.cloneBatch.track(rows.map(row => row.id))
+  for (let index = 1; index <= 100; index++) {
+    h.taskStore.projectTasks[0].progress = index / 2
+    await vue.nextTick()
+    assert.equal(h.cloneBadge({ name: 'role-0', clone_status: 'done' }).label, '制作中')
+    assert.equal(h.cloneBadge({ name: 'role-999', clone_status: 'done' }).label, '排队中')
+  }
+  assert.equal(historyReads, 0)
+  await new Promise(resolve => setTimeout(resolve, 450))
+  assert.equal(requests, 1)
+  h.clearProgressRefresh()
+})
+
+test('a coordinator role keeps its completed badge while the shared clone process finishes', () => {
+  const h = harness(async () => result('A'))
+  const row = cloneRow('A', 'running')
+  row.progress = 100
+  row.current = '克隆音频已完成'
+  h.taskStore.projectTasks = [row]
+  assert.equal(h.cloneBadge({ name: 'A', clone_status: 'done' }).label, '已完成')
+  h.taskStore.projectTasks[0].current = '克隆音频失败'
+  assert.equal(h.cloneBadge({ name: 'A', clone_status: 'done' }).label, '失败')
+  h.taskStore.projectTasks[0].current = '候选 1/1'
+  assert.equal(h.cloneBadge({ name: 'A', clone_status: 'done' }).label, '制作中')
 })

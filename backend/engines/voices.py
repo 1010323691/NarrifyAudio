@@ -54,6 +54,8 @@ from pathlib import Path
 
 from ..core import pathio
 from ..core.config import get_config
+from ..core.file_lock import exclusive_file_lock
+from ..core.task_control import TaskCancelled
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..platform.quota import QuotaInsufficientError
 from .persona_prompts import PERSONA_SYSTEM_PROMPT, PERSONA_USER_PROMPT
@@ -576,8 +578,10 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     if not (llm.model_name or "").strip() and not overrides:
         handle.log("警告：未配置 LLM 模型——未提供提示词的角色将使用兜底描述。", "WARNING")
 
-    vc_path, voice_config = _load_voice_config(handle)
     layout = get_or_prepare_layout()
+    foundation_lock = layout.workspace / ".tasks" / "foundation-publication.lock"
+    with exclusive_file_lock(foundation_lock):
+        vc_path, voice_config = _load_voice_config(handle)
 
     # Characters to (re)generate a foundation for: everyone, or (new_only) only those
     # without a foundation yet; an explicit ``speakers`` allowlist narrows it further.
@@ -647,23 +651,46 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             "foundation_status": "done" if description else "failed",
         }
 
-    def persist():
-        # Single-threaded incremental persist: every finished character is written back the
-        # moment it completes, so the 角色配音 list (status / preview) refreshes in real time.
-        data = json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8")
-        stage_workspace_file = getattr(handle, "publish_workspace_bytes", None) or getattr(handle, "stage_workspace_file", None)
-        if callable(stage_workspace_file):
-            stage_workspace_file(vc_path, data)
-        else:
+    def persist(result=None):
+        # Completed foundations are durable checkpoints, including on cancellation.
+        # Only merge this completion into the latest file: another character's
+        # task may have published since this task loaded its initial snapshot.
+        # A paused task may park indefinitely. Never park while holding the
+        # publication lock needed by the other characters in this project.
+        handle.check()
+        with exclusive_file_lock(foundation_lock):
+            if getattr(handle, "cancelled", False):
+                raise TaskCancelled()
+            _, latest = _load_voice_config(handle)
+            for alias, canonical in resolved_aliases.items():
+                entry = latest.setdefault(alias, {})
+                entry.update({"alias_of": canonical, "seed": entry.get("seed", -1)})
+            if result is not None:
+                entry = latest.setdefault(result["speaker"], {})
+                entry.update({key: result[key] for key in (
+                    "type", "description", "ref_text", "foundation_status")})
+                entry.setdefault("seed", -1)
+                if result.get("gender") and not entry.get("gender"):
+                    entry["gender"] = result["gender"]
+                # Invalidation is part of the checkpoint, so a failed sibling task
+                # must never restore a shared manifest or stale merged output.
+                invalidate_speaker_outputs([result["speaker"]], layout)
             vc_path.parent.mkdir(parents=True, exist_ok=True)
-            vc_path.write_bytes(data)
+            pending = vc_path.with_name(f".{vc_path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                pending.write_bytes(json.dumps(latest, indent=2, ensure_ascii=False).encode("utf-8"))
+                os.replace(pending, vc_path)
+            finally:
+                pending.unlink(missing_ok=True)
+            voice_config.clear()
+            voice_config.update(latest)
 
+    handle.progress(0.02, "启动 LLM（并行）")
     ex = ThreadPoolExecutor(max_workers=max_workers)
     futs = {ex.submit(copy_context().run, gen_one, sp): sp for sp in unique_speakers}
     cancelled = False
     quota_failed = False
     try:
-        handle.progress(0.02, "启动 LLM（并行）")
         for fut in as_completed(futs):
             sp = futs[fut]
             try:
@@ -679,21 +706,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
                 handle.log(f"  {sp} 生成基础失败：{e}", "ERROR")
                 r = {"speaker": sp, "ok": False, "type": "foundation", "description": "",
                      "ref_text": "", "foundation_status": "failed"}
-            # Apply the pure worker's result on the single coordinator thread, then persist.
-            entry = voice_config.get(sp, {})
-            entry.update({
-                "type": r["type"],
-                "description": r["description"],
-                "ref_text": r.get("ref_text", ""),
-                "foundation_status": r.get("foundation_status") or ("failed" if not r["ok"] else "done"),
-                "seed": entry.get("seed", -1),
-            })
-            # Gender pre-fill only: never clobber a value the badge (or an earlier run) set.
-            if r.get("gender") and not entry.get("gender"):
-                entry["gender"] = r["gender"]
-            voice_config[sp] = entry
-            persist()
-            invalidate_speaker_outputs([sp], layout, handle=handle)
+            persist(r)
             results.append({"speaker": r["speaker"], "ok": r["ok"], "type": r["type"],
                             "description": r["description"]})
             done += 1
@@ -861,6 +874,15 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         # All of this character's candidates have settled: apply them as ONE unit on the
         # single task thread (characters still in flight keep their pre-run entry).
         nonlocal ok, failed
+        speaker_cancelled = getattr(handle, "speaker_cancelled", None)
+        if callable(speaker_cancelled) and speaker_cancelled(sp):
+            discard_stage = getattr(handle, "discard_workspace_stage", None)
+            if callable(discard_stage):
+                for job in jobs:
+                    if job["sp"] == sp and job.get("final_out"):
+                        discard_stage(Path(job["out"]))
+            settled.add(sp)
+            return
         num = f"[{len(settled) + 1}/{n}]"
         entry = voice_config.get(sp, {})
         good = sorted((r for r in pending[sp].values() if r["ok"]), key=lambda r: r["k"])
@@ -897,7 +919,8 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
             })
             voice_config[sp] = entry
             persist()
-            invalidate_speaker_outputs([sp], layout, handle=handle)
+            invalidate_speaker_outputs([sp], layout,
+                                       handle=None if getattr(handle, "batch_checkpoints", False) else handle)
             results.append({"speaker": sp, "ok": True, "type": "clone",
                             "preview": good[0]["preview"], "candidates": len(good)})
             ok += 1
@@ -910,7 +933,8 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
                           "clone_status": "failed"})
             voice_config[sp] = entry
             persist()
-            invalidate_speaker_outputs([sp], layout, handle=handle)
+            invalidate_speaker_outputs([sp], layout,
+                                       handle=None if getattr(handle, "batch_checkpoints", False) else handle)
             first_reason = next((r["reason"] for r in pending[sp].values() if not r["ok"]), "")
             results.append({"speaker": sp, "ok": False, "type": "design", "preview": "",
                             "candidates": 0, "reason": first_reason})
@@ -922,6 +946,9 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
                 if job["sp"] == sp and job.get("final_out"):
                     discard_workspace_stage(Path(job["out"]))
         settled.add(sp)
+        speaker_settled = getattr(handle, "speaker_settled", None)
+        if callable(speaker_settled):
+            speaker_settled(results[-1])
 
     # Breakpoint adoption: a candidate WAV already on disk (rendered by an earlier
     # attempt of THIS run, before a watchdog restart) counts as done — its seed is
@@ -1017,6 +1044,9 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
             handle.log(f"  [{sp}] 候选 {k} 渲染失败（{parts[2]}）", "ERROR")
         job_results[(sp, k)] = r
         pending[sp][k] = r
+        speaker_progress = getattr(handle, "speaker_progress", None)
+        if callable(speaker_progress):
+            speaker_progress(sp, len(pending[sp]), _target(sp))
         if sp not in settled and len(pending[sp]) >= _target(sp):
             _settle(sp)
 

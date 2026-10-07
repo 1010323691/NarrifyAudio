@@ -1,0 +1,147 @@
+"""One isolated model run for independently leased character task records."""
+from __future__ import annotations
+
+import time
+from dataclasses import replace
+
+from sqlalchemy import select
+
+from .database import SessionLocal
+from .models import Task
+from .task_context import EngineExecutionContext
+from .task_contracts import TaskCancelledError, TaskExecutionError
+from .task_engine_support import engine_execution_context, engine_result_outcome
+from .task_validation import legacy_task_payload_error
+
+
+class CloneMemberContext(EngineExecutionContext):
+    """A parked member must also stop when its shared execution owner stops."""
+
+    def __init__(self, claim, primary):
+        super().__init__(claim)
+        self.primary = primary
+
+    @property
+    def cancelled(self):
+        return self.primary.cancelled or super().cancelled
+
+
+class CloneBatchContext(EngineExecutionContext):
+    batch_checkpoints = True
+
+    def __init__(self, claims, finish, cancel):
+        super().__init__(claims[0])
+        self.contexts = {claim.payload["speakers"][0]: CloneMemberContext(claim, self) for claim in claims}
+        self.completed = set()
+        self.results = {}
+        self.output_paths = {}
+        self.finish = finish
+        self.cancel = cancel
+        self.last_control_check = 0.0
+
+    def _check_members(self, on_pause=None):
+        # Check controls in one query, rather than querying every role on every
+        # subprocess line. A settlement separately checks its own lease fence.
+        if time.monotonic() - self.last_control_check < 0.5:
+            return
+        self.last_control_check = time.monotonic()
+        active = {ctx.claim.task_id: (speaker, ctx) for speaker, ctx in self.contexts.items()
+                  if speaker not in self.completed and ctx.claim.task_id != self.claim.task_id}
+        if not active:
+            return
+        with SessionLocal() as db:
+            statuses = db.execute(select(Task.id, Task.status).where(Task.id.in_(active))).all()
+        for task_id, status in statuses:
+            speaker, ctx = active[task_id]
+            if status in {"cancelling", "cancelled"}:
+                self.speaker_cancelled(speaker)
+            elif status in {"paused", "queued"}:
+                if on_pause is None:
+                    ctx.check()
+                else:
+                    ctx.check_interruptible(on_pause)
+
+    def check(self):
+        super().check()
+        self._check_members()
+
+    def check_interruptible(self, on_pause):
+        super().check_interruptible(on_pause)
+        self._check_members(on_pause)
+
+    def progress(self, fraction, current=""):
+        # A finished coordinator role can remain leased until the shared child
+        # exits. Keep its own completion badge stable during that interval.
+        speaker = self.claim.payload["speakers"][0]
+        if speaker not in self.results:
+            super().progress(fraction, current)
+
+    def speaker_cancelled(self, speaker):
+        if self.cancelled:
+            raise TaskCancelledError()
+        if speaker in self.completed:
+            return True
+        ctx = self.contexts[speaker]
+        if ctx.cancelled:
+            if ctx.claim.task_id == self.claim.task_id:
+                raise TaskCancelledError()
+            self.cancel(ctx.claim)
+            self.completed.add(speaker)
+            return True
+        return False
+
+    def speaker_progress(self, speaker, done, total):
+        if speaker not in self.completed and speaker not in self.results:
+            self.contexts[speaker].progress(done / max(1, total), f"候选 {done}/{total}")
+
+    def speaker_settled(self, result):
+        speaker = result["speaker"]
+        self.results[speaker] = result
+        ctx = self.contexts[speaker]
+        ctx.progress(1.0, "克隆音频已完成" if result["ok"] else "克隆音频失败")
+        ctx.log(f"{speaker} 克隆音频{'完成' if result['ok'] else '失败'}")
+        if ctx.claim.task_id != self.claim.task_id:
+            if self.finish(ctx.claim, self._result(speaker)):
+                self.completed.add(speaker)
+
+    def _result(self, speaker):
+        result = self.results.get(speaker)
+        return {"count": int(result is not None), "ok": int(bool(result and result["ok"])),
+                "failed": int(bool(result and not result["ok"])), "speakers": [speaker],
+                "results": [result] if result else [], **self.output_paths}
+
+
+def execute_clone_batch(claims, finish, cancel):
+    from ..engines.voices import generate_voice_candidates
+    from ..core.paths import get_or_prepare_layout
+
+    handle = CloneBatchContext(claims, finish, cancel)
+    primary = claims[0]
+    payload = primary.payload
+    validation_error = legacy_task_payload_error(primary.task_type, payload)
+    if validation_error:
+        raise TaskExecutionError("invalid_payload", validation_error)
+    try:
+        with engine_execution_context(primary):
+            # Settled characters are durable checkpoints. A later character's
+            # cancellation or engine failure must not undo an already completed
+            # task's WAVs, voice_config or output invalidation.
+            handle.mark_workspace_checkpoint_directory(get_or_prepare_layout().voice_profiles)
+            layout = get_or_prepare_layout()
+            handle.output_paths = {"voice_config_path": str(layout.voice_profiles / "voice_config.json"),
+                                   "output_dir": str(layout.voice_profiles / "designed_voices")}
+            generate_voice_candidates(
+                handle, list(handle.contexts), bool(payload.get("new_only")),
+                payload.get("concurrency"), payload.get("script"), payload.get("candidate_count"),
+            )
+            for speaker, ctx in handle.contexts.items():
+                if speaker not in handle.completed and ctx.claim.task_id != primary.task_id:
+                    if not handle.speaker_cancelled(speaker):
+                        while not finish(ctx.claim, handle._result(speaker)):
+                            ctx.check()
+                        handle.completed.add(speaker)
+        outcome = engine_result_outcome(primary, handle._result(primary.payload["speakers"][0]))
+        return replace(outcome, publication_journal=handle.publication_journal)
+    except BaseException:
+        handle.rollback_publications()
+        raise

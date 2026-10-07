@@ -9,8 +9,12 @@ import {
   ref,
   watch,
 } from 'vue'
+import { useAuthStore } from '@/stores/auth'
+import { useProjectStore } from '@/stores/project'
 import { useRouter } from 'vue-router'
 import { usePipelineStateStore } from '@/stores/pipelineState'
+import { activeEntryLabel, latestEntryTasks } from '@/composables/useLabelDerivedTasks'
+import { useWorkbenchRefresh } from '@/composables/useWorkbenchRefresh'
 import { useWorkbenchTaskBatch } from '@/composables/useWorkbenchTaskBatch'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useTaskStore } from '@/stores/task'
@@ -35,6 +39,8 @@ import { formatNumber } from '@/utils/format'
 import { Layers, Loader2, RotateCcw, ArrowRight } from 'lucide-vue-next'
 
 const router = useRouter()
+const auth = useAuthStore()
+const project = useProjectStore()
 const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const captureScope = useWorkbenchScope()
@@ -246,6 +252,8 @@ const taskId = ref<string | null>(null)
 
 const taskBatch = useWorkbenchTaskBatch(taskId)
 const task = taskBatch.task
+const tasksByFile = computed(() => latestEntryTasks([...taskStore.projectTasks, ...taskBatch.rows.value], 'tts-batch'))
+const ACTIVE = new Set(['pending', 'queued', 'retrying', 'running', 'paused', 'cancelling'])
 
 // 长度排序后按批内上限组批，模型在任务内仅加载一次。
 // ---------------------------------------------------------------------------
@@ -254,11 +262,12 @@ const task = taskBatch.task
 // animated) and the 已合成 badge appears the moment a file finishes.
 // ---------------------------------------------------------------------------
 let statusTimer: ReturnType<typeof setInterval> | null = null
+const statusRefresh = useWorkbenchRefresh(refreshStatusesOnly, 250)
 
 function startStatusPolling() {
   if (statusTimer) return
-  void refreshStatusesOnly()
-  statusTimer = setInterval(() => void refreshStatusesOnly(), 3000)
+  statusRefresh.schedule()
+  statusTimer = setInterval(statusRefresh.schedule, 3000)
 }
 
 function stopStatusPolling(final = true) {
@@ -266,8 +275,25 @@ function stopStatusPolling(final = true) {
     clearInterval(statusTimer)
     statusTimer = null
   }
-  if (final) void refreshStatusesOnly()
+  statusRefresh.stop()
+  if (final) statusRefresh.schedule()
 }
+
+watch([() => auth.user?.id, () => project.activeProjectId], () => {
+  ++rowsRequest
+  ++statsRequest
+  ++voiceSummaryRequest
+  stopStatusPolling(false)
+  busy.value = false
+  error.value = ''
+  fileNames.value = []
+  statuses.value = []
+  voiceSummary.value = null
+  filesLoaded.value = false
+  filesLoading.value = false
+  filesError.value = ''
+  for (const name of Object.keys(selected)) delete selected[name]
+}, { flush: 'sync' })
 
 // ---------------------------------------------------------------------------
 // Lifecycle (the page is keep-alive cached: onUnmounted does NOT fire on
@@ -288,11 +314,11 @@ function reattachTask() {
 }
 
 watch(
-  () => taskStore.projectTasks,
+  () => taskStore.projectTasks.filter(row => row.module === 'tts-batch').map(row => `${row.id}:${row.status}`).join('|'),
   () => {
     if (!captureScope()()) return
     reattachTask()
-    if (filesLoaded.value) void refreshStatusesOnly()
+    if (filesLoaded.value) statusRefresh.schedule()
   },
 )
 
@@ -436,7 +462,7 @@ watch(
         variant: result?.failed.length ? 'default' : 'success',
         description: `成功 ${result?.completed ?? 0} / ${result?.total ?? 0} 段`,
       })
-    } else if (st === 'failed') {
+    } else if (st === 'failed' || st === 'timeout') {
       error.value = t.error || '音频合成失败'
       taskId.value = null
       busy.value = false
@@ -452,20 +478,19 @@ watch(
 
 // ---------------------------------------------------------------------------
 
-const workRows = computed(() =>
-  rows.value.map((row) => ({
+const workRows = computed(() => rows.value.map(row => {
+  const entryTask = tasksByFile.value.get(row.name)
+  const active = !!entryTask && ACTIVE.has(entryTask.status)
+  const failed = entryTask?.status === 'failed' || entryTask?.status === 'timeout'
+  return {
     ...row,
     workKey: row.name,
     workName: row.display_name || row.name.replace(/\.json$/i, ''),
-    workState: row.complete
-      ? 'done'
-      : row.missing.length
-        ? 'blocked'
-        : row.stale_speakers?.length
-          ? 'stale'
-          : 'pending',
-  })),
-)
+    workState: active ? 'active' : failed ? 'failed' : row.complete ? 'done' : row.missing.length ? 'blocked' : row.stale_speakers?.length ? 'stale' : 'pending',
+    statusLabel: active ? activeEntryLabel(entryTask!, '合成中') : failed ? '合成失败' : row.complete ? '已完成' : row.missing.length ? '缺少声音' : row.stale_speakers?.length ? '待重合成' : '待合成',
+    statusVariant: (failed ? 'destructive' : active || row.missing.length ? 'warning' : row.complete ? 'success' : 'secondary') as 'destructive' | 'warning' | 'success' | 'secondary',
+  }
+}))
 const scopeRows = computed(() => rows.value.filter((row) => selected[row.name]))
 const selectedRemaining = computed(() =>
   scopeRows.value.reduce((sum, row) => sum + row.remaining, 0),
@@ -550,6 +575,8 @@ async function retryBatch() {
       :disabled="busy || !projectSet"
       :filters="[
         { key: 'pending', label: '待合成' },
+        { key: 'active', label: '处理中' },
+        { key: 'failed', label: '合成失败' },
         { key: 'blocked', label: '声音未就绪' },
         { key: 'stale', label: '声音已变更' },
         { key: 'done', label: '已完成' },
@@ -596,18 +623,7 @@ async function retryBatch() {
           {{ row.ready }} / {{ row.speakers }}
         </td>
         <td>
-          <WorkbenchStatus
-            :variant="row.complete ? 'success' : row.missing.length ? 'warning' : 'secondary'"
-            >{{
-              row.complete
-                ? '已完成'
-                : row.missing.length
-                  ? '缺少声音'
-                  : row.stale_speakers?.length
-                    ? '待重合成'
-                    : '待合成'
-            }}</WorkbenchStatus
-          >
+          <WorkbenchStatus :variant="row.statusVariant">{{ row.statusLabel }}</WorkbenchStatus>
         </td></template
       >
       <template #detail="{ row }">

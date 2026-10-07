@@ -71,3 +71,24 @@ def test_single_entry_retains_compatible_id_and_empty_batch_creates_nothing(owne
         result = submit(db, owner, [entry("one.json")])
         assert result["task_ids"] == [result["task_id"]]
         assert submit(db, owner, []) == {"task_ids": []}
+
+
+def test_clone_entries_keep_independent_records_and_share_only_their_execution_batch(owner):
+    with SessionLocal() as db:
+        user_id, project_id = owner
+        ctx = SimpleNamespace(user=db.get(User, user_id), session=SimpleNamespace(active_project_id=project_id))
+        batches = []
+        for names in (["A", "B"], ["C"]):
+            result = submission.submit_legacy_engine_tasks(
+                task_type="voices.clone", ctx=ctx, db=db, idempotency_prefix="voices-clone",
+                entries=[{"label": f"克隆音频 · {name}", "payload": {"speakers": [name], "script": "book.json"}}
+                         for name in names],
+            )
+            rows = db.scalars(select(Task).where(Task.id.in_(result["task_ids"]))).all()
+            assert len(rows) == len(names)
+            assert {row.payload["speakers"][0] for row in rows} == set(names)
+            assert all(row.status == "pending" for row in rows)
+            batch_ids = {row.payload["execution_batch"] for row in rows}
+            assert len(batch_ids) == 1
+            batches.append(batch_ids.pop())
+        assert batches[0] != batches[1]

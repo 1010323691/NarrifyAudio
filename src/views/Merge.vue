@@ -13,6 +13,7 @@ import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
+import { useWorkbenchRefresh } from '@/composables/useWorkbenchRefresh'
 import { useWorkbenchTaskControl } from '@/composables/useWorkbenchTaskControl'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
@@ -36,6 +37,7 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import {
   useLabelDerivedTasks,
   labelKeyOf,
+  activeEntryLabel,
   LABEL_TASK_TERMINAL_STATUSES,
 } from '@/composables/useLabelDerivedTasks'
 import { Combine, Loader2, ArrowRight } from 'lucide-vue-next'
@@ -51,18 +53,10 @@ const { push: toast } = useToast()
 
 const status = ref<TTSStatus | null>(null)
 let rowsRequest = 0
-let refreshTimer: ReturnType<typeof setTimeout> | null = null
-function scheduleRowsRefresh() {
-  if (refreshTimer) return
-  refreshTimer = setTimeout(() => {
-    refreshTimer = null
-    if (captureScope()()) void refreshRows()
-  }, 250)
-}
-function stopScheduledRefresh() {
-  if (refreshTimer) clearTimeout(refreshTimer)
-  refreshTimer = null
-}
+const rowsRefresh = useWorkbenchRefresh(refreshRows, 250)
+function scheduleRowsRefresh() { rowsRefresh.schedule() }
+function stopScheduledRefresh() { rowsRefresh.stop() }
+
 
 // 行数据（磁盘口径，onMounted / onActivated / 手动刷新时拉取）：
 // 包名列表 + 每包的合成进度 + 06_audio_merge/ 下的 MP3 存在性。
@@ -116,7 +110,7 @@ const rows = computed<MergeRow[]>(() => {
     let ready = false
     let mergedState = false
     if (task) {
-      label = '合并中'
+      label = activeEntryLabel(task, '合并中')
       variant = 'secondary'
     } else if (failed.get(pkg)) {
       label = '合并失败'
@@ -353,12 +347,6 @@ watch(
   },
 )
 
-watch(
-  () => taskStore.projectTasks,
-  () => {
-    if (captureScope()()) scheduleRowsRefresh()
-  },
-)
 
 onMounted(async () => {
   const isCurrent = captureScope()

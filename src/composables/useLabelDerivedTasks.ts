@@ -6,15 +6,16 @@ import type { TaskSnapshot } from '@/types'
 // 三个视图（Merge 包名 / BGM 章节 stem / 音乐库曲目名）原先各内联一份同形算法，
 // 终态集合与取 key 口径也与 SSE 已处理标记块共享。
 
-/** 终态口径：重试走同一任务 id，同一任务不会同时在途与失败两个集合里。
- * timeout 不在此集合——「超时」行按在途展示，与原有内联副本一致。 */
-export const LABEL_TASK_TERMINAL_STATUSES = new Set(['cancelled', 'succeeded', 'failed'])
+/** Retried tasks reuse their ID; every terminal status releases the row. */
+export const LABEL_TASK_TERMINAL_STATUSES = new Set(['cancelled', 'succeeded', 'failed', 'timeout'])
 
 /** label 第一个「：」之后的 key；口径与后端 re.search(r"：(.+)$") 相同。 */
 export function labelKeyOf(label: string): string {
   // The merge API submits this English prefix before the Worker starts.
   // Parse it before the full-width separator: chapter names may contain 「：」.
   if (label.startsWith('merge-audio: ')) return label.slice('merge-audio: '.length)
+  const entry = /^(?:语音推理基础|克隆音频|音频合成(?:（\d+ 段）)?|BGM 匹配（(?:random|segment)）) · (.+)$/.exec(label)
+  if (entry) return entry[1]!
   const i = label.indexOf('：')
   return i >= 0 ? label.slice(i + 1) : ''
 }
@@ -35,7 +36,7 @@ export function useLabelDerivedTasks(
       if (!modules.has(t.module)) continue
       const key = labelKeyOf(t.label)
       if (!key) continue
-      if (t.status === 'failed') {
+      if (t.status === 'failed' || t.status === 'timeout') {
         const cur = failed.get(key)
         if (!cur || t.seq > cur.seq) failed.set(key, t)
       } else if (!LABEL_TASK_TERMINAL_STATUSES.has(t.status)) {
@@ -45,4 +46,24 @@ export function useLabelDerivedTasks(
     }
     return { active, failed }
   })
+}
+
+/** Latest attempt for each entry, including retained batch completions. */
+export function latestEntryTasks(tasks: TaskSnapshot[], module: string): Map<string, TaskSnapshot> {
+  const latest = new Map<string, TaskSnapshot>()
+  for (const task of tasks) {
+    if (task.module !== module) continue
+    const key = labelKeyOf(task.label)
+    if (!key) continue
+    const previous = latest.get(key)
+    if (!previous || task.seq > previous.seq || (task.seq === previous.seq && task.id >= previous.id)) latest.set(key, task)
+  }
+  return latest
+}
+
+export function activeEntryLabel(task: TaskSnapshot, runningLabel: string): string {
+  if (task.status === 'paused') return '已暂停'
+  if (task.status === 'cancelling') return '取消中'
+  if (task.status === 'running') return runningLabel
+  return '排队中'
 }

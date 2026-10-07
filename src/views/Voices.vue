@@ -5,6 +5,7 @@ import { useProjectStore } from '@/stores/project'
 import VoicesWorkbench from './voices/VoicesWorkbench.vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
+import { latestEntryTasks } from '@/composables/useLabelDerivedTasks'
 import { useWorkbenchTaskBatch } from '@/composables/useWorkbenchTaskBatch'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useTaskStore } from '@/stores/task'
@@ -64,6 +65,7 @@ const error = ref('')
 
 // Phase 1 (语音推理基础, LLM only) task state.
 const foundationBusy = ref(false)
+const foundationSubmitting = ref(false)
 const foundationTaskId = ref<string | null>(null)
 const foundationResult = ref<PrepareFoundationsResult | null>(null)
 const foundationBatch = useWorkbenchTaskBatch(foundationTaskId)
@@ -71,6 +73,7 @@ const foundationTask = foundationBatch.task
 
 // Phase 2 (克隆音频, TTS only) task state.
 const cloneBusy = ref(false)
+const cloneSubmitting = ref(false)
 const cloneTaskId = ref<string | null>(null)
 const cloneResult = ref<MakeClonesResult | null>(null)
 const cloneBatch = useWorkbenchTaskBatch(cloneTaskId)
@@ -219,7 +222,7 @@ const cloneTargets = ref<string[] | null>(null)
 const script = '__all__'
 
 // A phase is "running" while any of its tasks is active (drives the per-row 生成中/制作中 overlay).
-const ACTIVE: string[] = ['pending', 'running', 'paused']
+const ACTIVE: string[] = ['pending', 'queued', 'retrying', 'running', 'paused', 'cancelling']
 const foundationRunning = computed(() => taskStore.projectTasks.some((t) => t.module === 'voices-foundation' && ACTIVE.includes(t.status)))
 const cloneRunning = computed(() => taskStore.projectTasks.some((t) => t.module === 'voices-clone' && ACTIVE.includes(t.status)))
 
@@ -242,20 +245,61 @@ function inTargets(list: string[] | null, name: string) {
   return list === null || list.includes(name)
 }
 
-// Phase 1 (语音推理基础) badge: done/failed from the stored state; a row the running task
-// targets (and that isn't done/failed yet) shows 生成中 (spinner) — only the rows that run touches.
+// Use each character's task, including retained batch completions. A stored
+// foundation is still usable during regeneration, but its old status must not
+// hide the new task or keep finished rows spinning until the entire batch ends.
+const foundationRows = computed(() => latestEntryTasks(
+  [...taskStore.projectTasks, ...foundationBatch.rows.value], 'voices-foundation',
+))
+const cloneRows = computed(() => latestEntryTasks(
+  [...taskStore.projectTasks, ...cloneBatch.rows.value], 'voices-clone',
+))
 function foundationBadge(v: VoiceItem): PhaseBadge {
-  if (v.foundation_status === 'done') return { label: '已生成', variant: 'success', spin: false }
+  const task = foundationRows.value.get(v.name)
+  if (task && ACTIVE.includes(task.status)) {
+    if (task.status === 'paused') return { label: '已暂停', variant: 'warning', spin: false }
+    if (task.status === 'cancelling') return { label: '取消中', variant: 'warning', spin: true }
+    if (task.status === 'running') return { label: '处理中', variant: 'warning', spin: true }
+    return { label: '排队中', variant: 'warning', spin: false }
+  }
+  if (foundationSubmitting.value && inTargets(foundationTargets.value, v.name)) {
+    return { label: '处理中', variant: 'warning', spin: true }
+  }
+  if (task?.status === 'failed' || task?.status === 'timeout') return { label: '失败', variant: 'destructive', spin: false }
+  if (task?.status === 'succeeded') {
+    const completion = task.result?.results?.find((r: { speaker: string; ok: boolean }) => r.speaker === v.name)
+    if (completion?.ok === false) return { label: '失败', variant: 'destructive', spin: false }
+    if (completion?.ok === true) return { label: '已完成', variant: 'success', spin: false }
+  }
+  if (v.foundation_status === 'done') return { label: '已完成', variant: 'success', spin: false }
   if (v.foundation_status === 'failed') return { label: '失败', variant: 'destructive', spin: false }
-  if (foundationRunning.value && inTargets(foundationTargets.value, v.name)) return { label: '生成中', variant: 'warning', spin: true }
   return { label: '未生成', variant: 'secondary', spin: false }
 }
 
 // Phase 2 (克隆音频) badge: same derivation against clone_status / cloneRunning / cloneTargets.
 function cloneBadge(v: VoiceItem): PhaseBadge {
+  const task = cloneRows.value.get(v.name)
+  if (task?.status === 'running' && task.progress === 100) {
+    if (task.current === '克隆音频已完成') return { label: '已完成', variant: 'success', spin: false }
+    if (task.current === '克隆音频失败') return { label: '失败', variant: 'destructive', spin: false }
+  }
+  if (task && ACTIVE.includes(task.status)) {
+    if (task.status === 'paused') return { label: '已暂停', variant: 'warning', spin: false }
+    if (task.status === 'cancelling') return { label: '取消中', variant: 'warning', spin: true }
+    if (task.status === 'running') return { label: '制作中', variant: 'warning', spin: true }
+    return { label: '排队中', variant: 'warning', spin: false }
+  }
+  if (cloneSubmitting.value && inTargets(cloneTargets.value, v.name)) {
+    return { label: '制作中', variant: 'warning', spin: true }
+  }
+  if (task?.status === 'failed' || task?.status === 'timeout') return { label: '失败', variant: 'destructive', spin: false }
+  if (task?.status === 'succeeded') {
+    const completion = task.result?.results?.find((r: { speaker: string; ok: boolean }) => r.speaker === v.name)
+    if (completion?.ok === false) return { label: '失败', variant: 'destructive', spin: false }
+    if (completion?.ok === true) return { label: '已完成', variant: 'success', spin: false }
+  }
   if (v.clone_status === 'done') return { label: '已完成', variant: 'success', spin: false }
   if (v.clone_status === 'failed') return { label: '失败', variant: 'destructive', spin: false }
-  if (cloneRunning.value && inTargets(cloneTargets.value, v.name)) return { label: '制作中', variant: 'warning', spin: true }
   return { label: '未制作', variant: 'secondary', spin: false }
 }
 
@@ -277,11 +321,38 @@ async function loadVoices() {
   }
 }
 
+let progressRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let progressRefreshRunning = false
+let progressRefreshPending = false
+function scheduleProgressRefresh() {
+  progressRefreshPending = true
+  if (progressRefreshTimer || progressRefreshRunning) return
+  progressRefreshTimer = setTimeout(async () => {
+    progressRefreshTimer = null
+    progressRefreshPending = false
+    progressRefreshRunning = true
+    try { await loadVoices() }
+    finally {
+      progressRefreshRunning = false
+      if (progressRefreshPending) scheduleProgressRefresh()
+    }
+  }, 400)
+}
+function clearProgressRefresh() {
+  if (progressRefreshTimer) clearTimeout(progressRefreshTimer)
+  progressRefreshTimer = null
+  progressRefreshPending = false
+}
+onBeforeUnmount(clearProgressRefresh)
+
 watch(() => `${auth.user?.id || ''}:${project.activeProjectId}`, () => {
+  clearProgressRefresh()
   ++voicesRequest
   speakers.value = []
   foundationBusy.value = false
+  foundationSubmitting.value = false
   cloneBusy.value = false
+  cloneSubmitting.value = false
   foundationTargets.value = null
   cloneTargets.value = null
   hasScript.value = false
@@ -343,9 +414,12 @@ async function doFoundations(opts: {
   if (foundationBusy.value || cloneRunning.value) return
   const isCurrent = captureScope()
   foundationBusy.value = true
+  foundationSubmitting.value = true
   error.value = ''
   foundationResult.value = null
-  foundationTargets.value = opts.speakers ?? null
+  foundationTargets.value = opts.speakers ?? (opts.new_only
+    ? speakers.value.filter(v => v.foundation_status !== 'done').map(v => v.name)
+    : null)
   try {
     const submitted = await withinScope(prepareFoundations({ ...opts, script }), isCurrent)
     foundationBatch.track(submitted.task_ids)
@@ -356,6 +430,8 @@ async function doFoundations(opts: {
     if (!isCurrent() || e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
     foundationBusy.value = false
+  } finally {
+    if (isCurrent()) foundationSubmitting.value = false
   }
 }
 
@@ -366,6 +442,7 @@ async function doClones(opts: {
   if (cloneBusy.value || foundationRunning.value) return
   const isCurrent = captureScope()
   cloneBusy.value = true
+  cloneSubmitting.value = true
   error.value = ''
   cloneResult.value = null
   cloneTargets.value = opts.speakers ?? null
@@ -379,6 +456,8 @@ async function doClones(opts: {
     if (!isCurrent() || e?.name === 'AbortError') return
     error.value = e?.message || '启动失败'
     cloneBusy.value = false
+  } finally {
+    if (isCurrent()) cloneSubmitting.value = false
   }
 }
 
@@ -515,7 +594,7 @@ watch(
       // Keep foundationTaskId set so the log panel stays visible with the final logs; the next
       // run simply overwrites it.
       loadVoices()
-    } else if (st === 'failed') {
+    } else if (st === 'failed' || st === 'timeout') {
       error.value = t.error || '语音推理基础生成失败'
       foundationBusy.value = false
       toast({ title: '语音推理基础生成失败', variant: 'destructive', description: error.value })
@@ -535,7 +614,7 @@ watch(
   (p) => {
     const t = foundationTask.value
     if (p == null || !t) return
-    if (ACTIVE.includes(t.status)) loadVoices()
+    if (ACTIVE.includes(t.status)) scheduleProgressRefresh()
   },
 )
 
@@ -551,7 +630,7 @@ watch(
       // Keep cloneTaskId set so the log panel stays visible with the final logs; the next run
       // simply overwrites it.
       loadVoices()
-    } else if (st === 'failed') {
+    } else if (st === 'failed' || st === 'timeout') {
       error.value = t.error || '克隆音频制作失败'
       cloneBusy.value = false
       toast({ title: '克隆音频制作失败', variant: 'destructive', description: error.value })
@@ -570,7 +649,7 @@ watch(
   (p) => {
     const t = cloneTask.value
     if (p == null || !t) return
-    if (ACTIVE.includes(t.status)) loadVoices()
+    if (ACTIVE.includes(t.status)) scheduleProgressRefresh()
   },
 )
 </script>

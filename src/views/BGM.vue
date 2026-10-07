@@ -6,6 +6,7 @@ import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useWorkbenchDialog } from '@/composables/useWorkbenchDialog'
 import { onDeactivated, onBeforeUnmount } from 'vue'
+import { useWorkbenchRefresh } from '@/composables/useWorkbenchRefresh'
 import { useWorkbenchTaskControl } from '@/composables/useWorkbenchTaskControl'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
@@ -47,6 +48,7 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import {
   useLabelDerivedTasks,
   labelKeyOf,
+  activeEntryLabel,
   LABEL_TASK_TERMINAL_STATUSES,
 } from '@/composables/useLabelDerivedTasks'
 import { ListMusic, Loader2, Lock, LockOpen, Music4, Package, Wand2 } from 'lucide-vue-next'
@@ -140,7 +142,8 @@ const rows = computed<BgmRow[]>(() => {
     const a = active.get(d.stem)
     const mixTask = a?.module === 'bgm-mix' ? a : undefined
     const segmentTask = a?.module === 'bgm-segment' ? a : undefined
-    const task = mixTask ?? segmentTask
+    const matchTask = a?.task_type === 'bgm.match' ? a : undefined
+    const task = mixTask ?? segmentTask ?? matchTask
     const asg = d.assignment
     const music = asg?.music ?? null
     const missing = d.music_missing
@@ -150,10 +153,10 @@ const rows = computed<BgmRow[]>(() => {
     let label: string
     let variant: RowVariant
     if (task) {
-      label = mixTask ? '混音中' : '段落分析中'
+      label = activeEntryLabel(task, mixTask ? '混音中' : segmentTask ? '段落分析中' : '匹配中')
       variant = 'secondary'
     } else if (failed.get(d.stem)) {
-      label = failed.get(d.stem)?.module === 'bgm-segment' ? '分析失败' : '混音失败'
+      label = failed.get(d.stem)?.task_type === 'bgm.match' ? '匹配失败' : failed.get(d.stem)?.module === 'bgm-segment' ? '分析失败' : '混音失败'
       variant = 'destructive'
     } else if (missing || d.segment_music_missing) {
       label = '曲目已删除'
@@ -308,14 +311,8 @@ async function refreshRows(options: { reloadLibrary?: boolean } = {}) {
 
 // 批量完成时（尤其无 BGM 章走 copy2 毫秒级连发）每章一次的全量重拉会风暴式打满
 // 同源连接 + 整表替换行数据：尾沿防抖把 N 次收敛为 1~2 次（toast 仍逐章即时弹）。
-let refreshTimer: number | undefined
-function scheduleRefresh() {
-  if (refreshTimer !== undefined) return
-  refreshTimer = window.setTimeout(() => {
-    refreshTimer = undefined
-    void refreshRows()
-  }, 800)
-}
+const rowsRefresh = useWorkbenchRefresh(() => refreshRows(), 800)
+function scheduleRefresh() { rowsRefresh.schedule() }
 
 // ---------------------------------------------------------------------------
 // 工具栏
@@ -536,9 +533,10 @@ const matching = computed(
     ),
 )
 const matchNote = ref('')
-const activeMatchTask = computed(() => taskStore.projectTasks.find(
-  task => task.task_type === 'bgm.match' && !LABEL_TASK_TERMINAL_STATUSES.has(task.status),
-))
+const activeMatchTask = computed(() => {
+  const tasks = taskStore.projectTasks.filter(task => task.task_type === 'bgm.match' && !LABEL_TASK_TERMINAL_STATUSES.has(task.status))
+  return tasks.find(task => task.status === 'running' || task.status === 'cancelling') ?? tasks[0]
+})
 const matchFeedback = computed(() => {
   const task = activeMatchTask.value
   if (task?.status === 'pending' || task?.status === 'queued')
@@ -835,12 +833,6 @@ watch(
   },
 )
 
-watch(
-  () => taskStore.projectTasks,
-  () => {
-    if (captureScope()()) scheduleRefresh()
-  },
-)
 
 onMounted(async () => {
   const isCurrent = captureScope()
@@ -930,8 +922,7 @@ const timelineKeydown = useWorkbenchDialog(timelineOpen, timelinePanel, () => {
   timelineStem.value = null
 }, () => timelineOpener)
 onDeactivated(() => {
-  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
-  refreshTimer = undefined
+  rowsRefresh.stop()
   manualStem.value = null
   timelineStem.value = null
   submitting.value = false
@@ -942,7 +933,7 @@ onDeactivated(() => {
   timelineBusy.value = false
 })
 onBeforeUnmount(() => {
-  if (refreshTimer !== undefined) window.clearTimeout(refreshTimer)
+  rowsRefresh.stop()
 })
 </script>
 

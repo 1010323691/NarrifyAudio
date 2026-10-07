@@ -40,3 +40,26 @@ def test_cancelled_progress_callback_removes_all_attempt_outputs(tmp_path, monke
         )
 
     assert not attempt_dir.exists()
+
+
+@pytest.mark.parametrize("kind", ["foundation", "clone"])
+def test_single_role_results_only_repeat_the_selected_character(monkeypatch, kind):
+    from backend.platform import engine_task_executor as executor
+    from backend.engines import voices
+    result = {"count": 1, "speakers": [f"role-{i}" for i in range(1000)], "results": [{"speaker": "role-0", "ok": True}]}
+    monkeypatch.setattr(voices, "prepare_foundations" if kind == "foundation" else "generate_voice_candidates", lambda *args: result)
+    runner = executor._run_voices_foundation if kind == "foundation" else executor._run_voices_clone
+    assert runner(None, None, {"speakers": ["role-0"]}, [], [])["speakers"] == ["role-0"]
+    assert len(result["speakers"]) == 1000  # Legacy multi-role calls keep their old shape.
+    assert len(runner(None, None, {"speakers": None}, [], [])["speakers"]) == 1000
+
+
+def test_single_chapter_matching_result_does_not_repeat_the_whole_book(monkeypatch):
+    from backend.platform import engine_task_executor as executor
+    from backend.engines import bgm
+    assignments = {"chapters": {f"chapter-{i}": {"music": None} for i in range(1000)}}
+    monkeypatch.setattr(executor, "get_or_prepare_layout", lambda: None)
+    monkeypatch.setattr(bgm, "match_stems", lambda *args, **kwargs: {"mode": "random", "matched": 0, "no_bgm": 1, "assignments": assignments})
+    result = executor._run_bgm_match(None, None, {"chapters": ["chapter-0"]}, [], [])
+    assert set(result["assignments"]["chapters"]) == {"chapter-0"}
+    assert len(assignments["chapters"]) == 1000
