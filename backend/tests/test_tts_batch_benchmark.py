@@ -87,7 +87,14 @@ def test_production_request_cancels_only_probe_and_preserves_source(tmp_path, mo
         except StopIteration: raise KeyboardInterrupt
     monkeypatch.setattr(bench, 'production_pending', pending)
     process = SimpleNamespace(pid=987654, returncode=None, poll=lambda: None)
-    monkeypatch.setattr(bench.subprocess, 'Popen', lambda *a, **kw: process)
+    monkeypatch.setenv('PYTHONUTF8', '0')
+    monkeypatch.setenv('PYTHONIOENCODING', 'ascii')
+    def spawn(*a, **kw):
+        assert kw['env']['PYTHONUTF8'] == '1'
+        assert kw['env']['PYTHONIOENCODING'] == 'utf-8'
+        assert kw['stdout'].encoding == 'utf-8'
+        return process
+    monkeypatch.setattr(bench.subprocess, 'Popen', spawn)
     stopped = []
     def stop(child):
         stopped.append(child.pid); child.returncode = -15

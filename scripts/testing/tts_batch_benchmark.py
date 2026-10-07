@@ -209,9 +209,10 @@ class Benchmark:
             self.report["trials"].append(info)
             self.publish(f"TEST {chars} chars x {cap} rows seed={seed}")
             start, peak, interrupted = time.monotonic(), 0, False
+            child_env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
             with (folder / "worker.log").open("w", encoding="utf-8") as log:
                 proc = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
-                                        start_new_session=os.name != "nt")
+                                        start_new_session=os.name != "nt", env=child_env)
                 try:
                     while proc.poll() is None:
                         if production_pending() or self.gpu_pids() - {proc.pid}:
