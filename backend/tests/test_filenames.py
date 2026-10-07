@@ -217,7 +217,7 @@ def test_registration_rejects_collision_with_legacy_username(filename_client):
 def test_legacy_republication_requires_matching_source(filename_client, same_source):
     from backend.platform.database import SessionLocal
     from backend.platform.models import Task, TaskResult, ProjectFile, Project
-    from backend.platform.storage import object_path
+    from backend.platform.storage import object_path, configured_storage_root
     from backend.platform.task_worker import claim_task, complete_claim
     from backend.platform.task_engine_support import write_task_outcome
     from backend.platform.task_contracts import TaskExecutionError
@@ -244,7 +244,7 @@ def test_legacy_republication_requires_matching_source(filename_client, same_sou
         db.flush()
         db.add(TaskResult(task_id=old.id, result={"file_id": file.id, "object_key": key}))
         file_id = file.id
-        path = object_path(key)
+        path = object_path(key, configured_storage_root(db))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"original")
     claim = claim_task(task_id, "filename-test")
@@ -267,7 +267,7 @@ def test_legacy_republication_requires_matching_source(filename_client, same_sou
 def test_deleted_target_case_change_reuses_row_only_without_disk_conflict(filename_client, file_exists):
     from backend.platform.database import SessionLocal
     from backend.platform.models import Task, ProjectFile, Project, utcnow
-    from backend.platform.storage import object_path
+    from backend.platform.storage import object_path, configured_storage_root
     from backend.platform.task_worker import claim_task, complete_claim
     from backend.platform.task_engine_support import write_task_outcome
     from backend.platform.task_contracts import TaskExecutionError
@@ -289,7 +289,7 @@ def test_deleted_target_case_change_reuses_row_only_without_disk_conflict(filena
         db.add(file)
         db.flush()
         file_id = file.id
-        path = object_path(key)
+        path = object_path(key, configured_storage_root(db))
         if file_exists:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"original")

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onDeactivated, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { BookOpen, Clock3, FolderPlus, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
 import Pager from '@/views/textformat/Pager.vue'
@@ -11,20 +11,18 @@ import { showConfirm } from '@/components/ui/dialog'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
-import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
-import { listProjectPage, deleteProject, getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
+import { listProjectPage, deleteProject, getActiveProject } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
-import { useTaskStore } from '@/stores/task'
+import { useAuthStore } from '@/stores/auth'
+import { useProjectCardProgress } from '@/composables/useProjectCardProgress'
 import { stageProgressColor } from '@/utils/projectStageProgress'
 
 const router = useRouter()
-const taskStore = useTaskStore()
+const auth = useAuthStore()
 let viewActive = false
 const projectStore = useProjectStore()
 const settings = useSettingsStore()
 const { push: toast } = useToast()
-const tasks = ref<DurableTask[]>([])
-const summaries = ref<Record<string, ProjectProgressSummary>>({})
 const loading = ref(true)
 const refreshing = ref(false)
 const createOpen = ref(false)
@@ -44,35 +42,24 @@ function progressFor(projectId: string, key: string) {
 }
 function progressTitle(projectId: string, key: string) {
   const value = progressFor(projectId, key)
-  if (!value || value.percent === null) return `${stageLabels[key]}：总量尚未确定，需先完成上游解析或分集计划`
+  if (!value) return `${stageLabels[key]}：正在读取进度`
+  if (value.percent === null) return `${stageLabels[key]}：总量尚未确定，需先完成上游解析或分集计划`
   return `${stageLabels[key]}：${value.percent}%；已完成 ${value.completed} / ${value.total} ${value.unit}`
 }
-let summaryGeneration = 0
-let progressTimer: ReturnType<typeof setTimeout> | undefined
-async function refreshSummaries() {
-  const generation = ++summaryGeneration
-  const requestGeneration = loadGeneration
-  await Promise.all(projects.value.slice(0, 12).map(async project => {
-    try {
-      const summary = await getProjectProgressSummary(project.id)
-      if (generation === summaryGeneration && requestGeneration === loadGeneration && viewActive) summaries.value[project.id] = summary
-    } catch { /* Keep existing coverage during a transient read failure. */ }
-  }))
-}
-watch(() => taskStore.tasks.map(task => `${task.id}:${task.status}:${task.progress}`).join('|'), () => {
-  if (!viewActive) return
-  clearTimeout(progressTimer)
-  progressTimer = setTimeout(() => { void refreshSummaries() }, 500)
-})
-
 const projectPage = ref(1)
 const projectTotal = ref(0)
 const pageProjects = ref<ProjectSummary[] | null>(null)
-const projects = computed(() => pageProjects.value ?? projectStore.projects)
-watch(projectPage, () => { void loadProjectPage() })
+const projects = computed(() => pageProjects.value ?? [])
+const { summaries, tasks, errors: progressErrors, refresh: refreshSummaries } = useProjectCardProgress(computed(() => projects.value.map(item => item.id)))
+const progressLabels: Record<string, string> = { tasks: '任务状态', text: '分册', catalog: '解析与配音', production: '音频制作' }
+function cardError(id: string) {
+  return Object.entries(progressErrors.value[id] ?? {}).map(([section, message]) => `${progressLabels[section]}暂未更新：${message}`).join('；')
+}
+watch(projectPage, () => { pageProjects.value = null; loading.value = true; if (viewActive && auth.user) void loadProjectPage() })
 let projectPageRequest = 0
 let projectPageAbort: AbortController | null = null
 async function loadProjectPage() {
+  if (!viewActive || document.hidden || !auth.user) return
   projectPageAbort?.abort()
   projectPageAbort = new AbortController()
   const signal = projectPageAbort.signal
@@ -84,21 +71,22 @@ async function loadProjectPage() {
     pageProjects.value = response.items; projectTotal.value = response.pagination.total
     const last = Math.max(1, Math.ceil(projectTotal.value / 12))
     if (projectPage.value > last) { projectPage.value = last; return }
-    summaries.value = Object.fromEntries(Object.entries(summaries.value).filter(([id]) => response.items.some(item => item.id === id)))
-    void refreshSummaries()
-  } catch (e: any) { if (!signal.aborted && request === projectPageRequest && generation === loadGeneration) pageError.value = e?.message || '项目读取失败' }
+    pageError.value = ''
+    loading.value = false
+  } catch (e: any) { if (!signal.aborted && request === projectPageRequest && generation === loadGeneration) { pageError.value = e?.message || '项目读取失败'; loading.value = false } }
 }
 
 
 function projectState(project: ProjectSummary) {
-  const task = tasks.value.find((item) => item.project_id === project.id && !['succeeded', 'cancelled'].includes(item.status))
-  if (!task) return null
-  return task
+  const summary = tasks.value[project.id]
+  const status = summary?.statuses[0]
+  if (!status) return null
+  return { ...status, error_message: summary.failures.find(item => item.task_type === status.task_type)?.error_message }
 }
 
 function statusLabel(status: string) {
   return ({ pending: '等待中', queued: '排队中', running: '处理中', retrying: '重试中',
-    succeeded: '已完成', failed: '失败', timeout: '超时', cancelled: '已取消', cancelling: '正在取消' } as Record<string, string>)[status] || status
+    paused: '已暂停', succeeded: '已完成', failed: '失败', timeout: '超时', cancelled: '已取消', cancelling: '正在取消' } as Record<string, string>)[status] || status
 }
 
 function tone(status: string): 'positive' | 'warning' | 'negative' | 'neutral' {
@@ -113,26 +101,31 @@ function updatedAt(value: string) {
   return Number.isNaN(date.getTime()) ? '最近更新未知' : `最近更新 ${date.toLocaleDateString()}`
 }
 
+async function syncActiveProject(userId = auth.user?.id, previous = projectStore.current) {
+  if (userId !== auth.user?.id || previous !== projectStore.current || projectStore.busy) return
+  const current = await getActiveProject()
+  // A new login or project selection owns the shared context once it starts.
+  if (userId === auth.user?.id && previous === projectStore.current && !projectStore.busy) {
+    projectStore.setCurrent(current)
+  }
+}
+
 async function load(force = false) {
+  if (!viewActive || !auth.user || document.hidden) return
   const requestGeneration = ++loadGeneration
   refreshing.value = true
   pageError.value = ''
-  // 卡片只等最基本的活动项目 + 项目列表（路由守卫首帧前已解析过时直接复用，
-  // 不再重复拉取）。任务列表与每项目进度都改为到达即填充，不阻塞首屏。
-  const refreshGate = force || !projectStore.loaded ? projectStore.refresh() : Promise.resolve(projectStore.current)
-  listDurableTasks()
-    .then((items) => { if (requestGeneration === loadGeneration) tasks.value = items })
-    .catch(() => { if (requestGeneration === loadGeneration && !pageError.value) pageError.value = '最近任务暂时无法读取。' })
-  await refreshGate
+  const previousIds = JSON.stringify(projects.value.map(item => item.id))
+  await loadProjectPage()
   if (requestGeneration !== loadGeneration) return
-  if (projectStore.error) pageError.value = projectStore.error
-  loading.value = false
-  refreshing.value = false
-  // 每项目进度并行发出、逐个回填：不再等最慢的一个项目算完才整批回显。
-  void refreshSummaries()
-  void loadProjectPage()
-  refreshing.value = false
-  loading.value = false
+  if (force) {
+    try { await syncActiveProject() }
+    catch { if (requestGeneration === loadGeneration) pageError.value = '当前项目状态暂未同步，请重试。' }
+  }
+  if (requestGeneration === loadGeneration) {
+    refreshing.value = false
+    if (force && previousIds === JSON.stringify(projects.value.map(item => item.id))) refreshSummaries()
+  }
 }
 
 async function createProject() {
@@ -163,15 +156,20 @@ async function openProject(project: ProjectSummary) {
 // error, and the list reloads on success.
 async function requestDelete(project: ProjectSummary) {
   if (projectStore.busy || deletingProjectId.value) return
+  const userId = auth.user?.id
   const confirmed = await showConfirm(
     `将项目「${project.name}」移入回收站。本地文件和任务记录会保留一个自然月，可在回收站恢复；到期后会彻底删除。如果项目有未完成任务，需要先等待任务完成或取消任务。`,
     { title: '删除项目', confirmText: '删除项目', destructive: true },
   )
-  if (!confirmed) return
+  if (!confirmed || userId !== auth.user?.id) return
+  const previous = projectStore.current
   deletingProjectId.value = project.id
   try {
     await deleteProject(project.id)
-    await load(true)
+    // Mutation completion updates shared context even if this page was deactivated.
+    try { await syncActiveProject(userId, previous) }
+    catch { if (userId === auth.user?.id) toast({ title: '项目已删除', variant: 'destructive', description: '当前项目状态暂未同步，请刷新页面。' }) }
+    await load()
   } catch (cause: any) {
     toast({ title: '删除项目失败', variant: 'destructive', description: cause?.message || '请稍后重试。' })
   } finally {
@@ -179,21 +177,34 @@ async function requestDelete(project: ProjectSummary) {
   }
 }
 
-onActivated(() => {
+function activate() {
+  if (viewActive) return
   viewActive = true
-  taskStore.setTaskCenterOpen(true)
   void load()
-})
+}
+function visibility() {
+  if (document.hidden) { projectPageAbort?.abort(); loadGeneration++ }
+  else if (viewActive && auth.user) void load()
+}
+onMounted(() => { document.addEventListener('visibilitychange', visibility); activate() })
+onActivated(activate)
 function deactivate() {
   viewActive = false
   projectPageAbort?.abort()
-  clearTimeout(progressTimer)
-  summaryGeneration += 1
   loadGeneration += 1
-  taskStore.setTaskCenterOpen(false)
 }
 onDeactivated(deactivate)
-onUnmounted(deactivate)
+onUnmounted(() => { deactivate(); document.removeEventListener('visibilitychange', visibility) })
+watch(() => auth.user?.id, () => {
+  loadGeneration++
+  projectPageAbort?.abort()
+  pageProjects.value = null
+  projectTotal.value = 0
+  pageError.value = ''; openError.value = ''; name.value = ''; createOpen.value = false
+  projectPage.value = 1
+  loading.value = true
+  if (viewActive && auth.user) void load()
+})
 </script>
 
 <template>
@@ -258,9 +269,8 @@ onUnmounted(deactivate)
             <div class="project-card__meta">
               <div v-if="projectState(project)" class="project-card__task">
                 <StatusPill :label="statusLabel(projectState(project)!.status)" :tone="tone(projectState(project)!.status)" />
-                <span>{{ projectState(project)!.current || taskTypeLabel(projectState(project)!.task_type) }}</span>
+                <span>{{ taskTypeLabel(projectState(project)!.task_type) }}</span>
               </div>
-              <template v-if="summaries[project.id]">
                 <div class="progress-label"><span>制作进度</span></div>
                 <div class="project-stage-track" aria-label="各阶段制作完成进度">
                   <div v-for="key in visibleStageKeys" :key="key" class="project-stage" :class="{ 'progress-unknown': progressFor(project.id, key)?.percent == null }" :style="{ '--progress-color': stageProgressColor(progressFor(project.id, key)?.percent ?? 0) }" :title="progressTitle(project.id, key)">
@@ -270,13 +280,14 @@ onUnmounted(deactivate)
                     <div class="stage-progress-label"><span>{{ stageLabels[key] }}</span><strong>{{ progressFor(project.id, key)?.percent != null ? `${progressFor(project.id, key)!.percent}%` : '—' }}</strong></div>
                   </div>
                 </div>
-              </template>
-              <span v-else class="muted">打开项目查看制作进度</span>
+              <div v-if="cardError(project.id)" class="project-error" role="alert" @click.stop>
+                {{ cardError(project.id) }} <button type="button" class="underline" @click="refreshSummaries(project.id)">重试</button>
+              </div>
             </div>
             <p v-if="projectState(project)?.status === 'failed'" class="project-card__error">{{ projectState(project)?.error_message || '最近任务失败，可进入项目查看详情。' }}</p>
           </Card>
         </div>
-        <div v-else class="project-empty">
+        <div v-else-if="!pageError" class="project-empty">
           <div class="project-empty__icon"><BookOpen class="h-6 w-6" /></div>
           <h3>还没有项目</h3>
           <p>创建项目后导入原文，制作进度和生成内容都会归在这里。</p>

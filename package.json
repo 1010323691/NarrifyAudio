@@ -11,7 +11,7 @@
     "test:project-overview-browser": "node scripts/test-project-overview-browser.mjs",
     "test:list-paging-browser": "node scripts/test-list-paging-browser.mjs",
     "test:task-center-browser": "node scripts/test-task-center-browser.mjs",
-    "test:project-overview": "node scripts/test-project-overview.mjs",
+    "test:project-overview": "node --test scripts/test-project-overview.mjs scripts/test-project-cards.mjs",
     "test:task-center": "node scripts/test-task-center.mjs",
     "test:state-isolation": "node scripts/test-state-isolation.mjs",
     "test:resources": "node scripts/test-resource-center.mjs",
@@ -24,7 +24,9 @@
     "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs",
     "test:admin-console": "node scripts/test-admin-console.mjs",
     "test:mobile-layout": "node scripts/test-mobile-layout.mjs",
-    "test:ten-row-layout": "node scripts/test-ten-row-layout.mjs"
+    "test:ten-row-layout": "node scripts/test-ten-row-layout.mjs",
+    "test:project-cards": "node scripts/test-project-cards.mjs",
+    "test:project-cards-browser": "node scripts/test-project-cards-browser.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",
