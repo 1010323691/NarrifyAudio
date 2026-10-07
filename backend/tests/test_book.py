@@ -1309,3 +1309,30 @@ def test_short_entries_do_not_shrink_mechanical_split_target():
     assert result['status'] != 'error'
     assert len(result['chapters']) < 40
     assert ''.join(text[c['start']:c['end']] for c in result['chapters']) == text
+
+
+def test_short_leaf_chapters_with_same_titles_in_later_arc_are_preserved():
+    text = '\n'.join(
+        f'第{arc}章 分组\n' + '\n'.join(
+            f'第{i}话 「标题」\n' + ('短正文。' if arc == 1 else '正文内容。' * 50)
+            for i in [1, 2, 3]
+        )
+        for arc in [1, 2]
+    )
+    chapters = B.analyze_text(text)['chapters']
+    assert len(chapters) == 6
+    assert [c['section'] for c in chapters] == [1, 1, 1, 2, 2, 2]
+    result = B.smart_repair(text, chapters)
+    assert len(result['chapters']) == 6
+    assert ''.join(text[c['start']:c['end']] for c in result['chapters']) == text
+
+
+def test_explicit_contents_with_arc_heading_can_match_body_in_next_section():
+    entries = '\n\n'.join(f'第{i}话 标题{i}' for i in range(1, 5))
+    body = '\n\n'.join(f'第{i}话 标题{i}\n\n' + '正文内容。' * 100 for i in range(1, 5))
+    text = f'CONTENTS\n\n第一章 幼年期\n\n{entries}\n\n第一章 幼年期\n\n{body}'
+    chapters = B.analyze_text(text)['chapters']
+    assert len(chapters) == 4
+    result = B.smart_repair(text, chapters)
+    assert len(result['chapters']) == 4
+    assert ''.join(text[c['start']:c['end']] for c in result['chapters']) == text

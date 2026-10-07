@@ -659,22 +659,35 @@ def _chapter_candidates(text: str) -> list[dict]:
     # between them. Suppress only runs of at least three short entries whose
     # identical headings recur later with substantial body text. Keep every
     # source byte: this changes boundaries, not the text itself.
-    later_body: set[tuple[str, str]] = set()
+    later_body: set[tuple[int, str, str]] = set()
+    any_section_body: set[tuple[str, str]] = set()
+    contents_sections = {
+        i + 1 for i, parent in enumerate(parents)
+        if re.search(
+            r"(?im)^(?:contents|table of contents|目录|目錄)[ \t]*\r?\n\s*$",
+            text[max(0, parent - 200):parent],
+        )
+    }
     toc_entries: set[int] = set()
     run: list[int] = []
     for i in reversed(range(len(deduped))):
         candidate = deduped[i]
         end = deduped[i + 1]["index"] if i + 1 < len(deduped) else len(text)
         size = len(text[candidate["index"]:end].strip())
+        section = bisect.bisect_right(parents, candidate["index"])
         key = (candidate["numStr"], candidate["title"])
-        if size < MIN_BASELINE_CHARS and key in later_body:
+        repeated_body = (section, *key) in later_body or (
+            section in contents_sections and key in any_section_body
+        )
+        if size < MIN_BASELINE_CHARS and repeated_body:
             run.append(i)
         else:
             if len(run) >= 3:
                 toc_entries.update(run)
             run = []
         if size >= MIN_BASELINE_CHARS:
-            later_body.add(key)
+            later_body.add((section, *key))
+            any_section_body.add(key)
     if len(run) >= 3:
         toc_entries.update(run)
     deduped = [c for i, c in enumerate(deduped) if i not in toc_entries]
