@@ -828,21 +828,21 @@ def test_auto_batch_length_tiers():
     # auto batch uses upward matched safety tiers
     tw = _load_worker()
     assert [tw.auto_batch_cap_for_chars(n) for n in (200, 150, 100, 50, 20, 5)] == \
-        [80, 96, 128, 224, 272, 340]
+        [72, 80, 114, 172, 216, 266]
     assert [tw.auto_batch_cap_for_chars(n) for n in (1, 10, 21, 35, 51, 75, 101, 151, 201)] == \
-        [340, 272, 224, 224, 128, 128, 96, 80, 80]
+        [266, 216, 172, 172, 114, 114, 80, 72, 72]
 
     # auto batch uses longest row in each prefix
-    rows = [dict(index=i, chars=5) for i in range(340)] + [dict(index=340, chars=20)]
+    rows = [dict(index=i, chars=5) for i in range(266)] + [dict(index=266, chars=20)]
     batch, remaining, cap, restored = tw.next_auto_batch(rows, 340, [])
-    assert len(batch) == 340 and batch[-1]["chars"] == 5
+    assert len(batch) == 266 and batch[-1]["chars"] == 5
     assert len(remaining) == 1 and cap == 340 and restored is None
 
     # auto batch mixed lengths use longest row tier
-    rows = [dict(index=i, chars=10) for i in range(79)] + [dict(index=79, chars=200)]
+    rows = [dict(index=i, chars=10) for i in range(71)] + [dict(index=71, chars=200)]
     ordered = tw.order_speaker_groups({"clone": rows})[0][1]
     batch, remaining, cap, restored = tw.next_auto_batch(ordered, 340, [])
-    assert len(batch) == 80 and max(row["chars"] for row in batch) == 200
+    assert len(batch) == 72 and max(row["chars"] for row in batch) == 200
     assert not remaining and cap == 340 and restored is None
 
 
@@ -860,8 +860,8 @@ def test_auto_batches_restore_after_two_successes():
     successes[0] += 1
 
     third, remaining, cap, restored = tw.next_auto_batch(remaining, cap, stack, successes)
-    assert len(third) == 272 and cap == restored == 340
-    assert len(remaining) == 68
+    assert len(third) == 216 and cap == restored == 340
+    assert len(remaining) == 124
 
 
 def test_oom_restore_probes_once_after_first_success(capsys):
@@ -890,8 +890,10 @@ def test_batch_restores_original_cap_after_one_reduced_group(tmp_path, monkeypat
     monkeypatch.setattr(tw, "_MechanicalPipeline", lambda *a: SimpleNamespace(
         worker_count=1, queue_size=1, close=lambda **kw: None))
     sizes = []
+    seen_indices = []
     def run_group(model, vtype, rows, planned_concurrency, **kw):
         sizes.append(len(rows))
+        seen_indices.extend(row["index"] for row in rows)
         return 1
     monkeypatch.setattr(tw, "run_planned_group", run_group)
     args = SimpleNamespace(segments_file=str(segments), voice_config=str(voices),
@@ -899,7 +901,8 @@ def test_batch_restores_original_cap_after_one_reduced_group(tmp_path, monkeypat
                            concurrency=128, auto_batch=True, seed=-1, language="chinese",
                            restore_stack=[(1, 224)], oom_restore_cap=340)
     assert tw._run_batch(args) == 0
-    assert sizes == [128, 340, 132]
+    assert sizes == [128, 266, 206]
+    assert seen_indices == list(range(600))  # Smaller batches keep the complete task scope.
     assert args.restore_stack == []
     assert capsys.readouterr().out.count("[oom-restore] cap=340") == 1
 

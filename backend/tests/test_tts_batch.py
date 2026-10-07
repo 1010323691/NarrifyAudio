@@ -231,9 +231,9 @@ def test_timeout_demotion_uses_actual_subbatch_size():
 
 def test_oom_demotion_steps_below_actual_batch():
     for cap, rows, auto, expected in [
-        (340, 224, True, 128), (340, 340, True, 272),
-        (128, 96, True, 80), (80, 80, True, 40),
-        (340, 2, True, 1), (80, 0, True, 40), (128, 80, False, 40),
+        (266, 172, True, 114), (266, 266, True, 216),
+        (114, 80, True, 72), (72, 72, True, 36),
+        (340, 2, True, 1), (72, 0, True, 36), (128, 80, False, 40),
     ]:
         assert tts_batch.oom_demotion_cap(cap, rows, auto) == expected, (cap, rows, auto, expected,)
 
@@ -258,7 +258,7 @@ def test_oom_restart_keeps_completed_segments(workspace, monkeypatch, pooled, au
             audio.write_bytes(b"fake")
             on_line(f"[segment] {row['index']} ok {audio}")
         if len(calls) == 1:
-            raise tts_batch.WorkerOutOfMemory(224)
+            raise tts_batch.WorkerOutOfMemory(172)
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("python"), Path("worker")))
@@ -269,11 +269,11 @@ def test_oom_restart_keeps_completed_segments(workspace, monkeypatch, pooled, au
     else:
         tts_batch.synthesize(handle, None, "s.json", 128, auto_concurrency=auto)
     assert [_cmd_flag(cmd, "--concurrency") for cmd in calls] == (
-        ["340", "128"] if auto else ["128", "64"]
+        ["266", "114"] if auto else ["128", "64"]
     )
     assert pending[1] == pending[0][1:]
     assert "--restore-stack" not in calls[1]
-    assert _cmd_flag(calls[1], "--oom-restore-cap") == ("340" if auto else "128")
+    assert _cmd_flag(calls[1], "--oom-restore-cap") == ("266" if auto else "128")
     assert any("正在自动重试" in msg for _, msg in handle.logs)
 
 
@@ -285,11 +285,11 @@ def test_second_oom_after_restore_locks_task_to_reduced_cap(workspace, monkeypat
     def run_worker(cmd, handle, on_line, **kw):
         calls.append(cmd)
         if len(calls) == 1:
-            raise tts_batch.WorkerOutOfMemory(224)
+            raise tts_batch.WorkerOutOfMemory(172)
         if len(calls) == 2:
-            assert _cmd_flag(cmd, "--oom-restore-cap") == "340"
-            on_line("[oom-restore] cap=340")
-            raise tts_batch.WorkerOutOfMemory(224)
+            assert _cmd_flag(cmd, "--oom-restore-cap") == "266"
+            on_line("[oom-restore] cap=266")
+            raise tts_batch.WorkerOutOfMemory(172)
         assert "--oom-restore-cap" not in cmd
         return completed(cmd, handle, on_line, **kw)
 
@@ -301,7 +301,7 @@ def test_second_oom_after_restore_locks_task_to_reduced_cap(workspace, monkeypat
         tts_batch.synthesize_multi(handle, ["s.json", "t.json"], auto_concurrency=True)
     else:
         tts_batch.synthesize(handle, None, "s.json", auto_concurrency=True)
-    assert [_cmd_flag(cmd, "--concurrency") for cmd in calls] == ["340", "128", "128"]
+    assert [_cmd_flag(cmd, "--concurrency") for cmd in calls] == ["266", "114", "114"]
     assert any("本次任务保持降档执行" in msg for _, msg in handle.logs)
 
 
