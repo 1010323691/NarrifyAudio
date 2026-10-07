@@ -166,6 +166,26 @@ def test_chapter_formatting():
     assert format_text(once, CFG)["text"] == once
 
 
+def test_compound_chapter_titles_preserve_pacing_spaces():
+    expected = "第一卷 异界的兽医 第三章 给巨龙放血"
+    for source in [
+        "第一卷 异界的兽医第三章给巨龙放血",
+        "第一卷 异界的兽医 第三章 给巨龙放血",
+        "第一卷　异界的兽医　第三章　给巨龙放血",
+        "第 一 卷 异界的兽医 第 三 章 给巨龙放血",
+    ]:
+        result = format_text(source, CFG)["text"]
+        assert result == expected
+        assert format_text(result, CFG)["text"] == result
+    assert format_text("第十九章 神秘 分阁主", CFG)["text"] == "第十九章 神秘 分阁主"
+    assert format_text("书名 第三章 给巨龙放血", CFG)["text"] == "书名 第三章 给巨龙放血"
+    assert format_text("第一章 第二章之后的故事", CFG)["text"] == "第一章 第二章之后的故事"
+    duplicate = "第一卷 异界的兽医第三章给巨龙放血\n\n" + expected + "\n正文。"
+    result = format_text(duplicate, CFG)
+    assert result["text"] == expected + "\n\n正文。"
+    assert result["stats"]["chapters"] == 1
+
+
 def test_episode_quoted_title_formatting():
     for header in ['第四话「师傅」', '第４话『师傅』', '第四話「師傅」']:
         assert is_chapter_title(header)
@@ -187,6 +207,35 @@ def test_special_quoted_chapter_headers_are_isolated():
         assert result["text"] == f"前文未完\n\n{header}\n\n后文开始。"
         assert result["stats"]["chapters"] == 1
     assert not is_chapter_title('外传说的是母亲的故事。')
+
+
+def test_adjacent_duplicate_chapter_titles_are_removed_during_formatting():
+    headers = [
+        "第一卷 异界的兽医第一章穿越了", "第一章 雪夜",
+        '第四话「师傅」', '外传「格雷拉特家的母亲」', "序章",
+        "书名 第一章 雪夜", "Chapter 1: First",
+    ]
+    for header in headers:
+        for separator in ["\n", "\n\n", "\r\n\r\n"]:
+            single = f"{header}\n正文不删除。"
+            source = separator.join([header, f"　{header}　", header, "正文不删除。"])
+            result = format_text(source, CFG)
+            assert result["text"] == format_text(single, CFG)["text"]
+            assert result["stats"]["chapters"] == 1
+            assert format_text(result["text"], CFG) == result
+
+
+def test_duplicate_title_removal_preserves_body_and_distinct_headers():
+    for source in [
+        "第一章 雪夜\n正文。\n第一章 雪夜\n更多正文。",
+        "第一章 雪夜\n第一章 另一标题\n正文。",
+        "第一章 雪夜\n第二章 雪夜\n正文。",
+        "重复正文\n重复正文",
+    ]:
+        assert re.sub(r"\s", "", format_text(source, CFG)["text"]) == content_of(source, CFG)
+    source = "第一章 雪夜\n\n第一章 雪夜\n正文。"
+    disabled = CFG.model_copy(update={"detect_chapters": False})
+    assert re.sub(r"\s", "", format_text(source, disabled)["text"]) == content_of(source, disabled)
 
 
 def test_chapter_title_recognition():
@@ -251,9 +300,9 @@ def test_format_preserves_content_and_is_idempotent():
 
 def test_sample_end_to_end():
     r = format_text(SAMPLE, CFG)["text"]
-    assert r.startswith("第一章 雪夜\n\n")
+    assert r.startswith("第一章 雪 夜\n\n")
     for bad in ("...", "。。", "，，", "??", "!!", "  ", "\t"):
         assert bad not in r, (bad, r)
     assert not re.search(r"^( )", r, re.MULTILINE)
-    assert "第二章 重审" in r and "第一章 雪夜" in r
+    assert "第二章 重 审" in r and "第一章 雪 夜" in r
     assert content_of(SAMPLE, CFG) == re.sub(r"\s", "", r)

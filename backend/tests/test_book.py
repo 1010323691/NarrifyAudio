@@ -514,6 +514,24 @@ def test_internal_scan_uses_physical_header_line_for_inline_prefix():
     assert B._internal_title_scan(source, chapter, 0) == []
 
 
+def test_volume_prefix_boundaries_survive_formatter_title_deduplication():
+    from backend.core.config import TextConfig
+    from backend.engines.text import format_text
+
+    source = "\n\n".join(
+        part for number in [1, 2, 3]
+        for part in [*[f"第一卷 异界的兽医第{number}章标题{number}"] * 2, "正文内容。" * 50]
+    )
+    formatted = format_text(source, TextConfig())["text"]
+    chapters = B.analyze_text(formatted)["chapters"]
+    assert [c["num"] for c in chapters] == [1, 2, 3]
+    assert all(formatted[c["start"]:c["end"]].startswith("第一卷") for c in chapters)
+    repaired = B.smart_repair(formatted, chapters)
+    assert len(repaired["chapters"]) == 3
+    assert all(c["chars"] > 200 for c in repaired["chapters"])
+    assert "".join(B.chapter_content({"text": formatted}, c) for c in repaired["chapters"]) == formatted
+
+
 def test_chapter_header_prefix_and_spacing():
     # detect prefixed and inline chapter headers
     prefix = "\u9886\u5730\u98ce\u4e91"

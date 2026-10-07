@@ -5,8 +5,9 @@ Source: ``TextFormatter/index.html``, the block between the ``__ENGINE_BEGIN__``
 punctuation / chapter) are reproduced 1:1. One rule added after the port:
 ``ensure_title_space`` puts a single space between a chapter number and its
 title when they are attached (第十九章神秘分阁主 → 第十九章 神秘分阁主).
-The invariant test suite (content
-preservation + idempotency) is ported to ``tests/test_text.py`` as the safety net.
+Adjacent identical chapter headers (ignoring whitespace) are reduced to one
+when chapter detection is enabled. Body content is preserved; the invariant
+test suite also checks idempotency in ``tests/test_text.py``.
 
 ``cfg`` is duck-typed: any object exposing the toggles (see
 ``core.config.TextConfig``) — ``keep_single_space``, ``sentence_break``,
@@ -115,22 +116,37 @@ def is_chapter_title(line: str) -> bool:
     return bool(CHAPTER_RE.match(line))
 
 
-# Chapter-number → title boundary: when the name is attached directly to the
-# ``第<num><unit>`` marker (no space or punctuation between), insert one space
-# so number and name read separately: 第十九章神秘分阁主 → 第十九章 神秘分阁主.
-# The lookahead leaves already-separated lines (space/：/、/·/-…) untouched,
-# which also makes the insertion idempotent.
+# Number markers in a heading: retain title spacing, while normalizing spaces
+# inside the number itself and separating volume/book/chapter/title boundaries.
 _NUM_TITLE_RE = re.compile(
-    r"^(?:[【〖〔（(「『《<\[［])?[ \t　]*第[ \t　]*"
-    r"[0-9０-９〇零一二三四五六七八九十百千万亿两廿卅]+[ \t　]*"
-    r"(?:章|节|回|话|話|卷|集|部|篇|幕|场|折)(?:[】〗〕）)」』》>\]］])?"
-    r"(?=[^\s:：;；,，、·|｜/／_\-—])"
+    r"第[ \t　]*(?P<num>[0-9０-９〇零一二三四五六七八九十百千万亿两廿卅]+"
+    r"(?:[ \t　]+[0-9０-９〇零一二三四五六七八九十百千万亿两廿卅]+)*)"
+    r"[ \t　]*(?P<kind>[章节回话話卷集部篇幕场折])(?P<close>[】〗〕）)」』》>\]］]?)"
 )
 
 
 def ensure_title_space(line: str) -> str:
-    """One space between a chapter number and its title (see ``_NUM_TITLE_RE``)."""
-    return _NUM_TITLE_RE.sub(lambda m: m.group(0) + " ", line, count=1)
+    """Separate heading fields without deleting spaces inside their names."""
+    matches = list(_NUM_TITLE_RE.finditer(line))
+    if not matches:
+        return line
+    # A volume/arc header can precede the actual chapter marker. Once the
+    # leaf marker is reached, later numbered references belong to its title.
+    selected = [matches[0]]
+    if matches[0].group("kind") in "卷部篇" and len(matches) > 1:
+        selected.append(matches[1])
+    delimiters = "：:;；﹔,，﹐、·•・‧|｜/／_＿—–-"
+    for match in reversed(selected):
+        marker = "第" + re.sub(r"\s+", "", match.group("num")) + match.group("kind") + match.group("close")
+        start, end = match.span()
+        before = line[:start]
+        after = line[end:]
+        if before and not before[-1].isspace() and before[-1] not in delimiters + "【〖〔（(「『《<[［":
+            before += " "
+        if after and not after[0].isspace() and after[0] not in delimiters:
+            marker += " "
+        line = before + marker + after
+    return line
 
 
 _SENT_END = re.compile(r"[。！？…“”」』）]")
@@ -157,34 +173,32 @@ def format_text(text: str, cfg: Any, *, on_progress: Callable[[float], None] | N
     raw_lines = text.split("\n")
 
     lines = []
+    previous_chapter_key: str | None = None
     for line_index, raw in enumerate(raw_lines, 1):
         trimmed = trim_edges(raw)  # for title detection (keeps inner spaces)
         chapter_like = is_chapter_title(trimmed)
         is_chapter = cfg.detect_chapters and chapter_like
         # Keep separators on chapter lines: they distinguish a repeated book
         # name from ``第N章`` and the number marker from its title.
-        starts_with_marker = bool(
-            re.match(
-                r"^(?:[【〖〔（(「『《<\[［])?\s*(?:第|卷|部|篇|"
-                r"Chapter|Chap\.?|Ch\.?|Episode|Ep\.?|Part|Section|"
-                r"Volume|Vol\.?|No\.?|Number|#|楔子|序章|引子|序言|前言|"
-                r"尾声|后记|番外|外传|外傳|附录|正文|终章)",
-                trimmed,
-                re.IGNORECASE,
-            )
-        )
         norm = apply_punct(
             normalize_line(
                 raw,
                 cfg,
-                preserve_internal_spaces=chapter_like and not starts_with_marker,
+                preserve_internal_spaces=chapter_like,
             ),
             cfg,
         )
         if chapter_like:
             # 章节号与章节名的分界补一个空格（第十九章神秘分阁主 → 第十九章 神秘分阁主）
             norm = ensure_title_space(norm)
-        lines.append((norm, is_chapter))
+        if norm:
+            chapter_key = re.sub(r"\s+", "", norm) if is_chapter else None
+            duplicate_title = is_chapter and chapter_key == previous_chapter_key
+            previous_chapter_key = chapter_key
+        else:
+            duplicate_title = False  # Blank lines do not separate mirrored headers.
+        if not duplicate_title:
+            lines.append((norm, is_chapter))
         if on_progress:
             on_progress(0.5 * line_index / max(1, len(raw_lines)))
 

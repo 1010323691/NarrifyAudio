@@ -200,7 +200,7 @@ BOOK_INLINE_FLEX_PREFIXED_CHAPTER_RE = re.compile(
 # ``领地风云第一章成人典礼``. Keep a compact-prefix form so formatting does
 # not erase the first chapter's boundary or title.
 BOOK_COMPACT_PREFIXED_CHAPTER_RE = re.compile(
-    r"^[ \t\u3000]*(?P<prefix>[^\s\r\n]{3,39}?)[ \t\u3000]*"
+    r"^[ \t\u3000]*(?P<prefix>[^\s\r\n][^\r\n]{2,38}?)[ \t\u3000]*"
     r"\u7b2c[ \t\u3000]*(?P<num>[0-9０-９零〇○一二三四五六七八九十百千万亿两廿卅]+)"
     r"[ \t\u3000]*(?P<kind>[章节回话話集卷部篇幕场折])[ \t\u3000]*"
     r"(?:[】〗〕）)」』》>\]］])?[ \t\u3000：:;；﹔,，﹐、·•・‧|｜/／_＿.．\-—–]*"
