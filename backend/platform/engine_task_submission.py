@@ -102,11 +102,11 @@ def submit_legacy_engine_tasks(
     *, task_type: str, entries: list[dict], ctx: AuthContext, db: Session,
     idempotency_prefix: str,
 ) -> dict:
-    """Submit independent records atomically; clone records share a GPU execution batch."""
+    """Submit independent records atomically; clone and TTS records share a GPU execution batch."""
     if not entries:
         return {"task_ids": []}
     created = []
-    execution_batch = uuid.uuid4().hex if task_type == "voices.clone" else None
+    execution_batch = uuid.uuid4().hex if task_type in {"voices.clone", "tts.batch"} else None
     try:
         for entry in entries:
             task = submit_legacy_engine_task(

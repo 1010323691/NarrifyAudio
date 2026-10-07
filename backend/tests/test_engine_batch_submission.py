@@ -54,6 +54,9 @@ def test_batch_creates_independent_rows_and_outbox_events(owner):
         rows = db.scalars(select(Task).where(Task.id.in_(result["task_ids"]))).all()
         assert {tuple(row.payload["scripts"]) for row in rows} == {("one.json",), ("two.json",)}
         assert all(row.status == "pending" for row in rows)
+        assert len({row.payload["execution_batch"] for row in rows}) == 1
+        second = submit(db, owner, [entry("three.json")])
+        assert db.get(Task, second["task_id"]).payload["execution_batch"] != rows[0].payload["execution_batch"]
         assert len(db.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id.in_(result["task_ids"]))).all()) == 2
 
 
