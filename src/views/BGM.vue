@@ -1393,8 +1393,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <p v-if="timelineData" class="mt-3 text-xs leading-5 text-muted-foreground">
-            生成于 {{ timelineData.generated_at }} · 混音会按此时间轴逐段叠加 BGM，音量 = 基准 ×
-            强度档位。
+            生成于 {{ timelineData.generated_at }} · 混音会按此时间轴逐段叠加 BGM，实际混音音量为下方时间轴音量的 50%。
           </p>
         </header>
 

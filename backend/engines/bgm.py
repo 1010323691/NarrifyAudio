@@ -657,7 +657,8 @@ def build_timeline_mix_cmd(
     positioning is by delay, avoiding ``atrim=start`` PTS arithmetic on a
     looped input). ``amix inputs=K+1 … normalize=0`` — the 1/N division must
     stay off (the same load-bearing invariant as :func:`build_mix_cmd`: the
-    narration keeps its full level, ``volume`` maps 1:1 to the BGM gain).
+    narration keeps its full level). Stored span volumes are scaled by 0.5
+    at mix time, including existing timelines, to lower paragraph-level BGM.
     Zero-span chapters never reach this function (the caller copies the
     narration instead).
     """
@@ -676,7 +677,7 @@ def build_timeline_mix_cmd(
         fi = round(min(float(cfg.fade_in), length / 2), 3)
         fo = round(min(float(cfg.fade_out), length / 2), 3)
         st = round(length - fo, 3)
-        vol = float(span.get("volume") or 0.0)
+        vol = float(span.get("volume") or 0.0) * 0.5
         mid = int(round(start * 1000))
         filter_parts.append(
             f"[{k + 1}:a]aresample=44100,atrim=0:{_fmt_time(length)},"

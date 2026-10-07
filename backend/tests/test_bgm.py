@@ -1159,11 +1159,13 @@ def test_timeline_mix_command_contract():
     # span 0：长 2s → 双侧 fade 钳 min(fade, 1.0)；adelay=0ms
     assert fc.split(";")[1] == (
         "[1:a]aresample=44100,atrim=0:2.000,afade=t=in:d=1.000,"
-        "afade=t=out:st=1.000:d=1.000,volume=0.09,adelay=0:all=1[m0]")
+        "afade=t=out:st=1.000:d=1.000,volume=0.045,adelay=0:all=1[m0]")
     # span 1：长 20s → fade 原值；adelay=10000ms
     assert fc.split(";")[2] == (
         "[2:a]aresample=44100,atrim=0:20.000,afade=t=in:d=1.500,"
-        "afade=t=out:st=17.000:d=3.000,volume=0.27,adelay=10000:all=1[m1]")
+        "afade=t=out:st=17.000:d=3.000,volume=0.135,adelay=10000:all=1[m1]")
+    # 已保存的时间轴音量只在混音时减半，重复混音不会修改或累积衰减。
+    assert [span["volume"] for span in spans] == [0.09, 0.27]
     # 首尾：旁白 resample + amix inputs=K+1 normalize=0（1/N 归一化必须关）
     assert fc.split(";")[0] == "[0:a]aresample=44100[nar]"
     assert fc.endswith("[nar][m0][m1]amix=inputs=3:duration=first:"
@@ -1174,6 +1176,7 @@ def test_timeline_mix_command_contract():
     cmd2 = bgm_engine.build_timeline_mix_cmd(
         "ffmpeg", narration, out, spans, lib, 100.0, cfg, threads=2)
     assert cmd2[0:5] == ["ffmpeg", "-y", "-threads", "2", "-i"]
+    assert cmd2[cmd2.index("-filter_complex") + 1] == fc
     # loop=False → -stream_loop -0
     cmd3 = bgm_engine.build_timeline_mix_cmd(
         "ffmpeg", narration, out, spans, lib, 100.0, _cfg(loop=False))
