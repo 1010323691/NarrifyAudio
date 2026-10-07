@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +12,7 @@ from ..platform.deps import require_csrf, require_authenticated_user
 from ..platform.models import Project, ProjectFile, User, utcnow
 from ..platform.project_context import active_project
 from ..platform.deps import AuthContext, get_auth_context
+from ..services.list_paging import project_page
 from ..services.projects import (
     ActiveProjectTasksError,
     add_calendar_month,
@@ -58,12 +60,16 @@ def _owned_project(db: Session, user: User, project_id: str, *, lock: bool = Fal
 
 
 @router.get("")
-def list_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
+                  page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 12, q: str = ""):
+    if page is not None: return project_page(db, user, page, page_size, q)
     return [_project_json(item, user) for item in db.scalars(select(Project).where(Project.owner_id == user.id, Project.deleted_at.is_(None)).order_by(Project.updated_at.desc())).all()]
 
 
 @router.get("/trash")
-def list_trashed_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_trashed_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
+                         page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 12, q: str = "", filter: str = "all"):
+    if page is not None: return project_page(db, user, page, page_size, q, True, filter)
     items = db.scalars(select(Project).where(
         Project.owner_id == user.id, Project.deleted_at.is_not(None),
     ).order_by(Project.deleted_at.desc())).all()

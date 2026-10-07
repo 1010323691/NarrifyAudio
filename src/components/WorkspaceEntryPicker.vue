@@ -12,6 +12,8 @@
  * ``scanned`` fires with the raw ``DirListResult`` so a caller can read the
  * directory's absolute ``path``.
  */
+import { useListPage } from '@/composables/useListPage'
+import Pager from '@/views/textformat/Pager.vue'
 import { onActivated, onMounted, ref, watch } from 'vue'
 import { listDir } from '@/api/files'
 import { useProjectGate } from '@/composables/useProjectGate'
@@ -71,6 +73,13 @@ const { projectSet } = useProjectGate()
 
 const entries = ref<FileItem[]>([])
 const loading = ref(false)
+const loadError = ref('')
+const page = ref(1)
+const query = ref('')
+const listPage = useListPage(scan, () => { entries.value = []; page.value = 1; loadError.value = '' })
+const pagination = listPage.pagination
+watch(page, scan)
+watch(query, () => { page.value = 1; void scan() })
 
 function matches(i: FileItem): boolean {
   if (props.pickDirs) return i.is_dir
@@ -89,14 +98,19 @@ async function scan() {
     return
   }
   loading.value = true
+  const signal = listPage.begin()
   try {
-    const r = await listDir(props.module)
+    const r = await listDir(props.module, false, { page: page.value, page_size: 20, q: query.value }, signal,
+      { extensions: props.extensions.join(','), exclude_suffix: props.excludeSuffix, kind: props.pickDirs ? 'directories' : 'files' })
+    if (signal.aborted) return
+    loadError.value = ''
+    listPage.received(r.pagination, page)
     entries.value = r.items.filter(matches)
     emit('scanned', r)
-  } catch {
-    entries.value = []
+  } catch (e: any) {
+    if (!signal.aborted) loadError.value = e?.message || '列表加载失败'
   } finally {
-    loading.value = false
+    if (!signal.aborted) loading.value = false
   }
 }
 
@@ -124,6 +138,8 @@ onActivated(() => {
 <template>
   <div v-if="projectSet" class="space-y-1.5">
     <Label v-if="label">{{ label }}</Label>
+    <input v-model="query" class="h-8 w-full rounded-md border bg-background px-2 text-xs" placeholder="搜索文件…" />
+    <p v-if="loadError" role="alert" class="text-xs text-destructive">{{ loadError }}</p>
     <div class="flex items-stretch gap-2">
       <div class="max-h-80 min-h-[6rem] flex-1 space-y-1 overflow-y-auto rounded-md border p-2">
         <label
@@ -185,5 +201,6 @@ onActivated(() => {
         <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />刷新
       </Button>
     </div>
+    <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / 20))" :total="pagination?.total ?? 0" :page-size="20" unit="项" @update:page="page = $event" />
   </div>
 </template>

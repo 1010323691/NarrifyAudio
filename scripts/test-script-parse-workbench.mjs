@@ -95,12 +95,14 @@ function harness(overrides = {}, extraGlobals = {}) {
 /** 搭台：project（真实 store）+ task store（可脚本化的桩）+ script api（可脚本化的桩）。
  *  `config` 由 getConfig 桩直接给出——setCurrent 会异步触发 settings.load()，
  *  手改 settings.config 会被那次加载覆盖（与真实「配置随工程」行为对齐）。 */
-async function setup({ stateFor, run, config, fetchImpl } = {}) {
-  const calls = { state: 0, run: 0, cancel: 0, patch: 0 }
+async function setup({ stateFor, run, config, fetchImpl, selection, summaryFor } = {}) {
+  const calls = { state: 0, run: 0, cancel: 0, patch: 0, cancelled: [] }
   const toasts = []
   const tasks = reactive({ projectTasks: [], refresh: async () => {}, control: async () => {}, bindProject: () => {} })
   const api = {
     '@/api/script': {
+      getParseSelection: async () => ({ items: await (typeof selection === 'function' ? selection() : selection ?? []) }),
+      getScriptParseSummary: async () => summaryFor ? summaryFor() : ({ total: 0, done_count: 0, active_task_ids: [] }),
       getScriptParseState: async (pid) => {
         calls.state += 1
         if (stateFor) return stateFor(pid, calls.state)
@@ -114,7 +116,7 @@ async function setup({ stateFor, run, config, fetchImpl } = {}) {
           files: files.map((f, i) => ({ name: f.name, task_id: `tA${i + 1}`, input_sha256: null })),
         }
       },
-      cancelParseBatch: async (ids) => { calls.cancel += 1; return { cancelled: ids, batches_stopped: 0 } },
+      cancelParseBatch: async (ids) => { calls.cancel += 1; calls.cancelled = Array.from(ids); return { cancelled: ids, batches_stopped: 0 } },
       scriptParseResultUrl: (pid, fileId) => `/res/${fileId}`,
     },
     '@/api/config': {
@@ -488,4 +490,150 @@ test('filtered selection includes completed chapters only when they match the se
   wb.filter.value = 'pending'
   wb.selectFiltered()
   assert.deepEqual(Object.keys(wb.selected.value), ['002.txt'])
+})
+
+
+test('a ten-row parse page still submits all 125 explicitly selected chapters', async () => {
+  const files = Array.from({ length: 125 }, (_, i) => ({ name: `chapter-${i}.txt`, input: { sha256: `sha-${i}` }, latest_task: null, result: null, result_status: null }))
+  const visible = stateV(files.slice(0, 10))
+  visible.pagination = { total: 125, page: 1, page_size: 10, counts: { all: 125 } }
+  let submitted = []
+  const { wb } = await setup({
+    stateFor: async () => visible, selection: files,
+    config: { llm: { model_name: 'test-model' } },
+    run: async (pid, targets) => { submitted = targets; return { task_ids: [], files: [] } },
+  })
+  await wb.refreshState()
+  assert.equal(wb.rows.value.length, 10)
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 125)
+  assert.equal(await wb.startParse(), true)
+  assert.deepEqual(Array.from(submitted, row => row.name), files.map(row => row.name))
+})
+
+test('paged controls retain all-book completion on ten rows and an empty pending page', async () => {
+  let empty = false
+  const done = Array.from({ length: 10 }, (_, i) => ({ name: `c${i}.txt`, input: { sha256: 's' }, latest_task: null, result: null, result_status: 'usable' }))
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV(empty ? [] : done), pagination: { total: empty ? 0 : 30, page: 1, page_size: 10, counts: { all: 30 } } }),
+    summaryFor: () => ({ total: 30, done_count: 30, active_task_ids: [] }),
+  })
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.doneCount.value, 30)
+  assert.equal(wb.pendingCount.value, 0)
+  empty = true
+  wb.filter.value = 'pending'
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.rows.value.length, 0)
+  assert.equal(wb.controlsReady.value, true)
+  assert.equal(wb.doneCount.value, 30)
+  assert.equal(wb.pendingCount.value, 0)
+})
+
+test('off-page active tasks keep global controls busy and are cancelled together', async () => {
+  const { wb, calls } = await setup({
+    stateFor: async () => ({ ...stateV([]), pagination: { total: 0, page: 1, page_size: 10, counts: { all: 30 } } }),
+    summaryFor: () => ({ total: 30, done_count: 28, active_task_ids: ['off-page-21', 'off-page-30'] }),
+  })
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.busy.value, true)
+  await wb.cancelAll()
+  assert.deepEqual(calls.cancelled, ['off-page-21', 'off-page-30'])
+})
+
+test('latest complete selection input wins on and off page, including a late stale row refresh', async () => {
+  const files = Array.from({ length: 11 }, (_, i) => ({ name: `c${i}.txt`, input: { sha256: 'old' }, latest_task: null, result: null, result_status: null }))
+  let references = files
+  let submitted = []
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV(files.slice(0, 10)), pagination: { total: 11, page: 1, page_size: 10, counts: { all: 11 } } }),
+    selection: () => references,
+    summaryFor: () => ({ total: 11, done_count: 0, active_task_ids: [] }),
+    config: { llm: { model_name: 'test-model' } },
+    run: async (_, targets) => { submitted = targets; return { task_ids: [], files: [] } },
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  references = files.map(file => ({ ...file, input: { sha256: 'new' } }))
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(await wb.startParse(), true)
+  assert.equal(submitted.length, 11)
+  assert.ok(submitted.every(target => target.sha256 === 'new'))
+})
+
+test('complete selection protects its input digest while same-input status still updates', async () => {
+  const pending = { name: 'c.txt', input: { sha256: 'same' }, latest_task: null, result: null, result_status: null }
+  let current = pending
+  let done = 0
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV([current]), pagination: { total: 1, page: 1, page_size: 10, counts: { all: 1 } } }),
+    selection: [pending],
+    summaryFor: () => ({ total: 1, done_count: done, active_task_ids: [] }),
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedDoneCount.value, 0)
+  current = { ...pending, result_status: 'usable', latest_task: { id: 'finished', status: 'succeeded', progress: 1, error: '', created_at: null, finished_at: null } }
+  done = 1
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.rows.value[0].status, 'done')
+  assert.equal(wb.doneCount.value, 1)
+  assert.equal(wb.selectedDoneCount.value, 1)
+  current = { ...current, result_status: 'stale' }
+  await wb.refreshState()
+  assert.equal(wb.selectedStaleCount.value, 1)
+})
+
+test('deselecting and manually reselecting a refreshed chapter submits its new digest', async () => {
+  let file = { name: 'c.txt', input: { sha256: 'old' }, latest_task: null, result: null, result_status: null }
+  let submitted = []
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV([file]), pagination: { total: 1, page: 1, page_size: 10, counts: { all: 1 } } }),
+    selection: () => [file],
+    summaryFor: () => ({ total: 1, done_count: 0, active_task_ids: [] }),
+    config: { llm: { model_name: 'test-model' } },
+    run: async (_, targets) => { submitted = targets; return { task_ids: [], files: [] } },
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 1)
+  wb.toggleSelect('c.txt')
+  assert.equal(wb.selectedCount.value, 0)
+  file = { ...file, input: { sha256: 'new' } }
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  wb.toggleSelect('c.txt')
+  assert.equal(wb.selectedCount.value, 1)
+  assert.equal(await wb.startParse(), true)
+  assert.equal(submitted[0].sha256, 'new')
+})
+
+test('clearing or manually changing selection invalidates a delayed complete selection response', async () => {
+  const file = { name: 'c.txt', input: { sha256: 'fresh' }, latest_task: null, result: null, result_status: null }
+  let finish
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV([file]), pagination: { total: 1, page: 1, page_size: 10, counts: { all: 1 } } }),
+    selection: () => new Promise(resolve => { finish = resolve }),
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  wb.clearSelection()
+  finish([file])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 0)
+  wb.selectScope('all')
+  wb.toggleSelect('c.txt')
+  finish([])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedCount.value, 1)
 })

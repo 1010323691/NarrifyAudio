@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { LoaderCircle, RotateCcw, RefreshCw, Search, Trash2 } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import { useToast } from '@/components/ui/toast'
-import { listTrashedProjects, restoreProject, type TrashedProjectSummary } from '@/api/project'
+import { listProjectPage, restoreProject, type TrashedProjectSummary } from '@/api/project'
+import { useListPage } from '@/composables/useListPage'
+import Pager from '@/views/textformat/Pager.vue'
 import { useProjectStore } from '@/stores/project'
 
 const { push: toast } = useToast()
@@ -17,12 +19,13 @@ const pageError = ref('')
 const workingId = ref('')
 const search = ref('')
 const expiryFilter = ref<'all' | 'active' | 'expired'>('all')
-const filteredProjects = computed(() => projects.value.filter((item) => {
-  const matchesSearch = !search.value.trim() || item.name.toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())
-  const expired = isExpired(item.expires_at)
-  return matchesSearch && (expiryFilter.value === 'all' || (expiryFilter.value === 'expired' ? expired : !expired))
-}).sort((a, b) => Date.parse(a.expires_at) - Date.parse(b.expires_at)))
-const activeCount = computed(() => projects.value.filter((item) => !isExpired(item.expires_at)).length)
+const listPage = useListPage(load, () => { projects.value = [] })
+const pagination = listPage.pagination
+const page = ref(1)
+const filteredProjects = computed(() => projects.value)
+const activeCount = computed(() => pagination.value?.counts.active ?? 0)
+watch([search, expiryFilter], () => { page.value = 1; void load() })
+watch(page, () => { void load() })
 
 function formatDate(value: string) {
   const date = new Date(value)
@@ -53,13 +56,16 @@ function isExpired(value: string) {
 async function load() {
   refreshing.value = true
   pageError.value = ''
+  const signal = listPage.begin()
   try {
-    projects.value = await listTrashedProjects()
+    const response = await listProjectPage({ page: page.value, page_size: 12, q: search.value, filter: expiryFilter.value }, signal, true)
+    if (signal.aborted) return
+    pageError.value = ''
+    projects.value = response.items; listPage.received(response.pagination, page)
   } catch (cause: any) {
-    pageError.value = cause?.message || '暂时无法读取回收站。'
+    if (!signal.aborted) pageError.value = cause?.message || '暂时无法读取回收站。'
   } finally {
-    loading.value = false
-    refreshing.value = false
+    if (!signal.aborted) { loading.value = false; refreshing.value = false }
   }
 }
 
@@ -91,7 +97,7 @@ onMounted(load)
       <template #title>回收站</template>
       <template #description>项目保留一个自然月；到期后由程序自动彻底删除。</template>
       <template #metrics>
-        <div class="workbench-context-metric"><strong>{{ loading ? '…' : projects.length }}</strong>已删除项目</div>
+        <div class="workbench-context-metric"><strong>{{ loading ? '…' : (pagination?.counts.all ?? projects.length) }}</strong>已删除项目</div>
         <div class="workbench-context-metric"><strong>{{ loading ? '…' : activeCount }}</strong>可恢复</div>
       </template>
       <template #actions>
@@ -150,6 +156,7 @@ onMounted(load)
           <p>{{ projects.length ? '调整搜索条件或状态筛选。' : '从项目列表删除的项目会显示在这里。' }}</p>
         </Card>
       </section>
+      <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / 12))" :total="pagination?.total ?? 0" :page-size="12" unit="个项目" @update:page="page = $event" />
     </div>
   </div>
 </template>

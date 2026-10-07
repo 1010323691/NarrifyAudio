@@ -5,7 +5,7 @@ import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import {
-  getResourceOverview, getResourceEntries, getCleanupPreview, submitResourceTask,
+  getResourceProjectIds, getResourceOverview, getResourceEntries, getCleanupPreview, submitResourceTask,
   type ResourceEntry, type ResourceEntries, type ResourceOverview, type ResourceQuery,
   type CleanupPreview, type ResourceProject, type SnapshotReference,
 } from '@/api/resources'
@@ -19,6 +19,7 @@ export function useResourceCenter() {
   const project = useProjectStore()
   const task = useTaskStore()
   const { push: toast } = useToast()
+  const projectPage = ref(1)
   const overview = shallowRef<ResourceOverview | null>(null)
   const entries = shallowRef<ResourceEntries | null>(null)
   const loading = ref(true)
@@ -88,10 +89,11 @@ export function useResourceCenter() {
   const selectedFiles = computed(() => entries.value?.items.filter(item => selection.value.has(item.id) && item.can_package) || [])
   const allPageSelected = computed(() => !!entries.value?.items.some(item => item.can_package) && entries.value.items.filter(item => item.can_package).every(item => selection.value.has(item.id)))
   const projects = computed(() => {
+    if (overview.value?.pagination) return overview.value.projects
     const filtered = (overview.value?.projects || []).filter(item => item.name.toLocaleLowerCase().includes(projectSearch.value.trim().toLocaleLowerCase()))
     return filtered.slice().sort((a, b) => projectSort.value === 'name' ? a.name.localeCompare(b.name, 'zh', { numeric: true }) : projectSort.value === 'size' ? (b.snapshot?.size_bytes ?? -1) - (a.snapshot?.size_bytes ?? -1) : Date.parse(b.snapshot?.latest_modified_at || '') - Date.parse(a.snapshot?.latest_modified_at || '') || a.name.localeCompare(b.name, 'zh'))
   })
-  const completeCount = computed(() => overview.value?.projects.filter(item => item.snapshot?.complete && !item.scan_error).length || 0)
+  const completeCount = computed(() => overview.value?.pagination?.counts.complete ?? (overview.value?.projects.filter(item => item.snapshot?.complete && !item.scan_error).length || 0))
   const scanTasks = computed(() => activeTasks.value.filter(item => item.task_type === 'resources.scan'))
   const operationTasks = computed(() => task.tasks.filter(item => ['resources.package', 'resources.cleanup'].includes(item.task_type) && (isActiveResourceTask(item) || recentOperationIds.value.has(item.id))).slice(0, 3))
 
@@ -149,8 +151,7 @@ export function useResourceCenter() {
 
   async function scanProjects(ids: string[], manual = false, includeTrash = false) {
     const currentLifecycle = lifecycle
-    const owned = new Set(overview.value?.projects.map(item => item.project_id))
-    const targets = [...new Set(ids)].filter(id => owned.has(id))
+    const targets = [...new Set(ids)]
     if (!targets.length || !alive) return
     targets.forEach(id => scanAttempts.add(id))
     updatingProjects.value = new Set([...updatingProjects.value, ...targets])
@@ -176,9 +177,12 @@ export function useResourceCenter() {
     refreshing.value = true
     pageError.value = ''
     try {
-      const result = await getResourceOverview({ signal: overviewAbort.signal })
+      const result = await getResourceOverview({ signal: overviewAbort.signal }, tab.value === 'storage' ? undefined : { page: projectPage.value, page_size: 12, q: projectSearch.value, sort: projectSort.value, project_id: projectId.value || undefined })
       if (!alive || currentLifecycle !== lifecycle || sequence !== overviewSequence) return
       overview.value = result
+      if (result.pagination && projectPage.value > Math.max(1, Math.ceil(result.pagination.total / 12))) {
+        projectPage.value = Math.max(1, Math.ceil(result.pagination.total / 12)); void loadOverview()
+      }
       const running = new Set(result.projects.filter(item => item.scan_task_id).map(item => item.project_id))
       updatingProjects.value = new Set([...updatingProjects.value].filter(id => running.has(id) || pendingRefresh.has(id)))
       if (scanMissing) {
@@ -204,9 +208,12 @@ export function useResourceCenter() {
   }
 
   function tasksForProject(id: string): TaskSnapshot[] { return activeTasks.value.filter(item => item.project_id === id) }
-  function refreshResources(id?: string) {
-    const ids = id ? [id] : overview.value?.projects.map(item => item.project_id) || []
-    void scanProjects(ids, true, !id)
+  async function refreshResources(id?: string) {
+    const currentLifecycle = lifecycle
+    try {
+      const ids = id ? [id] : (await getResourceProjectIds()).project_ids
+      if (alive && lifecycle === currentLifecycle) await scanProjects(ids, true, !id)
+    } catch (e: any) { if (alive && lifecycle === currentLifecycle) pageError.value = e.message }
   }
   async function enterProduction(id: string, module?: string) {
     if (busyProjectId.value) return
@@ -311,6 +318,9 @@ export function useResourceCenter() {
     finally { if (currentLifecycle === lifecycle && sequence === cleanupSequence) cleanupLoading.value = false }
   }
   async function prepareCleanup(ids: string[]) {
+    const currentLifecycle = lifecycle
+    if (tab.value === 'storage') ids = (await getResourceProjectIds()).project_ids
+    if (!alive || lifecycle !== currentLifecycle) return
     cleanupIds.value = ids
     cleanup.value = null
     modal.value = 'cleanup'
@@ -334,6 +344,8 @@ export function useResourceCenter() {
     finally { if (currentLifecycle === lifecycle) submitting.value = false }
   }
 
+  watch([projectSearch, projectSort], () => { projectPage.value = 1; void loadOverview() })
+  watch(projectPage, () => { void loadOverview() })
   watch(fileSearch, (value) => {
     if (value === String(route.query.q || '')) return
     if (searchTimer) clearTimeout(searchTimer)
@@ -348,7 +360,8 @@ export function useResourceCenter() {
   watch([projectId, tab], () => {
     previewEntry.value = null
     modal.value = null
-      if (tab.value !== 'storage') void loadEntries()
+    void loadOverview()
+    if (tab.value !== 'storage') void loadEntries()
   })
   watch(() => task.tasks.map(item => `${item.id}:${item.status}:${item.finished}`).join('|'), () => {
     if (!alive) return
@@ -424,7 +437,7 @@ export function useResourceCenter() {
   activate()
 
   return {
-    overview, entries, loading, refreshing, entriesLoading, pageError, entriesError,
+    projectPage, overview, entries, loading, refreshing, entriesLoading, pageError, entriesError,
     projectSearch, projectSort, fileSearch, selection, previewEntry, modal, submitting,
     tab, projectId, browsing, category, path, directoryMode, extension, sort, page,
     currentProject, projects, completeCount, scanTasks, currentTasks, operationTasks,

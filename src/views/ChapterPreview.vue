@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { useListPage } from '@/composables/useListPage'
+import Pager from '@/views/textformat/Pager.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
-import { batchStatusFiles, listVoices } from '@/api/tts'
-import { listDir } from '@/api/files'
-import { bgmPreviewUrl, getChapters } from '@/api/bgm'
+import { batchList, listVoices } from '@/api/tts'
+import { bgmPreviewUrl } from '@/api/bgm'
 import * as preview from '@/api/chapterPreview'
 import type { ChapterPreviewDetail, VoiceItem } from '@/types'
 import {
@@ -73,73 +74,33 @@ function chapterTitle(name: string): string {
   return m ? m[0].replace(/\s+/g, ' ') : stem
 }
 
-const CN_DIGITS: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
-
-/** 章节号（阿拉伯或中文数字，覆盖「第N章」，章数按 <1000 解析）；无章节号返回 null。 */
-function chapterNum(name: string): number | null {
-  const m = name.replace(/\.json$/, '').match(/第\s*([0-9]+|[一二三四五六七八九十百千零两]+)\s*章/)
-  if (!m) return null
-  const raw = m[1]
-  if (/^[0-9]+$/.test(raw)) return Number.parseInt(raw, 10)
-  let total = 0
-  let num = 0
-  for (const ch of raw) {
-    if (ch in CN_DIGITS) num = CN_DIGITS[ch]
-    else if (ch === '十') { total += (num || 1) * 10; num = 0 }
-    else if (ch === '百') { total += num * 100; num = 0 }
-    else if (ch === '千') { total += num * 1000; num = 0 }
-  }
-  return total + num
-}
+const page = ref(1)
+const listPage = useListPage(refreshList, () => { chapterRows.value = []; detail.value = null; openName.value = ''; voices.value = []; drafts.value = {} })
+const pagination = listPage.pagination
+watch(query, () => { page.value = 1; void refreshList() })
+watch(page, () => { void refreshList() })
 
 async function refreshList() {
   listLoading.value = true
   listError.value = ''
+  const signal = listPage.begin()
   try {
-    const dir = await listDir('03_parsed_json')
-    const names = dir.items
-      .filter((i) => !i.is_dir && i.name.endsWith('.json') && !i.name.endsWith('_checked.json'))
-      .map((i) => i.name)
-      .sort((a, b) => {
-        const na = chapterNum(a)
-        const nb = chapterNum(b)
-        // 有章节号按自然序号（中文数字也解析）；localeCompare('zh') 是拼音序，「二」(èr)
-        // 会排在「一」(yī) 前，导致第二章显示在第一章之前——不可用作主排序。
-        if (na !== null && nb !== null && na !== nb) return na - nb
-        return a.localeCompare(b)
-      })
-    const [status, chapters] = await Promise.all([
-      names.length ? batchStatusFiles(names) : Promise.resolve({ files: [] }),
-      getChapters().catch(() => null),
-    ])
-    const stats = new Map(status.files.map((f) => [f.name, f]))
-    const bgm = new Map((chapters?.chapters ?? []).map((c) => [c.stem, c]))
-    chapterRows.value = names.map((name) => {
-      const stem = name.replace(/\.json$/, '')
-      const stat = stats.get(name)
-      const bg = bgm.get(stem)
-      return {
-        name,
-        title: chapterTitle(name),
-        total: stat?.total ?? 0,
-        completed: stat?.completed ?? 0,
-        complete: !!stat?.complete,
-        merged: !!bg?.narration_exists,
-        mixed: !!bg?.mix_exists,
-      }
-    })
+    const response = await batchList({ page: page.value, page_size: 20, q: query.value, filter: 'all' }, signal)
+    if (signal.aborted) return
+    listError.value = ''
+    listPage.received(response.pagination, page)
+    chapterRows.value = response.files.filter(row => row.is_script !== false).map(row => ({
+      name: row.name, title: row.display_name || chapterTitle(row.name), total: row.total, completed: row.completed,
+      complete: row.complete, merged: !!row.merged, mixed: !!row.mixed,
+    }))
   } catch (e: any) {
-    listError.value = e?.message || '刷新失败'
+    if (!signal.aborted) listError.value = e?.message || '刷新失败'
   } finally {
-    listLoading.value = false
+    if (!signal.aborted) listLoading.value = false
   }
 }
 
-const visibleRows = computed(() => {
-  const q = query.value.trim()
-  if (!q) return chapterRows.value
-  return chapterRows.value.filter((r) => r.title.includes(q) || r.name.includes(q))
-})
+const visibleRows = computed(() => chapterRows.value)
 
 // ---------------------------------------------------------------------------
 // 详情（右栏内嵌，点章节才加载；左栏章节列表常驻）
@@ -671,7 +632,7 @@ onBeforeUnmount(() => {
         <div class="shrink-0 border-b border-border/70 px-3 py-2.5">
           <div class="flex items-center justify-between gap-2">
             <h2 class="text-xs font-bold tracking-wide">
-              章节<span class="ml-1.5 font-medium text-muted-foreground">共 {{ chapterRows.length }} 章</span>
+              章节<span class="ml-1.5 font-medium text-muted-foreground">共 {{ pagination?.total ?? chapterRows.length }} 章</span>
             </h2>
             <Button v-if="openName" variant="ghost" size="icon" class="h-6 w-6" title="刷新章节列表" :disabled="listLoading" @click="refreshList">
               <RefreshCw class="h-3 w-3" :class="listLoading ? 'animate-spin' : ''" />
@@ -693,7 +654,7 @@ onBeforeUnmount(() => {
           {{ listError }}
         </Alert>
 
-        <div v-else class="min-h-0 flex-1 overflow-y-auto p-1.5">
+        <div class="min-h-0 flex-1 overflow-y-auto p-1.5">
           <div
             v-for="row in visibleRows"
             :key="row.name"
@@ -727,6 +688,7 @@ onBeforeUnmount(() => {
             {{ listLoading ? '加载中…' : '暂无已解析章节，请先到「文本解析」生成剧本。' }}
           </p>
         </div>
+        <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / 20))" :total="pagination?.total ?? 0" :page-size="20" unit="章" @update:page="page = $event" />
       </Card>
 
       <!-- 中栏：台词列表（视觉中心） -->

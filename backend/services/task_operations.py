@@ -9,6 +9,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..platform.task_categories import TASK_CATEGORIES
 from ..platform.models import OutboxEvent, Project, QuotaTransaction, Task, TaskAttempt, utcnow
 from ..platform.platform_settings import settings
 from ..platform.task_context import _as_utc
@@ -19,17 +20,6 @@ from ..platform.task_lifecycle import (
     append_task_event,
     suppress_pending_dispatch,
 )
-
-
-TASK_CATEGORIES = {
-    "script": ("script.parse",),
-    "voices-foundation": ("voices.foundation",),
-    "voices-clone": ("voices.clone",),
-    "tts": ("tts.batch",),
-    "merge": ("tts.merge",),
-    "bgm": ("bgm.segment", "bgm.match", "bgm.mix", "bgm.package"),
-    "resources": ("resources.scan", "resources.package", "resources.cleanup"),
-}
 
 
 class RetryNotAllowedError(ValueError):

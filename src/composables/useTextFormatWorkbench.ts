@@ -8,6 +8,7 @@
  */
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
 import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
+import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/components/ui/toast'
@@ -41,6 +42,7 @@ export type WorkbenchPhase = 'empty' | 'processing' | 'ready' | 'failed'
 
 export function useTextFormatWorkbench() {
   const project = useProjectStore()
+  const auth = useAuthStore()
   const settings = useSettingsStore()
   const { push: toast } = useToast()
   const waitForTask = useDurableTaskWait()
@@ -51,6 +53,9 @@ export function useTextFormatWorkbench() {
   const nextTask = ref<WorkbenchNextTask | null>(null)
   const activeTasks = ref<WorkbenchState['active_tasks']>([])
   const loading = ref(false)
+  const stateError = ref('')
+  const pagination = ref<import('@/api/listPaging').ListPagination | null>(null)
+  let listAbort = new AbortController()
 
   // --- workbench UI state -------------------------------------------------
   const selectedKey = ref<string | null>(null)
@@ -69,6 +74,8 @@ export function useTextFormatWorkbench() {
   let previewAbort = new AbortController()
   let actionGeneration = 0
   let loadToken = 0
+  let navigating = false
+  let internalPageChange = false
   let pumpRunning = false
 
   // --- derived ------------------------------------------------------------
@@ -92,8 +99,8 @@ export function useTextFormatWorkbench() {
     () => new Map((version.value?.matters ?? []).map((m) => [m.id, m])),
   )
   const isMarked = (key: string | null) => !!key && (version.value?.review_marks ?? []).includes(key)
-  const pendingCount = computed(() => chapters.value.filter((c) => c.pending && !isMarked(c.key)).length)
-  const markedCount = computed(() => (version.value?.review_marks ?? []).length)
+  const pendingCount = computed(() => pagination.value?.counts.pending ?? chapters.value.filter((c) => c.pending && !isMarked(c.key)).length)
+  const markedCount = computed(() => pagination.value?.counts.marked ?? (version.value?.review_marks ?? []).length)
 
   /** The flow's config snapshot (TextToggles) differs from the persisted config. */
   const settingsDirty = computed(() => {
@@ -123,6 +130,7 @@ export function useTextFormatWorkbench() {
 
   // --- table filtering / pagination (in-memory, hundreds of chapters) -----
   const filteredChapters = computed(() => {
+    if (pagination.value) return chapters.value.filter(c => filter.value !== 'pending' || !isMarked(c.key))
     let list = chapters.value
     if (sameOrigNum.value != null) {
       // 同号比较模式：整组展示，忽略状态/原因筛选（组内混有已核对/正常章也要可比）。
@@ -147,24 +155,29 @@ export function useTextFormatWorkbench() {
   })
   /** 可筛选原因：本版本出现过的非「保留」原因，按首次出现顺序。 */
   const reasonOptions = computed(() => {
+    if (pagination.value?.reasons) return pagination.value.reasons
     const seen: string[] = []
     for (const c of chapters.value) {
       for (const r of c.reasons ?? []) if (r !== 'kept' && !seen.includes(r)) seen.push(r)
     }
     return seen
   })
-  const pageCount = computed(() => Math.max(1, Math.ceil(filteredChapters.value.length / pageSize.value)))
+  const pageCount = computed(() => Math.max(1, Math.ceil((pagination.value?.total ?? filteredChapters.value.length) / pageSize.value)))
   const pagedChapters = computed(() => {
+    if (pagination.value) return filteredChapters.value
     const p = Math.min(page.value, pageCount.value)
     return filteredChapters.value.slice((p - 1) * pageSize.value, p * pageSize.value)
   })
   watch([filter, query, reasonFilter, sameOrigNum], () => { page.value = 1 })
+
+  watch([page, pageSize, query, filter, reasonFilter, sameOrigNum], () => { if (pagination.value && !internalPageChange) void refreshState({ recover: false }) }, { flush: 'sync' })
 
   const currentChapter = computed(() => chapters.value.find((c) => c.key === selectedKey.value) ?? null)
   /** 选中章节在同原编号组里的规模与位置（按正文顺序）；「重复」类原因的结论卡与
    * 「查看同号章节」共用。组小于 2 或无原编号时返回 null。 */
   const dupInfo = computed(() => {
     const ch = currentChapter.value
+    if (ch?.dup_info !== undefined) return ch.dup_info
     if (!ch || ch.orig_num == null) return null
     const sameNumber = chapters.value.filter((c) => c.orig_num === ch.orig_num)
     const group = sameNumber.filter((c, index) => c.source_chapter_id == null
@@ -179,12 +192,13 @@ export function useTextFormatWorkbench() {
 
   /** The output file of a chapter (files is seq-indexed: chapter N → file N). */
   function chapterFile(chapter: WorkbenchChapter): { name: string; chars: number } | null {
-    return version.value?.files[chapter.seq - 1] ?? null
+    return chapter.file ?? version.value?.files[chapter.seq - 1] ?? null
   }
 
   // --- state loading / recovery pump ---------------------------------------
   function applyState(state: WorkbenchState) {
     const previousFlowId = version.value?.flow_id
+    pagination.value = state.pagination ?? null
     flow.value = state.flow
     version.value = state.version
     nextTask.value = state.next_task
@@ -204,13 +218,46 @@ export function useTextFormatWorkbench() {
     if (!projectId) return false
     const token = ++loadToken
     try {
-      const state = await getWorkbenchState(projectId, options)
+      listAbort.abort()
+      listAbort = new AbortController()
+      const state = await getWorkbenchState(projectId, { ...options, signal: listAbort.signal,
+        list: { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value }, reason: reasonFilter.value, origNum: sameOrigNum.value })
       if (token !== loadToken || project.activeProjectId !== projectId) return false
+      stateError.value = ''
       applyState(state)
+      if (page.value > pageCount.value) page.value = pageCount.value
       return true
-    } catch {
+    } catch (error: any) {
+      if (token === loadToken && project.activeProjectId === projectId && !listAbort.signal.aborted) stateError.value = error?.message || '章节列表暂未更新'
       return false
     }
+  }
+
+  function ensureChapterPage(key: string) {
+    if (pagination.value) return
+    const index = filteredChapters.value.findIndex(chapter => chapter.key === key)
+    if (index >= 0) page.value = Math.floor(index / pageSize.value) + 1
+  }
+
+  async function navigateChapter(delta: number) {
+    if (navigating || !filteredChapters.value.length) return
+    const list = filteredChapters.value
+    const index = list.findIndex(chapter => chapter.key === selectedKey.value)
+    const nextIndex = index + delta
+    if (!pagination.value || (nextIndex >= 0 && nextIndex < list.length) || pageCount.value === 1) {
+      const next = list[(nextIndex + list.length) % list.length]
+      if (next) { ensureChapterPage(next.key ?? ''); selectedKey.value = next.key ?? null }
+      return
+    }
+    navigating = true
+    try {
+      internalPageChange = true
+      page.value = delta > 0 ? page.value < pageCount.value ? page.value + 1 : 1 : page.value > 1 ? page.value - 1 : pageCount.value
+      internalPageChange = false
+      if (!(await refreshState({ recover: false }))) return
+      const next = delta > 0 ? filteredChapters.value[0] : filteredChapters.value.at(-1)
+      selectedKey.value = next?.key ?? null
+    } finally { navigating = false }
   }
 
   /** Ask the server to evaluate the flow and idempotently submit the next
@@ -219,9 +266,11 @@ export function useTextFormatWorkbench() {
     const projectId = project.activeProjectId
     if (!projectId) return null
     try {
-      const state = await postWorkbenchFlow(projectId, {})
+      const list = { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value }
+      const state = await postWorkbenchFlow(projectId, {}, list)
       if (project.activeProjectId !== projectId) return null
-      applyState(state)
+      if (list.page !== page.value || list.page_size !== pageSize.value || list.q !== query.value || list.filter !== filter.value) await refreshState({ recover: false })
+      else applyState(state)
       return state
     } catch {
       return null
@@ -295,7 +344,7 @@ export function useTextFormatWorkbench() {
         whole_book: opts.wholeBook ?? false,
         force_by_length: opts.forceByLength ?? false,
         restart: opts.restart ?? false,
-      })
+      }, { page: 1, page_size: pageSize.value, q: query.value, filter: filter.value })
       if (generation !== actionGeneration || project.activeProjectId !== projectId) return false
       applyState(state)
       await pump()
@@ -361,6 +410,7 @@ export function useTextFormatWorkbench() {
           } },
         })
       }
+      if (pagination.value && project.activeProjectId === projectId) await refreshState({ recover: false })
       return true
     } catch (e: any) {
       toast({
@@ -389,7 +439,7 @@ export function useTextFormatWorkbench() {
     )
     if (!next) return false
     const position = filteredChapters.value.findIndex((c) => c.key === next.key)
-    page.value = Math.floor(Math.max(0, position) / pageSize.value) + 1
+    if (!pagination.value) page.value = Math.floor(Math.max(0, position) / pageSize.value) + 1
     selectedKey.value = next.key
     return true
   }
@@ -444,8 +494,12 @@ export function useTextFormatWorkbench() {
 
   function resetWorkbench() {
     actionGeneration += 1
+    navigating = false
     loading.value = false
     loadToken += 1
+    listAbort.abort()
+    pagination.value = null
+    stateError.value = ''
     previewToken += 1
     previewAbort.abort()
     flow.value = null
@@ -459,9 +513,10 @@ export function useTextFormatWorkbench() {
 
   // --- lifecycle (keep-alive aware) ------------------------------------------
   watch(
-    () => project.activeProjectId,
-    (id, prev) => {
-      if (id === prev) return
+    () => `${auth.user?.id ?? ''}:${project.activeProjectId}`,
+    (scope, previous) => {
+      if (scope === previous) return
+      const id = project.activeProjectId
       resetWorkbench()
       if (!id) return
       void resume()
@@ -477,20 +532,24 @@ export function useTextFormatWorkbench() {
     if (!project.activeProjectId) return
     void resume()
   })
-  onDeactivated(() => previewAbort.abort())
-  onUnmounted(() => previewAbort.abort())
+  onDeactivated(() => { loadToken++; listAbort.abort(); previewAbort.abort() })
+  onUnmounted(() => { loadToken++; listAbort.abort(); previewAbort.abort() })
 
   return {
     // state
-    phase, flow, version, nextTask, activeTasks, loading, pipelineProgress,
+    phase, flow, version, nextTask, activeTasks, loading, stateError, pipelineProgress,
     chapters, filteredChapters, pagedChapters, pageCount, page, pageSize,
+    chapterTotal: computed(() => pagination.value?.counts.all ?? chapters.value.length),
+    filteredTotal: computed(() => pagination.value?.total ?? filteredChapters.value.length),
+    adjustedTotal: computed(() => pagination.value?.counts.adjusted ?? chapters.value.filter(c => c.adjusted).length),
+    numPad: computed(() => pagination.value?.num_pad ?? chapterNumWidth(chapters.value)),
     filter, query, reasonFilter, sameOrigNum, reasonOptions,
     selectedKey, marksBusy, preview,
     // derived
     pendingCount, markedCount, settingsDirty, canEnterParse, enterParseReason,
     isMarked, currentChapter, chapterMatters, chapterFile, dupInfo,
     // actions
-    resume, refreshState, startFlow, retryFailedStage, toggleMark, loadPreview,
+    resume, refreshState, startFlow, retryFailedStage, toggleMark, loadPreview, ensureChapterPage, navigateChapter,
     selectChapter: (key: string | null) => { selectedKey.value = key },
   }
 }

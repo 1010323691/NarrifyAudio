@@ -1,3 +1,4 @@
+import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 import { http } from './client'
 import type { UploadResult, DirListResult } from '@/types'
 
@@ -18,7 +19,6 @@ export async function uploadFile(file: File): Promise<UploadResult> {
  * ``module`` is the directory name (e.g. ``02_split_text``). Used by the parse page to
  * enumerate the split files the user can select — the backend does the reading.
  */
-export function listDir(module: string, recursive = false): Promise<DirListResult> {
-  const suffix = recursive ? '?recursive=true' : ''
-  return http.get<DirListResult>(`/api/files/list/${encodeURIComponent(module)}${suffix}`)
+export function listDir(module: string, recursive = false, options?: Partial<ListQuery>, signal?: AbortSignal, filters: { extensions?: string; exclude_suffix?: string; kind?: string } = {}): Promise<DirListResult & { pagination?: ListPagination }> {
+  return http.get(`/api/files/list/${encodeURIComponent(module)}?${listQuery(options, { recursive, ...filters })}`, { signal })
 }

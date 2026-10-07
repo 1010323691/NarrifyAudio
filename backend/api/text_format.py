@@ -7,7 +7,9 @@ the live artifacts before serving any content.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
+
+from fastapi import Query, APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -25,6 +27,8 @@ from ..services.text_format_workbench import (
     start_or_continue_flow,
     unmark_review,
 )
+
+from ..services.list_paging import page_text_state
 
 router = APIRouter(prefix="/api/v1/projects", tags=["text-format"])
 
@@ -57,15 +61,17 @@ def _raise(error: WorkbenchError) -> None:
 
 
 @router.post("/{project_id}/text-format/flow")
-def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depends(require_csrf), db: Session = Depends(get_db)) -> dict:
+def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depends(require_csrf), db: Session = Depends(get_db),
+                          page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10, q: str = "", filter: str = "all", reason: str = "", orig_num: int | None = None) -> dict:
     item = _owned(db, user, project_id)
     try:
-        return start_or_continue_flow(
+        state = start_or_continue_flow(
             db, user, item.id,
             source_file_id=body.source_file_id, source_file_ids=body.source_file_ids, config=body.config,
             whole_book=body.whole_book, force_by_length=body.force_by_length,
             restart=body.restart,
         )
+        return page_text_state(state, page, page_size, q, filter, reason, orig_num) if page is not None else state
     except WorkbenchError as error:
         _raise(error)
         raise
@@ -75,14 +81,15 @@ def post_text_format_flow(project_id: str, body: FlowRequest, user: User = Depen
 
 
 @router.get("/{project_id}/text-format/state")
-def get_text_format_state(project_id: str, recover: bool = True, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+def get_text_format_state(project_id: str, recover: bool = True, page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10, q: str = "", filter: str = "all", reason: str = "", orig_num: int | None = None, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     """Aggregated state. A running flow with no in-flight stage tasks is
     advanced idempotently (stable tflow keys), so the read also recovers
     flows whose last task finished after the client left. Set recover=false
     for a read-only snapshot without advancement or legacy-flow adoption."""
     item = _owned(db, user, project_id)
     try:
-        return flow_state(db, user, item.id, recover=recover)
+        state = flow_state(db, user, item.id, recover=recover)
+        return page_text_state(state, page, page_size, q, filter, reason, orig_num) if page is not None else state
     except WorkbenchError as error:
         _raise(error)
         raise

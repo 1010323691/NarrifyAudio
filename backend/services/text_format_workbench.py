@@ -139,13 +139,13 @@ def _manifest_consistent(db: Session, user: User, project: Project, flow: TextFo
     manifest = flow.manifest or []
     if not manifest:
         return False
+    live_by_key = {row.object_key: row for row in db.scalars(select(ProjectFile).where(
+        ProjectFile.project_id == project.id, ProjectFile.owner_id == user.id,
+        ProjectFile.deleted_at.is_(None),
+        ProjectFile.object_key.in_([entry["object_key"] for entry in manifest]),
+    )).all()}
     for entry in manifest:
-        live = db.scalar(select(ProjectFile).where(
-            ProjectFile.object_key == entry["object_key"],
-            ProjectFile.project_id == project.id,
-            ProjectFile.owner_id == user.id,
-            ProjectFile.deleted_at.is_(None),
-        ))
+        live = live_by_key.get(entry["object_key"])
         if live is None or live.sha256 != entry["sha256"] or live.size_bytes != entry["size_bytes"]:
             return False
     return True

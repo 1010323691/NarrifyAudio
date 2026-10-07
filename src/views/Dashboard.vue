@@ -2,6 +2,7 @@
 import { computed, onActivated, onDeactivated, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { BookOpen, Clock3, FolderPlus, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
+import Pager from '@/views/textformat/Pager.vue'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
@@ -11,7 +12,7 @@ import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
-import { deleteProject, getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
+import { listProjectPage, deleteProject, getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
 import { useTaskStore } from '@/stores/task'
 import { stageProgressColor } from '@/utils/projectStageProgress'
@@ -64,7 +65,29 @@ watch(() => taskStore.tasks.map(task => `${task.id}:${task.status}:${task.progre
   progressTimer = setTimeout(() => { void refreshSummaries() }, 500)
 })
 
-const projects = computed(() => [...projectStore.projects].sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at)))
+const projectPage = ref(1)
+const projectTotal = ref(0)
+const pageProjects = ref<ProjectSummary[] | null>(null)
+const projects = computed(() => pageProjects.value ?? projectStore.projects)
+watch(projectPage, () => { void loadProjectPage() })
+let projectPageRequest = 0
+let projectPageAbort: AbortController | null = null
+async function loadProjectPage() {
+  projectPageAbort?.abort()
+  projectPageAbort = new AbortController()
+  const signal = projectPageAbort.signal
+  const request = ++projectPageRequest
+  const generation = loadGeneration
+  try {
+    const response = await listProjectPage({ page: projectPage.value, page_size: 12 }, signal)
+    if (signal.aborted || request !== projectPageRequest || generation !== loadGeneration) return
+    pageProjects.value = response.items; projectTotal.value = response.pagination.total
+    const last = Math.max(1, Math.ceil(projectTotal.value / 12))
+    if (projectPage.value > last) { projectPage.value = last; return }
+    summaries.value = Object.fromEntries(Object.entries(summaries.value).filter(([id]) => response.items.some(item => item.id === id)))
+    void refreshSummaries()
+  } catch (e: any) { if (!signal.aborted && request === projectPageRequest && generation === loadGeneration) pageError.value = e?.message || '项目读取失败' }
+}
 
 
 function projectState(project: ProjectSummary) {
@@ -107,11 +130,7 @@ async function load(force = false) {
   refreshing.value = false
   // 每项目进度并行发出、逐个回填：不再等最慢的一个项目算完才整批回显。
   void refreshSummaries()
-  // 活动项目不在列表中（别处删除/移入回收站）时补拉一次列表。
-  if (projectStore.current?.set && !projectStore.projects.some((item) => item.id === projectStore.current!.project_id)) {
-    await projectStore.refresh()
-    if (requestGeneration !== loadGeneration) return
-  }
+  void loadProjectPage()
   refreshing.value = false
   loading.value = false
 }
@@ -167,6 +186,7 @@ onActivated(() => {
 })
 function deactivate() {
   viewActive = false
+  projectPageAbort?.abort()
   clearTimeout(progressTimer)
   summaryGeneration += 1
   loadGeneration += 1
@@ -211,7 +231,7 @@ onUnmounted(deactivate)
 
       <section class="project-center__section">
         <div class="section-heading">
-          <div><h2>项目列表</h2><span v-if="!loading" class="muted">{{ projects.length }} 个项目</span></div>
+          <div><h2>项目列表</h2><span v-if="!loading" class="muted">{{ projectTotal || projects.length }} 个项目</span></div>
           <Button variant="ghost" size="sm" :disabled="refreshing" @click="load(true)"><RefreshCw class="h-4 w-4" />刷新</Button>
         </div>
 
@@ -262,6 +282,7 @@ onUnmounted(deactivate)
           <p>创建项目后导入原文，制作进度和生成内容都会归在这里。</p>
           <Button @click="createOpen = true"><FolderPlus class="h-4 w-4" />创建第一个项目</Button>
         </div>
+        <Pager :page="projectPage" :page-count="Math.max(1, Math.ceil(projectTotal / 12))" :total="projectTotal" :page-size="12" unit="个项目" @update:page="projectPage = $event" />
       </section>
     </div>
 

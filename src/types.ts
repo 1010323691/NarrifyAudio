@@ -323,6 +323,9 @@ export interface BatchFileResult {
 }
 /** Per-file synthesis stats (the 待合成 rows; ``GET /api/tts/batch-status?scripts=…``). */
 export interface BatchFileStatus {
+  work_state?: string
+  merged?: boolean
+  mixed?: boolean
   name: string
   /** False for analysis reports, missing files, or invalid script JSON. */
   is_script?: boolean
@@ -358,6 +361,8 @@ export interface MergeResult {
  *  synthesis completion. `total` = the source parsed JSON's synthesizable segment count
  *  (a manifest-length total would mark a mid-cancelled package "ready"). */
 export interface MergePackageStatus {
+  work_state?: string
+  merged_filename?: string | null
   name: string
   display_name?: string
   total: number
@@ -792,6 +797,7 @@ export interface BgmTimelineSummary {
 }
 /** One row of ``GET /api/bgm/chapters`` (disk-state basis = 02_split_text stems). */
 export interface BgmChapterRow {
+  narration_filename?: string | null
   /** Chapter stem (02_split_text/<stem>.txt without .txt). */
   stem: string
   display_name?: string

@@ -7,7 +7,9 @@ silently reading a different project's or generation's files.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Annotated
+
+from fastapi import Query, APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -55,6 +57,9 @@ def _raise(error: ScriptParseError) -> None:
 @router.get("/{project_id}/script-parse/state")
 def get_script_parse_state(
     project_id: str,
+    page: Annotated[int | None, Query(ge=1)] = None,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+    q: str = "", filter: str = "all", keys_only: bool = False,
     user: User = Depends(require_authenticated_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -64,7 +69,16 @@ def get_script_parse_state(
     it (e.g. while a parse batch runs) is always safe."""
     item = _owned(db, user, project_id)
     try:
-        return get_state(db, user, item.id)
+        return get_state(db, user, item.id, page=page, page_size=page_size, query=q, filter=filter, keys_only=keys_only)
+    except ScriptParseError as error:
+        _raise(error)
+        raise
+
+
+@router.get("/{project_id}/script-parse/summary")
+def get_script_parse_summary(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return get_state(db, user, project_id, summary_only=True)
     except ScriptParseError as error:
         _raise(error)
         raise

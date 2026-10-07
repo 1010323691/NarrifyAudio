@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ListPagination, ListQuery } from '@/api/listPaging'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { VoiceItem } from '@/types'
 import Button from '@/components/ui/Button.vue'
@@ -11,6 +12,8 @@ import { Copy, Loader2, Merge, Users, X } from 'lucide-vue-next'
 
 type PhaseBadge = { label: string; variant: 'default' | 'secondary' | 'destructive' | 'success' | 'warning' | 'outline'; spin: boolean }
 const props = defineProps<{
+  remote?: boolean
+  pagination?: ListPagination
   speakers: VoiceItem[]
   prompts: Record<string, string>
   loading: boolean
@@ -30,6 +33,7 @@ const props = defineProps<{
   pickDisabled: (v: VoiceItem) => boolean
 }>()
 const emit = defineEmits<{
+  requestPage: [query: ListQuery]
   refresh: []
   gender: [voice: VoiceItem, element: HTMLElement]
   merge: [voice: VoiceItem]
@@ -60,19 +64,22 @@ onMounted(() => {
 onBeforeUnmount(() => {
   media?.removeEventListener('change', updateNarrow)
 })
-const pendingCount = computed(() => props.speakers.filter(v => v.status !== 'ready').length)
+const pendingCount = computed(() => props.pagination?.counts.pending ?? props.speakers.filter(v => v.status !== 'ready').length)
 const filtered = computed(() => {
+  if (props.remote) return props.speakers
   const q = query.value.trim().toLocaleLowerCase()
   return props.speakers.filter(v => (filter.value === 'all' || v.status !== 'ready') &&
     (!q || `${v.name} ${v.alias_of || ''}`.toLocaleLowerCase().includes(q)))
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize.value)))
+const pageCount = computed(() => Math.max(1, Math.ceil((props.remote ? props.pagination?.total ?? 0 : filtered.value.length) / pageSize.value)))
 const visible = computed(() => {
+  if (props.remote) return filtered.value
   const p = Math.min(page.value, pageCount.value)
   return filtered.value.slice((p - 1) * pageSize.value, p * pageSize.value)
 })
 const selected = computed(() => props.speakers.find(v => v.name === selectedName.value) ?? null)
 watch([query, filter], () => { page.value = 1 })
+watch([page, pageSize, query, filter], () => { if (props.remote) emit('requestPage', { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value }) })
 watch(pageCount, n => { page.value = Math.min(page.value, n) })
 watch(() => props.speakers, items => {
   if (!items.some(v => v.name === selectedName.value)) selectedName.value = items[0]?.name ?? ''
@@ -104,7 +111,7 @@ function detailKeydown(event: KeyboardEvent) {
         v-model:query="query"
         v-model:filter="filter"
         placeholder="搜索角色或别名"
-        :filters="[{ key: 'all', label: '全部', count: speakers.length }, { key: 'pending', label: '待完善', count: pendingCount }]"
+        :filters="[{ key: 'all', label: '全部', count: remote ? pagination?.counts.all : speakers.length }, { key: 'pending', label: '待完善', count: pendingCount }]"
         :loading="loading"
         @refresh="emit('refresh')"
       />
@@ -138,7 +145,7 @@ function detailKeydown(event: KeyboardEvent) {
         class="shrink-0 border-t px-4 py-2"
         :page="page"
         :page-count="pageCount"
-        :total="filtered.length"
+        :total="remote ? pagination?.total ?? 0 : filtered.length"
         :page-size="pageSize"
         :page-size-options="[10, 20, 50]"
         unit="个角色"

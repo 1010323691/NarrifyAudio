@@ -1,3 +1,4 @@
+import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 import { http } from './client'
 
 export interface QuotaBalance {
@@ -26,10 +27,14 @@ export interface QuotaTransaction {
   char_count?: number | null
 }
 
-export function getQuota(): Promise<QuotaBalance> {
-  return http.get('/api/v1/quota')
+export function getQuota(signal?: AbortSignal): Promise<QuotaBalance> {
+  return http.get('/api/v1/quota', { signal })
 }
 
 export function listQuotaTransactions(): Promise<QuotaTransaction[]> {
   return http.get('/api/v1/quota/transactions')
+}
+
+export function quotaTransactionPage(options: ListQuery, signal?: AbortSignal): Promise<{ items: QuotaTransaction[]; pagination: ListPagination; daily: number[]; registered_storage_bytes: number }> {
+  return http.get(`/api/v1/quota/transactions?${listQuery(options, { tz_offset: new Date().getTimezoneOffset() })}`, { signal })
 }

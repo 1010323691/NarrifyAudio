@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onDeactivated, onActivated, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import {
   Activity, AudioLines, Check, ChevronRight, CircleAlert, Clock3, Combine,
   FileText, Folder, LoaderCircle, ListTodo, Music4, Pause, Play, RefreshCw,
@@ -9,124 +9,29 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import Progress from '@/components/ui/Progress.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
-import { listTaskHistory } from '@/api/tasks'
-import { useTaskStore } from '@/stores/task'
+import { useTaskCenter } from '@/composables/useTaskCenter'
+import type { TaskCenterGroup } from '@/api/tasks'
 import type { TaskCenterItem, TaskStatus } from '@/types'
-import { TASK_CENTER_CATEGORIES, taskCenterCategoryOf, type TaskCenterCategoryId } from '@/utils/taskCenter'
+import { TASK_CENTER_CATEGORIES } from '@/utils/taskCenter'
 
-const taskStore = useTaskStore()
-const historyTasks = ref<TaskCenterItem[]>([])
-const cursor = ref<string | null>(null)
-const loading = ref(false)
-const loadingMore = ref(false)
-const loaded = ref(false)
-const error = ref('')
-const controlError = ref('')
-const controllingCategory = ref<TaskCenterCategoryId | null>(null)
-const taskFilter = ref<'all' | 'active' | 'completed'>('all')
-// A single bulk run can occupy the newest history pages (a 400-chapter
-// re-parse spans 8+ pages of 50). Auto-load this many rows so recently
-// completed entries stay in view instead of sitting behind manual
-// "load earlier" clicks.
-const AUTO_HISTORY_LIMIT = 500
-const selectedGroup = ref<{ categoryId: TaskCenterCategoryId; projectId: string } | null>(null)
-const dialogPanel = ref<HTMLElement | null>(null)
-const dialogCloseButton = ref<HTMLButtonElement | null>(null)
-let restoreFocus: HTMLElement | null = null
-
-const allTasks = computed(() => {
-  const byId = new Map<string, TaskCenterItem>()
-  for (const task of historyTasks.value) byId.set(task.id, task)
-  for (const task of taskStore.tasks) {
-    if (task.project_name && task.task_type) byId.set(task.id, task)
-  }
-  return [...byId.values()]
-    // 被新运行替换的终态行不再展示（服务端历史接口也不会再返回它们），
-    // 历史页里已加载的旧条目同样要按此过滤，否则重跑后同名任务会成对出现。
-    // 失败条目不在任务中心展示：数据行保留（各功能页的重试入口、管理台统计、
-    // one_row_per_entry 去重仍依赖它），这里只做显示层过滤。
-    .filter((task) => task.status !== 'cancelled'
-      && task.status !== 'failed'
-      && !taskStore.supersededIds.has(task.id))
-    .sort((a, b) => b.created - a.created || b.id.localeCompare(a.id))
-})
-
-const sections = computed(() => TASK_CENTER_CATEGORIES.map((category) => {
-  const projects = new Map<string, TaskCenterItem[]>()
-  for (const task of allTasks.value) {
-    if (taskCenterCategoryOf(task.task_type) !== category.id) continue
-    const projectTasks = projects.get(task.project_id) ?? []
-    projectTasks.push(task)
-    projects.set(task.project_id, projectTasks)
-  }
-  const groups = [...projects.entries()].map(([projectId, tasks]) => ({
-    projectId,
-    projectName: tasks.find((task) => task.project_name)?.project_name || '未知书籍',
-    tasks: tasks.sort((a, b) => b.created - a.created),
-    latest: Math.max(...tasks.map((task) => task.created)),
-    activeCount: tasks.filter((task) => isActive(task.status)).length,
-  })).sort((a, b) => b.latest - a.latest || a.projectName.localeCompare(b.projectName))
-  return {
-    ...category,
-    groups,
-    taskCount: groups.reduce((sum, group) => sum + group.tasks.length, 0),
-  }
-}))
-
-const browsingCategory = ref<TaskCenterCategoryId | null>(null)
-const browsingSection = computed(() =>
-  sections.value.find((section) => section.id === browsingCategory.value)
-  ?? sections.value.find((section) => section.groups.some((group) => group.activeCount))
-  ?? sections.value.find((section) => section.taskCount > 0)
-  ?? sections.value[0],
-)
-const browsingGroups = computed(() => [...browsingSection.value.groups].sort((a, b) =>
-  Number(b.activeCount > 0) - Number(a.activeCount > 0) || b.latest - a.latest,
-))
-const groupPage = ref(1)
-const groupsPerPage = 5
-const groupPageCount = computed(() => Math.max(1, Math.ceil(browsingGroups.value.length / groupsPerPage)))
-const visibleGroups = computed(() => browsingGroups.value.slice((groupPage.value - 1) * groupsPerPage, groupPage.value * groupsPerPage))
-watch(() => browsingSection.value.id, () => { groupPage.value = 1 })
-watch(groupPageCount, (count) => { groupPage.value = Math.min(groupPage.value, count) })
-
-const selectedCategory = computed(() => selectedGroup.value
-  ? TASK_CENTER_CATEGORIES.find((category) => category.id === selectedGroup.value?.categoryId) ?? null
-  : null)
-const selectedTasks = computed(() => {
-  if (!selectedGroup.value) return []
-  return allTasks.value
-    .filter((task) => task.project_id === selectedGroup.value?.projectId
-      && taskCenterCategoryOf(task.task_type) === selectedGroup.value?.categoryId)
-    .sort((a, b) => a.created - b.created || a.id.localeCompare(b.id))
-})
-const filteredSelectedTasks = computed(() => selectedTasks.value.filter((task) => {
-  if (taskFilter.value === 'active') return isActive(task.status)
-  if (taskFilter.value === 'completed') return isCompleted(task.status)
-  return true
-}))
-const selectedProjectName = computed(() => selectedTasks.value[0]?.project_name || '未知书籍')
-const selectedActiveTasks = computed(() => selectedTasks.value.filter((task) =>
-  ['pending', 'queued', 'retrying', 'running', 'paused'].includes(task.status),
-))
-const selectedPausableTasks = computed(() => selectedTasks.value.filter((task) =>
-  ['pending', 'queued', 'retrying', 'running'].includes(task.status),
-))
-const selectedResumableTasks = computed(() => selectedTasks.value.filter((task) => task.status === 'paused'))
-
+const center = useTaskCenter()
+const {
+  sections, browsingSection, groupPage, selectedGroup, taskFilter, taskPage, selectedCounts,
+  summary, summaryLoading, summaryError, groups, groupsLoading, groupsError,
+  items, itemsLoading, itemsError, controllingCategory, controlError,
+} = center
+const groupPageCount = computed(() => Math.max(1, Math.ceil((groups.value?.total ?? 0) / 5)))
+const taskPageCount = computed(() => Math.max(1, Math.ceil((items.value?.total ?? selectedCounts.value?.task_count ?? 0) / 50)))
+const selectedCategory = computed(() => TASK_CENTER_CATEGORIES.find(value => value.id === selectedGroup.value?.categoryId))
+const selectedProjectName = computed(() => selectedGroup.value?.initial.project_name || '未知书籍')
 const taskFilters = [
   { id: 'all', label: '全部' },
   { id: 'active', label: '进行中' },
   { id: 'completed', label: '已完成' },
 ] as const
-
-function isActive(status: TaskStatus) {
-  return ['pending', 'queued', 'running', 'retrying', 'cancelling', 'paused'].includes(status)
-}
-
-function isCompleted(status: TaskStatus) {
-  return ['succeeded', 'failed', 'timeout', 'cancelled'].includes(status)
-}
+const dialogPanel = ref<HTMLElement | null>(null)
+const dialogCloseButton = ref<HTMLButtonElement | null>(null)
+let restoreFocus: HTMLElement | null = null
 
 function statusInfo(status: TaskStatus): { label: string; tone: 'positive' | 'warning' | 'negative' | 'neutral' } {
   if (status === 'succeeded') return { label: '已完成', tone: 'positive' }
@@ -167,54 +72,14 @@ function formatTime(value: number) {
     .format(new Date(value * 1000))
 }
 
-async function loadPage(next = false) {
-  if (next ? loadingMore.value : loading.value) return
-  if (next && !cursor.value) return
-  if (next) loadingMore.value = true
-  else {
-    loading.value = true
-    error.value = ''
-  }
-  try {
-    const page = await listTaskHistory(next ? cursor.value : null)
-    const known = new Set(historyTasks.value.map((task) => task.id))
-    historyTasks.value = next
-      ? [...historyTasks.value, ...page.items.filter((task) => !known.has(task.id))]
-      : page.items
-    cursor.value = page.next_cursor
-    loaded.value = true
-  } catch (cause: any) {
-    error.value = cause?.message || '任务历史暂时无法读取，请检查连接后重试。'
-  } finally {
-    loading.value = false
-    loadingMore.value = false
-  }
-}
-
-async function runSelectedGroupControl(action: 'pause' | 'resume' | 'cancel') {
-  if (!selectedGroup.value || !selectedActiveTasks.value.length || controllingCategory.value) return
-  const { categoryId, projectId } = selectedGroup.value
-  controllingCategory.value = categoryId
-  controlError.value = ''
-  try {
-    await taskStore.controlCategory(projectId, categoryId, action)
-  } catch (cause: any) {
-    const actionLabel = action === 'pause' ? '暂停' : action === 'resume' ? '启动' : '取消'
-    controlError.value = cause?.message || `批量${actionLabel}任务失败，请重试。`
-  } finally {
-    controllingCategory.value = null
-  }
-}
-
-function openGroup(categoryId: TaskCenterCategoryId, projectId: string, event: MouseEvent) {
+function openGroup(group: TaskCenterGroup, event: MouseEvent) {
   restoreFocus = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
-  selectedGroup.value = { categoryId, projectId }
-  taskFilter.value = 'all'
+  center.openGroup(group)
   void nextTick(() => dialogCloseButton.value?.focus())
 }
 
 function closeDialog(returnFocus = true) {
-  selectedGroup.value = null
+  center.closeGroup()
   if (returnFocus) void nextTick(() => restoreFocus?.focus())
 }
 
@@ -240,24 +105,20 @@ function handleDialogKeydown(event: KeyboardEvent) {
   }
 }
 
-async function activate() {
-  taskStore.setTaskCenterOpen(true)
-  if (!loaded.value) {
-    await loadPage()
-    // keep pulling earlier pages (capped) so a large recent batch cannot push
-    // completed entries out of the auto-loaded view
-    for (let i = 0; i < 20 && cursor.value && historyTasks.value.length < AUTO_HISTORY_LIMIT; i += 1) {
-      await loadPage(true)
-    }
+// Pagination can remove the focused row/button while a request is pending.
+// Escape must still close the active dialog when focus has fallen to the body.
+function handleEscape(event: KeyboardEvent) {
+  if (selectedGroup.value && event.key === 'Escape' && !event.defaultPrevented) {
+    event.preventDefault()
+    closeDialog()
   }
-  void taskStore.refresh()
 }
-
-onActivated(activate)
-onDeactivated(() => {
-  closeDialog(false)
-  taskStore.setTaskCenterOpen(false)
-})
+watch(() => !!selectedGroup.value, (open) => {
+  if (open) document.addEventListener('keydown', handleEscape)
+  else document.removeEventListener('keydown', handleEscape)
+}, { flush: 'sync' })
+onBeforeUnmount(() => document.removeEventListener('keydown', handleEscape))
+onDeactivated(() => closeDialog(false))
 </script>
 
 <template>
@@ -273,34 +134,25 @@ onDeactivated(() => {
     </header>
 
     <div class="page-region" role="region" aria-label="页面工作区" tabindex="0">
-      <div v-if="error" class="task-center__error" role="alert">
-        <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ error }}</span>
-        <Button variant="outline" size="sm" @click="loadPage()">重试</Button>
+      <div v-if="summaryError" class="task-center__error" role="alert">
+        <CircleAlert class="h-4 w-4 shrink-0" /><span>摘要暂未更新：{{ summaryError }}</span>
+        <Button variant="outline" size="sm" @click="center.refreshSummary()">重试</Button>
       </div>
 
-      <div v-if="controlError" class="task-center__error" role="alert">
-        <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ controlError }}</span>
-        <Button variant="ghost" size="sm" aria-label="关闭批量控制错误提示" @click="controlError = ''"><X class="h-4 w-4" /></Button>
-      </div>
-
-      <div v-if="loading && !loaded" class="task-center__loading" role="status">
-        <LoaderCircle class="h-5 w-5 animate-spin" />正在读取任务记录…
-      </div>
-
-      <div v-else class="task-center__workspace">
+      <div class="task-center__workspace">
         <nav class="task-center__stages" aria-label="制作阶段">
           <div class="task-center__nav-head">
             <p class="task-center__nav-label">制作阶段</p>
-            <Button variant="ghost" size="sm" :disabled="loading" @click="loadPage()">
-              <RefreshCw class="h-4 w-4" :class="loading ? 'animate-spin' : ''" />刷新
+            <Button variant="ghost" size="sm" :disabled="summaryLoading" @click="center.refreshAll()">
+              <RefreshCw class="h-4 w-4" :class="summaryLoading ? 'animate-spin' : ''" />刷新
             </Button>
           </div>
           <button v-for="(section, index) in sections" :key="section.id" type="button"
             class="task-center__stage" :class="{ 'is-selected': browsingSection.id === section.id }"
-            :aria-pressed="browsingSection.id === section.id" @click="browsingCategory = section.id">
+            :aria-pressed="browsingSection.id === section.id" @click="center.selectCategory(section.id)">
             <span class="task-center__stage-number">{{ String(index + 1).padStart(2, '0') }}</span>
-            <span class="task-center__stage-copy"><strong>{{ section.label }}</strong><small>{{ section.groups.length }} 个项目<span v-if="section.groups.some(group => group.activeCount)"> · 进行中</span></small></span>
-            <span class="task-center__stage-count">{{ section.taskCount }}</span>
+            <span class="task-center__stage-copy"><strong>{{ section.label }}</strong><small>{{ summary ? section.project_count : '…' }} 个项目<span v-if="section.active_count > 0"> · 进行中</span></small></span>
+            <span class="task-center__stage-count">{{ summary ? section.task_count : '…' }}</span>
           </button>
         </nav>
         <Card class="task-center__section task-center__stage-detail">
@@ -312,26 +164,33 @@ onDeactivated(() => {
               <h2>{{ browsingSection.label }}</h2>
               <p>{{ browsingSection.description }} · 点击项目查看子任务与批量控制</p>
             </div>
-            <span class="task-center__section-count">{{ browsingSection.taskCount }} 项任务</span>
+            <span class="task-center__section-count">{{ summary ? browsingSection.task_count : '…' }} 项任务</span>
           </div>
 
-          <div v-if="browsingGroups.length" class="task-center__folder-list">
+          <div v-if="groupsError" class="task-center__error" role="alert">
+            项目列表暂未更新：{{ groupsError }}
+            <Button variant="ghost" size="sm" @click="center.refreshGroups()">重试</Button>
+          </div>
+          <div v-if="!groups" class="task-center__loading" role="status">
+            <LoaderCircle v-if="groupsLoading || summaryLoading" class="h-5 w-5 animate-spin" />{{ groupsLoading || summaryLoading ? '正在读取项目摘要…' : '项目摘要尚未加载' }}
+          </div>
+          <div v-else-if="groups.items.length" class="task-center__folder-list" :aria-busy="groupsLoading">
             <button
-              v-for="group in visibleGroups"
-              :key="group.projectId"
+              v-for="group in groups.items"
+              :key="group.project_id"
               type="button"
               class="task-center__folder"
-              :aria-label="`${group.projectName}，${group.tasks.length} 项任务，打开子任务`"
-              @click="openGroup(browsingSection.id, group.projectId, $event)"
+              :aria-label="`${group.project_name}，${group.task_count} 项任务，打开子任务`"
+              @click="openGroup(group, $event)"
             >
               <span class="task-center__folder-icon" aria-hidden="true"><Folder class="h-5 w-5" /></span>
               <span class="task-center__folder-copy">
-                <strong>{{ group.projectName }}</strong>
-                <small>{{ group.tasks.length }} 项任务 · 最近提交 {{ formatTime(group.latest) }}</small>
+                <strong>{{ group.project_name }}</strong>
+                <small>{{ group.task_count }} 项任务 · 最近提交 {{ formatTime(group.latest) }}</small>
               </span>
-              <span class="task-center__group-progress"><strong>{{ group.tasks.filter(task => task.status === 'succeeded').length }} / {{ group.tasks.length }}</strong><small>已完成</small></span>
-              <StatusPill v-if="group.activeCount" :label="`${group.activeCount} 项进行中`" tone="warning" />
-              <StatusPill v-else :label="statusInfo(group.tasks[0].status).label" :tone="statusInfo(group.tasks[0].status).tone" />
+              <span class="task-center__group-progress"><strong>{{ group.succeeded_count }} / {{ group.task_count }}</strong><small>已完成</small></span>
+              <StatusPill v-if="group.active_count" :label="`${group.active_count} 项进行中`" tone="warning" />
+              <StatusPill v-else :label="statusInfo(group.latest_status).label" :tone="statusInfo(group.latest_status).tone" />
               <ChevronRight class="task-center__folder-arrow h-4 w-4" aria-hidden="true" />
             </button>
           </div>
@@ -341,20 +200,13 @@ onDeactivated(() => {
             <span>在项目中提交制作任务后，可在这里跟踪进度。</span>
           </div>
           <nav v-if="groupPageCount > 1" class="task-center__group-pages" aria-label="阶段项目分页">
-            <span>{{ browsingGroups.length }} 个项目 · {{ groupPage }} / {{ groupPageCount }} 页</span>
+            <span>{{ groups?.total ?? 0 }} 个项目 · {{ groupPage }} / {{ groupPageCount }} 页</span>
             <div>
               <Button variant="ghost" size="sm" :disabled="groupPage === 1" @click="groupPage--">上一页</Button>
               <Button variant="ghost" size="sm" :disabled="groupPage === groupPageCount" @click="groupPage++">下一页</Button>
             </div>
           </nav>
         </Card>
-      </div>
-
-      <div v-if="cursor" class="task-center__more">
-        <Button variant="outline" :disabled="loadingMore" @click="loadPage(true)">
-          <LoaderCircle v-if="loadingMore" class="h-4 w-4 animate-spin" />
-          <span v-else>加载更早的任务</span>
-        </Button>
       </div>
     </div>
 
@@ -371,7 +223,7 @@ onDeactivated(() => {
           <div>
             <p class="eyebrow">{{ selectedCategory.label }}</p>
             <h2 id="task-center-dialog-title">{{ selectedProjectName }}</h2>
-            <p>{{ selectedTasks.length }} 项子任务</p>
+            <p>{{ selectedCounts?.task_count ?? 0 }} 项子任务</p>
           </div>
           <div class="task-center__dialog-actions">
             <button ref="dialogCloseButton" type="button" class="task-center__close" aria-label="关闭子任务窗口" @click="closeDialog()">
@@ -382,10 +234,10 @@ onDeactivated(() => {
                 variant="outline"
                 size="sm"
                 class="task-center__batch-control"
-                :disabled="!selectedPausableTasks.length || !!controllingCategory"
+                :disabled="!selectedCounts?.pausable_count || !!controllingCategory"
                 :aria-busy="controllingCategory === selectedGroup.categoryId"
                 :aria-label="`${selectedProjectName}的${selectedCategory.label}：暂停全部任务`"
-                @click="runSelectedGroupControl('pause')"
+                @click="center.control('pause')"
               >
                 <LoaderCircle v-if="controllingCategory === selectedGroup.categoryId" class="h-4 w-4 animate-spin" />
                 <Pause v-else class="h-4 w-4" />
@@ -395,10 +247,10 @@ onDeactivated(() => {
                 variant="outline"
                 size="sm"
                 class="task-center__batch-control"
-                :disabled="!selectedResumableTasks.length || !!controllingCategory"
+                :disabled="!selectedCounts?.resumable_count || !!controllingCategory"
                 :aria-busy="controllingCategory === selectedGroup.categoryId"
                 :aria-label="`${selectedProjectName}的${selectedCategory.label}：启动全部任务`"
-                @click="runSelectedGroupControl('resume')"
+                @click="center.control('resume')"
               >
                 <LoaderCircle v-if="controllingCategory === selectedGroup.categoryId" class="h-4 w-4 animate-spin" />
                 <Play v-else class="h-4 w-4" />
@@ -408,9 +260,9 @@ onDeactivated(() => {
                 variant="outline"
                 size="sm"
                 class="task-center__batch-control text-destructive"
-                :disabled="!selectedActiveTasks.length || !!controllingCategory"
+                :disabled="!selectedCounts?.active_count || !!controllingCategory"
                 :aria-label="`${selectedProjectName}的${selectedCategory.label}：取消此批全部任务`"
-                @click="runSelectedGroupControl('cancel')"
+                @click="center.control('cancel')"
               >
                 <LoaderCircle v-if="controllingCategory === selectedGroup.categoryId" class="h-4 w-4 animate-spin" />
                 <X v-else class="h-4 w-4" />
@@ -424,14 +276,26 @@ onDeactivated(() => {
                 :key="filter.id"
                 type="button"
                 :aria-pressed="taskFilter === filter.id"
-                @click="taskFilter = filter.id"
+                @click="center.selectFilter(filter.id)"
               >{{ filter.label }}</button>
             </div>
           </div>
         </header>
 
-        <div v-if="filteredSelectedTasks.length" class="task-center__task-list">
-          <article v-for="task in filteredSelectedTasks" :key="task.id" class="task-center__task-row">
+      <div v-if="controlError" class="task-center__error" role="alert">
+        <CircleAlert class="h-4 w-4 shrink-0" /><span>{{ controlError }}</span>
+        <Button variant="ghost" size="sm" aria-label="关闭批量控制错误提示" @click="controlError = ''"><X class="h-4 w-4" /></Button>
+      </div>
+
+        <div v-if="itemsError" class="task-center__error" role="alert">
+          任务列表暂未更新：{{ itemsError }}
+          <Button variant="ghost" size="sm" @click="center.refreshItems()">重试</Button>
+        </div>
+        <div v-if="!items" class="task-center__loading" role="status">
+          <LoaderCircle v-if="itemsLoading" class="h-5 w-5 animate-spin" />{{ itemsLoading ? '正在读取当前页任务…' : '任务列表尚未加载' }}
+        </div>
+        <div v-else-if="items.items.length" class="task-center__task-list" :aria-busy="itemsLoading">
+          <article v-for="task in items.items" :key="task.id" class="task-center__task-row">
             <div class="task-center__task-icon" aria-hidden="true"><component :is="taskIcon(task.task_type)" class="h-4 w-4" /></div>
             <strong class="task-center__task-title" :title="task.label">{{ task.label }}</strong>
             <time class="task-center__task-time">{{ formatTime(task.created) }}</time>
@@ -451,8 +315,15 @@ onDeactivated(() => {
         </div>
         <div v-else class="task-center__dialog-empty">
           <ListTodo class="h-8 w-8" aria-hidden="true" />
-          <p>{{ selectedTasks.length ? '当前筛选下没有子任务。' : '此书籍在该分区还没有子任务。' }}</p>
+          <p>{{ selectedCounts?.task_count ? '当前筛选下没有子任务。' : '此书籍在该分区还没有子任务。' }}</p>
         </div>
+        <nav v-if="taskPageCount > 1" class="task-center__group-pages" aria-label="任务分页">
+          <span>{{ items?.total ?? selectedCounts?.task_count ?? 0 }} 项任务 · {{ taskPage }} / {{ taskPageCount }} 页</span>
+          <div>
+            <Button variant="ghost" size="sm" :disabled="taskPage === 1 || itemsLoading" @click="taskPage--">上一页</Button>
+            <Button variant="ghost" size="sm" :disabled="taskPage === taskPageCount || itemsLoading" @click="taskPage++">下一页</Button>
+          </div>
+        </nav>
       </section>
     </div>
   </div>

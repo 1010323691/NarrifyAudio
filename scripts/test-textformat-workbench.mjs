@@ -495,7 +495,9 @@ test('manual state refresh explicitly requests a read-only server snapshot', asy
     },
   })
   assert.equal(await wb.refreshState({ recover: false }), true)
-  assert.deepEqual(readOptions, { recover: false })
+  assert.equal(readOptions.recover, false)
+  assert.deepEqual(JSON.parse(JSON.stringify(readOptions.list)), { page: 1, page_size: 10, q: '', filter: 'all' })
+  assert.ok(readOptions.signal)
   assert.equal(wb.nextTask.value.progress, 30)
   assert.equal(calls.post, 0)
   assert.equal(calls.wait, 0)
@@ -628,4 +630,61 @@ test('leaving the page during upload clears busy state and discards late results
   pending.resolve({ file_id: 'pending', name: 'pending.txt', size: 12, path: '', project_id: 'P1' })
   await adding
   assert.equal(view.sourceFiles.value.length, 0)
+})
+
+test('server chapter navigation keeps page-local moves and reads adjacent pages with global wrapping', async () => {
+  const requests = []
+  const chapters = makeChapters(23)
+  const { wb } = setupWorkbench({ getState: async (_, options) => {
+    const p = options.list.page ?? 1
+    requests.push(p)
+    return { flow: null, version: readyVersion(chapters.slice((p - 1) * 10, p * 10)), next_task: null, active_tasks: [], pagination: { page: p, page_size: 10, total: 23, counts: { all: 23 } } }
+  } })
+  await wb.refreshState({ recover: false })
+  wb.page.value = 2
+  await new Promise(resolve => setImmediate(resolve))
+  wb.selectedKey.value = 'c11'
+  await wb.navigateChapter(1)
+  assert.equal(wb.selectedKey.value, 'c12')
+  assert.equal(wb.page.value, 2)
+  wb.ensureChapterPage('c12')
+  assert.equal(wb.page.value, 2)
+  wb.selectedKey.value = 'c20'
+  await wb.navigateChapter(1)
+  assert.equal(wb.page.value, 3)
+  assert.equal(wb.selectedKey.value, 'c21')
+  await wb.navigateChapter(-1)
+  assert.equal(wb.page.value, 2)
+  assert.equal(wb.selectedKey.value, 'c20')
+  wb.page.value = 1
+  await new Promise(resolve => setImmediate(resolve))
+  wb.selectedKey.value = 'c1'
+  await wb.navigateChapter(-1)
+  assert.equal(wb.page.value, 3)
+  assert.equal(wb.selectedKey.value, 'c23')
+  await wb.navigateChapter(1)
+  assert.equal(wb.page.value, 1)
+  assert.equal(wb.selectedKey.value, 'c1')
+  assert.deepEqual(requests, [1, 2, 3, 2, 1, 3, 1])
+})
+
+test('a filter change invalidates a delayed cross-page navigation', async () => {
+  const delayed = deferred()
+  const chapters = makeChapters(20)
+  const state = (page, selected = chapters.slice((page - 1) * 10, page * 10)) => ({ flow: null, version: readyVersion(selected), next_task: null, active_tasks: [], pagination: { page, page_size: 10, total: 20, counts: { all: 20 } } })
+  const { wb } = setupWorkbench({ getState: async (_, options) => {
+    if (options.list.q === 'new') return state(1, [chapters[2]])
+    if (options.list.page === 2) return delayed.promise
+    return state(1)
+  } })
+  await wb.refreshState({ recover: false })
+  wb.selectedKey.value = 'c10'
+  const navigation = wb.navigateChapter(1)
+  wb.query.value = 'new'
+  await new Promise(resolve => setImmediate(resolve))
+  delayed.resolve(state(2))
+  await navigation
+  assert.equal(wb.page.value, 1)
+  assert.deepEqual(Array.from(wb.chapters.value, chapter => chapter.key), ['c3'])
+  assert.notEqual(wb.selectedKey.value, 'c11')
 })

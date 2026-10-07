@@ -4,7 +4,8 @@ from __future__ import annotations
 from datetime import datetime
 import shutil
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from typing import Annotated
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -23,13 +24,17 @@ from ..services.admin_storage import (
     project_storage_path,
 )
 
+from ..services.admin_lists import resource_page
+
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-resources"])
 
 
 @router.get("/resources")
-def resources(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+def resources(_: User = Depends(require_admin), db: Session = Depends(get_db), light: bool = False,
+              page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=100)] = 20) -> dict:
     root = configured_storage_root(db)
     disk = shutil.disk_usage(root)
+    if light: return resource_page(db, root, disk, MUSIC_LIBRARY_DIR, page, page_size)
     file_rows = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
     registered = {
         username: {"count": int(count), "size_bytes": int(size)}

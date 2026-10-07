@@ -1,3 +1,4 @@
+import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 // BGM API (背景音乐：段落分析 / 匹配 / 手动干预 / 混音；后端 /api/bgm)。
 // 瘦客户端：只做 HTTP 封装，无处理逻辑。
 
@@ -12,8 +13,8 @@ import type {
 } from '@/types'
 
 /** All chapter rows (disk-state basis = 02_split_text stems). Read-only. */
-export function getChapters(): Promise<BgmChaptersResult> {
-  return http.get<BgmChaptersResult>('/api/bgm/chapters')
+export function getChapters(options?: ListQuery, signal?: AbortSignal, keysOnly = false): Promise<BgmChaptersResult & { pagination?: ListPagination }> {
+  return http.get(`/api/bgm/chapters?${listQuery(options, { keys_only: keysOnly || undefined })}`, { signal })
 }
 
 /** Preview URL of a finished mix (08_bgm is a workspace dir — the shared

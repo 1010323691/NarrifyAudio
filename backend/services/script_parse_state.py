@@ -17,8 +17,9 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
@@ -36,6 +37,7 @@ from ..platform.storage import (
 from ..core.filenames import filename_aliases, legacy_storage_name
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..platform.task_submission import TaskSubmissionError, submit_task_record
+from .list_paging import page_meta, page_slice
 from .task_operations import owned_project
 from .text_format_workbench import FLOW_TASK_TYPES, _version_from_flow
 
@@ -224,22 +226,17 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
     }
 
 
-def _parse_tasks(db: Session, owner_id: str, project_id: str) -> list[Task]:
-    """Every script.parse task of the project, newest first. The result
-    relationship stays lazy — a parse result is megabytes of entries and the
-    aggregate never touches ``task.result`` (it reads scalars via JSON item
-    extraction below), so it is never loaded."""
-    return list(
-        db.scalars(
-            select(Task)
-            .where(
-                Task.owner_id == owner_id,
-                Task.project_id == project_id,
-                Task.task_type == _PARSE_TASK_TYPE,
-            )
-            .order_by(Task.created_at.desc(), Task.id.desc())
-        ).all()
-    )
+def _parse_tasks(db: Session, owner_id: str, project_id: str, names: list[str] | None = None, input_ids: list[str] | None = None) -> list[SimpleNamespace]:
+    """Read only task scalars/identity: no config payload, result or events."""
+    rows = db.execute(select(Task.id, Task.status, Task.progress, Task.error_message,
+        Task.created_at, Task.finished_at, Task.payload["source_name"].as_string().label("source_name"),
+        Task.payload["input_file_id"].as_string().label("input_file_id"))
+        .where(Task.owner_id == owner_id, Task.project_id == project_id, Task.task_type == _PARSE_TASK_TYPE,
+            or_(Task.payload["source_name"].as_string().in_([alias for name in names for alias in filename_aliases(name)]),
+                Task.payload["input_file_id"].as_string().in_(input_ids or [])) if names is not None else True)
+        .order_by(Task.created_at.desc(), Task.id.desc())).mappings().all()
+    return [SimpleNamespace(**{k: v for k, v in row.items() if k not in {"source_name", "input_file_id"}},
+        payload={"source_name": row["source_name"], "input_file_id": row["input_file_id"]}) for row in rows]
 
 
 def _active_parse_names(db: Session, owner_id: str, project_id: str) -> set[str]:
@@ -340,8 +337,8 @@ def _build_file_states(
     result, judged against the CURRENT input digest. Task execution state and
     result availability are separate axes: a failed re-parse with an older
     still-valid result reports both (status failed + result usable)."""
-    tasks = _parse_tasks(db, user.id, project.id)
     split_rows = _split_files(db, user, project.id)
+    tasks = _parse_tasks(db, user.id, project.id, names, [item.id for name in names if (item := _resolve_split_name(split_rows, name)) is not None])
     split_rows_by_id = {item.id: item for item in split_rows.values()}
     latest_by_id: dict[str, Task] = {}
     success_by_id: dict[str, Task] = {}
@@ -448,7 +445,7 @@ def _file_lite(item: ProjectFile) -> dict:
     }
 
 
-def get_state(db: Session, user: User, project_id: str) -> dict:
+def get_state(db: Session, user: User, project_id: str, *, page: int | None = None, page_size: int = 10, query: str = "", filter: str = "all", keys_only: bool = False, summary_only: bool = False) -> dict:
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise ScriptParseError(404, "项目不存在")
@@ -461,11 +458,67 @@ def get_state(db: Session, user: User, project_id: str) -> dict:
         names = [f["name"] for f in source["legacy_files"]] + list(source.get("disk_only") or [])
     else:
         names = []
+    if summary_only:
+        # Independent read model: exact whole-book controls, never full row bodies.
+        states = _build_file_states(db, user, project, names)
+        active = [(item.get("latest_task") or {}) for item in states
+                  if (item.get("latest_task") or {}).get("status") in ACTIVE_TASK_STATUSES]
+        done = sum(item.get("result_status") == "usable" and
+                   (item.get("latest_task") or {}).get("status") not in ACTIVE_TASK_STATUSES | {"failed", "timeout", "cancelled"}
+                   for item in states)
+        return {"total": len(names), "done_count": done, "active_task_ids": list(dict.fromkeys(t["id"] for t in active))}
+    if page is None and not query and filter == "all" and not keys_only:
+        return {"source": source, "text_format_busy": _text_format_busy(db, user.id, project.id),
+                "files": _build_file_states(db, user, project, names)}
+    refs = []
+    if source["mode"] == "version":
+        files = source["version"]["files"]
+        refs = [{**c, "name": files[c.get("seq", 1) - 1]["name"]} for c in source["version"]["chapters"]
+                if 0 < c.get("seq", 1) <= len(files)]
+    else:
+        refs = [{"name": name, "seq": i + 1, "title": Path(name).stem, "numStr": str(i + 1), "chars": 0} for i, name in enumerate(names)]
+    q = query.strip().casefold()
+    matching = [c for c in refs if not q or q in c["name"].casefold() or q in c.get("title", "").casefold()
+                or q in str(c.get("seq", "")) or q in str(c.get("numStr", ""))]
+    states = None
+    if filter != "all":
+        states = _build_file_states(db, user, project, [c["name"] for c in matching])
+        def matches(item):
+            active = (item.get("latest_task") or {}).get("status") in ACTIVE_TASK_STATUSES
+            done = not active and item.get("result_status") == "usable" and (item.get("latest_task") or {}).get("status") not in {"failed", "timeout", "cancelled"}
+            if filter == "done":
+                return done
+            if filter == "failed":
+                return not active and (item.get("latest_task") or {}).get("status") in {"failed", "timeout"}
+            return not done
+        eligible = {item["name"] for item in states if matches(item)}
+        matching = [c for c in matching if c["name"] in eligible]
+    if keys_only:
+        # Explicit bulk selection may fetch lightweight input references, never
+        # task/results bodies or previews for the whole book.
+        states = states or _build_file_states(db, user, project, [c["name"] for c in matching])
+        matching_names = {c["name"] for c in matching}
+        return {"items": [{"name": item["name"], "input": item["input"], "result_status": item.get("result_status"), "status": (item.get("latest_task") or {}).get("status")} for item in states
+                          if item["name"] in matching_names and (item.get("latest_task") or {}).get("status") not in ACTIVE_TASK_STATUSES]}
+    visible = page_slice(matching, page, page_size) if page is not None else matching
+    visible_names = [c["name"] for c in visible]
+    if states is None:
+        states = _build_file_states(db, user, project, visible_names)
+    else:
+        states = [item for item in states if item["name"] in set(visible_names)]
+    if page is not None:
+        source = {**source}
+        if source["mode"] == "version":
+            source["version"] = {**source["version"], "chapters": visible,
+                                 "files": [f for f in source["version"]["files"] if f["name"] in set(visible_names)]}
+        elif source["mode"] == "legacy":
+            source["legacy_files"] = [f for f in source["legacy_files"] if f["name"] in set(visible_names)]
+            source["disk_only"] = [n for n in source["disk_only"] if n in set(visible_names)]
     return {
-        "source": source,
-        "text_format_busy": _text_format_busy(db, user.id, project.id),
-        "files": _build_file_states(db, user, project, names),
+        "source": source, "text_format_busy": _text_format_busy(db, user.id, project.id), "files": states,
+        **({"chapter_refs": visible, "pagination": page_meta(len(matching), page, page_size, {"all": len(refs)})} if page is not None else {}),
     }
+
 
 
 def _resolved_prompts():

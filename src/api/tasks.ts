@@ -97,3 +97,43 @@ export function streamAllTasks(
     : `${API_BASE}/api/v1/tasks/stream`
   return openSse(url, onEvent, onDone, onConnection)
 }
+
+export interface TaskCenterCounts {
+  task_count: number
+  succeeded_count: number
+  active_count: number
+  pausable_count: number
+  resumable_count: number
+}
+export interface TaskCenterSummary {
+  items: Array<{ category: TaskCenterCategoryId; task_count: number; project_count: number; active_count: number }>
+}
+export interface TaskCenterGroup extends TaskCenterCounts {
+  project_id: string
+  project_name: string
+  latest: number
+  latest_status: TaskCenterItem['status']
+}
+export interface TaskCenterPage<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
+}
+export type TaskCenterItems = TaskCenterPage<TaskCenterItem> & { counts: TaskCenterCounts }
+export type TaskCenterFilter = 'all' | 'active' | 'completed'
+
+export function getTaskCenterSummary(signal: AbortSignal): Promise<TaskCenterSummary> {
+  return http.get('/api/v1/tasks/center/summary', { signal })
+}
+export function getTaskCenterGroups(category: TaskCenterCategoryId, page: number, signal: AbortSignal): Promise<TaskCenterPage<TaskCenterGroup>> {
+  const query = new URLSearchParams({ category, page: String(page) })
+  return http.get(`/api/v1/tasks/center/groups?${query}`, { signal })
+}
+export function getTaskCenterItems(category: TaskCenterCategoryId, projectId: string, filter: TaskCenterFilter, page: number, signal: AbortSignal): Promise<TaskCenterItems> {
+  const query = new URLSearchParams({ category, project_id: projectId, filter, page: String(page) })
+  return http.get(`/api/v1/tasks/center/items?${query}`, { signal })
+}
+export function controlTaskCenterGroup(projectId: string, category: TaskCenterCategoryId, action: 'pause' | 'resume' | 'cancel', signal: AbortSignal): Promise<{ changed: number }> {
+  return http.post('/api/v1/tasks/batch-control?compact=true', { project_id: projectId, category, action }, { signal })
+}

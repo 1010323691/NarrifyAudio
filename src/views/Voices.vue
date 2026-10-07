@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import Pager from '@/views/textformat/Pager.vue'
+import { useListPage } from '@/composables/useListPage'
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
@@ -99,6 +101,9 @@ watch(pickerTarget, (t) => {
 // only the source name differs.
 const mergeSource = ref<string | null>(null)
 const mergeQuery = ref('')
+const mergePage = ref(1)
+const mergeTotal = ref(0)
+watch(mergeQuery, () => { mergePage.value = 1 })
 const mergeTarget = ref<string | null>(null)
 const mergeConfirm = ref(false)
 const mergeBusy = ref(false)
@@ -165,10 +170,20 @@ function overlayKeydown(event: KeyboardEvent) {
 watch(mergeSourceItem, (t) => {
   if (!t && mergeSource.value) closeMerge()
 })
+watch([mergeSource, mergeQuery, mergePage], async () => {
+  if (!mergeSource.value) return
+  const isCurrent = captureScope()
+  const source = mergeSource.value, q = mergeQuery.value, page = mergePage.value
+  try {
+    const result = await withinScope(listVoices(script, { page, page_size: 10, q, filter: 'all' }, undefined, false, true), isCurrent)
+    if (mergeSource.value === source && mergeQuery.value === q && mergePage.value === page) { mergeTargetItems.value = result.speakers; mergeTotal.value = result.pagination?.total ?? 0 }
+  } catch { /* The source row stays available while retrying a search. */ }
+})
 // Searchable target list: every character except the source itself (auto-filter).
+const mergeTargetItems = ref<VoiceItem[]>([])
 const mergeOptions = computed(() => {
   const q = mergeQuery.value.trim().toLowerCase()
-  return speakers.value.filter(
+  return mergeTargetItems.value.filter(
     (s) => s.name !== mergeSource.value && (!q || s.name.toLowerCase().includes(q)),
   )
 })
@@ -233,9 +248,9 @@ const cloneBlocked = computed(() => cloneBusy.value || foundationRunning.value |
 
 // Progress + readiness (denominator = non-alias characters).
 const nonAlias = computed(() => speakers.value.filter((s) => !s.alias_of))
-const foundationDone = computed(() => nonAlias.value.filter((s) => s.foundation_status === 'done').length)
-const cloneDone = computed(() => nonAlias.value.filter((s) => s.clone_status === 'done').length)
-const readyCount = computed(() => speakers.value.filter((s) => s.status === 'ready').length)
+const foundationDone = computed(() => listPagination.value?.counts.foundation ?? nonAlias.value.filter((s) => s.foundation_status === 'done').length)
+const cloneDone = computed(() => listPagination.value?.counts.clone ?? nonAlias.value.filter((s) => s.clone_status === 'done').length)
+const readyCount = computed(() => listPagination.value?.counts.ready ?? speakers.value.filter((s) => s.status === 'ready').length)
 
 type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'success' | 'warning' | 'outline'
 interface PhaseBadge { label: string; variant: BadgeVariant; spin: boolean }
@@ -303,6 +318,8 @@ function cloneBadge(v: VoiceItem): PhaseBadge {
   return { label: '未制作', variant: 'secondary', spin: false }
 }
 
+const listPage = useListPage(loadVoices, () => { speakers.value = []; mergeTargetItems.value = []; mergeTotal.value = 0 })
+const listPagination = listPage.pagination
 async function loadVoices() {
   const request = ++voicesRequest
   const context = `${auth.user?.id || ''}:${project.activeProjectId}:${script}`
@@ -310,8 +327,9 @@ async function loadVoices() {
   voicesLoading.value = true
   voicesLoadError.value = ''
   try {
-    const r = await listVoices(script)
+    const r = await listVoices(script, listPage.query, listPage.begin())
     if (!current()) return
+    listPage.received(r.pagination)
     hasScript.value = r.has_script
     speakers.value = r.speakers
   } catch (e: any) {
@@ -679,11 +697,12 @@ watch(
         <template #title>角色声音核对</template>
         <template #description>选择角色检查声音，使用底部操作生成基础与候选音色。</template>
         <template #metrics>
-          <div class="workbench-context-metric"><strong>{{ speakers.length }}</strong>角色总数</div>
+          <div class="workbench-context-metric"><strong>{{ listPagination?.counts.all ?? speakers.length }}</strong>角色总数</div>
           <div class="workbench-context-metric"><strong class="!text-emerald-600 dark:!text-emerald-400">{{ readyCount }}</strong>音色已就绪</div>
         </template>
       </WorkbenchContextBar>
       <VoicesWorkbench
+        remote :pagination="listPagination" @request-page="listPage.request"
         :speakers="speakers" :prompts="prompts" :loading="voicesLoading" :load-error="voicesLoadError" :has-script="hasScript"
         :foundation-blocked="foundationBlocked" :clone-blocked="cloneBlocked" :foundation-busy="foundationBusy"
         :foundation-running="foundationRunning" :clone-running="cloneRunning" :gender-busy="genderBusy"
@@ -738,8 +757,8 @@ watch(
 
       <WorkbenchActionBar>
         <template #summary>
-          <strong>声音就绪 {{ readyCount }} / {{ speakers.length }} 个角色</strong>
-          <p class="mt-1 text-muted-foreground">基础 {{ foundationDone }} / {{ nonAlias.length }} · 克隆音频 {{ cloneDone }} / {{ nonAlias.length }}</p>
+          <strong>声音就绪 {{ readyCount }} / {{ listPagination?.counts.all ?? speakers.length }} 个角色</strong>
+          <p class="mt-1 text-muted-foreground">基础 {{ foundationDone }} / {{ (listPagination?.counts.non_alias ?? nonAlias.length) }} · 克隆音频 {{ cloneDone }} / {{ (listPagination?.counts.non_alias ?? nonAlias.length) }}</p>
         </template>
         <div class="flex flex-wrap items-center gap-2" role="group" aria-label="基础生成">
           <span class="text-xs text-muted-foreground">基础生成</span>
@@ -931,6 +950,7 @@ watch(
             没有匹配的目标角色。
           </p>
         </div>
+        <Pager :page="mergePage" :page-count="Math.max(1, Math.ceil(mergeTotal / 10))" :total="mergeTotal" :page-size="10" unit="个角色" @update:page="mergePage = $event" />
 
         <Alert v-if="mergeError" variant="destructive">{{ mergeError }}</Alert>
 

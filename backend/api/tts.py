@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import threading
 import uuid
@@ -23,18 +24,20 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
 
 from ..core import pathio
 from ..core.config import get_config
 from ..core.file_lock import exclusive_file_lock
-from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all
+from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all, merged_audio_filename
+from ..engines.book import parse_chapter_number
 from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
+from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
 from ..engines.merge import boundary_gap_ms
@@ -248,8 +251,36 @@ def _fold_script(order: list[str], counts: dict[str, int], data) -> bool:
     return True
 
 
+_SPEAKER_CACHE: OrderedDict = OrderedDict()
+_SPEAKER_CACHE_LOCK = threading.Lock()
+
+
+def _script_speakers(path):
+    try:
+        stat = path.stat()
+    except OSError:
+        return False, [], {}
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    with _SPEAKER_CACHE_LOCK:
+        if key in _SPEAKER_CACHE:
+            _SPEAKER_CACHE.move_to_end(key)
+            return _SPEAKER_CACHE[key]
+    order, counts = [], {}
+    try:
+        has_script = _fold_script(order, counts, json.loads(path.read_text("utf-8")))
+    except (OSError, ValueError, UnicodeError):
+        return False, [], {}
+    value = (has_script, order, counts)
+    with _SPEAKER_CACHE_LOCK:
+        _SPEAKER_CACHE[key] = value
+        while len(_SPEAKER_CACHE) > 2048: _SPEAKER_CACHE.popitem(last=False)
+    return value
+
+
 @router.get("/voices")
-def list_voices(script: str | None = None) -> dict:
+def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=1)] = None,
+                page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+                q: str = "", filter: str = "all", summary_only: bool = False, keys_only: bool = False) -> dict:
     """Detected characters + their voice-config state (ready/pending) + preview paths.
 
     ``script`` names the parsed JSON (in ``03_parsed_json/``) to read; when omitted the
@@ -279,14 +310,11 @@ def list_voices(script: str | None = None) -> dict:
     order: list[str] = []
     counts: dict[str, int] = {}
     for sp in script_paths:
-        if not sp.exists():
-            continue
-        try:
-            data = json.loads(sp.read_text("utf-8"))
-        except Exception:  # noqa: BLE001 — a corrupt file just contributes no speakers
-            data = []
-        if _fold_script(order, counts, data):
-            has_script = True
+        found, file_order, file_counts = _script_speakers(sp)
+        has_script = has_script or found
+        for name in file_order:
+            if name not in counts: order.append(name)
+            counts[name] = counts.get(name, 0) + file_counts[name]
 
     voice_config: dict = {}
     if vc_path.exists():
@@ -306,6 +334,19 @@ def list_voices(script: str | None = None) -> dict:
     # ties keep first-appearance (or voice_config) order.
     names = sorted(order if has_script else list(voice_config.keys()),
                    key=lambda sp: -counts.get(sp, 0))
+
+    ready_names = {n for n in names if voice_config.get(n, {}).get("alias_of") or _voice_usable(voice_config.get(n, {}))}
+    counts_out = {"all": len(names), "ready": len(ready_names), "pending": len(names) - len(ready_names),
+                  "non_alias": sum(not voice_config.get(n, {}).get("alias_of") for n in names),
+                  "foundation": sum(not voice_config.get(n, {}).get("alias_of") and _foundation_status(voice_config.get(n, {})) == "done" for n in names),
+                  "clone": sum(not voice_config.get(n, {}).get("alias_of") and _clone_status(voice_config.get(n, {})) == "done" for n in names)}
+    matching = [n for n in names if (filter == "all" or n not in ready_names) and
+                (not q.strip() or q.strip().casefold() in (n + " " + voice_config.get(n, {}).get("alias_of", "")).casefold())]
+    pagination = page_meta(len(matching), page or 1, page_size, counts_out)
+    if keys_only:
+        return {"has_script": has_script, "script_path": script_path_out, "voice_config_path": str(vc_path),
+                "speakers": [{"name": n, "line_count": counts.get(n, 0), "status": "ready" if n in ready_names else "pending", "alias_of": voice_config.get(n, {}).get("alias_of", "")} for n in (page_slice(matching, page, page_size) if page is not None else matching)], "pagination": pagination}
+    names = [] if summary_only else page_slice(matching, page, page_size) if page is not None else matching
 
     def _preview_of(ref: str) -> str:
         """A stored reference-audio path, relative to 04_voice_profiles/ (the UI plays it
@@ -357,6 +398,7 @@ def list_voices(script: str | None = None) -> dict:
         "script_path": script_path_out,
         "voice_config_path": str(vc_path),
         "speakers": speakers,
+        **({"pagination": pagination} if page is not None or summary_only else {}),
     }
 
 
@@ -867,6 +909,58 @@ def batch_status_files(req: BatchStatusRequest) -> dict:
 # ``list[...]`` default is treated as a JSON request body, and the repeated ``?scripts=``
 # params are silently ignored (the 待合成 rows would all stay zero). ``Annotated`` keeps
 # the plain ``None`` default, so direct (test) calls still work without going through FastAPI.
+@router.post("/batch-list")
+@router.get("/batch-list")
+def batch_list(page: Annotated[int, Query(ge=1)] = 1,
+               page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+               q: str = "", filter: str = "all", keys_only: bool = False,
+               ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db),
+               selected: Annotated[list[str] | None, Body(max_length=10000)] = None) -> dict:
+    layout = resolve_layout()
+    def order(name):
+        match = re.search(r"第\s*([0-9一二三四五六七八九十百千零两]+)\s*章", name)
+        number = parse_chapter_number(match.group(1)) if match else None
+        return (number if number is not None else float("inf"), name)
+    names = sorted((p.name for p in resolve_parsed_json_all()), key=order) if layout.parsed_json is not None else []
+    vc = _read_voice_config(layout) if names else {}
+    states = entry_states(db, ctx, ["tts.batch"])
+    def state(row):
+        if states.get(row["name"]) in {"active", "failed"}:
+            return states[row["name"]]
+        return "done" if row.get("complete") else "blocked" if row.get("missing") else "stale" if row.get("stale_speakers") else "pending"
+    def enrich(name):
+        row = _cached_file_batch_status(name, layout, vc)
+        stem = Path(name).stem
+        return {**row, "merged": (layout.audio_merge / merged_audio_filename(stem)).is_file(), "mixed": (layout.bgm / (stem + ".mp3")).is_file()}
+    result = page_enriched(names, enrich, state,
+                           page, page_size, q, filter, keys_only)
+    result["files"] = result.pop("items")
+    available = set(names)
+    result["missing_selected"] = [n for n in selected or [] if n not in available]
+    return result
+
+
+@router.post("/merge-list")
+@router.get("/merge-list")
+def merge_list(page: Annotated[int, Query(ge=1)] = 1,
+               page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+               q: str = "", filter: str = "all", keys_only: bool = False,
+               ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db),
+               selected: Annotated[list[str] | None, Body(max_length=10000)] = None) -> dict:
+    layout = resolve_layout()
+    names = sorted(p.name for p in layout.audio_chunk.iterdir() if p.is_dir()) if layout.audio_chunk and layout.audio_chunk.exists() else []
+    def enrich(name):
+        row = _package_merge_status(name, layout)
+        target = layout.audio_merge / merged_audio_filename(name)
+        return {**row, "merged_filename": target.name if row.get("complete") and target.is_file() else None}
+    states = entry_states(db, ctx, ["tts.merge"])
+    result = page_enriched(names, enrich, lambda r: "running" if states.get(r["name"]) == "active" else "failed" if states.get(r["name"]) == "failed" else "done" if r["merged_filename"] else "ready" if r.get("complete") else "blocked", page, page_size, q, filter, keys_only)
+    result["packages"] = result.pop("items")
+    available = set(names)
+    result["missing_selected"] = [n for n in selected or [] if n not in available]
+    return result
+
+
 @router.get("/batch-status")
 def batch_status(script: str | None = None,
                  scripts: Annotated[list[str] | None, Query()] = None) -> dict:

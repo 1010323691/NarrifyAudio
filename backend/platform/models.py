@@ -154,6 +154,8 @@ class Task(Base):
     __table_args__ = (
         ForeignKeyConstraint(["project_id", "owner_id"], ["projects.id", "projects.owner_id"], name="fk_tasks_project_owner"),
         Index("ix_tasks_scope_status", "owner_id", "project_id", "status"),
+        Index("ix_tasks_owner_created", "owner_id", "created_at", "id"),
+        Index("ix_tasks_entry_created", "owner_id", "project_id", "task_type", "created_at", "id"),
         UniqueConstraint("owner_id", "idempotency_key", name="uq_tasks_owner_idempotency"),
         CheckConstraint("progress >= 0 and progress <= 100", name="ck_tasks_progress"),
         CheckConstraint("status in ('pending','queued','running','paused','cancelling','cancelled','succeeded','failed','retrying','timeout')", name="ck_tasks_status"),
@@ -189,7 +191,10 @@ class TaskEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="events")
-    __table_args__ = (UniqueConstraint("task_id", "sequence", name="uq_task_event_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("task_id", "sequence", name="uq_task_event_sequence"),
+        Index("ix_task_events_type_sequence", "task_id", "event_type", "sequence"),
+    )
 
 
 class TaskResult(Base):

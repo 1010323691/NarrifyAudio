@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
+from typing import Annotated
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..platform.database import get_db
 from ..platform.deps import require_authenticated_user
 from ..platform.models import QuotaTransaction, User, UserQuotaAccount
+
+from ..services.list_paging import quota_page
 
 router = APIRouter(prefix="/api/v1/quota", tags=["quota"])
 
@@ -30,7 +33,10 @@ def get_quota(user: User = Depends(require_authenticated_user), db: Session = De
 
 
 @router.get("/transactions")
-def list_quota_transactions(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> list[dict]:
+def list_quota_transactions(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
+                            page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+                            q: str = "", filter: str = "all", tz_offset: int = 0):
+    if page is not None: return quota_page(db, user, page, page_size, q, filter, tz_offset)
     rows = db.scalars(
         select(QuotaTransaction)
         .where(QuotaTransaction.user_id == user.id)

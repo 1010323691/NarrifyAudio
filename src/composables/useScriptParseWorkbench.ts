@@ -17,7 +17,8 @@ import { useToast } from '@/components/ui/toast'
 import { ApiError } from '@/api/client'
 import {
   cancelParseBatch,
-  getScriptParseState,
+  getScriptParseState, getScriptParseSummary, type ScriptParseSummary,
+  getParseSelection,
   runScriptParse,
   scriptParseResultUrl,
   type ScriptParseFile,
@@ -137,7 +138,11 @@ export function useScriptParseWorkbench() {
 
   // --- server-side state -----------------------------------------------------
   const state = ref<ScriptParseState | null>(null)
+  const selectedRowCache = new Map<string, ParseRow>()
+  const selectedInputs = reactive(new Map<string, ScriptParseInput | null>())
   const stateError = ref('')
+  const summary = ref<ScriptParseSummary | null>(null)
+  const summaryError = ref('')
   const loading = ref(false)
   const submitting = ref(false)
 
@@ -165,6 +170,7 @@ export function useScriptParseWorkbench() {
   const sourceCache = new Map<string, string>()
 
   let loadToken = 0
+  let selectionToken = 0
   let liveTimer: number | undefined
   let stateAbort = new AbortController()
   let resultToken = 0
@@ -188,6 +194,7 @@ export function useScriptParseWorkbench() {
         result_status: f?.result_status ?? null,
       }
     }
+    if (st.chapter_refs) return st.chapter_refs.map(c => merge(c.name, c.seq, c.numStr, c.title, c.chars))
     if (st.source.mode === 'version' && st.source.version) {
       const v = st.source.version
       // 分册文件按 seq 索引：第 N 章 = files[N-1]（与排版工作台同口径）。
@@ -253,17 +260,44 @@ export function useScriptParseWorkbench() {
   }))
 
   // --- stats / selection --------------------------------------------------------
-  const total = computed(() => rows.value.length)
-  const doneCount = computed(() => rows.value.filter((r) => r.status === 'done').length)
-  const pendingCount = computed(() => total.value - doneCount.value)
-  const busy = computed(() => rows.value.some((r) => r.status === 'active'))
+  const total = computed(() => state.value?.pagination?.counts.all ?? rows.value.length)
+  const controlsReady = computed(() => !state.value?.pagination || summary.value != null)
+  const doneCount = computed(() => state.value?.pagination ? summary.value?.done_count ?? null : rows.value.filter((r) => r.status === 'done').length)
+  const pendingCount = computed(() => doneCount.value == null ? null : Math.max(0, total.value - doneCount.value))
+  const activeIds = computed(() => {
+    const snapshots = taskStore.projectTasks
+    const ids = new Set<string>([...(summary.value?.active_task_ids ?? []), ...rows.value.filter(r => r.status === 'active' && r.taskId).map(r => r.taskId!)])
+    for (const task of snapshots) {
+      if (task.module === 'script' && ACTIVE.has(task.status)) ids.add(task.id)
+      else if (!ACTIVE.has(task.status)) ids.delete(task.id)
+    }
+    return ids
+  })
+  const busy = computed(() => activeIds.value.size > 0)
 
-  const selectedRows = computed(() => rows.value.filter((r) => selected.value[r.chapter.name]))
+  function matchesSelectedInput(row: ParseRow) {
+    return !selectedInputs.has(row.chapter.name) || row.chapter.input?.sha256 === selectedInputs.get(row.chapter.name)?.sha256
+  }
+  watch(rows, current => {
+    for (const row of current) if (matchesSelectedInput(row)) selectedRowCache.set(row.chapter.name, row)
+  }, { flush: 'sync' })
+  const selectedRows = computed(() => Object.keys(selected.value).filter(name => selected.value[name]).map(name => {
+    const current = rows.value.find(row => row.chapter.name === name)
+    const row = current && matchesSelectedInput(current) ? current : selectedRowCache.get(name)
+    if (!row) return undefined
+    // Only the selected input reference is authoritative. Execution/result
+    // state for that same input keeps following current rows and SSE.
+    return selectedInputs.has(name) ? { ...row, chapter: { ...row.chapter, input: selectedInputs.get(name) ?? null } } : row
+  }).filter((row): row is ParseRow => !!row))
   const selectedCount = computed(() => selectedRows.value.length)
   const selectedDoneCount = computed(() => selectedRows.value.filter((r) => r.status === 'done').length)
   const selectedStaleCount = computed(() => selectedRows.value.filter((r) => r.status === 'stale').length)
 
   function pruneSelection() {
+    if (state.value?.pagination) {
+      if (selectedName.value && !chapters.value.some(c => c.name === selectedName.value)) selectedName.value = null
+      return
+    }
     const names = new Set(chapters.value.map((c) => c.name))
     for (const k of Object.keys(selected.value)) if (!names.has(k)) delete selected.value[k]
     if (selectedName.value && !names.has(selectedName.value)) selectedName.value = null
@@ -272,6 +306,7 @@ export function useScriptParseWorkbench() {
   /** 范围选择作用于全量章节清单（不随搜索/过滤），并排除已有活跃任务的章节
    *  （服务端 409 兜底）。pending = 非已完成（含失败/取消/输入已变更——都可重新解析）。 */
   function selectScope(scope: 'pending' | 'all' | 'done' | 'failed') {
+    if (state.value?.pagination) { void selectRemote(scope); return }
     selected.value = {}
     for (const r of rows.value) {
       if (r.status === 'active') continue
@@ -285,24 +320,55 @@ export function useScriptParseWorkbench() {
   }
 
   function selectFiltered() {
-    if (!project.activeProjectId || busy.value || loading.value || stateError.value) return
+    if (!project.activeProjectId || busy.value || loading.value || stateError.value || !controlsReady.value) return
+    if (state.value?.pagination) { void selectRemote(filter.value, query.value); return }
     selected.value = {}
     for (const row of filteredRows.value) {
       if (row.status !== 'active') selected.value[row.chapter.name] = true
     }
   }
 
+  async function selectRemote(scope: string, q = '') {
+    const pid = project.activeProjectId
+    const token = loadToken
+    const selectionGeneration = ++selectionToken
+    try {
+      const response = await getParseSelection(pid, scope, q)
+      if (token !== loadToken || pid !== project.activeProjectId || selectionGeneration !== selectionToken) return
+      selected.value = {}
+      selectedInputs.clear()
+      for (const item of response.items) {
+        selected.value[item.name] = true
+        selectedInputs.set(item.name, item.input)
+        inputShaOverrides.delete(item.name)
+        const previous = selectedRowCache.get(item.name)
+        selectedRowCache.set(item.name, {
+          chapter: { ...(previous?.chapter ?? { seq: 0, numStr: '', title: item.name, chars: 0 }), name: item.name, input: item.input, latest_task: null, result: null, result_status: item.result_status ?? null },
+          status: item.status === 'failed' ? 'failed' : item.status === 'timeout' ? 'timeout' : item.status === 'cancelled' ? 'cancelled' : item.result_status === 'usable' ? 'done' : item.result_status === 'stale' ? 'stale' : 'pending', label: '待解析', tone: 'muted', task: undefined, taskId: null, progress: 0, error: '', retryable: false,
+        })
+      }
+    } catch (cause: any) {
+      if (token === loadToken && pid === project.activeProjectId && selectionGeneration === selectionToken) stateError.value = cause?.message || '选择范围读取失败'
+    }
+  }
+
   function clearSelection() {
+    selectionToken += 1
+    selectedInputs.clear()
     selected.value = {}
   }
 
   function toggleSelect(name: string) {
+    selectionToken += 1
+    selectedInputs.delete(name)
+    inputShaOverrides.delete(name)
     if (selected.value[name]) delete selected.value[name]
     else selected.value[name] = true
   }
 
   // --- list filtering / pagination (in-memory, hundreds of chapters) ------------
   const filteredRows = computed(() => {
+    if (state.value?.pagination) return rows.value
     let list = rows.value
     if (filter.value === 'pending') list = list.filter((r) => r.status !== 'done')
     else if (filter.value === 'done') list = list.filter((r) => r.status === 'done')
@@ -318,12 +384,14 @@ export function useScriptParseWorkbench() {
     }
     return list
   })
-  const pageCount = computed(() => Math.max(1, Math.ceil(filteredRows.value.length / pageSize.value)))
+  const pageCount = computed(() => Math.max(1, Math.ceil((state.value?.pagination?.total ?? filteredRows.value.length) / pageSize.value)))
   const pagedRows = computed(() => {
+    if (state.value?.pagination) return filteredRows.value
     const p = Math.min(page.value, pageCount.value)
     return filteredRows.value.slice((p - 1) * pageSize.value, p * pageSize.value)
   })
   watch([filter, query], () => { page.value = 1 })
+  watch([page, pageSize, query, filter], () => { if (state.value?.pagination) void refreshState() })
 
   const currentRow = computed<ParseRow | null>(() =>
     rows.value.find((r) => r.chapter.name === selectedName.value) ?? null,
@@ -516,6 +584,10 @@ export function useScriptParseWorkbench() {
     const pid = project.activeProjectId
     if (!pid) {
       state.value = null
+      summary.value = null
+      summaryError.value = ''
+      selectedRowCache.clear()
+      selectedInputs.clear()
       return false
     }
     const token = ++loadToken
@@ -523,9 +595,18 @@ export function useScriptParseWorkbench() {
     stateAbort.abort()
     stateAbort = new AbortController()
     try {
-      const next = await getScriptParseState(pid, stateAbort.signal)
+      const next = await getScriptParseState(pid, stateAbort.signal, { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value })
       if (token !== loadToken || project.activeProjectId !== pid) return false
       applyState(next)
+      if (next.pagination) {
+        const signal = stateAbort.signal
+        void getScriptParseSummary(pid, signal).then(value => {
+          if (!signal.aborted && token === loadToken && project.activeProjectId === pid) { summary.value = value; summaryError.value = '' }
+        }).catch((error: any) => {
+          if (!signal.aborted && token === loadToken && project.activeProjectId === pid) summaryError.value = error?.message || '全书状态暂未更新'
+        })
+      }
+      if (page.value > pageCount.value) page.value = pageCount.value
       return true
     } catch (e: any) {
       // 「状态待确认」：保留上次已知行，不当成正常完成。
@@ -540,7 +621,6 @@ export function useScriptParseWorkbench() {
 
   /** 在途任务离开活跃态（成功/失败/取消/超时）→ 合并在 600ms 内整表刷新：
    *  单章先完成立即刷新该章状态/预览，不等整批（review #4）。 */
-  const activeIds = computed(() => new Set(rows.value.filter((r) => r.status === 'active').map((r) => r.taskId)))
   watch(activeIds, (now, prev) => {
     if (!prev) return
     const dropped = [...prev].filter((id) => id != null && !now.has(id))
@@ -553,11 +633,11 @@ export function useScriptParseWorkbench() {
   const canSubmit = computed(() => {
     const st = state.value
     const staleBlocked = st?.source.mode === 'version' && st?.source.version?.version_status === 'stale'
-    return !!project.activeProjectId && !!st && !st.text_format_busy && !staleBlocked
+    return controlsReady.value && !!project.activeProjectId && !!st && !st.text_format_busy && !staleBlocked
   })
 
   async function startParse(): Promise<boolean> {
-    if (busy.value || submitting.value || !selectedCount.value) return false
+    if (!controlsReady.value || busy.value || submitting.value || !selectedCount.value) return false
     if (!project.activeProjectId) return false
     if (state.value?.text_format_busy) {
       toast({ title: '排版与分册任务正在进行，暂不能提交解析', variant: 'destructive' })
@@ -605,7 +685,7 @@ export function useScriptParseWorkbench() {
 
   /** 【取消全部】：一次取消所有在途解析任务（端点失败回退逐任务取消）。 */
   async function cancelAll() {
-    const ids = rows.value.filter((r) => r.status === 'active' && r.taskId).map((r) => r.taskId as string)
+    const ids = [...activeIds.value]
     if (!ids.length) return
     try {
       await cancelParseBatch(ids)
@@ -649,6 +729,10 @@ export function useScriptParseWorkbench() {
     sourceToken += 1
     sourceAbort.abort()
     state.value = null
+    summary.value = null
+    summaryError.value = ''
+    selectedRowCache.clear()
+    selectedInputs.clear()
     stateError.value = ''
     selected.value = {}
     selectedName.value = null
@@ -707,8 +791,9 @@ export function useScriptParseWorkbench() {
 
   return {
     // state
-    state, stateError, loading, submitting,
+    state, stateError, summaryError, controlsReady, loading, submitting,
     rows, chapters, filteredRows, pagedRows, pageCount, page, pageSize,
+    filteredTotal: computed(() => state.value?.pagination?.total ?? filteredRows.value.length),
     filter, query, chapterNumPad, chapterLabel,
     // stats / selection
     total, doneCount, pendingCount, busy,

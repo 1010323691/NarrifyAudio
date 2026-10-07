@@ -1,3 +1,4 @@
+import { listQuery, type ListPagination, type ListQuery } from '@/api/listPaging'
 import { API_BASE, http } from './client'
 import type { ParseChecks } from '@/types'
 
@@ -61,6 +62,8 @@ export interface ScriptParseChapterLite {
 }
 
 export interface ScriptParseState {
+  pagination?: ListPagination
+  chapter_refs?: (ScriptParseChapterLite & { name: string })[]
   source: {
     mode: 'version' | 'legacy' | 'empty'
     version?: {
@@ -77,8 +80,8 @@ export interface ScriptParseState {
 }
 
 /** 只读聚合：章节清单 + 每章最新任务/结果可用性。轮询安全（无 flow 副作用）。 */
-export function getScriptParseState(projectId: string, signal?: AbortSignal): Promise<ScriptParseState> {
-  return http.get<ScriptParseState>(`/api/v1/projects/${projectId}/script-parse/state`, { signal })
+export function getScriptParseState(projectId: string, signal?: AbortSignal, options?: ListQuery): Promise<ScriptParseState> {
+  return http.get<ScriptParseState>(`/api/v1/projects/${projectId}/script-parse/state${options ? `?${listQuery(options)}` : ''}`, { signal })
 }
 
 /** 版本化批量提交：files 携带页面所见的 sha256（历史无摘要文件可缺省）；
@@ -94,4 +97,13 @@ export function runScriptParse(
 /** 项目绑定的解析结果读取 URL（ETag = 产物 sha256；内容变化必然 ETag 变化）。 */
 export function scriptParseResultUrl(projectId: string, fileId: string): string {
   return `${API_BASE}/api/v1/projects/${encodeURIComponent(projectId)}/script-parse/results/${encodeURIComponent(fileId)}`
+}
+
+export function getParseSelection(projectId: string, filter: string, q = ''): Promise<{ items: { name: string; result_status?: 'usable' | 'stale' | 'unverified' | null; status?: string | null; input: ScriptParseInput | null }[] }> {
+  return http.get(`/api/v1/projects/${projectId}/script-parse/state?${listQuery({ page: 1, page_size: 10, q, filter })}&keys_only=true`)
+}
+
+export interface ScriptParseSummary { total: number; done_count: number; active_task_ids: string[] }
+export function getScriptParseSummary(projectId: string, signal?: AbortSignal): Promise<ScriptParseSummary> {
+  return http.get(`/api/v1/projects/${projectId}/script-parse/summary`, { signal })
 }
