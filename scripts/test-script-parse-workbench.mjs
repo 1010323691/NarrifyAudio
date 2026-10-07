@@ -567,3 +567,28 @@ test('latest complete selection input wins on and off page, including a late sta
   assert.equal(submitted.length, 11)
   assert.ok(submitted.every(target => target.sha256 === 'new'))
 })
+
+test('complete selection protects its input digest while same-input status still updates', async () => {
+  const pending = { name: 'c.txt', input: { sha256: 'same' }, latest_task: null, result: null, result_status: null }
+  let current = pending
+  let done = 0
+  const { wb } = await setup({
+    stateFor: async () => ({ ...stateV([current]), pagination: { total: 1, page: 1, page_size: 10, counts: { all: 1 } } }),
+    selection: [pending],
+    summaryFor: () => ({ total: 1, done_count: done, active_task_ids: [] }),
+  })
+  await wb.refreshState()
+  wb.selectScope('all')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.selectedDoneCount.value, 0)
+  current = { ...pending, result_status: 'usable', latest_task: { id: 'finished', status: 'succeeded', progress: 1, error: '', created_at: null, finished_at: null } }
+  done = 1
+  await wb.refreshState()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(wb.rows.value[0].status, 'done')
+  assert.equal(wb.doneCount.value, 1)
+  assert.equal(wb.selectedDoneCount.value, 1)
+  current = { ...current, result_status: 'stale' }
+  await wb.refreshState()
+  assert.equal(wb.selectedStaleCount.value, 1)
+})

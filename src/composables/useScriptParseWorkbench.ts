@@ -139,7 +139,7 @@ export function useScriptParseWorkbench() {
   // --- server-side state -----------------------------------------------------
   const state = ref<ScriptParseState | null>(null)
   const selectedRowCache = new Map<string, ParseRow>()
-  const authoritativeSelections = new Set<string>()
+  const selectedInputs = reactive(new Map<string, ScriptParseInput | null>())
   const stateError = ref('')
   const summary = ref<ScriptParseSummary | null>(null)
   const summaryError = ref('')
@@ -274,9 +274,20 @@ export function useScriptParseWorkbench() {
   })
   const busy = computed(() => activeIds.value.size > 0)
 
-  watch(rows, current => { for (const row of current) if (!authoritativeSelections.has(row.chapter.name)) selectedRowCache.set(row.chapter.name, row) }, { flush: 'sync' })
-  const selectedRows = computed(() => Object.keys(selected.value).filter(name => selected.value[name]).map(name =>
-    selectedRowCache.get(name) ?? rows.value.find(row => row.chapter.name === name)).filter((row): row is ParseRow => !!row))
+  function matchesSelectedInput(row: ParseRow) {
+    return !selectedInputs.has(row.chapter.name) || row.chapter.input?.sha256 === selectedInputs.get(row.chapter.name)?.sha256
+  }
+  watch(rows, current => {
+    for (const row of current) if (matchesSelectedInput(row)) selectedRowCache.set(row.chapter.name, row)
+  }, { flush: 'sync' })
+  const selectedRows = computed(() => Object.keys(selected.value).filter(name => selected.value[name]).map(name => {
+    const current = rows.value.find(row => row.chapter.name === name)
+    const row = current && matchesSelectedInput(current) ? current : selectedRowCache.get(name)
+    if (!row) return undefined
+    // Only the selected input reference is authoritative. Execution/result
+    // state for that same input keeps following current rows and SSE.
+    return selectedInputs.has(name) ? { ...row, chapter: { ...row.chapter, input: selectedInputs.get(name) ?? null } } : row
+  }).filter((row): row is ParseRow => !!row))
   const selectedCount = computed(() => selectedRows.value.length)
   const selectedDoneCount = computed(() => selectedRows.value.filter((r) => r.status === 'done').length)
   const selectedStaleCount = computed(() => selectedRows.value.filter((r) => r.status === 'stale').length)
@@ -323,10 +334,10 @@ export function useScriptParseWorkbench() {
       const response = await getParseSelection(pid, scope, q)
       if (token !== loadToken || pid !== project.activeProjectId) return
       selected.value = {}
-      authoritativeSelections.clear()
+      selectedInputs.clear()
       for (const item of response.items) {
         selected.value[item.name] = true
-        authoritativeSelections.add(item.name)
+        selectedInputs.set(item.name, item.input)
         inputShaOverrides.delete(item.name)
         const previous = selectedRowCache.get(item.name)
         selectedRowCache.set(item.name, {
@@ -338,7 +349,7 @@ export function useScriptParseWorkbench() {
   }
 
   function clearSelection() {
-    authoritativeSelections.clear()
+    selectedInputs.clear()
     selected.value = {}
   }
 
@@ -568,7 +579,7 @@ export function useScriptParseWorkbench() {
       summary.value = null
       summaryError.value = ''
       selectedRowCache.clear()
-      authoritativeSelections.clear()
+      selectedInputs.clear()
       return false
     }
     const token = ++loadToken
@@ -713,7 +724,7 @@ export function useScriptParseWorkbench() {
     summary.value = null
     summaryError.value = ''
     selectedRowCache.clear()
-    authoritativeSelections.clear()
+    selectedInputs.clear()
     stateError.value = ''
     selected.value = {}
     selectedName.value = null
