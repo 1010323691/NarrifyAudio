@@ -11,7 +11,7 @@ import { showConfirm } from '@/components/ui/dialog'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
-import { listProjectPage, deleteProject } from '@/api/project'
+import { listProjectPage, deleteProject, getActiveProject } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectCardProgress } from '@/composables/useProjectCardProgress'
@@ -100,12 +100,28 @@ function updatedAt(value: string) {
   return Number.isNaN(date.getTime()) ? '最近更新未知' : `最近更新 ${date.toLocaleDateString()}`
 }
 
+async function syncActiveProject() {
+  const userId = auth.user?.id
+  const previous = projectStore.current
+  const current = await getActiveProject()
+  // A new login or project selection owns the shared context once it starts.
+  if (userId === auth.user?.id && previous === projectStore.current && !projectStore.busy) {
+    projectStore.setCurrent(current)
+  }
+}
+
 async function load(force = false) {
+  if (!viewActive || !auth.user || document.hidden) return
   const requestGeneration = ++loadGeneration
   refreshing.value = true
   pageError.value = ''
   const previousIds = JSON.stringify(projects.value.map(item => item.id))
   await loadProjectPage()
+  if (requestGeneration !== loadGeneration) return
+  if (force) {
+    try { await syncActiveProject() }
+    catch { if (requestGeneration === loadGeneration) pageError.value = '当前项目状态暂未同步，请重试。' }
+  }
   if (requestGeneration === loadGeneration) {
     refreshing.value = false
     if (force && previousIds === JSON.stringify(projects.value.map(item => item.id))) refreshSummaries()

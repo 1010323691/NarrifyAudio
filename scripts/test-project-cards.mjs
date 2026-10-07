@@ -117,3 +117,21 @@ test('polling an earlier audio card cannot starve later cards in the initial que
     assert.deepEqual(h.calls.filter(call => call.section === 'production').map(call => call.project), ['p','q','r','s'])
   } finally { h.close() }
 })
+test('active-context refresh after deletion cannot overwrite a new login or project selection', async () => {
+  const source = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
+  const fn = source.slice(source.indexOf('async function syncActiveProject()'), source.indexOf('async function load(force'))
+  for (const change of ['none', 'account', 'selection', 'busy']) {
+    const pending = deferred(), applied = []
+    const auth = {user:{id:'u'}}, projectStore = {current:{project_id:'deleted'},busy:false,setCurrent:value=>applied.push(value)}
+    const module = {exports:{}}
+    runInNewContext(ts.transpileModule(fn + '\nexports.sync = syncActiveProject', {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText, {
+      module,exports:module.exports,auth,projectStore,getActiveProject:()=>pending.promise,
+    })
+    const request = module.exports.sync()
+    if (change === 'account') auth.user = {id:'other'}
+    if (change === 'selection') projectStore.current = {project_id:'new'}
+    if (change === 'busy') projectStore.busy = true
+    pending.resolve({set:false,project_id:''}); await request
+    assert.equal(applied.length, change === 'none' ? 1 : 0, change)
+  }
+})

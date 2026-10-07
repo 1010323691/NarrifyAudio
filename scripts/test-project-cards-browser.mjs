@@ -14,6 +14,7 @@ try {
     const page = await browser.newPage({viewport})
     page.setDefaultTimeout(8000)
     const reads = [], errors = [], mutations = [], streams = []
+    let deleted = false
     let release
     const gate = new Promise(resolve => {release = resolve})
     page.on('pageerror', error => errors.push(error.message))
@@ -23,13 +24,15 @@ try {
       reads.push({path, page:url.searchParams.get('page'), section:url.searchParams.get('section')})
       if (!['GET','HEAD'].includes(route.request().method())) mutations.push(path)
       let body = layoutResponse(path,'user')
+      if (path === '/api/v1/projects/active') body = deleted ? {set:false,exists:false,project_id:'',project_name:'',path:'',dirs:{}} : {...body,project_id:'p1-0',project_name:'CARD-1-0'}
+      if (path === '/api/v1/projects/p1-0' && route.request().method() === 'DELETE') { deleted = true; body = {ok:true} }
       if (path === '/api/v1/tasks/stream') {
         streams.push(url.search)
         return route.fulfill({contentType:'text/event-stream',body:'data: {"type":"snapshot_all","tasks":[]}\n\n'})
       }
       if (path === '/api/v1/projects') {
         const p = Number(url.searchParams.get('page') || 1)
-        body = {items:Array.from({length:12},(_,i)=>({...layoutResponse(path,'user')[0],id:`p${p}-${i}`,name:`CARD-${p}-${i}`})),pagination:{page:p,page_size:12,total:24}}
+        body = {items:Array.from({length:12},(_,i)=>({...layoutResponse(path,'user')[0],id:`p${p}-${i}`,name:`CARD-${p}-${i}`})).filter(row=>!deleted || row.id !== 'p1-0'),pagination:{page:p,page_size:12,total:24}}
       }
       if (path.endsWith('/summary')) {
         const section = url.searchParams.get('section')
@@ -55,12 +58,21 @@ try {
     await page.getByText('CARD-2-0',{exact:true}).waitFor()
     try { await page.locator('.project-card').last().locator('.project-stage').first().getByText('50%',{exact:true}).waitFor() } catch(e) { console.log(errors, reads, (await page.locator('body').innerText()).slice(-4000)); throw e }
     assert.ok(reads.some(r=>r.page==='2'))
-    assert.equal(await page.getByText('CARD-1-0',{exact:true}).count(),0)
+    assert.equal(await page.locator('.project-card').getByText('CARD-1-0',{exact:true}).count(),0)
     release()
     await page.locator('.project-card').last().locator('.project-stage').nth(3).getByText('50%',{exact:true}).waitFor()
-    assert.equal(await page.getByText('CARD-1-0',{exact:true}).count(),0)
+    assert.equal(await page.locator('.project-card').getByText('CARD-1-0',{exact:true}).count(),0)
     assert.deepEqual(errors,[])
     assert.deepEqual(mutations,[])
+    await page.getByRole('button',{name:'上一页',exact:true}).click()
+    await page.getByRole('button',{name:'删除项目 CARD-1-0',exact:true}).click()
+    const activeReads = reads.filter(r=>r.path==='/api/v1/projects/active').length
+    await page.getByRole('alertdialog').getByRole('button',{name:'删除项目',exact:true}).click()
+    await page.waitForFunction(()=>!document.querySelector('.app-nav__project-title'))
+    assert.ok(reads.filter(r=>r.path==='/api/v1/projects/active').length > activeReads, 'delete must sync active context')
+    assert.equal(await page.locator('.project-card').getByText('CARD-1-0',{exact:true}).count(),0)
+    assert.deepEqual(mutations,['/api/v1/projects/p1-0'])
+    assert.deepEqual(errors,[])
     await page.close()
     console.log(`Project cards visible ${cardsMs}ms, light counts and paging usable with audio held: ${viewport.width}×${viewport.height} (fixture/local browser)`)
   }
