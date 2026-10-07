@@ -667,3 +667,19 @@ test('expensive task refreshes coalesce and never overlap across completion burs
   project.activeProjectId = 'B'
   assert.equal(timers.size, 0)
 })
+
+
+test('pooled chapter completion stays visible while the coordinator retains its lease', () => {
+  const h = harness('BatchTTS')
+  h.fileNames.value = ['chapter.json']
+  h.statuses.value = [file('chapter.json', false)]
+  h.taskStore.projectTasks = [{ id: 'chapter', module: 'tts-batch', label: '音频合成 · chapter.json', seq: 1,
+    status: 'running', progress: 100, current: '音频合成已完成', logs: [], result: {} }]
+  assert.equal(h.workRows.value[0].statusLabel, '已完成')
+  h.taskStore.projectTasks[0].current = '音频合成部分完成'
+  assert.equal(h.workRows.value[0].statusLabel, '部分完成')
+  h.taskStore.projectTasks[0].current = '音频合成失败'
+  assert.equal(h.workRows.value[0].statusLabel, '合成失败')
+  h.taskStore.projectTasks[0].progress = 25
+  assert.equal(h.workRows.value[0].statusLabel, '合成中')
+})

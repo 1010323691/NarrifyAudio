@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { useTenRowHeight } from '@/composables/useTenRowHeight'
 import Progress from '@/components/ui/Progress.vue'
 import Button from '@/components/ui/Button.vue'
 import { RefreshCw, XCircle } from 'lucide-vue-next'
@@ -24,6 +25,8 @@ const emit = defineEmits<{
   (e: 'retry', row: ParseRow): void
   (e: 'cancel', row: ParseRow): void
 }>()
+const table = ref<HTMLTableElement | null>(null)
+const rowHeight = useTenRowHeight(table, () => props.pageSize ?? 10)
 
 const chapterColClass = computed(() => ['w-20', 'w-24', 'w-28', 'w-32'][Math.min((props.numPad ?? 3) - 1, 3)] ?? 'w-32')
 function chapterLabel(row: ParseRow): string {
@@ -36,7 +39,7 @@ function failText(row: ParseRow): string {
 </script>
 
 <template>
-  <table class="wb-chapter-table workbench-table" :class="{ 'wb-chapter-table--empty': !rows.length }" aria-label="章节解析列表">
+  <table ref="table" class="wb-chapter-table workbench-table" :style="{ '--list-row-height': rowHeight }" :class="{ 'wb-chapter-table--empty': !rows.length, 'workbench-table--fit': (pageSize ?? 10) === 10 }" aria-label="章节解析列表">
     <thead>
       <tr>
         <th class="w-10" aria-label="选择" />

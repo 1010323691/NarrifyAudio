@@ -1,17 +1,25 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, toValue, watch, type MaybeRefOrGetter, type Ref } from 'vue'
 
-/** Share the voices workbench's ten-row fit without adding another scroll container. */
+/** Fit ten rows in the existing scroller, retaining the normal density on taller screens. */
 export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: MaybeRefOrGetter<number>) {
-  const fittedHeight = ref(32)
+  const fittedHeight = ref(40)
   let observer: ResizeObserver | null = null
   function measure() {
     const element = table.value
-    const viewportHeight = element?.parentElement?.getBoundingClientRect().height ?? 0
-    if (!viewportHeight || !element?.tHead) return
-    const bodyHeight = viewportHeight - element.tHead.getBoundingClientRect().height - 0.5
-    const minimum = window.matchMedia('(pointer:coarse)').matches ? 51 : 32
+    const viewport = element?.parentElement
+    if (!viewport?.clientHeight || !element?.tHead) return
+    const style = getComputedStyle(viewport)
+    const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+    const lastCell = element.tBodies[0]?.rows[0]?.cells[0]
+    // clientHeight excludes borders and the horizontal scrollbar. A collapsed
+    // table still paints half of its final cell border below the last row.
+    const bottomBorder = lastCell ? parseFloat(getComputedStyle(lastCell).borderBottomWidth) / 2 : 0.5
+    const bodyHeight = viewport.clientHeight - padding - element.tHead.getBoundingClientRect().height - bottomBorder
+    const coarse = window.matchMedia('(pointer:coarse)').matches
+    const minimum = coarse ? 55 : 28
+    const normal = coarse ? 55 : 40
     // Round down to Chromium's layout unit so the last row stays inside the viewport.
-    fittedHeight.value = Math.max(minimum, Math.floor(bodyHeight / 10 * 64) / 64)
+    fittedHeight.value = Math.max(minimum, Math.min(normal, Math.floor(bodyHeight / 10 * 64) / 64))
   }
   onMounted(() => {
     observer = new ResizeObserver(measure)
@@ -24,5 +32,5 @@ export function useTenRowHeight(table: Ref<HTMLTableElement | null>, pageSize: M
   })
   watch(() => toValue(pageSize), async () => { await nextTick(); measure() })
   onBeforeUnmount(() => observer?.disconnect())
-  return computed(() => toValue(pageSize) === 10 ? fittedHeight.value : 32)
+  return computed(() => toValue(pageSize) === 10 ? `${fittedHeight.value}px` : undefined)
 }
