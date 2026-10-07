@@ -40,6 +40,8 @@ jobs:
       # Pinia store 竞态隔离回归（node:test 沙箱跑真实 store 代码，改 store 行为的门禁）
       - name: 状态隔离回归
         run: npm run test:state-isolation
+      - name: 项目制作总览分区加载回归
+        run: npm run test:project-overview
       - name: 任务中心分层加载回归
         run: npm run test:task-center
       - name: 制作工作台及完整目标范围回归

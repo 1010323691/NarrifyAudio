@@ -21,6 +21,7 @@ from ..platform.task_identity import one_row_per_entry
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
 from ..platform.task_submission import task_dict
 from ..services import task_center, task_views
+from ..services.project_overview import overview_tasks
 from .task_operations import (
     TaskBatchControl,
     TaskSubmit,
@@ -97,6 +98,14 @@ def _decode_task_cursor(cursor: str) -> tuple[datetime, str]:
         return value, task_id
     except (ValueError, TypeError, binascii.Error) as exc:
         raise HTTPException(422, "无效的任务历史游标") from exc
+
+
+@router.get("/overview")
+def get_overview_tasks(project_id: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    try:
+        return overview_tasks(db, user.id, project_id)
+    except ValueError as error:
+        raise HTTPException(404, str(error)) from error
 
 
 @router.get("/history")
