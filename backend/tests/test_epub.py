@@ -54,7 +54,8 @@ def test_document_encoding(tmp_path, encoding):
     (make_epub(spine='nav extra'), '没有可读取'),
     (make_epub(spine='first', first='<html><body><img src="scan.jpg"/></body></html>'), '没有可读取'),
     (make_epub(extra_members={'META-INF/encryption.xml': '<encryption><EncryptedData><CipherData><CipherReference URI="OPS/Text/second.xhtml"/></CipherData></EncryptedData></encryption>'}), '加密'),
-])
+], ids=['not-zip', 'missing-spine-entry', 'empty-spine', 'no-linear-body',
+        'image-only-body', 'encrypted-body'])
 def test_invalid_sources(tmp_path, body, message):
     path = tmp_path / 'book.epub'
     path.write_bytes(body)

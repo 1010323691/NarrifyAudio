@@ -655,6 +655,42 @@ def _chapter_candidates(text: str) -> list[dict]:
             "title": m.group(0).strip(), "prefix": "", "kind": "special", "weak": False,
         })
     deduped.sort(key=lambda c: c["index"])
+    # A printed table of contents repeats the real headings but has no body
+    # between them. Suppress only runs of at least three short entries whose
+    # identical headings recur later with substantial body text. Keep every
+    # source byte: this changes boundaries, not the text itself.
+    later_body: set[tuple[int, str, str]] = set()
+    any_section_body: set[tuple[str, str]] = set()
+    contents_sections = {
+        i + 1 for i, parent in enumerate(parents)
+        if re.search(
+            r"(?im)^(?:contents|table of contents|目录|目錄)[ \t]*\r?\n\s*$",
+            text[max(0, parent - 200):parent],
+        )
+    }
+    toc_entries: set[int] = set()
+    run: list[int] = []
+    for i in reversed(range(len(deduped))):
+        candidate = deduped[i]
+        end = deduped[i + 1]["index"] if i + 1 < len(deduped) else len(text)
+        size = len(text[candidate["index"]:end].strip())
+        section = bisect.bisect_right(parents, candidate["index"])
+        key = (candidate["numStr"], candidate["title"])
+        repeated_body = (section, *key) in later_body or (
+            section in contents_sections and key in any_section_body
+        )
+        if size < MIN_BASELINE_CHARS and repeated_body:
+            run.append(i)
+        else:
+            if len(run) >= 3:
+                toc_entries.update(run)
+            run = []
+        if size >= MIN_BASELINE_CHARS:
+            later_body.add((section, *key))
+            any_section_body.add(key)
+    if len(run) >= 3:
+        toc_entries.update(run)
+    deduped = [c for i, c in enumerate(deduped) if i not in toc_entries]
     if parents:
         for candidate in deduped:
             candidate["section"] = bisect.bisect_right(parents, candidate["index"])
@@ -1157,7 +1193,7 @@ def _balance_long_chapters(text: str, chapters: list[dict], fallback_target: int
     lengths = sorted(c["chars"] for c in chapters if c["chars"] > 0)
     mid = len(lengths) // 2
     median = (lengths[mid] if len(lengths) % 2 else (lengths[mid - 1] + lengths[mid]) / 2) if lengths else 0
-    normal = [n for n in lengths if n < median * LONG_CHAPTER_RATIO]
+    normal = [n for n in lengths if MIN_BASELINE_CHARS <= n < median * LONG_CHAPTER_RATIO]
     use_average = median >= MIN_BASELINE_CHARS and len(normal) >= 3
     target = sum(normal) / len(normal) if use_average else float(fallback_target)
     summary = {
@@ -1258,9 +1294,9 @@ def smart_repair(
     # cannot distort the target; a genuinely single-chapter book gets the
     # explicit fallback target.
     if baseline is not None:
-        reference_lengths = [c["chars"] for c in work if not c["_long"] and c["chars"] > 0]
+        reference_lengths = [c["chars"] for c in work if not c["_long"] and c["chars"] >= MIN_BASELINE_CHARS]
     else:
-        lengths = sorted(c["chars"] for c in work if c["chars"] > 0)
+        lengths = sorted(c["chars"] for c in work if c["chars"] >= MIN_BASELINE_CHARS)
         reference_lengths = lengths[: max(1, (len(lengths) + 1) // 2)]
     chapter_average = (
         sum(reference_lengths) / len(reference_lengths)

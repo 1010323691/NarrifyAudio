@@ -329,3 +329,52 @@ def test_reconcile_applies_guarded_compare_without_lock(tmp_path):
     assert final.read_text("utf-8") == "concurrent edit"
     assert not journal.path.exists()
     assert not list(journal.path.parent.glob("publication-backup-*"))
+
+
+@pytest.mark.parametrize('recover', [False, True])
+def test_batch_registration_recovers_partial_publication(tmp_path, recover):
+    originals = [tmp_path / f'{i}.txt' for i in range(4)]
+    originals[0].write_text('old0')
+    originals[2].write_text('old2')
+    journal = _journal(tmp_path)
+    journal.prepare()
+    indices = journal.add_many(originals)
+    # Crash halfway: includes an untouched existing file and untouched new file.
+    for i in range(2):
+        staged = tmp_path / f'staged{i}'
+        staged.write_text('new')
+        journal.publish(indices[i], staged)
+    if recover:
+        PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    else:
+        journal.rollback()
+    assert originals[0].read_text() == 'old0'
+    assert not originals[1].exists()
+    assert originals[2].read_text() == 'old2'
+    assert not originals[3].exists()
+
+
+def test_batch_registration_writes_journal_once(tmp_path, monkeypatch):
+    journal = _journal(tmp_path)
+    journal.prepare()
+    writes = []
+    write = journal._write
+    def record(entries):
+        writes.append(len(entries))
+        write(entries)
+    monkeypatch.setattr(journal, '_write', record)
+    journal.add_many([tmp_path / f'{i}.txt' for i in range(500)])
+    assert writes == [500]
+    journal.rollback()
+
+
+def test_batch_removal_can_be_rolled_back(tmp_path):
+    finals = [tmp_path / f'{i}.txt' for i in range(3)]
+    for path in finals:
+        path.write_text(path.name)
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.remove_many(finals)
+    assert not any(path.exists() for path in finals)
+    journal.rollback()
+    assert all(path.read_text() == path.name for path in finals)
