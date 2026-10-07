@@ -493,7 +493,7 @@ def test_disjoint_matching_overlaps_without_losing_shared_assignments(audio_proj
 def test_all_chapters_share_the_original_pool_and_settle_independently(audio_project, monkeypatch, mode, legacy_queue):
     from collections import deque
     from backend.engines import tts_batch
-    from backend.platform.models import TaskResult
+    from backend.platform.models import TaskEvent, TaskResult
 
     submit, workspace = audio_project
     parsed = workspace / "03_parsed_json"
@@ -589,6 +589,32 @@ def test_all_chapters_share_the_original_pool_and_settle_independently(audio_pro
             assert [entry["index"] for entry in manifest] == [0, 1]
             assert sum(bool(entry["ok"]) for entry in manifest) == result["completed"]
             assert all((workspace / entry["path"]).exists() for entry in manifest if entry["ok"])
+
+    # The settlement marker is a cross-layer string contract: BatchTTS row badges
+    # (src/views/BatchTTS.vue) match the task's latest progress text verbatim.
+    def last_progress_current(task_id):
+        with SessionLocal() as db:
+            events = db.scalars(select(TaskEvent)
+                                .where(TaskEvent.task_id == task_id,
+                                       TaskEvent.event_type == "progress")
+                                .order_by(TaskEvent.sequence)).all()
+            return (events[-1].payload or {}).get("current") if events else None
+
+    for index, task_id in enumerate(ids):
+        expected_current = None
+        if mode in {"failed_chapter", "partial"}:
+            expected_current = "音频合成已完成"
+            if index == 49:
+                expected_current = "音频合成失败" if mode == "failed_chapter" else "音频合成部分完成"
+        elif mode in {"primary_failed", "all_failed"}:
+            expected_current = "音频合成失败" if (mode == "all_failed" or index == 0) else "音频合成已完成"
+        elif mode == "crash" and index == 49:
+            expected_current = "音频合成已完成"
+        elif mode == "cancel" and index != 49:
+            expected_current = "音频合成已完成"
+        if expected_current is None:
+            continue
+        assert last_progress_current(task_id) == expected_current
 
 
 def test_pooled_execution_preserves_simulation_and_selected_paragraph_dispatch():
