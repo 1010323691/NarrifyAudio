@@ -15,7 +15,7 @@ from ..platform.models import Project, Task, User
 from ..platform.storage import safe_project_workspace_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
-from ..services.project_completion import project_completion
+from ..services.project_completion import project_completion, overview_completion, COMPLETION_SECTIONS
 from ..services.task_operations import owned_project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -166,18 +166,20 @@ def _project_progress(root: Path) -> dict:
 
 
 @router.get("/{project_id}/summary")
-def get_project_summary(project_id: str, progress: bool = False, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+def get_project_summary(project_id: str, progress: bool = False, section: str | None = None, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, project_id)
     root = _safe_project_directory(db, user, item)
     if root is None:
         raise HTTPException(409, "项目存储目录不可安全访问")
+    if section is not None and (not progress or section not in COMPLETION_SECTIONS):
+        raise HTTPException(422, "无效的进度区域")
     if progress:
         return {
             "project_id": item.id,
             "name": item.name,
             "updated_at": item.updated_at.isoformat(),
-            **_project_progress(root),
-            "stage_completion": project_completion(root),
+            **(_project_progress(root) if section is None else {"stage_keys": [], "split_volume_count": 0}),
+            "stage_completion": project_completion(root) if section is None else overview_completion(root, section),
         }
     active = db.scalar(select(Task.id).where(
         Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)

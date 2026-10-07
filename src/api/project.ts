@@ -83,8 +83,9 @@ export function getProjectSummary(projectId: string): Promise<ProjectStorageSumm
   return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary`)
 }
 
-export function getProjectProgressSummary(projectId: string): Promise<ProjectProgressSummary> {
-  return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary?progress=true`)
+export type OverviewSection = 'text' | 'catalog' | 'production'
+export function getProjectProgressSummary(projectId: string, signal?: AbortSignal, section?: OverviewSection): Promise<ProjectProgressSummary> {
+  return http.get(`/api/v1/projects/${encodeURIComponent(projectId)}/summary?progress=true${section ? `&section=${section}` : ''}`, { signal })
 }
 
 export function cleanupProjectTemp(projectId: string): Promise<{ deleted_count: number; deleted_bytes: number; skipped_count: number; older_than_days: number }> {

@@ -6,29 +6,23 @@ import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
-import { getProjectProgressSummary, type ProjectProgressSummary } from '@/api/project'
-import { listDurableTasks, type DurableTask } from '@/api/durableTasks'
+import { useProjectOverview } from '@/composables/useProjectOverview'
 import { useProjectStore } from '@/stores/project'
 import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { modulePrefixes } from '@/utils/taskTypes'
 import { previewCompletion, stageProgressColor } from '@/utils/projectStageProgress'
-import { useTaskStore } from '@/stores/task'
 
 const route = useRoute()
 const router = useRouter()
 const project = useProjectStore()
 const settings = useSettingsStore()
 const projectId = computed(() => String(route.params.projectId || ''))
-const loading = ref(true)
+const { completion, loading, refreshing, errors, refresh: load, tasks: taskSummary, tasksLoading, tasksError } = useProjectOverview(projectId)
+const tasks = computed(() => taskSummary.value?.statuses ?? [])
 const error = ref('')
-const summary = ref<ProjectProgressSummary | null>(null)
-const tasks = ref<DurableTask[]>([])
-const refreshing = ref(false)
-const taskStore = useTaskStore()
-let loadGeneration = 0
-let progressTimer: ReturnType<typeof setTimeout> | undefined
 let viewActive = false
+let scopeGeneration = 0
 
 const STAGE_DEFS = [
   { key: 'text', label: '排版与分册', path: '/text', dir: '02_split_text', icon: FileText, taskTypes: modulePrefixes('text', 'book') },
@@ -51,11 +45,12 @@ function taskFor(stage: typeof STAGE_DEFS[number]) {
 function stageStatus(stage: typeof STAGE_DEFS[number]) {
   const task = taskFor(stage)
   if (task && ['failed', 'timeout'].includes(task.status)) return { label: '需处理', tone: 'negative' as const }
-  if (task && ['running', 'queued', 'pending', 'retrying', 'paused'].includes(task.status)) {
+  if (task && ['running', 'queued', 'pending', 'retrying', 'paused', 'cancelling'].includes(task.status)) {
     if (task.status === 'paused') return { label: '等待 LLM 恢复', tone: 'warning' as const }
     return { label: task.status === 'running' ? '处理中' : '排队中', tone: 'warning' as const }
   }
   const value = completionFor(stage)
+  if (!value) return { label: '读取中', tone: 'neutral' as const }
   if (value?.percent === 100) return { label: '已完成', tone: 'positive' as const }
   if (value?.percent === null) return { label: '总量待确定', tone: 'neutral' as const }
   if (value && value.completed > 0) return { label: '部分完成', tone: 'warning' as const }
@@ -63,7 +58,7 @@ function stageStatus(stage: typeof STAGE_DEFS[number]) {
 }
 
 function completionFor(stage: typeof STAGE_DEFS[number]) {
-  const value = summary.value?.stage_completion?.[stage.dir]
+  const value = completion.value[stage.dir]
   return stage.key === 'preview' && value ? previewCompletion(value) : value
 }
 const productionStages = computed(() => STAGES.value.filter(stage => stage.key !== 'preview'))
@@ -74,7 +69,7 @@ const nextStage = computed(() => productionStages.value.find(stage => stageStatu
   || productionStages.value[productionStages.value.length - 1]!)
 function completionNote(stage: typeof STAGE_DEFS[number]) {
   const value = completionFor(stage)
-  if (!value) return '进度暂时无法读取'
+  if (!value) return errors.value.length ? '进度暂未更新' : '正在读取进度'
   if (stage.key === 'preview') return `${value.completed.toLocaleString()} / ${value.total.toLocaleString()} 段 · 已解析台词`
   if (value.percent === null) return stage.key === 'audio' ? '确定分集计划后统计' : `当前 ${value.completed} / ${value.total} ${value.unit} · 总量待解析`
   return `${value.completed.toLocaleString()} / ${value.total.toLocaleString()} ${value.unit}`
@@ -97,66 +92,28 @@ const stageDescriptions: Record<string, string> = {
   audio: '按时长切分发布音频',
   bgm: '匹配音乐，混音与试听',
 }
-const recentFailures = computed(() => tasks.value.filter((task) => ['failed', 'timeout'].includes(task.status)).slice(0, 3))
+const recentFailures = computed(() => taskSummary.value?.failures ?? [])
 
-async function load() {
-  const generation = ++loadGeneration
+async function ensureProject() {
   const id = projectId.value
-  refreshing.value = true
+  const generation = ++scopeGeneration
   error.value = ''
   try {
     if (project.activeProjectId !== id) await project.select(id)
-    else if (!project.loaded) await project.refresh()
-    if (generation !== loadGeneration || !viewActive) return
-    const [taskResult, progressResult] = await Promise.allSettled([
-      listDurableTasks(),
-      getProjectProgressSummary(id),
-    ])
-    if (generation !== loadGeneration || id !== projectId.value || !viewActive) return
-    tasks.value = taskResult.status === 'fulfilled'
-      ? taskResult.value.filter((task) => task.project_id === id)
-      : []
-    if (progressResult.status === 'fulfilled') summary.value = progressResult.value
-    else {
-      error.value = '项目进度暂时无法读取，请检查连接后重试。'
-    }
+    if (viewActive && generation === scopeGeneration && project.activeProjectId !== id) error.value = '项目正在切换，请稍后重试。'
   } catch (cause: any) {
-    if (generation === loadGeneration && viewActive) error.value = cause?.message || '无法打开此项目。'
-  } finally {
-    if (generation === loadGeneration && viewActive) {
-      refreshing.value = false
-      loading.value = false
-    }
+    if (viewActive && generation === scopeGeneration) error.value = cause?.message || '无法打开此项目。'
   }
 }
 
 function openStage(path: string) {
+  if (path !== '/tasks' && project.activeProjectId !== projectId.value) return
   void router.push(path)
 }
 
-watch(projectId, () => {
-  summary.value = null
-  tasks.value = []
-  loading.value = true
-  if (viewActive) void load()
-})
-watch(() => taskStore.tasks.filter(task => task.project_id === projectId.value)
-  .map(task => `${task.id}:${task.status}:${task.progress}`).join('|'), () => {
-  if (!viewActive) return
-  clearTimeout(progressTimer)
-  progressTimer = setTimeout(() => { void load() }, 500)
-})
-onActivated(() => {
-  viewActive = true
-  taskStore.setTaskCenterOpen(true)
-  void load()
-})
-function deactivate() {
-  viewActive = false
-  loadGeneration += 1
-  clearTimeout(progressTimer)
-  taskStore.setTaskCenterOpen(false)
-}
+watch(projectId, () => { scopeGeneration++; if (viewActive) void ensureProject() })
+onActivated(() => { viewActive = true; void ensureProject() })
+function deactivate() { viewActive = false; scopeGeneration++ }
 onDeactivated(deactivate)
 onUnmounted(deactivate)
 </script>
@@ -174,7 +131,9 @@ onUnmounted(deactivate)
       </div>
     </header>
 
-    <div v-if="error" class="project-alert" role="alert"><span>{{ error }}</span><Button variant="outline" size="sm" @click="load">重试</Button></div>
+    <div v-if="error" class="project-alert" role="alert"><span>{{ error }}</span><Button variant="outline" size="sm" @click="ensureProject">重试</Button></div>
+
+    <div v-for="item in errors" :key="item.label" class="project-alert" role="alert"><span>{{ item.label }}：{{ item.message }}</span><Button variant="outline" size="sm" @click="item.retry">重试此区域</Button></div>
 
     <WorkbenchContextBar class="overview-context" :aria-busy="refreshing">
       <template #icon><FileAudio2 /></template>
@@ -193,18 +152,15 @@ onUnmounted(deactivate)
         <div class="panel-heading"><div><h2>制作流程</h2><p>点击阶段进入工作台</p></div><span>{{ STAGES.length }} 个阶段</span></div>
         <div class="stage-columns" aria-hidden="true"><span>阶段 / 功能</span><span>状态</span><span>完成进度 / 数量</span></div>
         <div class="stage-list">
-          <div v-if="loading" class="stage-loading" role="status"><LoaderCircle class="h-5 w-5 animate-spin" />正在读取制作进度</div>
-          <template v-else>
-            <button v-for="(stage, index) in STAGES" :key="stage.key" type="button" class="stage-row" :class="{ 'is-next': stage.key === nextStage.key }" @click="openStage(stage.path)">
-              <span class="stage-row__identity"><span class="stage-number">{{ String(index + 1).padStart(2, '0') }}</span><span class="stage-icon"><component :is="stage.icon" class="h-4 w-4" /></span><span class="stage-copy"><strong>{{ stage.label }}<small v-if="stage.key === nextStage.key">建议下一步</small></strong><span>{{ stageDescriptions[stage.key] }}</span></span></span>
+            <button v-for="(stage, index) in STAGES" :key="stage.key" type="button" class="stage-row" :disabled="project.activeProjectId !== projectId" :class="{ 'is-next': !loading && stage.key === nextStage.key }" @click="openStage(stage.path)">
+              <span class="stage-row__identity"><span class="stage-number">{{ String(index + 1).padStart(2, '0') }}</span><span class="stage-icon"><component :is="stage.icon" class="h-4 w-4" /></span><span class="stage-copy"><strong>{{ stage.label }}<small v-if="!loading && stage.key === nextStage.key">建议下一步</small></strong><span>{{ stageDescriptions[stage.key] }}</span></span></span>
               <StatusPill :label="stageStatus(stage).label" :tone="stageStatus(stage).tone" />
               <span class="stage-completion" :style="{ '--progress-color': stageProgressColor(completionFor(stage)?.percent ?? 0) }">
-                <span class="stage-completion__heading"><span>{{ stage.key === 'preview' ? '可预览比例' : completionFor(stage)?.percent == null ? '总量待确定' : '完成比例' }}</span><strong>{{ completionFor(stage)?.percent == null ? '—' : `${completionFor(stage)!.percent}%` }}</strong></span>
+                <span class="stage-completion__heading"><span>{{ !completionFor(stage) ? '正在读取' : stage.key === 'preview' ? '可预览比例' : completionFor(stage)?.percent == null ? '总量待确定' : '完成比例' }}</span><strong>{{ completionFor(stage)?.percent == null ? '—' : `${completionFor(stage)!.percent}%` }}</strong></span>
                 <span class="stage-progress" :class="{ 'is-unknown': completionFor(stage)?.percent == null }" role="progressbar" :aria-label="`${stage.label}：${completionNote(stage)}`" :aria-valuenow="completionFor(stage)?.percent ?? undefined" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${completionFor(stage)?.percent ?? 0}%` }" /></span>
                 <span class="stage-completion__note">{{ completionNote(stage) }}</span>
               </span>
             </button>
-          </template>
         </div>
         <p class="stage-footnote">红色 → 紫色表示完成比例；整章预览按已解析台词的有效音频统计，试听为可选操作。</p>
       </Card>
@@ -224,8 +180,8 @@ onUnmounted(deactivate)
         </Card>
 
         <Card class="attention-card">
-          <div class="attention-heading"><h2>需要处理</h2><span v-if="!loading">{{ tasks.filter(task => ['failed', 'timeout'].includes(task.status)).length }}</span></div>
-          <div v-if="loading" class="stage-loading" role="status"><LoaderCircle class="h-4 w-4 animate-spin" />正在读取任务</div>
+          <div class="attention-heading"><h2>需要处理</h2><span v-if="taskSummary">{{ taskSummary?.failure_count ?? '—' }}</span></div>
+          <div v-if="!taskSummary" class="stage-loading" role="status"><LoaderCircle v-if="tasksLoading" class="h-4 w-4 animate-spin" />{{ tasksError ? '任务暂未更新' : '正在读取任务' }}</div>
           <div v-else-if="recentFailures.length" class="failure-list">
             <div v-for="task in recentFailures" :key="task.id" class="failure-row"><CircleAlert class="h-4 w-4" /><div><strong>{{ taskTypeLabel(task.task_type) }}</strong><p>{{ task.error_message || '任务失败，请重试或检查输入。' }}</p></div></div>
           </div>

@@ -137,3 +137,12 @@ export function getTaskCenterItems(category: TaskCenterCategoryId, projectId: st
 export function controlTaskCenterGroup(projectId: string, category: TaskCenterCategoryId, action: 'pause' | 'resume' | 'cancel', signal: AbortSignal): Promise<{ changed: number }> {
   return http.post('/api/v1/tasks/batch-control?compact=true', { project_id: projectId, category, action }, { signal })
 }
+
+export interface ProjectOverviewTasks {
+  statuses: Array<{ task_type: string; status: string; count: number }>
+  failures: Array<{ id: string; task_type: string; error_message: string }>
+  failure_count: number
+}
+export function getProjectOverviewTasks(projectId: string, signal: AbortSignal): Promise<ProjectOverviewTasks> {
+  return http.get(`/api/v1/tasks/overview?project_id=${encodeURIComponent(projectId)}`, { signal })
+}
