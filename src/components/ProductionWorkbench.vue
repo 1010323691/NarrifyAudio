@@ -9,6 +9,7 @@ import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
 import Pager from '@/views/textformat/Pager.vue'
 import { X } from 'lucide-vue-next'
 import { useWorkbenchDialog } from '@/composables/useWorkbenchDialog'
+import { useTenRowHeight } from '@/composables/useTenRowHeight'
 
 const props = defineProps<{
   rows: T[]
@@ -32,6 +33,8 @@ const query = ref('')
 const filter = ref('all')
 const page = ref(1)
 const pageSize = ref(10)
+const table = ref<HTMLTableElement | null>(null)
+const rowHeight = useTenRowHeight(table, pageSize)
 const focusedKey = ref('')
 const narrow = ref(false)
 const detailOpen = ref(false)
@@ -160,7 +163,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
         >
       </div>
       <div class="production-scroll">
-        <table class="production-table workbench-table" :aria-label="label + '列表'">
+        <table ref="table" class="production-table workbench-table" :class="{ 'workbench-table--fit': pageSize === 10 }" :style="{ '--list-row-height': rowHeight }" :aria-label="label + '列表'">
           <colgroup>
             <col style="width: 32px" />
             <col />

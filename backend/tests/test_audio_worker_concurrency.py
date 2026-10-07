@@ -484,3 +484,139 @@ def test_disjoint_matching_overlaps_without_losing_shared_assignments(audio_proj
         assert [future.result(timeout=10) for future in futures] == ["succeeded", "succeeded"]
     data = json.loads((workspace / "08_bgm" / "bgm_assignments.json").read_text("utf-8"))
     assert set(data["chapters"]) == {"one", "two"}
+
+
+@pytest.mark.parametrize("mode,legacy_queue", [("success", False), ("success", True),
+                                               ("failed_chapter", False), ("partial", False),
+                                               ("cancel", False), ("crash", False),
+                                               ("primary_failed", False), ("all_failed", False)])
+def test_all_chapters_share_the_original_pool_and_settle_independently(audio_project, monkeypatch, mode, legacy_queue):
+    from collections import deque
+    from backend.engines import tts_batch
+    from backend.platform.models import TaskEvent, TaskResult
+
+    submit, workspace = audio_project
+    parsed = workspace / "03_parsed_json"
+    parsed.mkdir(parents=True, exist_ok=True)
+    profiles = workspace / "04_voice_profiles"
+    profiles.mkdir(exist_ok=True)
+    (profiles / "voice_config.json").write_text(json.dumps({"A": {"type": "custom"}}))
+    names = [f"chapter-{i:03}.json" for i in range(50)]
+    for name in names:
+        (parsed / name).write_text(json.dumps([{"speaker": "A", "text": "same voice across chapters"},
+                                             {"speaker": "A", "text": "another line"}]))
+    payload = {"indices": None, "concurrency": 128, "auto_concurrency": False, "seed": 42}
+    if not legacy_queue:
+        payload["execution_batch"] = uuid.uuid4().hex
+    leader = submit("tts.batch", {**payload, "script": names[0], "scripts": [names[0]]})
+    with SessionLocal.begin() as db:
+        db.get(UserQuotaAccount, leader.owner_id).available_units = 100000
+        members = [Task(owner_id=leader.owner_id, project_id=leader.project_id, task_type="tts.batch",
+                        payload={**payload, "script": name, "scripts": [name], "label": name})
+                   for name in names[1:]]
+        db.add_all(members)
+        # A duplicate and a paragraph selection must not join the pooled execution.
+        excluded = [Task(owner_id=leader.owner_id, project_id=leader.project_id, task_type="tts.batch",
+                         payload={**payload, "script": names[0], "scripts": [names[0]]}),
+                    Task(owner_id=leader.owner_id, project_id=leader.project_id, task_type="tts.batch",
+                         payload={**payload, "script": names[-1], "scripts": [names[-1]], "indices": [0]})]
+        db.add_all(excluded)
+        db.flush()
+        ids = [leader.task_id, *(member.id for member in members)]
+        excluded_ids = [task.id for task in excluded]
+    calls = []
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("/fake/python"), Path("/fake/worker")))
+
+    def run_worker(cmd, handle, on_line, **kwargs):
+        rows = json.loads(Path(cmd[cmd.index("--segments-file") + 1]).read_text())
+        calls.append(rows)
+        assert len(rows) == 100
+        assert len({row["out_dir"] for row in rows}) == 50
+        assert cmd[cmd.index("--concurrency") + 1] == "128"
+        handle.progress(0.8, "whole pool progress")
+        with SessionLocal() as db:
+            assert all(db.get(Task, task_id).status == "running" for task_id in ids)
+            assert db.get(Task, leader.task_id).progress == 0
+        if mode == "cancel":
+            with SessionLocal.begin() as db:
+                db.get(Task, ids[-1]).status = "cancelling"
+        # Complete a later chapter first: the original scheduler may choose any
+        # chapter's rows together according to voice/length rather than chapter order.
+        for row in reversed(rows):
+            local = row["file_index"]
+            last_chapter = row["out_dir"] == rows[-1]["out_dir"]
+            failed = last_chapter and (mode == "failed_chapter" or mode == "partial" and local == 1)
+            failed = failed or mode == "all_failed" or (mode == "primary_failed" and row["out_dir"] == rows[0]["out_dir"])
+            if failed:
+                on_line(f"[segment] {row['index']} error forced error")
+            else:
+                output = Path(row["out_dir"]) / f"{local + 1:04}.mp3"
+                output.write_bytes(b"fake audio")
+                on_line(f"[segment] {row['index']} ok {output}")
+            if last_chapter and local == 0 and mode != "cancel":
+                with SessionLocal() as db:
+                    assert db.get(Task, ids[-1]).status == ("failed" if mode in {"failed_chapter", "all_failed"} else "succeeded")
+                    assert db.get(Task, leader.task_id).status == "running"
+                if mode == "crash":
+                    raise RuntimeError("child interrupted after a completed chapter")
+        return deque()
+
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
+    assert _run_claim_fenced(leader) == ("worker_error" if mode == "crash" else
+                                         "tts_chapter_failed" if mode in {"primary_failed", "all_failed"} else "succeeded")
+    assert len(calls) == 1
+    with SessionLocal() as db:
+        assert all(db.get(Task, task_id).status == "pending" for task_id in excluded_ids)
+        for index, task_id in enumerate(ids):
+            expected = "succeeded"
+            if mode == "all_failed" or (mode == "primary_failed" and index == 0):
+                expected = "failed"
+            elif mode == "crash" and index != 49:
+                expected = "retrying"
+            elif index == 49 and mode == "failed_chapter":
+                expected = "failed"
+            elif index == 49 and mode == "cancel":
+                expected = "cancelled"
+            assert db.get(Task, task_id).status == expected
+            if expected != "succeeded":
+                continue
+            result = db.scalar(select(TaskResult).where(TaskResult.task_id == task_id)).result
+            assert len(result["files"]) == 1
+            assert result["files"][0]["script"] == names[index]
+            assert result["total"] == 2
+            assert result["completed"] == (1 if mode == "partial" and index == 49 else 2)
+            manifest = json.loads((workspace / "05_audio_chunk" / names[index][:-5] / "manifest.json").read_text())
+            assert [entry["index"] for entry in manifest] == [0, 1]
+            assert sum(bool(entry["ok"]) for entry in manifest) == result["completed"]
+            assert all((workspace / entry["path"]).exists() for entry in manifest if entry["ok"])
+
+    # The settlement marker is a cross-layer string contract: BatchTTS row badges
+    # (src/views/BatchTTS.vue) match the task's latest progress text verbatim.
+    def last_progress_current(task_id):
+        with SessionLocal() as db:
+            events = db.scalars(select(TaskEvent)
+                                .where(TaskEvent.task_id == task_id,
+                                       TaskEvent.event_type == "progress")
+                                .order_by(TaskEvent.sequence)).all()
+            return (events[-1].payload or {}).get("current") if events else None
+
+    for index, task_id in enumerate(ids):
+        expected_current = None
+        if mode in {"failed_chapter", "partial"}:
+            expected_current = "音频合成已完成"
+            if index == 49:
+                expected_current = "音频合成失败" if mode == "failed_chapter" else "音频合成部分完成"
+        elif mode in {"primary_failed", "all_failed"}:
+            expected_current = "音频合成失败" if (mode == "all_failed" or index == 0) else "音频合成已完成"
+        elif mode == "crash" and index == 49:
+            expected_current = "音频合成已完成"
+        elif mode == "cancel" and index != 49:
+            expected_current = "音频合成已完成"
+        if expected_current is None:
+            continue
+        assert last_progress_current(task_id) == expected_current
+
+
+def test_pooled_execution_preserves_simulation_and_selected_paragraph_dispatch():
+    assert task_worker._pooled_entry_key("tts.batch", {"scripts": ["one.json"], "indices": [0]}) is None
+    assert task_worker._pooled_entry_key("tts.batch", {"scripts": ["one.json"], "_load_simulation": True}) is None

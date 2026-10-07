@@ -413,6 +413,7 @@ class _PooledFile:
     all_count: int = 0
     error: str | None = None
     dirty: bool = False
+    cancelled: bool = False
     quota_operation: str = "tts.batch"
 
 
@@ -432,7 +433,7 @@ def _build_pool_rows(files, pool_start: int = 0) -> tuple:
     pool_rows: list[dict] = []
     pool_owners: list = []
     for f in files:
-        if f.error or not f.pending:
+        if f.error or f.cancelled or not f.pending:
             continue
         for local in f.pending:
             row = dict(f.by_index[local])
@@ -470,6 +471,11 @@ def _handle_segment_pool(line: str, pool_map: dict, pool_total: int, handle) -> 
         handle.log(f"未知段索引 {pool_index}（池共 {pool_total} 段）：{line}", "WARNING")
         return
     f, local = owner
+    chapter_cancelled = getattr(handle, "chapter_cancelled", None)
+    if callable(chapter_cancelled) and chapter_cancelled(f.name):
+        if f.name not in getattr(handle, "results", {}):
+            f.cancelled = True
+        return
     speaker = (f.by_index.get(local) or {}).get("speaker") or "(未知)"
     if status == "ok":
         detail = _published_segment_path(handle, detail, f.stage_out_dir, f.out_dir)
@@ -491,7 +497,7 @@ def _handle_segment_pool(line: str, pool_map: dict, pool_total: int, handle) -> 
         }
 
 
-def _settle_pool(handle, files) -> dict:
+def _settle_pool(handle, files, *, allow_failure: bool = False) -> dict:
     """Aggregate the pooled run's final result (the same shape the legacy multi run returned).
 
     ``files`` is in request order and so is the result's ``files`` list; the top-level
@@ -558,6 +564,10 @@ def _settle_pool(handle, files) -> dict:
         "all_count": sum(r["all_count"] for r in per_file),
         "files": per_file,
     }
+    if allow_failure:
+        if len(files) == 1 and files[0].error:
+            result["error"] = files[0].error
+        return result
     attempted = [f for f in files if f.error or f.pending]
     if not attempted or result["completed"] > 0:
         handle.progress(1.0, "完成")
@@ -1342,9 +1352,13 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     # Admit chapters in request order. Each chapter reserves its pending input before
     # entering the pool. After the first quota failure, report all following chapters too.
     from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+    chapter_cancelled = getattr(handle, "chapter_cancelled", None)
+    if callable(chapter_cancelled):
+        for f in files:
+            f.cancelled = chapter_cancelled(f.name)
     quota_exhausted = False
     for chapter_index, f in enumerate(files, 1):
-        if f.error or not f.pending:
+        if f.error or f.cancelled or not f.pending:
             continue
         f.quota_operation = f"tts.batch.chapter.{chapter_index}.{hashlib.sha1(f.name.encode('utf-8')).hexdigest()[:8]}"
         required_chars = sum(len(f.by_index[index]["text"]) for index in f.pending)
@@ -1385,23 +1399,47 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     # finished in every chapter, not just the last one touched.
     last_flush = [0.0]
 
+    def flush_file(f):
+        if f.error or not f.pending:
+            return
+        f.dirty = False
+        write_manifest_file(f.manifest_path,
+                            build_manifest(f.all_segments, f.old_entries, f.seg_results, root=ws,
+                                           expected_voice_signatures=f.voice_signatures,
+                                           expected_voice_params=f.voice_params), handle)
+
     def flush_manifests(force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - last_flush[0] < MANIFEST_FLUSH_INTERVAL:
             return
         for f in files:
-            if f.error or not f.pending:
-                continue
-            if not force and not f.dirty:
-                continue
-            f.dirty = False
-            write_manifest_file(f.manifest_path,
-                                 build_manifest(
-                                     f.all_segments, f.old_entries, f.seg_results, root=ws,
-                                     expected_voice_signatures=f.voice_signatures,
-                                     expected_voice_params=f.voice_params,
-                                 ), handle)
+            if force or f.dirty:
+                flush_file(f)
         last_flush[0] = now
+
+    notified = set()
+    chapter_settled = getattr(handle, "chapter_settled", None)
+    chapter_progress = getattr(handle, "chapter_progress", None)
+
+    def report_chapter(f):
+        if not callable(chapter_progress) or f.error or f.cancelled:
+            return
+        finished = [seg for i, seg in f.by_index.items()
+                    if i in f.done_set or (f.seg_results.get(i) or {}).get("ok")]
+        chapter_progress(f.name, len(finished), f.all_count,
+                         sum(len(seg["text"]) for seg in finished),
+                         sum(len(seg["text"]) for seg in f.all_segments))
+
+    def settle_chapter(f, force=False):
+        if not callable(chapter_settled) or f.name in notified or f.cancelled:
+            return
+        if not force and not f.error and len(f.seg_results) < len(f.pending):
+            return
+        flush_file(f)
+        report_chapter(f)
+        result = _settle_pool(handle, [f], allow_failure=True)
+        chapter_settled(result)
+        notified.add(f.name)
 
     # In-flight POOL indices the current child was generating (from its [watchdog] line) —
     # shared with on_line below; a strike at workers==1 targets these, mapped back to their
@@ -1420,6 +1458,9 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                     len(file.by_index[local_index]["text"]), file.quota_operation,
                     f"{file.name}:{local_index}",
                 )
+            if outcome:
+                file, _local = pool_map[outcome["index"]]
+                settle_chapter(file)
             segment_log.add(outcome)
             flush_manifests()
             _report_stats()  # resolved at call time (defined before the loop below)
@@ -1463,11 +1504,14 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
 
     # No pool (everything done / empty, or every file a prep fatal): settle without the
     # engine — all-fatals raise inside _settle_pool (nothing was synthesized).
+    for f in files:
+        settle_chapter(f)
+
     if pool_total == 0:
         if quota_exhausted:
             raise QuotaInsufficientError("TTS 输入字数额度不足，未合成任何章节")
         handle.log(f"无待合成段（{n} 个文件），不启动引擎")
-        return _settle_pool(handle, files)
+        return _settle_pool(handle, [f for f in files if not f.cancelled])
 
 
     # Resolve the external TTS environment only after validation has produced
@@ -1511,6 +1555,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 if i in f.done_set or (f.seg_results.get(i) or {}).get("ok"):
                     done += 1
                     chars += len(seg["text"])
+        for f in files:
+            report_chapter(f)
         handle.segment_stats(done, seg_total, chars, chars_total)
 
     _report_stats(force=True)  # the baseline (resume runs show their pre-run progress at once)
@@ -1537,7 +1583,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 if row["index"] in excluded:
                     continue
                 f, local = pool_map[row["index"]]
-                if (f.seg_results.get(local) or {}).get("ok"):
+                if f.cancelled or (f.seg_results.get(local) or {}).get("ok"):
                     continue
                 remaining.append(row)
             if not remaining:
@@ -1634,4 +1680,6 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         for f in files:
             if f.stage_out_dir is not None:
                 discard_directory(f.stage_out_dir)
-    return _settle_pool(handle, files)
+    for f in files:
+        settle_chapter(f, force=True)
+    return _settle_pool(handle, [f for f in files if not f.cancelled])

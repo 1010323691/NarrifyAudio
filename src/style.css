@@ -1286,6 +1286,14 @@ html, body, #app { overflow: hidden; }
   box-sizing:border-box;height:var(--list-row-height);padding:5px var(--list-cell-x);
   vertical-align:middle;border-bottom:1px solid hsl(var(--border)/.6);
 }
+/* Compact padding with the measured height, so progress bars do not impose
+   a larger minimum row height than the ten-row calculation. */
+.app-shell table.workbench-table--fit td:not([colspan]),
+.app-shell table.workbench-table--fit tr[aria-hidden] td {
+  height:var(--list-row-height);
+  padding-top:clamp(0px, calc((var(--list-row-height) - 27px) / 2), 5px);
+  padding-bottom:clamp(0px, calc((var(--list-row-height) - 27px) / 2), 5px);
+}
 @media(pointer:coarse) {
   .app-shell { --list-row-height:48px; }
 }

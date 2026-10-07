@@ -1,94 +1,22 @@
 """One isolated model run for independently leased character task records."""
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 
-from sqlalchemy import select
-
-from .database import SessionLocal
-from .models import Task
-from .task_context import EngineExecutionContext
-from .task_contracts import TaskCancelledError, TaskExecutionError
+from .pooled_task_execution import PooledTaskContext
+from .task_contracts import TaskExecutionError
 from .task_engine_support import engine_execution_context, engine_result_outcome
 from .task_validation import legacy_task_payload_error
 
 
-class CloneMemberContext(EngineExecutionContext):
-    """A parked member must also stop when its shared execution owner stops."""
-
-    def __init__(self, claim, primary):
-        super().__init__(claim)
-        self.primary = primary
-
-    @property
-    def cancelled(self):
-        return self.primary.cancelled or super().cancelled
-
-
-class CloneBatchContext(EngineExecutionContext):
+class CloneBatchContext(PooledTaskContext):
     batch_checkpoints = True
 
     def __init__(self, claims, finish, cancel):
-        super().__init__(claims[0])
-        self.contexts = {claim.payload["speakers"][0]: CloneMemberContext(claim, self) for claim in claims}
-        self.completed = set()
-        self.results = {}
-        self.output_paths = {}
-        self.finish = finish
-        self.cancel = cancel
-        self.last_control_check = 0.0
-
-    def _check_members(self, on_pause=None):
-        # Check controls in one query, rather than querying every role on every
-        # subprocess line. A settlement separately checks its own lease fence.
-        if time.monotonic() - self.last_control_check < 0.5:
-            return
-        self.last_control_check = time.monotonic()
-        active = {ctx.claim.task_id: (speaker, ctx) for speaker, ctx in self.contexts.items()
-                  if speaker not in self.completed and ctx.claim.task_id != self.claim.task_id}
-        if not active:
-            return
-        with SessionLocal() as db:
-            statuses = db.execute(select(Task.id, Task.status).where(Task.id.in_(active))).all()
-        for task_id, status in statuses:
-            speaker, ctx = active[task_id]
-            if status in {"cancelling", "cancelled"}:
-                self.speaker_cancelled(speaker)
-            elif status in {"paused", "queued"}:
-                if on_pause is None:
-                    ctx.check()
-                else:
-                    ctx.check_interruptible(on_pause)
-
-    def check(self):
-        super().check()
-        self._check_members()
-
-    def check_interruptible(self, on_pause):
-        super().check_interruptible(on_pause)
-        self._check_members(on_pause)
-
-    def progress(self, fraction, current=""):
-        # A finished coordinator role can remain leased until the shared child
-        # exits. Keep its own completion badge stable during that interval.
-        speaker = self.claim.payload["speakers"][0]
-        if speaker not in self.results:
-            super().progress(fraction, current)
+        super().__init__(claims, finish, cancel, lambda claim: claim.payload["speakers"][0])
 
     def speaker_cancelled(self, speaker):
-        if self.cancelled:
-            raise TaskCancelledError()
-        if speaker in self.completed:
-            return True
-        ctx = self.contexts[speaker]
-        if ctx.cancelled:
-            if ctx.claim.task_id == self.claim.task_id:
-                raise TaskCancelledError()
-            self.cancel(ctx.claim)
-            self.completed.add(speaker)
-            return True
-        return False
+        return self.entry_cancelled(speaker)
 
     def speaker_progress(self, speaker, done, total):
         if speaker not in self.completed and speaker not in self.results:

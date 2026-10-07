@@ -1388,6 +1388,18 @@ def fail_claim(claim: TaskClaim, error: TaskExecutionError) -> str:
         return "failed"
 
 
+def _pooled_entry_key(task_type: str, payload: dict) -> str | None:
+    if payload.get("_load_simulation") is True:
+        return None
+    if task_type == "voices.clone":
+        names = payload.get("speakers")
+    elif task_type == "tts.batch" and payload.get("indices") is None:
+        names = payload.get("scripts") or ([payload["script"]] if payload.get("script") else None)
+    else:
+        return None
+    return names[0] if isinstance(names, list) and len(names) == 1 and isinstance(names[0], str) and names[0] else None
+
+
 def _run_claim_fenced(claim: TaskClaim) -> str:
     from .quota import reset_quota_context, set_quota_context
     from .worker_registry import heartbeat as worker_heartbeat
@@ -1399,7 +1411,11 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
     batch_finished = set()
     batch_outcomes = {}
 
-    def finish_clone(member, result):
+    def finish_member(member, result):
+        if member.task_type == "tts.batch" and (result.get("error") or (result.get("total", 0) > 0 and result.get("completed", 0) == 0)):
+            fail_claim(member, TaskExecutionError("tts_chapter_failed", result.get("error") or "本章全部段落合成失败"))
+            batch_finished.add(member.task_id)
+            return True
         from .task_engine_support import engine_result_outcome
         outcome = batch_outcomes.get(member.task_id)
         if outcome is None:
@@ -1418,7 +1434,7 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         batch_outcomes.pop(member.task_id, None)
         return True
 
-    def cancel_clone(member):
+    def cancel_member(member):
         fail_claim(member, TaskCancelledError())
         batch_finished.add(member.task_id)
 
@@ -1458,31 +1474,37 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                     return "cancelled"
                 return "skipped"
             execution_batch = claim.payload.get("execution_batch")
-            if claim.task_type == "voices.clone" and len(claim.payload.get("speakers", [])) == 1:
+            if (entry_key := _pooled_entry_key(claim.task_type, claim.payload)) is not None:
                 # The project fence is held before claiming the rest. Other
                 # Workers leave these rows queued; only this batch owner may
                 # bypass the project conflict for matching immutable inputs.
                 with SessionLocal() as db:
                     siblings = db.scalars(select(Task).where(
                         Task.owner_id == claim.owner_id, Task.project_id == claim.project_id,
-                        Task.task_type == "voices.clone", Task.id != claim.task_id,
+                        Task.task_type == claim.task_type, Task.id != claim.task_id,
                         Task.status.in_(("pending", "queued", "retrying")),
                         Task.payload["execution_batch"].as_string() == execution_batch,
                     ).order_by(Task.created_at, Task.id)).all()
-                    sibling_entries = [(row.id, row.payload["speakers"][0]) for row in siblings if
-                                   len(row.payload.get("speakers", [])) == 1 and
-                                   {k: v for k, v in row.payload.items() if k not in {"speakers", "label", "_request_hash"}}
-                                   == {k: v for k, v in claim.payload.items() if k not in {"speakers", "label", "_request_hash"}}]
-                claimed_speakers = {claim.payload["speakers"][0]}
-                for task_id, speaker in sibling_entries:
-                    if speaker in claimed_speakers:
+                    entry_fields = {"speakers"} if claim.task_type == "voices.clone" else {"script", "scripts"}
+                    ignored = entry_fields | {"label", "_request_hash"}
+                    sibling_entries = [(row.id, key) for row in siblings
+                                       if (key := _pooled_entry_key(row.task_type, row.payload)) is not None
+                                       and {k: v for k, v in row.payload.items() if k not in ignored}
+                                       == {k: v for k, v in claim.payload.items() if k not in ignored}]
+                claimed_entries = {entry_key}
+                for task_id, entry in sibling_entries:
+                    if entry in claimed_entries:
                         continue
                     member = claim_task(task_id, claim.worker_id, defer_workspace_conflicts=False)
                     if member is not None:
                         batch_claims.append(member)
-                        claimed_speakers.add(speaker)
-                from .clone_batch_execution import execute_clone_batch
-                outcome = execute_clone_batch(batch_claims, finish_clone, cancel_clone)
+                        claimed_entries.add(entry)
+                if claim.task_type == "voices.clone":
+                    from .clone_batch_execution import execute_clone_batch
+                    outcome = execute_clone_batch(batch_claims, finish_member, cancel_member)
+                else:
+                    from .tts_batch_execution import execute_tts_batch
+                    outcome = execute_tts_batch(batch_claims, finish_member, cancel_member)
             else:
                 outcome = execute_claim(claim)
             if cancellation_requested(claim):
@@ -1531,14 +1553,15 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         return "worker_error"
     finally:
         # A failed/killed shared child leaves unfinished rows independently
-        # retryable. Already settled role tasks remain completed checkpoints.
+        # retryable. Already settled entries remain completed checkpoints.
         for member in batch_claims[1:]:
             if member.task_id not in batch_finished:
                 unfinished_outcome = batch_outcomes.pop(member.task_id, None)
                 if unfinished_outcome is not None:
                     _cleanup_outcome(unfinished_outcome)
                 fail_claim(member, TaskCancelledError() if cancellation_requested(member) else
-                           TaskExecutionError("clone_batch_interrupted", "共享克隆批次已中断，等待重试", retryable=True))
+                           TaskExecutionError("clone_batch_interrupted" if claim.task_type == "voices.clone" else "tts_batch_interrupted",
+                                              "共享合成批次已中断，等待重试", retryable=True))
         stop.set()
         heartbeat.join(timeout=2)
         report_worker("idle", None)

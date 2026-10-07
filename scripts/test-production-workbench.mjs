@@ -560,15 +560,20 @@ test('synthesis entry status overrides old complete output and follows the actua
   const row = { id: 'chapter', module: 'tts-batch', label: '音频合成（2 段） · 第一章：重试.json', seq: 1, status: 'pending', progress: 0, logs: [], result: {} }
   h.taskStore.projectTasks = [row]
   assert.equal(h.workRows.value[0].statusLabel, '排队中')
+  assert.equal(h.workRows.value[0].statusVariant, 'warning')
   assert.equal(h.workRows.value[1].statusLabel, '已完成')
+  assert.equal(h.workRows.value[1].statusVariant, 'success')
   h.taskStore.projectTasks[0].status = 'running'
   assert.equal(h.workRows.value[0].statusLabel, '合成中')
+  assert.equal(h.workRows.value[0].statusVariant, 'warning')
   h.taskStore.projectTasks[0].status = 'paused'
   assert.equal(h.workRows.value[0].statusLabel, '已暂停')
   h.taskStore.projectTasks[0].status = 'timeout'
   assert.equal(h.workRows.value[0].statusLabel, '合成失败')
+  assert.equal(h.workRows.value[0].statusVariant, 'destructive')
   h.taskStore.projectTasks[0].status = 'succeeded'
   assert.equal(h.workRows.value[0].statusLabel, '已完成')
+  assert.equal(h.workRows.value[0].statusVariant, 'success')
   await vue.nextTick()
 })
 
@@ -666,4 +671,45 @@ test('expensive task refreshes coalesce and never overlap across completion burs
   refresh.schedule()
   project.activeProjectId = 'B'
   assert.equal(timers.size, 0)
+})
+
+
+test('pooled chapter completion stays visible while the coordinator retains its lease', () => {
+  const h = harness('BatchTTS')
+  h.fileNames.value = ['chapter.json']
+  h.statuses.value = [file('chapter.json', false)]
+  h.taskStore.projectTasks = [{ id: 'chapter', module: 'tts-batch', label: '音频合成 · chapter.json', seq: 1,
+    status: 'running', progress: 100, current: '音频合成已完成', logs: [], result: {} }]
+  assert.equal(h.workRows.value[0].statusLabel, '已完成')
+  h.taskStore.projectTasks[0].current = '音频合成部分完成'
+  assert.equal(h.workRows.value[0].statusLabel, '部分完成')
+  h.taskStore.projectTasks[0].current = '音频合成失败'
+  assert.equal(h.workRows.value[0].statusLabel, '合成失败')
+  h.taskStore.projectTasks[0].progress = 25
+  assert.equal(h.workRows.value[0].statusLabel, '合成中')
+})
+
+test('partially settled chapters keep a stable partial badge after the member task settles', () => {
+  const h = harness('BatchTTS')
+  h.fileNames.value = ['chapter.json', 'missing.json', 'stale.json', 'done.json']
+  h.statuses.value = [
+    file('chapter.json', false),
+    { ...file('missing.json', false), missing: ['A'] },
+    { ...file('stale.json', false), stale_speakers: ['A'] },
+    file('done.json', true),
+  ]
+  // No task at all: the 3/10 segments on disk are the chapter's settled state.
+  assert.equal(h.workRows.value[0].statusLabel, '部分完成')
+  assert.equal(h.workRows.value[0].statusVariant, 'warning')
+  assert.equal(h.workRows.value[1].statusLabel, '缺少声音')
+  assert.equal(h.workRows.value[2].statusLabel, '待重合成')
+  assert.equal(h.workRows.value[3].statusLabel, '已完成')
+  // The member task reached its terminal state: the badge must not fall back to 待合成.
+  h.taskStore.projectTasks = [{ id: 'chapter', module: 'tts-batch', label: '音频合成 · chapter.json', seq: 1,
+    status: 'succeeded', progress: 100, logs: [], current: '', result: {} }]
+  assert.equal(h.workRows.value[0].statusLabel, '部分完成')
+  // A re-synth run on the partial chapter keeps the active label.
+  h.taskStore.projectTasks[0].status = 'running'
+  h.taskStore.projectTasks[0].progress = 50
+  assert.equal(h.workRows.value[0].statusLabel, '合成中')
 })

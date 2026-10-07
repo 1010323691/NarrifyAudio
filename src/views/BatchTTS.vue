@@ -480,15 +480,24 @@ watch(
 
 const workRows = computed(() => rows.value.map(row => {
   const entryTask = tasksByFile.value.get(row.name)
-  const active = !!entryTask && ACTIVE.has(entryTask.status)
-  const failed = entryTask?.status === 'failed' || entryTask?.status === 'timeout'
+  const settled = entryTask?.status === 'running' && entryTask.progress === 100
+    ? entryTask.current : ''
+  const completed = row.complete || settled === '音频合成已完成'
+  // Marker branch covers the settlement window (row data may lag SSE); the data
+  // branch keeps the label stable after the member task settles. Guarded so
+  // re-synth / 缺少声音 / 待重合成 rows keep their own actionable states.
+  const markerPartial = settled === '音频合成部分完成'
+  const partial = markerPartial
+    || (row.completed > 0 && row.completed < row.total && !row.missing.length && !row.stale_speakers?.length)
+  const failed = entryTask?.status === 'failed' || entryTask?.status === 'timeout' || settled === '音频合成失败'
+  const active = !!entryTask && ACTIVE.has(entryTask.status) && !failed && !markerPartial && settled !== '音频合成已完成'
   return {
     ...row,
     workKey: row.name,
     workName: row.display_name || row.name.replace(/\.json$/i, ''),
-    workState: active ? 'active' : failed ? 'failed' : row.complete ? 'done' : row.missing.length ? 'blocked' : row.stale_speakers?.length ? 'stale' : 'pending',
-    statusLabel: active ? activeEntryLabel(entryTask!, '合成中') : failed ? '合成失败' : row.complete ? '已完成' : row.missing.length ? '缺少声音' : row.stale_speakers?.length ? '待重合成' : '待合成',
-    statusVariant: (failed ? 'destructive' : active || row.missing.length ? 'warning' : row.complete ? 'success' : 'secondary') as 'destructive' | 'warning' | 'success' | 'secondary',
+    workState: active ? 'active' : failed ? 'failed' : completed ? 'done' : partial ? 'pending' : row.missing.length ? 'blocked' : row.stale_speakers?.length ? 'stale' : 'pending',
+    statusLabel: active ? activeEntryLabel(entryTask!, '合成中') : failed ? '合成失败' : completed ? '已完成' : partial ? '部分完成' : row.missing.length ? '缺少声音' : row.stale_speakers?.length ? '待重合成' : '待合成',
+    statusVariant: (failed ? 'destructive' : active ? 'warning' : completed ? 'success' : partial || row.missing.length ? 'warning' : 'secondary') as 'destructive' | 'warning' | 'success' | 'secondary',
   }
 }))
 const scopeRows = computed(() => rows.value.filter((row) => selected[row.name]))
