@@ -29,6 +29,7 @@ _test_storage = TemporaryDirectory(prefix="narrify-pytest-")
 os.environ["NARRIFY_DATABASE_URL"] = f"sqlite:///{_test_storage.name}/pytest.db"
 os.environ["NARRIFY_AUTO_CREATE_SCHEMA"] = "true"
 os.environ["NARRIFY_STORAGE_ROOT"] = _test_storage.name
+os.environ["NARRIFY_PROBE_CACHE_DIR"] = str(Path(_test_storage.name) / "audio-probes")
 
 
 @pytest.fixture(scope="session", autouse=True)

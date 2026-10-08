@@ -1,5 +1,7 @@
 """Single-host delivery backfill and legacy-layout maintenance coordinator."""
 import logging
+import time
+from ..core.audio_probe_cache import prune_cache
 from ..core.file_lock import exclusive_file_lock
 from ..core.paths import PROJECT_ROOT
 from .database import SessionLocal
@@ -15,6 +17,7 @@ def run(stop):
             with exclusive_file_lock(PROJECT_ROOT / ".narrify" / "delivery-maintenance.lock", timeout=0):
                 cursor = ""
                 scanned = False
+                last_prune = time.monotonic()
                 while not stop.is_set():
                     try:
                         next_cursor, next_scanned = cursor, scanned
@@ -32,6 +35,9 @@ def run(stop):
                                 db.commit()
                         cursor, scanned = next_cursor, next_scanned
                         remove_retired_files(retired)
+                        if not paused and time.monotonic() - last_prune >= 3600:
+                            prune_cache()
+                            last_prune = time.monotonic()
                         stop.wait(10 if paused else 0.2 if pending or not scanned else 10)
                     except Exception:
                         logger.exception("Delivery index maintenance failed; retrying")

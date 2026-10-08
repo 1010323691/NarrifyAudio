@@ -1342,10 +1342,8 @@ def _preview_inflight_conflicts(script: str, pkg: str, ctx: AuthContext, db: Ses
 
 # 单句/章节音频时长的进程级 LRU 缓存：detail 是事件驱动（打开/保存/刷新/任务终态），
 # 批量重渲染会随任务逐个终态多次重拉——文件未变即命中，避免重复起 ffprobe 子进程。
-# key 含 mtime_ns 以支持同路径覆盖；失败值（None）也缓存（字节身份决定时长，修好 mtime 必变；
-# 边界：装好 ffprobe 后对未动过的文件需重启 API 才生效）。放本模块而非包装
-# engines/audio.probe_duration：后者被 music/bgm/task_worker 各命名空间引用且被大量测试
-# monkeypatch，全局包装会污染它们；_cached_probe 以**裸名**调 probe_duration 以保测试可 patch。
+# key 包含完整文件身份、工具身份和参数；只缓存成功值。
+# probe_duration 的持久化缓存供其它进程和 BGM 共享；本层仅保留小型预览 memo。
 _DURATION_CACHE: OrderedDict = OrderedDict()
 _DURATION_CACHE_LOCK = threading.Lock()
 _DURATION_CACHE_MAX = 512
@@ -1354,20 +1352,23 @@ _DURATION_MISSING = object()
 
 def _cached_probe(path: Path, ffprobe_path: str, mtime_ns: int | None,
                   timeout: float = 120.0) -> float | None:
-    """ffprobe 时长（秒，round 3；失败/缺失 → None）。线程安全 + cache-aside：
-
-    单个锁包住所有 dict 操作（查/挪位/写/超限弹出是复合操作，不能只靠 GIL）；
-    ffprobe 子进程在**锁外**执行，临界区仅微秒级 dict 操作；两线程同时 miss 同一文件
-    会重复 probe 一次，结果相同、无害。``timeout`` 透传给 probe_duration 子进程上限。
-    """
-    key = (str(path), mtime_ns)
+    """Small preview memo above the shared persistent probe cache; successes only."""
+    from ..core.audio_probe_cache import input_identity, tool_identity, PARAMETERS
+    source, tool = input_identity(path), tool_identity(ffprobe_path)
+    if source is None:
+        return None
+    key = (source, tool or ("unresolved", ffprobe_path), PARAMETERS)
     with _DURATION_CACHE_LOCK:
         hit = _DURATION_CACHE.get(key, _DURATION_MISSING)
         if hit is not _DURATION_MISSING:
             _DURATION_CACHE.move_to_end(key)
-            return hit
+            if source == input_identity(path) and tool == tool_identity(ffprobe_path):
+                return hit
+            return None
     duration, _err = probe_duration(path, ffprobe_path, timeout=timeout)  # 锁外：起子进程
-    value: float | None = None if math.isnan(duration) else round(duration, 3)
+    if source != input_identity(path) or tool != tool_identity(ffprobe_path) or _err or not math.isfinite(duration) or duration <= 0:
+        return None
+    value = round(duration, 3)
     with _DURATION_CACHE_LOCK:
         _DURATION_CACHE[key] = value
         _DURATION_CACHE.move_to_end(key)

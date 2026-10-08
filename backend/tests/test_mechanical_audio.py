@@ -178,3 +178,74 @@ def test_nested_host_lock_is_reentrant_and_released_on_exception(isolated):
             raise ValueError("test")
     with store.host_lock():
         assert audio.capacity_available()
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'cancel', 'database'])
+def test_registered_probe_stops_and_finishes_child_on_failure(isolated, monkeypatch, failure):
+    import subprocess
+    from backend.platform import task_context
+    from backend.core.task_control import TaskCancelled
+    factory, _ = isolated
+    current = claim(0)
+    with store.host_lock(), factory.begin() as db:
+        assert audio.reserve(db, current)
+    children = []
+    spawn = audio.spawn_registered
+    def record(*args, **kwargs):
+        child = spawn(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(audio, 'spawn_registered', record)
+    monkeypatch.setattr(task_context.EngineExecutionContext, 'check', lambda self: None)
+    def check(self, on_pause):
+        if failure == 'cancel':
+            raise TaskCancelled()
+        if failure == 'database':
+            raise RuntimeError('database unavailable')
+    monkeypatch.setattr(task_context.EngineExecutionContext, 'check_interruptible', check)
+    error = {'timeout': subprocess.TimeoutExpired, 'cancel': TaskCancelled, 'database': RuntimeError}[failure]
+    token = audio.bind_claim(current)
+    try:
+        with pytest.raises(error):
+            audio.run_registered([sys.executable, '-c', 'import time; time.sleep(60)'],
+                                 timeout=.1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert len(children) == 1 and children[0].poll() is not None
+        with factory() as db:
+            assert all(child['finished'] for child in db.get(MechanicalAudioPermit, current.attempt_id).process['children'])
+        assert audio.release(current)
+    finally:
+        audio.reset_claim(token)
+
+
+def test_registered_probe_pause_stops_before_release_and_restarts(isolated, monkeypatch):
+    import subprocess
+    from backend.platform import task_context
+    factory, _ = isolated
+    current = claim(0)
+    with store.host_lock(), factory.begin() as db:
+        assert audio.reserve(db, current)
+    children = []
+    spawn = audio.spawn_registered
+    def record(*args, **kwargs):
+        child = spawn(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(audio, 'spawn_registered', record)
+    monkeypatch.setattr(task_context.EngineExecutionContext, 'check', lambda self: None)
+    def pause_once(self, on_pause):
+        if len(children) == 1:
+            on_pause()
+            assert children[0].poll() is not None
+            assert audio.release(current)
+            with store.host_lock(), factory.begin() as db:
+                assert audio.reserve(db, current)
+    monkeypatch.setattr(task_context.EngineExecutionContext, 'check_interruptible', pause_once)
+    token = audio.bind_claim(current)
+    try:
+        result = audio.run_registered([sys.executable, '-c', 'import time; time.sleep(.1); print(2.5)'],
+                                      timeout=2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert result.returncode == 0 and result.stdout.strip() == b'2.5'
+        assert len(children) == 2 and all(child.poll() is not None for child in children)
+        assert audio.release(current)
+    finally:
+        audio.reset_claim(token)

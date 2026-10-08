@@ -232,6 +232,50 @@ def finish_registered(proc):
                 for child in permit.process.get("children", [])]}
 
 
+def run_registered(cmd, *, timeout, **kwargs):
+    """Interruptible small-output probe; pause kills before releasing its permit."""
+    claim = _claim.get()
+    if claim is None:
+        return subprocess.run(cmd, timeout=timeout, **kwargs)
+    from .task_context import EngineExecutionContext
+    context = EngineExecutionContext(claim)
+    context.check()
+    while True:
+        proc = spawn_registered(cmd, **kwargs)
+        restart = False
+        deadline = time.monotonic() + timeout
+
+        def stop_for_pause():
+            nonlocal restart
+            cancel_registered(proc)
+            proc.wait(timeout=30)
+            finish_registered(proc)
+            restart = True
+
+        try:
+            while True:
+                context.check_interruptible(stop_for_pause)
+                if restart:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                try:
+                    stdout, stderr = proc.communicate(timeout=min(.25, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        finally:
+            if not restart:
+                # Includes cancellation, timeout and callback/database errors.
+                cancel_registered(proc)
+                proc.wait(timeout=30)
+                finish_registered(proc)
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+
+
 def release_safely(claim):
     if claim.task_type not in AUDIO_TASK_TYPES:
         return
