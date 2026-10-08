@@ -13,6 +13,27 @@ from ..core.safe_filesystem import is_link_or_junction
 from .task_operations import owned_project
 
 
+def _is_book_analysis(data) -> bool:
+    """Recognize the producer's report structure, not arbitrary JSON objects."""
+    if not isinstance(data, dict):
+        return False
+    chapters = data.get('chapters')
+    filenames = data.get('filenames')
+    return (
+        all(isinstance(data.get(key), str) for key in ('source', 'encoding', 'base', 'expected_format'))
+        and type(data.get('total_chars')) is int and data['total_chars'] >= 0
+        and isinstance(data.get('sequence'), dict)
+        and isinstance(chapters, list)
+        and type(data.get('chapter_count')) is int and data['chapter_count'] == len(chapters)
+        and isinstance(filenames, list) and len(filenames) == len(chapters)
+        and all(isinstance(name, str) for name in filenames)
+        and all(isinstance(chapter, dict)
+                and type(chapter.get('seq')) is int
+                and isinstance(chapter.get('title'), str)
+                and type(chapter.get('chars')) is int for chapter in chapters)
+    )
+
+
 def overview_tasks(db: Session, user_id: str, project_id: str, *, root: Path | None = None) -> dict:
     if owned_project(db, user_id, project_id) is None:
         raise ValueError("项目不存在")
@@ -53,7 +74,7 @@ def overview_tasks(db: Session, user_id: str, project_id: str, *, root: Path | N
             if not path.is_file():
                 continue
             try:
-                if isinstance(read_json(path), dict):
+                if _is_book_analysis(read_json(path)):
                     reports.append(path.name)
             except (OSError, ValueError):
                 pass  # Missing/corrupt chapter errors remain actionable.

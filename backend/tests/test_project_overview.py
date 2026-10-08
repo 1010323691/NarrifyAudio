@@ -1,4 +1,5 @@
 from datetime import timedelta
+import json
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -85,6 +86,8 @@ def test_deleted_analysis_reports_use_durable_provenance_not_names(tmp_path):
         # A real script now occupying an old report path must remain actionable.
         (parsed / reports[0]).write_text('[{"text":"chapter"}]')
         assert overview_tasks(db, 'u', 'p', root=tmp_path)['failure_count'] == 8
+        (parsed / reports[0]).write_text('{}')
+        assert overview_tasks(db, 'u', 'p', root=tmp_path)['failure_count'] == 8
         (parsed / reports[0]).write_text('corrupt')
         assert overview_tasks(db, 'u', 'p', root=tmp_path)['failure_count'] == 8
     engine.dispose()
@@ -95,10 +98,16 @@ def test_overview_excludes_legacy_report_failures_but_preserves_real_errors(tmp_
     Base.metadata.create_all(engine)
     parsed = tmp_path / '03_parsed_json'
     parsed.mkdir()
-    (parsed / 'book_analysis.json').write_text('{"chapters": []}')
+    (parsed / 'book_analysis.json').write_text(json.dumps({
+        'source': 'book.txt', 'encoding': 'utf-8', 'base': 'book',
+        'total_chars': 100, 'chapters': [], 'chapter_count': 0, 'filenames': [],
+        'expected_format': '第 X 章', 'sequence': {},
+    }))
     # Naming is not identity: a real script with an analysis suffix remains actionable.
     (parsed / 'chapter_analysis.json').write_text('[{"text":"hello"}]')
     (parsed / 'broken.json').write_text('broken')
+    (parsed / 'object.json').write_text('{}')
+    (parsed / 'partial_analysis.json').write_text('{"chapters": []}')
     with Session(engine) as db:
         db.add(User(id='u', username='u', email='u@example.test', password_hash='x'))
         db.flush()
@@ -111,6 +120,8 @@ def test_overview_excludes_legacy_report_failures_but_preserves_real_errors(tmp_
             ('broken', 'failed', {'scripts': ['broken.json']}),
             ('missing', 'failed', {'scripts': ['missing.json']}),
             ('unknown', 'failed', {}),
+            ('object', 'failed', {'scripts': ['object.json']}),
+            ('partial', 'failed', {'scripts': ['partial_analysis.json']}),
             ('mixed', 'failed', {'scripts': ['book_analysis.json', 'chapter_analysis.json']}),
         ]
         for id, status, payload in entries:
@@ -118,8 +129,8 @@ def test_overview_excludes_legacy_report_failures_but_preserves_real_errors(tmp_
                         status=status, payload=payload, error_message=id))
         db.commit()
         result = overview_tasks(db, 'u', 'p', root=tmp_path)
-        assert result['failure_count'] == 5
-        assert result['statuses'] == [{'task_type': 'tts.batch', 'status': 'failed', 'count': 5}]
+        assert result['failure_count'] == 7
+        assert result['statuses'] == [{'task_type': 'tts.batch', 'status': 'failed', 'count': 7}]
         assert all(row['id'] not in {'report', 'legacy'} for row in result['failures'])
         # History is preserved. With only the obsolete reports left, card health is clear.
         for id, _, _ in entries:
