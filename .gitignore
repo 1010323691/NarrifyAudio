@@ -30,8 +30,17 @@ install_tts_env.log
 /storage/
 # 本机存储根目录位置（管理控制台选定；per-user 运行时数据，永不提交）
 /workspace/
-# 文档目录不随 Git 跟踪
-/docs/
+# 仅跟踪公开指南；其他本地文档继续忽略
+/docs/*
+!/docs/windows.md
+!/docs/windows.en.md
+!/docs/linux.en.md
+!/docs/production.md
+!/docs/production.en.md
+!/docs/operations.md
+!/docs/operations.en.md
+!/docs/development.md
+!/docs/development.en.md
 
 # 0015 migration backup dumps (contain user data — never commit)
 .backups/

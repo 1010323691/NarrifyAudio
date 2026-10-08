@@ -1,6 +1,8 @@
-# NarrifyAudio：Linux 完整部署指南
+# Linux 完整部署指南
 
-本指南面向全新的 **Ubuntu Server 24.04 LTS x86_64**，使用系统软件包、项目 Python 虚拟环境和 systemd 服务部署。Windows 本地部署见 [README.md](README.md)。其他发行版需要调整包名、PostgreSQL 集群名称和服务配置。
+[English](docs/linux.en.md) · [首页](README.zh-CN.md) · [Windows](docs/windows.md) · [运维](docs/operations.md) · [开发](docs/development.md) · [制作流程](docs/production.md)
+
+本指南面向全新的 **Ubuntu Server 24.04 LTS x86_64**，使用系统软件包、项目 Python 虚拟环境和 systemd 服务部署。Windows 本地部署见 [Windows 部署指南](docs/windows.md)。其他发行版需要调整包名、PostgreSQL 集群名称和服务配置。
 
 安装顺序为：**系统工具 → PostgreSQL / Redis → 项目依赖与前端构建 → 数据库与环境配置 → 迁移 → API / Worker → Nginx → LLM / TTS → 制作验收**。
 
@@ -50,7 +52,7 @@ bash launch/dev-all.sh
 
 ## 用户级部署（无 sudo / 无系统软件包）
 
-无 sudo 权限、或不希望安装系统软件包时，可在 `~/.local` 下自编译安装 PostgreSQL 16 与 Redis，并在 `~/.config/systemd/user/` 安装五个 user 级单元：`narrify-postgresql`、`narrify-redis`、`narrify-migrate`（oneshot 迁移）、`narrify-api`、`narrify-worker`。
+这是高级部署形态说明，本文未提供自编译软件和五个 user 单元的完整安装模板；下文首次安装采用系统级部署。无 sudo 权限、或不希望安装系统软件包时，可在 `~/.local` 下自编译安装 PostgreSQL 16 与 Redis，并在 `~/.config/systemd/user/` 安装五个 user 级单元：`narrify-postgresql`、`narrify-redis`、`narrify-migrate`（oneshot 迁移）、`narrify-api`、`narrify-worker`。
 
 - `launch/` 脚本自动检测该形态：五个单元**全部存在**时，所有单元操作走 `systemctl --user`（不 sudo），数据服务默认名切换为 `narrify-postgresql.service` / `narrify-redis.service`；任一缺失则回退系统级行为（`sudo systemctl` + 发行版默认服务名）。
 - 环境变量仍由单元的 `EnvironmentFile` 供给（如仓库根目录 `.env`），脚本不 source `.env`。
@@ -66,7 +68,7 @@ flowchart LR
   Dist[前端构建 dist/] --> API
   API -->|业务记录与任务 Outbox| PG[PostgreSQL 16 :5432]
   API <--> Redis[Redis :6379]
-  Worker[独立 Python Worker] <-->|领取任务、保存结果| PG
+  Worker[Worker 池 4 机械 + 4 模型] <-->|领取任务、保存结果| PG
   Worker <--> Redis
   Worker --> Storage[持久化工作空间]
   Worker --> LLM[可访问的 LLM API]
@@ -110,7 +112,7 @@ ffprobe -version
 sox --version
 ```
 
-预期 Python 为 3.12、Node.js 为 24、PostgreSQL 为 16。Linux 方案选择 Python 3.12，与 [Qwen3-TTS 官方环境建议](https://github.com/QwenLM/Qwen3-TTS#environment-setup)一致；不必照搬 Windows 的 Python 版本或安装 Conda。
+预期 Python 为 3.12、Node.js 为 24、PostgreSQL 为 16。这是本文目标组合，不表示最新版本或全部机器均已验证。Linux 方案选择 Python 3.12，与 [Qwen3-TTS 官方环境建议](https://github.com/QwenLM/Qwen3-TTS#environment-setup)一致；不必照搬 Windows 的 Python 版本或安装 Conda。
 
 ## 2. 配置数据服务
 
@@ -344,7 +346,7 @@ sudo systemctl status narrify-api narrify-worker --no-pager
 curl -fsS http://127.0.0.1:8642/api/health
 ```
 
-迁移成功后 `narrify-migrate` 显示 `active (exited)` 是正常状态。API 固定监听 `127.0.0.1:8642`，浏览器入口由 Nginx 提供。先部署一个 API、一个 Worker；增加 Worker 前要重新评估 GPU 显存和并发任务资源。
+迁移成功后 `narrify-migrate` 显示 `active (exited)` 是正常状态。API 固定监听 `127.0.0.1:8642`，浏览器入口由 Nginx 提供。先部署一个 API 进程和一个 Worker 池服务；池内默认 4 个机械 Worker + 4 个模型 Worker。扩容前须核对连接预算、GPU 显存和模型许可限制，见 [开发指南](docs/development.md)。
 
 ## 6. 配置 Nginx 同源入口
 
@@ -415,6 +417,13 @@ HTTPS 生效并启用 HTTP 到 HTTPS 重定向后，把环境文件中的 `NARRI
 项目默认地址是 `http://localhost:11434/v1`，但这不表示仓库会安装或启动 Ollama，也不会自动准备 LLM 模型。本地 LLM 的安装和常驻进程需单独管理；若与 TTS 共用 GPU，必须给两者留足显存。
 
 字幕 / 剧本解析、角色配置和背景音乐匹配等能力需要对应的应用配置。音乐库文件也需要自行准备；没有素材时不能仅靠安装 FFmpeg 完成背景音乐制作。
+
+基础依赖清单未包含章节合并所需的 Python 音频包。仅合并已有片段时，无需安装 CUDA/TTS 模型，但需 FFmpeg 及以下共享环境依赖：
+
+```bash
+sudo -u narrify -H /opt/narrify-audio/.venv/bin/python -m pip install \
+  'pydub>=0.25' 'soundfile>=0.12' 'numpy>=2.0'
+```
 
 ## 8. 完整 TTS 部署
 
@@ -546,6 +555,12 @@ sudo systemctl start narrify-api narrify-worker
 
 完整依赖升级后重新核对 CUDA wheel 与 GPU 推理；仅使用基础环境的部署继续按基础依赖清单维护。`narrify-migrate` 设置了 `RemainAfterExit`，升级时必须显式 **restart** 才会再次执行迁移，不能只重新启动 API。
 
+以下构建入口包含 import-linter 门禁，而当前 requirements 和 TTS 安装脚本不安装该工具。首次使用前执行：
+
+```bash
+sudo -u narrify -H /opt/narrify-audio/.venv/bin/python -m pip install import-linter
+```
+
 已安装 systemd 单元的机器，更新本地源码后可在仓库根目录执行 `bash launch/build.sh`，一键构建并加载最新代码。脚本自动识别 user / system 部署，先完成前端类型检查与构建、Python 编译检查和分层门禁，再执行 `daemon-reload`、停止 API / Worker、启动数据服务、重新运行迁移、启动 API / Worker，并检查 API 健康状态。它不拉取 Git 更新；浏览器完成后刷新。执行期间已有任务会受到服务重启影响，建议等待制作任务结束再运行。
 
 默认复用已安装依赖；依赖清单有变化时运行 `bash launch/build.sh --install-deps`，会先停止应用，再执行 `npm ci`、安装 `backend/requirements.txt` 和 `pip check`。这包括 TTS 依赖，完整依赖升级后的 CUDA 核对仍按上文执行。只需构建产物时使用 `bash launch/build.sh --build-only`，无需 systemd。普通构建失败时不停止服务；依赖安装模式中的失败及迁移失败会保持应用停止，修复后重新运行脚本。
@@ -602,19 +617,8 @@ sudo tar -czf "$backup_dir/narrify-files.tar.gz" \
 | `nvidia-smi` 正常但 torch 无 CUDA | wheel 是否为 CUDA 版本、驱动兼容性、GPU 直通与设备权限 |
 | GPU OOM | 降低批量，检查同时运行的 LLM / 其他 GPU 任务，避免未经验证启动多个 Worker |
 
-当前代码已处理 POSIX 虚拟环境路径和 `fcntl` 文件锁，但 Linux 自动化部署、GPU 冒烟和生产运行仍需目标机验证。部分 TTS 错误提示还会建议运行 `install_tts_env.ps1`，Linux 实际按本文第 8 节安装。
+当前代码已处理 POSIX 虚拟环境路径、`fcntl` 文件锁以及 TTS 子进程组终止，但 Linux 自动化部署、GPU 冒烟和生产运行仍需目标机验证。部分 TTS 错误提示还会建议运行 `install_tts_env.ps1`，Linux 实际按本文第 8 节安装。
 
-TTS 强制终止在 Windows 会杀进程树，POSIX 分支目前只调用子进程 `kill()`。因此 Linux 单任务取消 / 暂停期间，可能有 FFmpeg 等后代进程继续运行；本指南的 `KillMode=control-group` 能在停止整个 Worker 服务时清理同一服务组，但不能替代单任务的进程树取消。完整上线验收应覆盖取消、暂停、重试和临时文件清理；如果观察到残留，需要补充 POSIX 进程组管理，而不是仅修改部署配置。
+TTS 强制终止由受控进程管理器处理：Windows 使用 Job Object，POSIX 创建独立会话并终止进程组。systemd 的 `KillMode=control-group` 还会在停止整个 Worker 服务时清理服务组。实现存在不等于目标机已验收；上线仍须覆盖取消、暂停、重试和临时文件清理。
 
-
-### 独立任务 Worker 池
-
-正式启动使用 `python -m backend.worker_pool`，默认 4 个机械任务 Worker 和 4 个模型任务 Worker，均为独立进程。Windows 启动脚本及 Linux 开发启动脚本已使用此入口；Linux systemd 的 `narrify-worker.service` 使用同一入口。
-
-`backend.worker --task-lane mechanical` 只领取非模型任务；`--task-lane model` 只领取注册表标记为 LLM/TTS 的任务。单 Worker 默认只处理机械任务，不提供混合领取模式。模型任务范围包含文本解析、角色基础、角色克隆、批量合成、预览渲染、BGM 场景分析、音乐标签推荐；合并及混音仍归机械 Worker。模型专用进程保留原 GPU 调度及模型调用许可限制。
-
-监督进程只重启退出的槽位，并保持它原来的分工。可通过 `--mechanical-workers`、`--model-workers` 配置两组数量。扩容时须计算连接池总预算：API 两池共 48，每个 Worker 两池共 5，默认八个 Worker 合计上限 88。已有 systemd 安装需要更新服务入口并重新加载服务配置，修改源码不会自动改写已安装的 unit。
-
-同一项目的冲突写任务在领取前排队，避免正常的长模型调用引发 30 秒文件锁超时及重复尝试；其他项目与非冲突任务继续被领取。同一项目不同章节的合并/混音仍可并行。任务数据一致性要求造成的等待与模型占用机械执行槽的等待分别处理。
-
-LLM 并发设置为全机共享的同时请求上限（沿用 `generation.parse_worker_concurrency` 配置键），文本解析、角色分析、BGM 段落分析和音乐标签推荐共用，不随模型 Worker 进程数叠加。默认 4 个模型 Worker 各提供 2 个 LLM 任务通道；同一项目不同章节的 BGM 分析可并行，同章的分析、混音、合并以及整项目写操作仍互斥。单章内部的分析批次依赖上一批场景上下文，按顺序执行。
+Worker 池分工、任务互斥和全机 LLM 请求并发见 [开发指南](docs/development.md)；管理员可选 GPU 调度见 [GPU 调度](docs/operations.md)。
