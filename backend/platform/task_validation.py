@@ -58,6 +58,9 @@ def legacy_task_payload_error(task_type: str, payload: object) -> str | None:
     """Validate client-controlled path components used by legacy task engines."""
     if not isinstance(payload, dict):
         return "任务参数无效"
+    if task_type == 'project.progress':
+        signature = payload.get('signature')
+        return None if isinstance(signature, str) and re.fullmatch(r'[0-9a-f]{64}', signature) else '进度索引版本无效'
     if "input_file_ids" in payload:
         ids = payload["input_file_ids"]
         if task_type != "text.format":

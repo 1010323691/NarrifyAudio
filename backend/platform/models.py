@@ -105,6 +105,14 @@ class Project(TimestampMixin, Base):
     )
 
 
+class ProjectProgress(Base):
+    __tablename__ = "project_progress"
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    stages: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class ProjectFile(Base):
     __tablename__ = "project_files"
 

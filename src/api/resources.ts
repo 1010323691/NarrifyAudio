@@ -1,5 +1,6 @@
 import { listQuery, type ListPagination } from '@/api/listPaging'
 import { API_BASE, http } from './client'
+import { randomUuid } from '@/utils/uuid'
 
 export interface ResourceCategory {
   key: string
@@ -145,6 +146,6 @@ export function getCleanupPreview(projectIds: string[], page = 1, options?: Requ
 export function submitResourceTask(projectId: string, taskType: 'resources.scan' | 'resources.package' | 'resources.cleanup', payload: Record<string, unknown>): Promise<{ id: string; status: string }> {
   return http.post('/api/v1/tasks', {
     project_id: projectId, task_type: taskType, payload,
-    idempotency_key: `resources-${crypto.randomUUID()}`,
+    idempotency_key: `resources-${randomUuid()}`,
   })
 }

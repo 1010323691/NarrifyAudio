@@ -64,6 +64,28 @@ def test_default_synthesis_page_only_checks_visible_files_and_bulk_keeps_all(sco
     assert db.query(Task).count() == 0
 
 
+def test_synthesis_last_page_and_bulk_exclude_analysis_reports(scope, monkeypatch):
+    from backend.core import paths
+    db, ctx, layout = scope
+    monkeypatch.setattr(paths, 'get_or_prepare_layout', lambda: layout)
+    names = [f'第 {i:03} 章.json' for i in range(1, 625)]
+    for name in names:
+        (layout.parsed_json / name).write_text('[{"text":"hello"}]', encoding='utf-8')
+    reports = ['book_analysis.json', 'book_analysis (2).json', 'custom_report.json', 'bad.json']
+    for name in reports:
+        (layout.parsed_json / name).write_text('{"chapters": []}', encoding='utf-8')
+    monkeypatch.setattr(tts, '_cached_file_batch_status', lambda name, *_: {
+        'name': name, 'is_script': True, 'complete': False, 'missing': [],
+    })
+    page = tts.batch_list(page=63, page_size=10, db=db, ctx=ctx, selected=reports)
+    assert page['pagination']['total'] == 624
+    assert page['pagination']['counts']['all'] == 624
+    assert [row['name'] for row in page['files']] == names[620:]
+    assert page['missing_selected'] == reports
+    bulk = tts.batch_list(keys_only=True, db=db, ctx=ctx)
+    assert [row['name'] for row in bulk['files']] == names
+
+
 def test_merge_page_enriches_only_page_and_full_selection_keeps_done_and_ready(scope, monkeypatch):
     db, ctx, layout = scope
     for i in range(61): (layout.audio_chunk / f'p{i:03}').mkdir()

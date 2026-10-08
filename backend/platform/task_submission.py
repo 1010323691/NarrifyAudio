@@ -139,6 +139,14 @@ def submit_task_record(
     # Resolve shared policy only for a NEW task, after both idempotency checks.
     # Keep the original request hash independent of changing admin defaults.
     stored_payload = dict(payload)
+    if task_type == "project.progress":
+        from .task_lifecycle import ACTIVE_TASK_STATUSES
+        running = db.scalar(select(Task).where(
+            Task.owner_id == user.id, Task.project_id == project_id,
+            Task.task_type == task_type, Task.status.in_(ACTIVE_TASK_STATUSES),
+        ).limit(1))
+        if running is not None:
+            return running
     if task_type == "resources.scan":
         from .task_lifecycle import ACTIVE_TASK_STATUSES
 

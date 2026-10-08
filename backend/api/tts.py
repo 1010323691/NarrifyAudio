@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from ..core import pathio
 from ..core.config import get_config
-from ..core.bounded_json import read_json
+from ..core.bounded_json import read_json, is_script_data
 from ..core.bounded_cache import BoundedCache
 from ..core.file_lock import exclusive_file_lock
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all, merged_audio_filename
@@ -880,10 +880,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
         return out
     # Legacy book-analysis reports share this directory with scripts. Identify
     # scripts by their contents, not by a filename suffix or their segment count.
-    if not isinstance(data, list) or not all(
-        isinstance(entry, dict) and isinstance(entry.get("text", ""), str)
-        for entry in data
-    ):
+    if not is_script_data(data):
         return out
     out["is_script"] = True
     if not data:

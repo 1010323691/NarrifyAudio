@@ -9,7 +9,7 @@ import ts from 'typescript'
 class ApiError extends Error { constructor(status, message = 'rejected') { super(message); this.status = status } }
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); await vue.nextTick() }
-function harness(api = {}, storage = new Map()) {
+function harness(api = {}, storage = new Map(), browserCrypto) {
   let clock = 0, uuid = 0, next = 0
   const timers = new Map(), unmount = [], deactivate = [], activate = [], calls = []
   const auth = vue.reactive({ user: { id: 'user-a' } })
@@ -25,11 +25,15 @@ function harness(api = {}, storage = new Map()) {
     '@/api/durableTasks': { getDurableTask: async () => ({ status: 'succeeded' }), ...api },
     '@/stores/auth': { useAuthStore: () => auth }, '@/stores/project': { useProjectStore: () => project },
   }
+  const uuidModule = { exports: {} }
+  const cryptoApi = browserCrypto ?? { randomUUID: () => `key-${++uuid}` }
+  runInNewContext(ts.transpileModule(readFileSync(new URL('../src/utils/uuid.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { module: uuidModule, exports: uuidModule.exports, crypto: cryptoApi })
+  dependencies['@/utils/uuid'] = uuidModule.exports
   const module = { exports: {} }
   const code = ts.transpileModule(readFileSync(new URL('../src/composables/useTtsSubmission.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
   runInNewContext(code, { module, exports: module.exports, require: n => dependencies[n],
     localStorage: { getItem: k => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) },
-    crypto: { randomUUID: () => `key-${++uuid}` }, Date: { now: () => clock }, document: { hidden: false },
+    crypto: cryptoApi, Date: { now: () => clock }, document: { hidden: false },
     window: { addEventListener() {}, removeEventListener() {} },
     setTimeout: (fn, ms) => { const id = ++next; timers.set(id, { fn, time: clock + ms }); return id }, clearTimeout: id => timers.delete(id),
   })
@@ -116,4 +120,17 @@ test('a successful reset is persisted and never repeated after a lost synthesis 
   assert.equal(resets, 1)
   assert.ok(calls.length >= 2 && calls.every(call => call[1] === calls[0][1]))
   replay.stop()
+})
+
+
+test('LAN HTTP without randomUUID supports resume and reset with distinct secure keys', async () => {
+  const { webcrypto } = await import('node:crypto')
+  const h = harness({}, new Map(), { getRandomValues: bytes => webcrypto.getRandomValues(bytes) })
+  await h.op.submit(['one.json'])
+  const first = h.calls[0][1]
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:batch$/)
+  h.op.settled(['task-a'])
+  await h.op.submit(['one.json'], 'reset')
+  assert.notEqual(h.calls[1][1], first)
+  h.stop()
 })

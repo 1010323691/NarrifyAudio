@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import logging
 import mimetypes
 import os
@@ -49,6 +50,7 @@ from .database import SessionLocal
 from .models import (
     OutboxEvent,
     Project,
+    ProjectProgress,
     ProjectFile,
     Task,
     TaskAttempt,
@@ -1104,7 +1106,21 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
 
 
 # S1：6 个平台直连执行器的显式绑定（注册表按名查表；不用装饰器隐式注册）。
+def _execute_project_progress(claim: TaskClaim) -> TaskOutcome:
+    from ..engines.project_completion import project_completion
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        if user is None:
+            raise TaskExecutionError('owner_not_found', '任务所属用户不存在')
+        root = project_workspace_path(db, user.username, claim.project_id)
+    stages = project_completion(root)
+    outcome = write_task_outcome(claim, 'progress.json', 'application/json', b'{}',
+                                 {'signature': claim.payload['signature'], 'stages': stages})
+    return replace(outcome, result_only=True)
+
+
 DIRECT_EXECUTORS: dict[str, Callable[[TaskClaim], TaskOutcome]] = {
+    "project.progress": _execute_project_progress,
     "text.format": _execute_text_format,
     "book.analyze": _execute_book_analyze,
     "book.split": _execute_book_split,
@@ -1370,6 +1386,14 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 "name": published[0]["name"],
                 **outcome.metadata,
             }
+            if task.task_type == 'project.progress':
+                snapshot = db.get(ProjectProgress, task.project_id)
+                if snapshot is None:
+                    snapshot = ProjectProgress(project_id=task.project_id)
+                    db.add(snapshot)
+                snapshot.signature = outcome.metadata['signature']
+                snapshot.stages = outcome.metadata['stages']
+                snapshot.updated_at = utcnow()
             if outcome.publish_module:
                 result_payload["path"] = published[0]["path"]
             if len(published) > 1 or isinstance(outcome.metadata.get("files"), list):
