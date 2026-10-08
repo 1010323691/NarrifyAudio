@@ -14,6 +14,7 @@ down (requirement #7).
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -46,6 +47,7 @@ from ..services.list_paging import entry_states, page_enriched, page_meta, page_
 from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
 from ..engines.merge import boundary_gap_ms
+from ..platform.merge_submission import submit_merge_tasks
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.engine_task_submission import (
@@ -831,6 +833,9 @@ def reset_batch_status_cache() -> None:
     invalidate on every real change). Mirrors ``core.config.reset_config_cache``."""
     with _STATUS_CACHE_LOCK:
         _STATUS_CACHE.clear()
+    with _MERGE_STATUS_CACHE_LOCK:
+        _MERGE_STATUS_CACHE.clear()
+        _MERGE_INPUT_CACHE.clear()
 
 
 def _stat_key(path) -> tuple | None:
@@ -851,6 +856,11 @@ def _chapter_source_path(name: str, layout) -> Path | None:
 
 def _chapter_display_name(name: str, layout) -> str:
     return chapter_display_name(Path(name).stem, layout) if Path(name).name == name else Path(name).stem
+
+
+def _chapter_completion(segments, manifest, package_dir, expected_params):
+    """Shared source-based completion rule for synthesis and merge readiness."""
+    return Batch.count_completion(segments, manifest, out_dir=package_dir, expected_voice_params=expected_params)
 
 
 def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | None = None) -> dict:
@@ -888,11 +898,8 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     segs = Batch.build_segments(data)
     pkg_dir = out_dir or layout.audio_chunk / Batch.package_for(src)
     expected_params = _expected_voice_params(layout, segs, voice_config)
-    manifest = Batch.read_manifest(pkg_dir)
-    c = Batch.count_completion(
-        segs, manifest, out_dir=pkg_dir,
-        expected_voice_params=expected_params,
-    )
+    manifest = Batch.read_manifest(pkg_dir, voice_config=voice_config)
+    c = _chapter_completion(segs, manifest, pkg_dir, expected_params)
     out["total"], out["completed"], out["remaining"] = c["total"], c["completed"], c["remaining"]
     out["complete"] = c["total"] > 0 and c["completed"] == c["total"]
     order: list[str] = []
@@ -991,10 +998,13 @@ def merge_list(page: Annotated[int, Query(ge=1)] = 1,
                q: str = "", filter: str = "all", keys_only: bool = False,
                ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db),
                selected: Annotated[list[str] | None, Body(max_length=10000)] = None) -> dict:
+    started = time.monotonic()
+    metrics = {"hits": 0, "misses": 0, "verify_ms": 0.0}
     layout = resolve_layout()
     names = sorted(p.name for p in layout.audio_chunk.iterdir() if p.is_dir()) if layout.audio_chunk and layout.audio_chunk.exists() else []
+    voice_config = _read_voice_config(layout) if names else {}
     def enrich(name):
-        row = _package_merge_status(name, layout)
+        row = _cached_package_merge_status(name, layout, voice_config, metrics)
         target = layout.audio_merge / merged_audio_filename(name)
         return {**row, "merged_filename": target.name if row.get("complete") and target.is_file() else None}
     states = entry_states(db, ctx, ["tts.merge"])
@@ -1002,6 +1012,10 @@ def merge_list(page: Annotated[int, Query(ge=1)] = 1,
     result["packages"] = result.pop("items")
     available = set(names)
     result["missing_selected"] = [n for n in selected or [] if n not in available]
+    if keys_only:
+        _merge_log.info("合并选择：匹配 %d 章 · 命中 %d · 核验 %d · 核验耗时 %.1fms · 总耗时 %.1fms",
+                        len(result["packages"]), metrics["hits"], metrics["misses"], metrics["verify_ms"],
+                        (time.monotonic() - started) * 1000)
     return result
 
 
@@ -1060,7 +1074,8 @@ def batch_status(script: str | None = None,
 
 
 class MergeRequest(BaseModel):
-    packages: list[str] | None = None
+    packages: list[str] | None = Field(default=None, max_length=10000)
+    project_id: str | None = None
 
 
 @router.post("/merge")
@@ -1068,6 +1083,7 @@ def run_merge(
     req: MergeRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict:
     """Submit one durable Worker task per selected merge package.
 
@@ -1082,37 +1098,20 @@ def run_merge(
     for p in pkgs:
         if not p or p != Path(p).name:
             raise HTTPException(400, f"非法包名：{p}")
-    layout = resolve_layout()
-    for p in pkgs:
-        # 章节锁探测（提前拒绝；TOCTOU 可接受——真正的互斥由 tts.merge 执行期持锁保证，
-        # 见 merge_audio_package 与「整章预览」保存共用的章节级跨进程锁）。
-        if _chapter_preview_lock_held(layout, p):
-            raise HTTPException(409, f"章节 {p} 有保存操作进行中，请稍后再合并。")
-    active_packages = active_durable_targets(
-        task_type="tts.merge", payload_key="package", ctx=ctx, db=db,
+    return submit_merge_tasks(
+        packages=pkgs, ctx=ctx, db=db, idempotency_key=idempotency_key,
+        project_id=req.project_id, preflight=_merge_preflight,
     )
-    conflicts = [package for package in pkgs if package in active_packages]
-    if conflicts:
-        raise HTTPException(409, "以下包已有合并任务在途：" + "、".join(conflicts))
-    created = []
-    for package in pkgs:
-        label = "merge-audio: " + package
-        task = submit_legacy_engine_task(
-            task_type="tts.merge",
-            label=label,
-            payload={
-                "package": package,
-                "config": get_config().model_dump(mode="json"),
-            },
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"tts-merge:{package}",
-        )
-        created.append({"package": package, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "packages": created}
 
 
-def _package_merge_status(name: str, layout) -> dict:
+def _merge_preflight(packages):
+    layout = resolve_layout()
+    for package in packages:
+        if _chapter_preview_lock_held(layout, package):
+            raise HTTPException(409, f"章节 {package} 有保存操作进行中，请稍后再合并。")
+
+
+def _package_merge_status(name: str, layout, voice_config: dict | None = None, *, probe=None) -> dict:
     """One row of the merge page's package list (``GET /merge-status?packages=…``).
 
     ``total`` = the source parsed JSON's synthesizable segment count — the same rule as
@@ -1124,7 +1123,13 @@ def _package_merge_status(name: str, layout) -> dict:
     """
     out = {"name": name, "display_name": chapter_display_name(name, layout),
            "total": 0, "completed": 0, "remaining": 0, "complete": False}
-    manifest = Batch.read_manifest(layout.audio_chunk / name)
+    if voice_config is None:
+        voice_config = _read_voice_config(layout)
+    manifest = Batch.read_manifest(layout.audio_chunk / name, voice_config=voice_config)
+    if probe is not None:
+        # Version selection depends on file existence, including nested directories.
+        # Re-normalize these manifests after the short existence cache expires.
+        probe["dynamic_versions"] = any(entry.get("voice_versions") for entry in manifest.values())
     src = layout.parsed_json / f"{name}.json"
     if src.exists():
         try:
@@ -1133,23 +1138,90 @@ def _package_merge_status(name: str, layout) -> dict:
             data = None
         if isinstance(data, list) and data:
             segs = Batch.build_segments(data)
-            c = Batch.count_completion(
-                segs, manifest, out_dir=layout.audio_chunk / name,
-                expected_voice_params=_expected_voice_params(
-                    layout, segs, _read_voice_config(layout),
-                ),
-            )
+            expected = _expected_voice_params(layout, segs,
+                _read_voice_config(layout) if voice_config is None else voice_config)
+            c = _chapter_completion(segs, manifest, layout.audio_chunk / name, expected)
+            if probe is not None:
+                indices = {segment["index"] for segment in segs}
+                probe["candidates"] = [(index, entry["path"]) for index, entry in manifest.items()
+                    if index in indices and entry.get("ok") and entry.get("path")
+                    and (expected is None or entry.get("voice_used") == expected.get(index))]
             out["total"] = c["total"]
             out["completed"] = c["completed"]
             out["remaining"] = c["remaining"]
             out["complete"] = c["total"] > 0 and c["completed"] == c["total"]
             return out
+    if probe is not None:
+        probe["candidates"] = [(index, entry["path"]) for index, entry in manifest.items()
+                               if entry.get("ok") and entry.get("path")]
     out["total"] = len(manifest)  # degrade: source JSON missing / corrupt / empty
     out["completed"] = len(Batch.done_indices(manifest, layout.audio_chunk / name,
                                               layout.workspace))
     out["remaining"] = out["total"] - out["completed"]
     out["complete"] = out["total"] > 0 and out["completed"] == out["total"]
     return out
+
+
+_MERGE_STATUS_CACHE = BoundedCache(32 * 1024 * 1024, 2048)
+_MERGE_STATUS_CACHE_LOCK = threading.Lock()
+# No audio/text bodies: only the eligible path/index probe and its source-derived row.
+_MERGE_INPUT_CACHE = BoundedCache(64 * 1024 * 1024, 2048)
+# Fixed stripes bound synchronization memory even during large cold requests.
+_MERGE_STATUS_STRIPES = [threading.Lock() for _ in range(64)]
+_MERGE_STATUS_TTL = 2.0
+_merge_log = logging.getLogger(__name__)
+
+
+def _cached_package_merge_status(name, layout, voice_config, metrics=None):
+    package_dir = layout.audio_chunk / name
+    title_source = _chapter_source_path(f"{name}.json", layout)
+    key = (str(layout.workspace), name,
+           _stat_key(layout.parsed_json / f"{name}.json"),
+           _stat_key(package_dir / "manifest.json"), _stat_key(package_dir),
+           _stat_key(layout.voice_profiles / "voice_config.json"),
+           _stat_key(title_source) if title_source else None)
+    def lookup():
+        with _MERGE_STATUS_CACHE_LOCK:
+            cached = _MERGE_STATUS_CACHE.get(key)
+            if cached is not None:
+                expires, row = cached
+                if time.monotonic() < expires:
+                    if metrics is not None:
+                        metrics["hits"] += 1
+                    return dict(row)
+                _MERGE_STATUS_CACHE.pop(key)
+        return None
+    row = lookup()
+    if row is not None:
+        return row
+    with _MERGE_STATUS_STRIPES[hash(key) % len(_MERGE_STATUS_STRIPES)]:
+        row = lookup()
+        if row is not None:
+            return row
+        started = time.monotonic()
+        # Directory changes and expiry require fresh existence checks, not re-parsing
+        # unchanged scripts, titles, manifests and effective voice parameters.
+        input_key = key[:4] + key[5:]
+        with _MERGE_STATUS_CACHE_LOCK:
+            inputs = _MERGE_INPUT_CACHE.get(input_key)
+        if inputs is None:
+            probe = {"candidates": []}
+            row = _package_merge_status(name, layout, voice_config, probe=probe)
+            if not probe.get("dynamic_versions"):
+                with _MERGE_STATUS_CACHE_LOCK:
+                    _MERGE_INPUT_CACHE[input_key] = (dict(row), probe["candidates"])
+        else:
+            base, candidates = inputs
+            minimal = {index: {"ok": True, "path": path} for index, path in candidates}
+            completed = len(Batch.done_indices(minimal, package_dir, layout.workspace))
+            row = {**base, "completed": completed, "remaining": base["total"] - completed,
+                   "complete": base["total"] > 0 and completed == base["total"]}
+        if metrics is not None:
+            metrics["misses"] += 1
+            metrics["verify_ms"] += (time.monotonic() - started) * 1000
+        with _MERGE_STATUS_CACHE_LOCK:
+            _MERGE_STATUS_CACHE[key] = (time.monotonic() + _MERGE_STATUS_TTL, dict(row))
+        return row
 
 
 class MergeStatusRequest(BaseModel):
@@ -1184,7 +1256,8 @@ def merge_status(packages: Annotated[list[str] | None, Query()] = None) -> dict:
              "total": 0, "completed": 0, "remaining": 0, "complete": False}
             for p in names
         ]}
-    return {"packages": [_package_merge_status(p, layout) for p in names]}
+    voice_config = _read_voice_config(layout) if names else {}
+    return {"packages": [_cached_package_merge_status(p, layout, voice_config) for p in names]}
 
 
 # ---------------------------------------------------------------------------

@@ -340,9 +340,9 @@ def _migrate_legacy_voice_used(data: list, layout, voice_config=None) -> int:
     return migrated
 
 
-def read_manifest(out_dir) -> dict:
+def read_manifest(out_dir, *, voice_config=None) -> dict:
     """Read a manifest with legacy entries normalized in memory, without writing it."""
-    return _load_manifest(out_dir, persist_migration=False)
+    return _load_manifest(out_dir, persist_migration=False, voice_config=voice_config)
 
 
 def migrate_manifest(out_dir, handle=None, *, voice_config=None, expected_params=None, expected_signatures=None) -> dict:
