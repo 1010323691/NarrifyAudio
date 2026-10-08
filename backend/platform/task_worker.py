@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 import redis
 from sqlalchemy import case, func, or_, select
@@ -22,7 +22,8 @@ from ..core.config import TextConfig
 from ..core import config as core_config
 from ..core.file_lock import exclusive_file_lock, shared_file_lock
 from ..core.paths import WORKSPACE_DIRS
-from ..core.filenames import workspace_audio_identity, legacy_storage_name
+from ..core.filenames import workspace_audio_identity, legacy_storage_name, fit_filename
+from ..core.object_keys import normalized_object_key, object_key_lookup_key
 from ..core.request_context import bind_workspace, reset_workspace
 from ..core.task_control import TaskCancelled
 from ..engines.book import (
@@ -67,7 +68,6 @@ from .storage import (
     object_path,
     project_object_key,
     artifact_module,
-    available_file_name,
     safe_display_name,
     sha256_file,
     task_attempt_path,
@@ -726,7 +726,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
         source_identity = file_identity(source_path.stat())
         # Uploaded audio is a valid standalone input. Production intermediates
         # inherit their source's delivery eligibility rather than gaining it by cutting.
-        source_complete = source_relative.startswith("01_input/") or source_relative in delivery_records(db, user, claim.project_id)
+        source_complete = source_relative.startswith("01_input/") or source_relative in delivery_records(db, user, claim.project_id, [source_relative])
     handle = EngineExecutionContext(claim)
     token = bind_workspace(workspace)
     try:
@@ -786,7 +786,7 @@ def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
         user = db.get(User, claim.owner_id)
         source_complete = source_complete and file_identity(safe_regular_path(workspace, source_relative).stat()) == source_identity
         if not source_relative.startswith("01_input/"):
-            source_complete = source_complete and source_relative in delivery_records(db, user, claim.project_id)
+            source_complete = source_complete and source_relative in delivery_records(db, user, claim.project_id, [source_relative])
     outputs = [Path(file["path"]) for file in files]
     metadata_files = [
         {
@@ -1238,31 +1238,45 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             _cleanup_outcome(outcome)
             raise TaskExecutionError("invalid_publish_module", "任务产物目录配置无效")
         targets: set[tuple[str, str]] = set()
-        records = (
-            list(db.scalars(select(ProjectFile).where(ProjectFile.project_id == task.project_id)))
-            if any(item.publish_module for item in outputs) else []
-        )
+        project_prefix = project_directory_key(db, user.username, task.project_id)
+        # Serialize target checks and publication together, including old
+        # case-insensitive collisions. Read only this completion's target keys.
+        if outputs:
+            db.scalar(select(Project.id).where(Project.id == task.project_id).with_for_update())
+        wanted_keys = list({object_key_lookup_key(f"{project_prefix}/{item.publish_module}/{safe_display_name(item.output_name)}")
+                            for item in outputs if item.publish_module})
+        records = []
+        for offset in range(0, len(wanted_keys), 100):
+            records.extend(db.scalars(select(ProjectFile).where(ProjectFile.project_id == task.project_id,
+                ProjectFile.object_key_normalized.in_(wanted_keys[offset:offset + 100]))))
+        grouped = {}
+        for record in records:
+            grouped.setdefault(record.object_key_normalized, []).append(record)
+        if any(len(rows) > 1 for rows in grouped.values()):
+            db.rollback()
+            _cleanup_outcome(outcome)
+            raise TaskExecutionError("output_name_collision", "任务产物目标有历史名称碰撞，请先处理冲突文件")
         recorded_targets = {
-            item.object_key.casefold(): item
+            item.object_key_normalized: item
             for item in records if item.deleted_at is None
         }
-        deleted_targets = {item.object_key.casefold(): item for item in records if item.deleted_at is not None}
+        deleted_targets = {item.object_key_normalized: item for item in records if item.deleted_at is not None}
         publication_keys: dict[tuple[str, str], str] = {}
         for item in outputs:
             if item.publish_module:
-                target = (item.publish_module, safe_display_name(item.output_name).casefold())
+                target = (item.publish_module, normalized_object_key(safe_display_name(item.output_name)))
                 if target in targets:
                     db.rollback()
                     _cleanup_outcome(outcome)
                     raise TaskExecutionError("output_name_collision", "任务产物清洗后重名，未发布任何文件")
                 targets.add(target)
-                key = f"{project_directory_key(db, user.username, task.project_id)}/{item.publish_module}/{safe_display_name(item.output_name)}"
-                previous = recorded_targets.get(key.casefold())
+                key = f"{project_prefix}/{item.publish_module}/{safe_display_name(item.output_name)}"
+                previous = recorded_targets.get(object_key_lookup_key(key))
                 if previous is not None and previous.original_name == item.output_name:
                     # A revived tombstone can retain an older disk casing.
                     key = previous.object_key
                 if previous is None:
-                    deleted = deleted_targets.get(key.casefold())
+                    deleted = deleted_targets.get(object_key_lookup_key(key))
                     if deleted is not None:
                         deleted_path = object_path(deleted.object_key, configured_storage_root(db))
                         if deleted_path.exists() or deleted_path.is_symlink():
@@ -1283,30 +1297,13 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     _cleanup_outcome(outcome)
                     raise TaskExecutionError("output_name_collision", "任务产物与已有文件名称冲突，未覆盖原文件")
                 publication_keys[target] = key
-        legacy_module_paths: list[tuple[str, Path]] = []
         stale_book_paths: list[Path] = []
         module_outputs = {item.publish_module for item in outputs if item.publish_module}
         for module in module_outputs:
-            module_prefix = f"{project_directory_key(db, user.username, task.project_id)}/{module}/"
-            for existing in db.scalars(
-                select(ProjectFile).where(
-                    ProjectFile.owner_id == task.owner_id,
-                    ProjectFile.project_id == task.project_id,
-                    ProjectFile.kind == "artifact",
-                    ProjectFile.object_key.like(module_prefix + "%"),
-                )
-            ).all():
-                relative_parts = existing.object_key.removeprefix(module_prefix).split("/")
-                if len(relative_parts) == 2:
-                    try:
-                        UUID(relative_parts[0])
-                    except ValueError:
-                        continue
-                    existing.deleted_at = utcnow()
-                    legacy_module_paths.append((module, object_path(existing.object_key, configured_storage_root(db))))
+            module_prefix = f"{project_prefix}/{module}/"
             if claim.task_type == "book.split" and module == "02_split_text":
                 output_names = {
-                    Path(publication_keys[(module, safe_display_name(item.output_name).casefold())]).name
+                    Path(publication_keys[(module, normalized_object_key(safe_display_name(item.output_name)))]).name
                     for item in outputs if item.publish_module == module
                 }
                 for existing in db.scalars(
@@ -1344,25 +1341,26 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
         with publication_transaction(transaction_journal, prepared=existing is not None):
             published: list[dict[str, Any]] = []
             book_indices = journal.add_many([
-                object_path(publication_keys[(item.publish_module, safe_display_name(item.output_name).casefold())], configured_storage_root(db))
+                object_path(publication_keys[(item.publish_module, normalized_object_key(safe_display_name(item.output_name)))], configured_storage_root(db))
                 for item in outputs
             ]) if claim.task_type == "book.split" and all(item.publish_module for item in outputs) else None
             for output_index, item in enumerate(outputs):
                 file_record = None
                 if item.publish_module:
-                    object_key = publication_keys[(item.publish_module, safe_display_name(item.output_name).casefold())]
-                    file_record = db.scalar(select(ProjectFile).where(ProjectFile.object_key == object_key))
+                    object_key = publication_keys[(item.publish_module, normalized_object_key(safe_display_name(item.output_name)))]
+                    file_record = (recorded_targets.get(object_key_lookup_key(object_key))
+                                   or deleted_targets.get(object_key_lookup_key(object_key)))
                     output_id = file_record.id if file_record is not None else new_id()
                 else:
                     output_id = new_id()
                     module = artifact_module(task.task_type, item.output_name)
-                    directory = project_workspace_path(db, user.username, task.project_id) / module
-                    # Serialize publication names for concurrent tasks in this project.
-                    db.scalar(select(Project.id).where(Project.id == task.project_id).with_for_update())
-                    reserved = set(db.scalars(select(ProjectFile.object_key).where(ProjectFile.project_id == task.project_id)))
-                    reserved_names = {Path(key).name for key in reserved if Path(key).parent.as_posix() == f"{project_directory_key(db, user.username, task.project_id)}/{module}"}
-                    name = available_file_name(directory, item.output_name, reserved=reserved_names)
+                    name = fit_filename(safe_display_name(item.output_name), disambiguator=f"~{attempt.id}-{output_index}")
                     object_key = project_object_key(user.username, task.project_id, output_id, name, db=db, task_type=task.task_type)
+                    existing_key = db.scalar(select(ProjectFile.id).where(ProjectFile.project_id == task.project_id,
+                        ProjectFile.object_key_normalized == object_key_lookup_key(object_key)))
+                    unique_path = object_path(object_key, configured_storage_root(db))
+                    if existing_key or unique_path.exists() or unique_path.is_symlink():
+                        raise TaskExecutionError("output_name_collision", "任务独立成果名称冲突，未覆盖原文件")
                 final_path = object_path(object_key, configured_storage_root(db))
                 journal.publish(book_indices[output_index] if book_indices is not None else journal.add(final_path), item.temp_path)
                 if item.publish_module and file_record is not None:
@@ -1437,24 +1435,12 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
             task.progress = 100
             task.finished_at = utcnow()
             task.updated_at = utcnow()
+            from .delivery_index import write_authorities
+            write_authorities(db, user, task, result_payload)
             from .quota import release_attempt_holds
             release_attempt_holds(task.id, attempt.id, db=db)
             append_task_event(db, task.id, "succeeded", {"attempt_id": attempt.id, "file_id": output_id})
             db.commit()
-        storage_root = project_workspace_path(db, user.username, task.project_id)
-        for module, legacy_path in legacy_module_paths:
-            try:
-                legacy_path.unlink(missing_ok=True)
-            except OSError:
-                continue
-            module_root = storage_root / module
-            parent = legacy_path.parent
-            while parent != module_root and parent.is_relative_to(module_root):
-                try:
-                    parent.rmdir()
-                except OSError:
-                    break
-                parent = parent.parent
         if outcome.result_only:
             outcome.temp_path.unlink(missing_ok=True)
         return True

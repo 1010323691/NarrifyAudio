@@ -52,6 +52,13 @@ def _check_delivery_identity(path, record):
     if not unchanged:
         raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化，请重新制作或选择成品。")
 
+
+def _revalidate_deliveries(claim, payload, expected):
+    current = _validate_deliveries(claim, payload)
+    if any(name not in current or current[name].get("task_id") != record.get("task_id")
+           or current[name].get("identity") != record.get("identity") for name, record in expected.items()):
+        raise TaskExecutionError("delivery_changed", "成品资格或版本在导出期间已变化，请重新选择。")
+
 def _voice_entry_result(payload: dict, result: dict) -> dict:
     """Single-role records must not repeat the whole book's character list."""
     speakers = payload.get("speakers")
@@ -140,8 +147,13 @@ def _run_bgm_mix(handle, claim: TaskClaim, payload: dict, side_effect_outputs, s
     cfg = core_config.get_config()
     with SessionLocal() as db:
         user = db.get(User, claim.owner_id)
-        source_complete = f"06_audio_merge/{payload['stem']}.mp3" in delivery_records(db, user, claim.project_id)
+        relative = f"06_audio_merge/{payload['stem']}.mp3"
+        source_complete = relative in delivery_records(db, user, claim.project_id, [relative])
     result = bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
+    if source_complete:
+        with SessionLocal() as db:
+            user = db.get(User, claim.owner_id)
+            source_complete = relative in delivery_records(db, user, claim.project_id, [relative])
     result["complete"] = source_complete
     return result
 
@@ -250,8 +262,10 @@ def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_output
                 if not inside_bgm or not resolved_source.is_file():
                     raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
                 record = deliveries[f"08_bgm/{stem}.mp3"]
+                _revalidate_deliveries(claim, {**payload, "chapters": [stem]}, {f"08_bgm/{stem}.mp3": record})
                 _archive_source(output, resolved_source, f"{base}/{stem}.mp3", record, claim)
                 update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
+        _revalidate_deliveries(claim, payload, deliveries)
         result = file_task_outcome(
             archive, f"{base}.zip", "application/zip",
             {"engine": "bgm.package", "base": base, "file_count": len(stems), "delivery_policy": POLICY_VERSION},
@@ -283,9 +297,11 @@ def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
                 name = unique_filename(str(item.get("name") or source.name), reserved_names)
                 reserved_names.add(name)
                 record = deliveries[relative.as_posix()]
+                _revalidate_deliveries(claim, {**payload, "files": [item]}, {relative.as_posix(): record})
                 _archive_source(output, source, name, record, claim)
                 update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
         # Closing the archive writes its central directory before publication.
+        _revalidate_deliveries(claim, payload, deliveries)
         result = file_task_outcome(
             archive, f"{base}.zip", "application/zip",
             {"engine": "audio.zip", "file_count": len(files), "delivery_policy": POLICY_VERSION},
@@ -338,6 +354,7 @@ def _run_audio_export(handle, claim: TaskClaim, payload: dict, side_effect_outpu
         side_effect_outputs.append(TaskSideEffectOutput(staged, target))
         written.append({"name": name, "path": str(target)})
         update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
+    _revalidate_deliveries(claim, payload, deliveries)
     return {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
 
 

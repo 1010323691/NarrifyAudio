@@ -65,7 +65,7 @@ def capture_deliveries(db, user, project_id: str, task_type: str, result: dict, 
     return list(deliveries.values())
 
 
-def delivery_records(db, user, project_id: str) -> dict[str, dict]:
+def _historical_delivery_records(db, user, project_id: str) -> dict[str, dict]:
     root = safe_project_workspace_path(db, user.username, project_id)
     if root is None:
         return {}
@@ -126,8 +126,19 @@ def delivery_records(db, user, project_id: str) -> dict[str, dict]:
     return records
 
 
+def delivery_records(db, user, project_id: str, relatives=None) -> dict[str, dict]:
+    from .models import DeliveryIndexState
+    state = db.get(DeliveryIndexState, project_id)
+    if state is not None and state.complete:
+        from .delivery_index import indexed_records
+        root = safe_project_workspace_path(db, user.username, project_id)
+        return indexed_records(db, user, project_id, root, relatives) if root is not None else {}
+    records = _historical_delivery_records(db, user, project_id)
+    return records if relatives is None else {name: records[name] for name in relatives if name in records}
+
+
 def require_delivery(db, user, project_id: str, relative: str) -> dict:
-    record = delivery_records(db, user, project_id).get(relative)
+    record = delivery_records(db, user, project_id, [relative]).get(relative)
     if record is None:
         raise DeliveryDenied("此资源为制作资料或尚未形成有效成品，不提供下载或打包。")
     return record
@@ -137,7 +148,7 @@ def validate_delivery_sources(db, user, project_id: str, task_type: str, payload
     if task_type not in {"audio.zip", "audio.export", "bgm.package"}:
         return {}
     files = [f"08_bgm/{stem}.mp3" for stem in payload.get("chapters", [])] if task_type == "bgm.package" else [str(item.get("relative_path", "")) for item in payload.get("files", [])]
-    records = delivery_records(db, user, project_id)
+    records = delivery_records(db, user, project_id, files)
     if not files or any(relative not in records for relative in files):
         raise DeliveryDenied("只允许导出已完成的音频成品，制作资料不能打包或导出。")
     return {relative: records[relative] for relative in files}

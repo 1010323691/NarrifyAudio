@@ -499,7 +499,7 @@ def resolve_resource(db: Session, user: User, value: str, snapshot_id: str | Non
         path = safe_regular_path(root, row["relative_path"])
     except (OSError, ValueError, RuntimeError) as exc:
         raise ResourceError("文件已变化或不可访问，请刷新资源", 404) from exc
-    delivery = delivery_records(db, user, project_id).get(row["relative_path"])
+    delivery = delivery_records(db, user, project_id, [row["relative_path"]]).get(row["relative_path"])
     return path, entry_json(row, project, summary, delivery), row
 
 

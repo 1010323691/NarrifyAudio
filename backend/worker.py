@@ -304,6 +304,7 @@ def main() -> None:
         return
     parse_workers: list[threading.Thread] = []
     retention_worker: threading.Thread | None = None
+    delivery_worker: threading.Thread | None = None
     gpu_workers: list[threading.Thread] = []
     merge_workers: list[threading.Thread] = []
     scheduler_thread: threading.Thread | None = None
@@ -315,6 +316,10 @@ def main() -> None:
                 name="project-retention-cleanup", daemon=True,
             )
             retention_worker.start()
+            from .platform.delivery_maintenance import run as maintain_deliveries
+            delivery_worker = threading.Thread(target=maintain_deliveries, args=(stop,),
+                name="delivery-index-maintenance", daemon=True)
+            delivery_worker.start()
         if args.task_lane == "model":
             scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
             scheduler_thread.start()
@@ -345,6 +350,8 @@ def main() -> None:
         stop.set()
         if retention_worker is not None:
             retention_worker.join(timeout=5)
+        if delivery_worker is not None:
+            delivery_worker.join(timeout=5)
         for thread in parse_workers:
             thread.join(timeout=2)
         for thread in gpu_workers:

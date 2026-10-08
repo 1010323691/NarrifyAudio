@@ -143,6 +143,9 @@ def package_selection(db, user: User, payload: dict, check=lambda: None) -> list
             policies[project_id] = delivery_records(db, user, project_id)
         if description["relative_path"] not in policies[project_id]:
             raise ResourceError("此资源为制作资料或成品已变化，不提供下载或打包，请刷新成品清单。", 403)
+        authority = policies[project_id][description["relative_path"]]
+        description["_delivery_task_id"] = authority["task_id"]
+        description["_delivery_identity"] = authority["identity"]
     if not unique:
         raise ResourceError("没有可打包的文件", 422)
     return list(unique.values())
@@ -206,6 +209,19 @@ def _execute_resource_package(claim: TaskClaim) -> TaskOutcome:
                         raise ResourceError(f"打包期间文件变化：{description['relative_path']}")
                 update_progress(claim, min(95, int(copied * 95 / max(1, total_bytes))), f"打包 {index + 1}/{len(selected)}：{description['name']}")
         context.check()
+        # A qualification can be revoked without changing the audio bytes.
+        # Recheck every selected source once more after the entire copy phase.
+        with SessionLocal() as db:
+            current_user = db.get(User, claim.owner_id)
+            groups = {}
+            for _path, description, _record in selected:
+                groups.setdefault(description["project_id"], []).append(description)
+            for project_id, descriptions in groups.items():
+                current = delivery_records(db, current_user, project_id, [item["relative_path"] for item in descriptions])
+                for item in descriptions:
+                    authority = current.get(item["relative_path"])
+                    if not authority or authority["task_id"] != item["_delivery_task_id"] or authority["identity"] != item["_delivery_identity"]:
+                        raise ResourceError("成品资格在打包期间已变化，请重新选择", 403)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=EXPORT_RETENTION_SECONDS)
         return _outcome(claim, {
             "delivery_policy": POLICY_VERSION,
