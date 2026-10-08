@@ -15,7 +15,7 @@ from ..core.concurrency import gate, merge_gate
 from ..core.task_control import TaskCancelled
 from .artifact_publication import PublicationJournal, PublicationJournalBundle
 from .database import SessionLocal
-from .models import Task, TaskAttempt, User, utcnow
+from .models import Task, TaskAttempt, TaskEvent, User, utcnow
 from .storage import configured_storage_root, safe_display_name, task_attempt_path
 from .task_contracts import (
     TaskClaim, TaskExecutionError,
@@ -48,12 +48,16 @@ class EngineExecutionContext:
         self._published_workspace_stages: set[Path] = set()
         self._pending_audio_stages: list[tuple[Path, Path]] = []
         self._audio_stage_started = 0.0
+        self._attempt_directory: Path | None = None
 
     @property
     def cancelled(self) -> bool:
         return cancellation_requested(self.claim)
 
     def progress(self, fraction: float, current: str = "") -> None:
+        if getattr(self.claim, "task_type", None) == "tts.batch" and current in {"启动引擎", "解析输入", "加载模型", "模型就绪"}:
+            self.phase(current)
+            return
         self.progress_percent(fraction * 100, current)
 
     def progress_percent(self, percent: float, current: str = "") -> None:
@@ -63,7 +67,10 @@ class EngineExecutionContext:
         return update_chapter_snapshot(self.claim, done, total, chars, chars_total, current)
 
     def phase(self, name: str) -> None:
-        _append_claim_event(self.claim, "phase", {"phase": name})
+        payload = {"phase": name}
+        if getattr(self.claim, "task_type", None) == "tts.batch":
+            payload["current"] = name
+        _append_claim_event(self.claim, "phase", payload)
 
     def log(self, message: str, level: str = "INFO") -> None:
         _append_claim_event(self.claim, "log", {"level": level, "msg": message})
@@ -119,14 +126,18 @@ class EngineExecutionContext:
         return self._shared_publication_journal
 
     def _workspace_stage_path(self, final_path: Path) -> Path:
-        with SessionLocal() as db:
-            user = db.get(User, self.claim.owner_id)
-            if user is None:
-                raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
-            return task_attempt_path(
-                db, user.username, self.claim.project_id, self.claim.task_id,
-                self.claim.attempt_id, f"workspace-{secrets.token_hex(12)}-{safe_display_name(final_path.name)}",
-            )
+        # The worker holds the storage/project fence for this immutable attempt.
+        # Resolving its root again for every chapter adds hundreds of DB reads.
+        if self._attempt_directory is None:
+            with SessionLocal() as db:
+                user = db.get(User, self.claim.owner_id)
+                if user is None:
+                    raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+                self._attempt_directory = task_attempt_path(
+                    db, user.username, self.claim.project_id, self.claim.task_id,
+                    self.claim.attempt_id, "stage",
+                ).parent
+        return self._attempt_directory / f"workspace-{secrets.token_hex(12)}-{safe_display_name(final_path.name)}"
 
     def allocate_workspace_stage(self, final_path: Path) -> Path:
         staged = self._workspace_stage_path(final_path)
@@ -466,3 +477,40 @@ def cancellation_requested(claim: TaskClaim) -> bool:
 
 
 PersistentTaskHandle = EngineExecutionContext
+
+
+def write_claim_events(entries):
+    """Fence and persist a bounded collection of chapter events in one transaction."""
+    from sqlalchemy import insert
+    from .task_lifecycle import _update_ui_state
+    from .models import new_id
+    if not entries:
+        return set()
+    now = utcnow()
+    with SessionLocal() as db:
+        tasks = {row.id: row for row in db.scalars(select(Task).where(Task.id.in_([claim.task_id for claim, _ in entries]))
+                                                  .order_by(Task.id).with_for_update())}
+        attempts = {row.id: row for row in db.scalars(select(TaskAttempt).where(
+            TaskAttempt.id.in_([claim.attempt_id for claim, _ in entries])).order_by(TaskAttempt.id).with_for_update())}
+        accepted, events = set(), []
+        for claim, updates in entries:
+            task, attempt = tasks.get(claim.task_id), attempts.get(claim.attempt_id)
+            if (task is None or attempt is None or attempt.task_id != task.id or attempt.status != 'running'
+                    or attempt.lease_token != claim.lease_token or _as_utc(attempt.lease_expires_at) is None
+                    or _as_utc(attempt.lease_expires_at) <= now
+                    or task.status in TERMINAL_TASK_STATUSES):
+                continue
+            state = dict(task.ui_state or {})
+            for kind, payload in updates:
+                task.event_sequence = (task.event_sequence or 0) + 1
+                _update_ui_state(state, kind, payload)
+                if kind == 'progress':
+                    task.progress = max(0, min(100, int(payload['progress'])))
+                events.append(dict(id=new_id(), task_id=task.id, sequence=task.event_sequence,
+                                   event_type=kind, payload=payload, created_at=now))
+            task.ui_state = state; task.updated_at = now
+            accepted.add(task.id)
+        for offset in range(0, len(events), 100):
+            db.execute(insert(TaskEvent), events[offset:offset + 100])
+        db.commit()
+        return accepted

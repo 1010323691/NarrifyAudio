@@ -6,7 +6,8 @@
  * frozen. Purely presentational: the parent owns the Task and the cancel control
  * (drop one in the ``#actions`` slot).
  */
-import { computed } from 'vue'
+import { computed, ref, watch, onUnmounted, onDeactivated, onActivated } from 'vue'
+import { getTaskLogs, type TaskLogPage } from '@/api/tasks'
 import { useClientDisplayStore } from '@/stores/clientDisplay'
 const clientDisplay = useClientDisplayStore()
 import type { TaskSnapshot } from '@/types'
@@ -25,7 +26,44 @@ const props = defineProps<{
   showProgress?: boolean
 }>()
 
-const logs = computed(() => props.task?.logs ?? [])
+const history = ref<TaskLogPage['logs']>([])
+const before = ref<number | null>(null)
+let controller = new AbortController()
+let logTimer: ReturnType<typeof setTimeout> | null = null
+let active = true
+let epoch = 0
+async function loadLogs(older = false) {
+  const id = props.task?.id
+  if (!id || !active || !clientDisplay.logsEnabled || (props.task?.batch_task_count ?? 1) > 1) return
+  const version = epoch
+  try {
+    const options = older && before.value !== null ? { before: before.value }
+      : history.value.length ? { after: history.value[history.value.length - 1]!.sequence } : {}
+    const response = await getTaskLogs(id, options, controller.signal)
+    if (version !== epoch || id !== props.task?.id) return
+    const merged = new Map([...history.value, ...response.logs].map(log => [log.sequence, log]))
+    history.value = [...merged.values()].sort((a, b) => a.sequence - b.sequence).slice(-1000)
+    if (older || !options.after) before.value = response.next_before
+  } catch { /* Live SSE logs remain available during temporary failures. */ }
+  finally {
+    if (!older && version === epoch && active && clientDisplay.logsEnabled && ['pending', 'running', 'paused'].includes(props.task?.status ?? '')) {
+      logTimer = setTimeout(() => { logTimer = null; void loadLogs() }, 3000)
+    }
+  }
+}
+function restartLogs() {
+  epoch++; controller.abort(); controller = new AbortController()
+  if (logTimer) clearTimeout(logTimer)
+  logTimer = null
+  history.value = []; before.value = null
+  void loadLogs()
+}
+watch([() => props.task?.id, () => props.task?.batch_task_count, () => clientDisplay.logsEnabled], restartLogs, { immediate: true })
+watch(() => props.task?.status, status => { if (status && !['pending', 'running', 'paused'].includes(status)) restartLogs() })
+onDeactivated(() => { active = false; epoch++; controller.abort(); if (logTimer) clearTimeout(logTimer); logTimer = null })
+onActivated(() => { active = true; restartLogs() })
+onUnmounted(() => { active = false; epoch++; controller.abort(); if (logTimer) clearTimeout(logTimer) })
+const logs = computed(() => history.value.length ? history.value : props.task?.logs ?? [])
 
 // While the task is in a live state the step row spins; once it lands in a terminal state
 // (succeeded / failed / cancelled) the spinner stops so a finished run doesn't look busy.
@@ -62,6 +100,7 @@ function logColor(level: string) {
 
     <div v-if="clientDisplay.logsEnabled || $slots.actions" class="flex items-center justify-between gap-2">
       <span v-if="clientDisplay.logsEnabled" class="text-xs text-muted-foreground">实时日志</span>
+      <button v-if="before !== null && history.length < 1000 && clientDisplay.logsEnabled" class="text-xs text-primary underline" @click="loadLogs(true)">读取更早日志</button>
       <slot name="actions" />
     </div>
 

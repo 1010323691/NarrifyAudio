@@ -290,6 +290,12 @@ def claim_task(
         task = db.scalar(task_stmt.with_for_update())
         if task is None or task.status in TERMINAL_TASK_STATUSES or task.status == "paused":
             return None
+        if task.task_type == "tts.batch" and defer_workspace_conflicts:
+            from .tts_resource_budget import preparation_memory_available
+            if (not preparation_memory_available()) or db.scalar(select(Task.id).join(TaskAttempt).where(
+                Task.task_type == "tts.batch", Task.id != task.id, TaskAttempt.status == "running",
+                TaskAttempt.lease_expires_at > now).limit(1)):
+                return None
         if not claim_allowed(task.task_type, db):
             return None
         if task.status == "retrying" and _as_utc(task.next_attempt_at) and _as_utc(task.next_attempt_at) > now:
@@ -407,6 +413,11 @@ def claim_fair_task(
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
         eligible_tasks = eligible_tasks & _foundation_claim_eligibility()
+        active_tts = db.scalar(select(Task.id).join(TaskAttempt).where(
+            Task.task_type == "tts.batch", TaskAttempt.status == "running", TaskAttempt.lease_expires_at > now).limit(1))
+        from .tts_resource_budget import preparation_memory_available
+        if active_tts or (not preparation_memory_available()):
+            eligible_tasks = eligible_tasks & (Task.task_type != "tts.batch")
         # Resuming live attempts are continued by their existing execution thread.
         live_attempt = select(TaskAttempt.id).where(
             TaskAttempt.task_id == Task.id, TaskAttempt.status == "running",
@@ -1376,6 +1387,8 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     [str(item.final_path) for item in outcome.side_effect_outputs],
                 )
             db.add(TaskResult(task_id=task.id, result=result_payload))
+            from .task_lifecycle import compact_result
+            task.ui_state = {**(task.ui_state or {}), 'result': compact_result(result_payload)}
             attempt.status = "succeeded"
             attempt.finished_at = utcnow()
             attempt.lease_expires_at = None
@@ -1526,9 +1539,8 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                 current = list(batch_claims)
                 if not heartbeat_claim(claim):
                     return
-                for member in current[1:]:
-                    if member.task_id not in batch_finished:
-                        heartbeat_claim(member)
+                from .tts_batch_claims import heartbeat_members
+                heartbeat_members([member for member in current[1:] if member.task_id not in batch_finished])
             except Exception:
                 # A transient DB hiccup must not kill the lease-renewal thread: a
                 # dead heartbeat is exactly how a live task loses its lease and gets
@@ -1551,12 +1563,15 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                 # Workers leave these rows queued; only this batch owner may
                 # bypass the project conflict for matching immutable inputs.
                 with SessionLocal() as db:
-                    siblings = db.scalars(select(Task).where(
+                    sibling_query = select(Task).where(
                         Task.owner_id == claim.owner_id, Task.project_id == claim.project_id,
                         Task.task_type == claim.task_type, Task.id != claim.task_id,
                         Task.status.in_(("pending", "queued", "retrying")),
                         Task.payload["execution_batch"].as_string() == execution_batch,
-                    ).order_by(Task.created_at, Task.id)).all()
+                    ).order_by(Task.created_at, Task.id)
+                    if claim.task_type == "tts.batch":
+                        sibling_query = sibling_query.limit(1000)
+                    siblings = db.scalars(sibling_query).all()
                     entry_fields = {"speakers"} if claim.task_type == "voices.clone" else {"script", "scripts"}
                     ignored = entry_fields | {"label", "_request_hash"}
                     sibling_entries = [(row.id, key) for row in siblings
@@ -1564,13 +1579,21 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
                                        and {k: v for k, v in row.payload.items() if k not in ignored}
                                        == {k: v for k, v in claim.payload.items() if k not in ignored}]
                 claimed_entries = {entry_key}
+                unique_ids = []
                 for task_id, entry in sibling_entries:
-                    if entry in claimed_entries:
-                        continue
-                    member = claim_task(task_id, claim.worker_id, defer_workspace_conflicts=False)
-                    if member is not None:
-                        batch_claims.append(member)
+                    if entry not in claimed_entries:
+                        unique_ids.append(task_id)
                         claimed_entries.add(entry)
+                        if claim.task_type == 'tts.batch' and len(unique_ids) == 499:
+                            break
+                if claim.task_type == "tts.batch":
+                    from .tts_batch_claims import claim_tts_members
+                    batch_claims.extend(claim_tts_members(claim, unique_ids))
+                else:
+                    for task_id in unique_ids:
+                        member = claim_task(task_id, claim.worker_id, defer_workspace_conflicts=False)
+                        if member is not None:
+                            batch_claims.append(member)
                 if claim.task_type == "voices.clone":
                     from .clone_batch_execution import execute_clone_batch
                     outcome = execute_clone_batch(batch_claims, finish_member, cancel_member)

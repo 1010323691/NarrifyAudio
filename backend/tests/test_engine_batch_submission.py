@@ -57,7 +57,7 @@ def test_batch_creates_independent_rows_and_outbox_events(owner):
         assert len({row.payload["execution_batch"] for row in rows}) == 1
         second = submit(db, owner, [entry("three.json")])
         assert db.get(Task, second["task_id"]).payload["execution_batch"] != rows[0].payload["execution_batch"]
-        assert len(db.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id.in_(result["task_ids"]))).all()) == 2
+        assert len(db.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id.in_(result["task_ids"]))).all()) == 1
 
 
 def test_invalid_later_entry_rolls_back_the_whole_batch(owner):

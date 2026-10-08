@@ -22,8 +22,8 @@ import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useTaskStore } from '@/stores/task'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
-import { batchStatusFiles, submitBatchReset, runBatch, ttsStatus, listVoices, batchList } from '@/api/tts'
-import { useDurableTaskWait } from '@/composables/useDurableTaskWait'
+import { batchStatusFiles, ttsStatus, listVoices, batchList } from '@/api/tts'
+import { useTtsSubmission } from '@/composables/useTtsSubmission'
 import type { BatchFileStatus, BatchResult, TTSStatus } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
@@ -47,7 +47,7 @@ const taskStore = useTaskStore()
 const captureScope = useWorkbenchScope()
 const { projectSet } = useProjectGate()
 const { push: toast } = useToast()
-const waitForTask = useDurableTaskWait()
+const submission = useTtsSubmission()
 
 const settings = useSettingsStore()
 const status = ref<TTSStatus | null>(null)
@@ -255,6 +255,9 @@ const noSynthesizable = computed(
 const busy = ref(false)
 let operationVersion = 0
 const error = ref('')
+watch(submission.locked, value => { if (value) busy.value = true; else if (!taskId.value) busy.value = false })
+watch(submission.failure, value => { if (value) { error.value = value; busy.value = false } })
+const submissionLabel = submission.label
 const taskId = ref<string | null>(null)
 
 const taskBatch = useWorkbenchTaskBatch(taskId)
@@ -362,7 +365,7 @@ onActivated(async () => {
     // 实时快照包含全部在途任务；旧的终态任务可能已移出回放窗口。
     const activeIds = new Set(taskStore.activeTasks('tts-batch').map(row => row.id))
     if (!taskBatch.rows.value.some(row => activeIds.has(row.id))) taskId.value = null
-    if (!taskId.value) busy.value = false
+    if (!taskId.value) busy.value = submission.locked.value
     reattachTask()
     const st = task.value?.status
     if (st && ACTIVE.has(st)) startStatusPolling()
@@ -378,7 +381,7 @@ async function doRun() {
   const isCurrent = captureScope()
 
   if (
-    busy.value ||
+    busy.value || submission.locked.value ||
     !projectSet.value ||
     filesLoading.value ||
     filesError.value ||
@@ -393,9 +396,10 @@ async function doRun() {
   try {
     // Default (resume): synthesize only the not-yet-done segments, skipping existing audio
     // (fully-done files contribute no segments to the pool).
-    const submitted = await withinScope(runBatch({ scripts: names }), isCurrent)
+    const submitted = await withinScope(submission.submit(names), isCurrent)
+    if (!submitted) { busy.value = submission.locked.value; return }
     taskBatch.track(submitted.task_ids)
-    await withinScope(taskStore.refresh(), isCurrent)
+    void taskStore.refresh()
     startStatusPolling()
     // Completion is handled by the watcher on task.status.
   } catch (e: any) {
@@ -416,7 +420,7 @@ async function doRunAll() {
   const isCurrent = captureScope()
 
   if (
-    busy.value ||
+    busy.value || submission.locked.value ||
     !projectSet.value ||
     filesLoading.value ||
     filesError.value ||
@@ -441,16 +445,10 @@ async function doRunAll() {
       return
     }
     error.value = ''
-    // Clear the completion state (the package folders) first …
-    const reset = await withinScope(submitBatchReset(names), isCurrent)
-    const resetTask = await withinScope(waitForTask.wait(reset.task_id), isCurrent)
-    if (resetTask.status !== 'succeeded') {
-      throw new Error(resetTask.error_message || '重置合成包失败')
-    }
-    // … then the identical one-click run: default resume, nothing done → everything re-done.
-    const submitted = await withinScope(runBatch({ scripts: names }), isCurrent)
+    const submitted = await withinScope(submission.submit(names, 'reset'), isCurrent)
+    if (!submitted) { busy.value = submission.locked.value; return }
     taskBatch.track(submitted.task_ids)
-    await withinScope(taskStore.refresh(), isCurrent)
+    void taskStore.refresh()
     startStatusPolling()
   } catch (e: any) {
     if (!isCurrent()) return
@@ -460,6 +458,14 @@ async function doRunAll() {
     busy.value = false
   }
 }
+
+watch(submission.receipt, submitted => {
+  if (!submitted) return
+  taskBatch.track(submitted.task_ids)
+  busy.value = submission.locked.value
+  void taskStore.refresh()
+  startStatusPolling()
+})
 
 function cancel() {
   const isCurrent = captureScope()
@@ -471,6 +477,7 @@ watch(
   (st) => {
     const t = task.value
     if (!st || !t) return
+    if (['succeeded', 'failed', 'cancelled', 'timeout'].includes(st)) submission.settled(taskBatch.rows.value.map(row => row.id))
     if (st === 'succeeded') {
       const result = t.result as BatchResult | null
       taskId.value = null
@@ -478,7 +485,7 @@ watch(
       stopStatusPolling()
       toast({
         title: '音频合成完成',
-        variant: result?.failed.length ? 'default' : 'success',
+        variant: (result?.failed_count ?? result?.failed?.length ?? 0) ? 'default' : 'success',
         description: `成功 ${result?.completed ?? 0} / ${result?.total ?? 0} 段`,
       })
     } else if (st === 'failed' || st === 'timeout') {
@@ -602,7 +609,7 @@ async function retryBatch() {
       :selected="selected"
       :loading="filesLoading"
       :load-error="filesError"
-      :disabled="busy || !projectSet"
+      :disabled="busy || submission.locked.value || !projectSet"
       :filters="[
         { key: 'pending', label: '待合成' },
         { key: 'active', label: '处理中' },
@@ -727,14 +734,14 @@ async function retryBatch() {
         </p>
       </template>
       <Button
-        :disabled="busy || filesLoading || !projectSet || !engineReady || !!filesError || !selectedRemaining"
+        :disabled="busy || submission.locked.value || filesLoading || !projectSet || !engineReady || !!filesError || !selectedRemaining"
         @click="doRun"
         ><Loader2 v-if="busy" class="h-4 w-4 animate-spin" /><Layers v-else class="h-4 w-4" />{{
-          busy ? '合成中…' : '增量合成'
+          busy ? (submissionLabel || '合成中…') : '增量合成'
         }}</Button
       ><Button
         variant="outline"
-        :disabled="busy || filesLoading || !projectSet || !engineReady || !!filesError || !selectedTotal"
+        :disabled="busy || submission.locked.value || filesLoading || !projectSet || !engineReady || !!filesError || !selectedTotal"
         title="清除所选音频并重新合成全部段落"
         @click="doRunAll"
         ><RotateCcw class="h-4 w-4" />重新合成所选</Button
@@ -742,7 +749,7 @@ async function retryBatch() {
       ><Button
         v-else-if="failedTask"
         variant="outline"
-        :disabled="busy || !projectSet || !engineReady"
+        :disabled="busy || submission.locked.value || !projectSet || !engineReady"
         @click="retryBatch"
         >重试失败批次</Button
       >

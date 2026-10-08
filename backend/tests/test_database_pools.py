@@ -8,7 +8,7 @@ from backend.platform import database
 
 def test_database_pools_have_separate_bounded_budgets(monkeypatch):
     for role, size, overflow, lock_size, lock_overflow in [
-        ("api", 16, 8, 16, 8), ("worker", 3, 1, 1, 0),
+        ("api", 16, 0, 8, 0), ("worker", 3, 0, 1, 0),
     ]:
         with monkeypatch.context() as monkeypatch:
             monkeypatch.setenv("NARRIFY_DB_ROLE", role)

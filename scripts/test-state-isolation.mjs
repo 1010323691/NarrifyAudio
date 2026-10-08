@@ -430,3 +430,30 @@ test('log display polling does not supersede a pending admin save', async () => 
   assert.equal(display.logsEnabled, true)
   assert.equal(display.saving, false)
 })
+
+
+test('compact snapshots apply atomically, append in chunks and discard partial old-account replays', () => {
+  const connections = []
+  const h = harness({ '@/api/tasks': { streamAllTasks: emit => { const connection = { emit }; connections.push(connection); return () => {} } } })
+  const store = h('@/stores/task').useTaskStore()
+  store.setTaskCenterOpen(true)
+  const first = connections[0]
+  const rows = Array.from({ length: 500 }, (_, i) => ({ id: `task-${i}`, status: 'pending', progress: 0 }))
+  for (let offset = 0; offset < 500; offset += 100) first.emit({ type: 'snapshot_chunk', first: offset === 0, tasks: rows.slice(offset, offset + 100) })
+  assert.equal(store.tasks.length, 0)
+  first.emit({ type: 'snapshot_end' }); assert.equal(store.tasks.length, 500)
+  first.emit({ type: 'status', task_id: 'task-499', status: 'running', task: { ...rows[499], status: 'running' } })
+  assert.equal(store.tasks.find(t => t.id === 'task-499').status, 'running')
+  first.emit({ type: 'snapshot_add_chunk', tasks: [{ id: 'new-task', status: 'pending' }] })
+  assert.equal(store.tasks.length, 501)
+  first.emit({ type: 'superseded', task_id: 'task-0' })
+  first.emit({ type: 'progress', task_id: 'task-499', progress: .5 })
+  assert.equal(store.tasks.find(t => t.id === 'task-499').progress, .5)
+  first.emit({ type: 'snapshot_chunk', first: true, tasks: rows.slice(0, 100) })
+  store.reset(); store.setTaskCenterOpen(true)
+  connections[1].emit({ type: 'snapshot_end' })
+  assert.equal(store.tasks.length, 0)
+  first.emit({ type: 'snapshot_end' })
+  assert.equal(store.tasks.length, 0)
+  store.reset()
+})

@@ -200,8 +200,8 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
     except FileNotFoundError:
         raise RuntimeError(f"无法启动 TTS 引擎：{cmd[0]}")
 
-    out_q: "queue.Queue" = queue.Queue()
-    err_q: "queue.Queue" = queue.Queue()
+    out_q: "queue.Queue" = queue.Queue(maxsize=256)
+    err_q: "queue.Queue" = queue.Queue(maxsize=256)
     stderr_tail: deque = deque(maxlen=40)
 
     # Stage callbacks select normal output; private stderr is retained once
@@ -216,14 +216,26 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
         except OSError:
             run_log = None
 
+    pump_stop = threading.Event()
+
+    def enqueue(q, value):
+        while not pump_stop.is_set():
+            try:
+                q.put(value, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
+
     def _pump(stream, q: "queue.Queue") -> None:
         try:
-            for raw in iter(stream.readline, b""):
-                q.put(raw)
-        except Exception:  # noqa: BLE001
+            for raw in iter(lambda: stream.readline(16384), b""):
+                if not enqueue(q, raw):
+                    return
+        except Exception:
             pass
         finally:
-            q.put(None)  # EOF sentinel — guarantees the reader loop terminates
+            enqueue(q, None)
 
     threading.Thread(target=_pump, args=(proc.stdout, out_q), daemon=True).start()
     threading.Thread(target=_pump, args=(proc.stderr, err_q), daemon=True).start()
@@ -354,6 +366,7 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                 break
             time.sleep(0.15)
     finally:
+        pump_stop.set()
         if proc.poll() is None:
             _kill_worker_tree(proc)
         GPUServiceManager.finish_tts(proc)

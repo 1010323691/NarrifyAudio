@@ -26,6 +26,7 @@ from pathlib import Path
 
 from ..core.tts_batch_limits import AUTO_BATCH_CAPS, AUTO_BATCH_MAX
 from ..core import pathio
+from ..core.bounded_json import read_json
 from ..core.config import get_config
 from ..core.paths import get_or_prepare_layout, resolve_parsed_json
 from ..core.task_control import TaskCancelled
@@ -180,7 +181,8 @@ def _load_script(script_path):
     if not script_path.exists():
         raise RuntimeError("未找到脚本 JSON（03_parsed_json/）——请先在「文本解析」生成脚本。")
     try:
-        data = json.loads(script_path.read_text("utf-8"))
+        from ..core.bounded_json import read_json
+        data = read_json(script_path)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"{script_path.name} 无法解析：{e}")
     if not isinstance(data, list) or not data:
@@ -474,7 +476,7 @@ def _parse_restore_cap(line: str):
     return None
 
 
-def build_segments(script, indices=None):
+def build_segments(script, indices=None, *, maximum=None):
     """Build the ordered per-line synthesis segments (pure).
 
     ``index`` is the line's position in the *full* script, so per-segment filenames
@@ -489,6 +491,9 @@ def build_segments(script, indices=None):
         text = (entry.get("text") or "").strip()
         if not text:
             continue
+        if maximum is not None and len(segments) >= maximum:
+            from ..platform.task_contracts import TaskExecutionError
+            raise TaskExecutionError('tts_input_budget', '一次最多准备 50000 段，请减少选择章节')
         segments.append({
             "index": i,
             "speaker": (entry.get("speaker") or entry.get("type") or "").strip(),
@@ -736,7 +741,10 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     engine. Re-doing everything is not a mode here: the caller deletes the package folder
     first (``POST /api/tts/batch-reset``), after which an ordinary resume has nothing to skip.
     """
+    from ..platform.tts_resource_budget import PreparationBudget, MAX_SEGMENTS
+    budget = PreparationBudget()
     src = resolve_parsed_json(script)
+    budget.file(src)
     script = _load_script(src)
 
     layout = get_or_prepare_layout()
@@ -750,7 +758,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
     voice_config = {}
     if vc_path.exists():
         try:
-            loaded = json.loads(vc_path.read_text("utf-8"))
+            loaded = read_json(vc_path)
             if isinstance(loaded, dict):
                 voice_config = loaded
         except Exception as e:  # noqa: BLE001
@@ -764,7 +772,9 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
 
     # The full set of synthesizable segments (the manifest always describes exactly these) and
     # the subset this run will actually synthesize (a resume = the not-yet-done ones).
-    all_segments = build_segments(script)
+    budget.file(manifest_path, manifest=True)
+    all_segments = build_segments(script, maximum=MAX_SEGMENTS)
+    budget.add_segments(len(all_segments))
     voice_params_by_index = (
         segment_voice_params(all_segments, voice_config)
         if vc_path.exists() else None
@@ -774,9 +784,9 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         if vc_path.exists() else None
     )
     all_indices = {s["index"] for s in all_segments}
-    old_entries = migrate_manifest(out_dir, handle)
-    restore_cached_voice_versions(
-        old_entries, voice_params_by_index, voice_signatures, ws,
+    old_entries = migrate_manifest(
+        out_dir, handle, voice_config=voice_config, expected_params=voice_params_by_index,
+        expected_signatures=voice_signatures,
     )
     done_set = done_indices(
         old_entries, out_dir, ws, voice_signatures, voice_params_by_index,
@@ -998,7 +1008,11 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                          and not (seg_results.get(s["index"]) or {}).get("ok")]
             if not remaining:
                 break
-            seg_file.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
+            with seg_file.open("w", encoding="utf-8") as stream:
+                json.dump(remaining, stream, ensure_ascii=False)
+            budget.check()
+            if attempt == 0:
+                budget.prepared()
             cmd = _build_cmd(
                 python, worker, seg_file, vc_path, stage_out_dir or out_dir,
                 language=t.language, device=t.device,
@@ -1375,6 +1389,12 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     """
     if not scripts:
         raise RuntimeError("没有可合成的文件——请先在「待合成」列表勾选解析 JSON。")
+    from ..platform.tts_resource_budget import PreparationBudget
+    from ..platform.task_contracts import TaskExecutionError
+    budget = PreparationBudget()
+    phase = getattr(handle, "phase", None)
+    if callable(phase):
+        phase("准备章节")
     n = len(scripts)
     layout = get_or_prepare_layout()
     ws = layout.workspace
@@ -1389,7 +1409,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     voice_config = {}
     if vc_path.exists():
         try:
-            loaded = json.loads(vc_path.read_text("utf-8"))
+            loaded = read_json(vc_path)
             if isinstance(loaded, dict):
                 voice_config = loaded
         except Exception as e:  # noqa: BLE001
@@ -1399,6 +1419,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     # -- per-file prep (request order): fatal files are isolated, the rest join the pool --
     files: list[_PooledFile] = []
     pkg_owner: dict = {}  # package -> first file claiming it (collision defence)
+    signature_cache, params_cache = {}, {}
     for i, name in enumerate(scripts):
         handle.check()  # cancel / pause point before any work on file i
         f = _PooledFile(name=name)
@@ -1407,6 +1428,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             handle.log(f"文件 {i + 1}/{n}：{name}")
         try:
             src = resolve_parsed_json(name)
+            budget.file(src)
             script = _load_script(src)
             f.src = src
             pkg = package_for(src)
@@ -1420,21 +1442,21 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             f.pkg = pkg
             f.out_dir = layout.audio_chunk / pkg
             f.manifest_path = f.out_dir / "manifest.json"
-            f.all_segments = build_segments(script)
+            budget.file(f.manifest_path, manifest=True)
+            f.all_segments = build_segments(script, maximum=50000 - budget.segments)
+            budget.add_segments(len(f.all_segments))
             f.by_index = {s["index"]: s for s in f.all_segments}
             f.voice_signatures = (
-                segment_voice_signatures(f.all_segments, voice_config)
+                segment_voice_signatures(f.all_segments, voice_config, signature_cache)
                 if vc_path.exists() else None
             )
             f.voice_params = (
-                segment_voice_params(f.all_segments, voice_config)
+                segment_voice_params(f.all_segments, voice_config, params_cache)
                 if vc_path.exists() else None
             )
-            f.old_entries = migrate_manifest(f.out_dir, handle)
+            f.old_entries = migrate_manifest(f.out_dir, handle, voice_config=voice_config,
+                                             expected_params=f.voice_params, expected_signatures=f.voice_signatures)
             all_indices = {s["index"] for s in f.all_segments}
-            restore_cached_voice_versions(
-                f.old_entries, f.voice_params, f.voice_signatures, ws,
-            )
             done_set = done_indices(
                 f.old_entries, f.out_dir, ws, f.voice_signatures, f.voice_params,
             ) & all_indices
@@ -1481,6 +1503,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                     handle.log("无待合成段，跳过" if not f.all_count else f"已全部完成，跳过（0/{f.all_count} 段待合成）")
         except TaskCancelled:
             raise  # cancel is a task-level outcome — never "file failed, keep going"
+        except TaskExecutionError:
+            raise
         except Exception as e:  # noqa: BLE001 — one bad file is isolated, the pool continues
             f.error = str(e)
             handle.log(f"文件 {name} 准备失败（跳过，继续其余文件）：{e}", "ERROR")
@@ -1488,30 +1512,32 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     if not voice_config:
         handle.log("警告：未找到 voice_config.json——请先在「角色配音」页生成角色声音，否则所有段都会失败。", "WARNING")
 
-    # Admit chapters in request order. Each chapter reserves its pending input before
-    # entering the pool. After the first quota failure, report all following chapters too.
-    from ..platform.quota import QuotaInsufficientError, reserve_tts_quota
+    # One quota-account lock and commit for the whole ordered pool.
+    from ..platform.quota import QuotaInsufficientError, reserve_tts_quotas
     chapter_cancelled = getattr(handle, "chapter_cancelled", None)
     if callable(chapter_cancelled):
         for f in files:
             f.cancelled = chapter_cancelled(f.name)
-    quota_exhausted = False
+    reservations = []
     for chapter_index, f in enumerate(files, 1):
         if f.error or f.cancelled or not f.pending:
             continue
         f.quota_operation = f"tts.batch.chapter.{chapter_index}.{hashlib.sha1(f.name.encode('utf-8')).hexdigest()[:8]}"
         required_chars = sum(len(f.by_index[index]["text"]) for index in f.pending)
-        if quota_exhausted or not reserve_tts_quota(required_chars, f.quota_operation):
+        reservations.append((required_chars, f.quota_operation))
+    reserved = reserve_tts_quotas(reservations)
+    quota_exhausted = False
+    for f in files:
+        if f.quota_operation in reserved and not reserved[f.quota_operation]:
             quota_exhausted = True
-            f.error = f"额度不足：本章需要 {required_chars} 字，当前可用额度不足"
+            f.error = "额度不足：本章输入字数无法预留"
             handle.log(f"{f.name}：{f.error}，跳过本章及后续章节", "ERROR")
-        else:
-            if get_config().log.level.upper() == "DEBUG":
-                handle.log(f"{f.name}：已预留本章 TTS 输入 {required_chars} 字")
+    budget.check()
 
     # -- build the unified pool ----------------------------------------------------------
     pool_rows, pool_owners = _build_pool_rows(files)
     pool_total = len(pool_rows)
+    budget.check()
     handle.expected_audio = pool_total
     handle.stage_dirs = [f.stage_out_dir for f in files if f.stage_out_dir is not None]
     # The single source mapping pool-global index -> (chapter file, chapter-local index).
@@ -1695,8 +1721,12 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             return
         _flush_audio(handle)
         started = time.monotonic()
-        for f in files:
-            if force or f.name in stats_dirty:
+        selected_files = [f for f in files if (force or f.name in stats_dirty) and not f.error and not f.cancelled]
+        progress_many = getattr(handle, "chapter_progress_many", None)
+        if callable(progress_many):
+            progress_many([(f.name, f.done_count, f.all_count, f.done_chars, f.all_chars) for f in selected_files])
+        else:
+            for f in selected_files:
                 report_chapter(f)
         stats_dirty.clear()
         handle.segment_stats(sum(f.done_count for f in files if not f.error), seg_total,
@@ -1733,7 +1763,14 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 remaining.append(row)
             if not remaining:
                 break
-            seg_file.write_bytes(json.dumps(remaining, ensure_ascii=False).encode("utf-8"))
+            with seg_file.open("w", encoding="utf-8") as stream:
+                json.dump(remaining, stream, ensure_ascii=False)
+            budget.check()
+            if attempt == 0:
+                budget.prepared()
+            finish_preparation = getattr(handle, 'finish_preparation', None)
+            if callable(finish_preparation):
+                finish_preparation()
             cmd = _build_cmd(
                 python, worker, seg_file, vc_path, out_dir_fallback,
                 language=t.language, device=t.device,

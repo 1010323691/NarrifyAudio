@@ -26,7 +26,8 @@
     "test:mobile-layout": "node scripts/test-mobile-layout.mjs",
     "test:ten-row-layout": "node scripts/test-ten-row-layout.mjs",
     "test:project-cards": "node scripts/test-project-cards.mjs",
-    "test:project-cards-browser": "node scripts/test-project-cards-browser.mjs"
+    "test:project-cards-browser": "node scripts/test-project-cards-browser.mjs",
+    "test:tts-submission": "node scripts/test-tts-submission.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

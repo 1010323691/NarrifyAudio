@@ -104,6 +104,13 @@ def engine_execution_context(claim: TaskClaim):
             raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
         workspace = project_workspace_path(db, user.username, claim.project_id)
     snapshot = claim.payload.get("config")
+    if not isinstance(snapshot, dict) and claim.payload.get("_batch_config_id"):
+        from .models import TaskBatch
+        with SessionLocal() as db:
+            batch = db.get(TaskBatch, claim.payload["_batch_config_id"])
+            if batch is None or batch.owner_id != claim.owner_id or batch.project_id != claim.project_id:
+                raise TaskExecutionError("batch_not_found", "提交配置不存在")
+            snapshot = batch.config
     config_token = None
     if isinstance(snapshot, dict):
         config_token = core_config.bind_task_config(core_config.AppConfig.model_validate(snapshot))
@@ -132,4 +139,3 @@ def engine_result_outcome(claim: TaskClaim, result: Any) -> TaskOutcome:
         data,
         metadata,
     )
-

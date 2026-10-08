@@ -11,7 +11,7 @@ def test_workspace_pool_wait_does_not_block_event_loop_or_lose_request_context(m
     entered = threading.Event()
     release = threading.Event()
     session = SimpleNamespace(user=SimpleNamespace(username="user"))
-    request = SimpleNamespace(cookies={settings.session_cookie: "test-session"})
+    request = SimpleNamespace(cookies={settings.session_cookie: "test-session"}, url=SimpleNamespace(path="/api/tts/voices"), method="GET")
 
     class WaitingSession:
         def __enter__(self):

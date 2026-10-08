@@ -14,6 +14,7 @@ import type {
 export interface BatchTaskSubmission {
   task_ids: string[]
   task_id?: string
+  batch_id?: string
 }
 
 /** Report whether TTS is implemented (ready vs. engine-not-installed). */
@@ -98,26 +99,36 @@ export function setGender(speaker: string, gender: 'male' | 'female' | ''): Prom
  *  already done (omitted → the administrator-configured TTS defaults for concurrency / seed;
  *  ``seed`` -1 → random). Re-doing everything = call :func:`submitBatchReset` first (deletes the
  *  packages), then this exact same call. */
-export function runBatch(opts: BatchRunOptions = {}): Promise<BatchTaskSubmission> {
+export function runBatch(opts: BatchRunOptions = {}, key?: string, projectId?: string): Promise<BatchTaskSubmission> {
   return http.post<BatchTaskSubmission>('/api/tts/batch', {
     indices: opts.indices ?? null,
     script: opts.script ?? null,
     scripts: opts.scripts ?? null,
-  })
+    project_id: projectId,
+  }, { headers: key ? { 'Idempotency-Key': key } : {} })
 }
 
 /** Queue package removal before the ordinary synthesis task recreates each segment. */
 
-export function submitBatchReset(scripts: string[]): Promise<{ task_id: string }> {
-  return http.post<{ task_id: string }>('/api/tts/batch-reset', { scripts })
+export function submitBatchReset(scripts: string[], key?: string, projectId?: string): Promise<{ task_id: string }> {
+  return http.post<{ task_id: string }>('/api/tts/batch-reset', { scripts, project_id: projectId }, { headers: key ? { 'Idempotency-Key': key } : {} })
+}
+
+export function getSubmission(key: string): Promise<BatchTaskSubmission & { project_id: string; task_type: string; statuses: Record<string, string> }> {
+  return http.get(`/api/v1/tasks/submissions/${encodeURIComponent(key)}`)
 }
 
 /** 音频合成进度（每文件）：each file's 【已合成 / 总段落】· 角色 · 已就绪声音, plus the
  *  【已合成】 flag when a file's segments are all done. Reads the package manifests (written
  *  incrementally as synthesis proceeds), so polling while a run streams gives live, real
  *  per-row counts. Send file names in the body so large books do not exceed HTTP URL limits. */
-export function batchStatusFiles(scripts: string[]): Promise<BatchStatusFiles> {
-  return http.post<BatchStatusFiles>('/api/tts/batch-status', { scripts })
+export async function batchStatusFiles(scripts: string[]): Promise<BatchStatusFiles> {
+  const files: BatchStatusFiles['files'] = []
+  for (let offset = 0; offset < scripts.length; offset += 100) {
+    const response = await http.post<BatchStatusFiles>('/api/tts/batch-status', { scripts: scripts.slice(offset, offset + 100) })
+    files.push(...(response.files ?? []))
+  }
+  return { files }
 }
 
 /** 音频合并：start one merge Task per selected package (always MP3 — the M4B half-branch

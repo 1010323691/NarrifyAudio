@@ -161,6 +161,8 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
         db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
         db.execute(delete(TaskAttempt).where(TaskAttempt.task_id.in_(task_ids)))
         db.execute(delete(Task).where(Task.id.in_(task_ids)))
+        from ..platform.models import TaskBatch
+        db.execute(delete(TaskBatch).where(TaskBatch.owner_id == project.owner_id, TaskBatch.project_id == project.id))
         db.execute(delete(ProjectFile).where(
             ProjectFile.project_id == project.id, ProjectFile.owner_id == project.owner_id,
         ))
