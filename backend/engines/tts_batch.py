@@ -195,6 +195,7 @@ class _BatchRunLogHandle:
         self.handle = handle
         self.path = path
         self.quota_inputs = []
+        self.quota_paths = {}
         self.quota_started = 0.0
         self.quota_seconds = 0.0
         self.manifest_seconds = 0.0
@@ -207,10 +208,14 @@ class _BatchRunLogHandle:
     def __getattr__(self, name):
         return getattr(self.handle, name)
 
-    def queue_tts_input(self, count, operation, key):
+    def queue_tts_input(self, count, operation, key, final_path=None):
+        if final_path is None and callable(getattr(self.handle, "workspace_stage_published", None)):
+            raise ValueError("TTS 额度结算缺少音频发布路径")
         if not self.quota_inputs:
             self.quota_started = time.monotonic()
         self.quota_inputs.append((count, operation, key))
+        if final_path is not None:
+            self.quota_paths[(operation, key)] = Path(final_path)
         self.flush_workspace_stages()
 
     def flush_workspace_stages(self, *, force=False):
@@ -224,9 +229,17 @@ class _BatchRunLogHandle:
                 flush(force=True)
             from ..platform.quota import consume_tts_inputs
             started = time.monotonic()
-            consume_tts_inputs(self.quota_inputs)
+            published = getattr(self.handle, "workspace_stage_published", None)
+            ready = [row for row in self.quota_inputs
+                     if not callable(published) or ((row[1], row[2]) in self.quota_paths
+                         and published(self.quota_paths[(row[1], row[2])]))]
+            if ready:
+                consume_tts_inputs(ready)
             self.quota_seconds += time.monotonic() - started
-            self.quota_inputs.clear()
+            settled = {(row[1], row[2]) for row in ready}
+            self.quota_inputs = [row for row in self.quota_inputs if (row[1], row[2]) not in settled]
+            for key in settled:
+                self.quota_paths.pop(key, None)
         self.report_publication()
 
     def report_publication(self, *, force=False):
@@ -1520,6 +1533,15 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         if f.error or not f.pending or not f.dirty:
             return
         _flush_audio(handle)
+        published = getattr(handle, "workspace_stage_published", None)
+        if callable(published) and f.stage_out_dir is not None:
+            # A failed batch may have moved only a prefix. Never persist completion
+            # for the remaining buffered successes, even if an old file still exists.
+            for local, result in list(f.seg_results.items()):
+                if result.get("ok") and not published(Path(result["path"])):
+                    _update_pool_result(f, local, {
+                        "ok": False, "path": "", "reason": "音频结果发布失败，需重试",
+                    })
         started = time.monotonic()
         write_manifest_file(f.manifest_path,
                             build_manifest(f.all_segments, f.old_entries, f.seg_results, root=ws,
@@ -1573,7 +1595,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 file, local_index = pool_map[outcome["index"]]
                 handle.queue_tts_input(
                     len(file.by_index[local_index]["text"]), file.quota_operation,
-                    f"{file.name}:{local_index}",
+                    f"{file.name}:{local_index}", file.seg_results[local_index]["path"],
                 )
             if outcome:
                 file, _local = pool_map[outcome["index"]]

@@ -261,3 +261,107 @@ def test_postgres_concurrent_batch_retries_charge_each_key_once(monkeypatch, wit
         with engine.begin() as conn:
             conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         engine.dispose()
+
+
+@pytest.mark.parametrize("fail_at", [1, 11, 128])
+@pytest.mark.parametrize("existing_originals", [False, True])
+def test_partial_audio_publish_failure_charges_only_moved_files_and_keeps_manifest_consistent(
+    sessions, tmp_path, monkeypatch, fail_at, existing_originals,
+):
+    import json
+    import time
+    from collections import deque
+    from pathlib import Path
+    from backend.core.paths import Layout
+    from backend.core.request_context import bind_workspace, reset_workspace
+    from backend.core.config import AppConfig, bind_task_config, reset_task_config
+    from backend.engines import tts_batch
+    from backend.platform.artifact_publication import PublicationJournal
+
+    layout = Layout(tmp_path / "Book")
+    layout.ensure()
+    script = layout.parsed_json / "s.json"
+    script.write_text(json.dumps([{"speaker": "A", "text": "x"} for _ in range(128)]))
+    with sessions() as db:
+        for hold in db.scalars(select(QuotaHold)):
+            db.delete(hold)
+        account = db.get(UserQuotaAccount, "user")
+        account.available_units, account.reserved_units = 1000, 0
+        db.commit()
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    context = task_context.EngineExecutionContext(SimpleNamespace(
+        task_id="task", owner_id="user", project_id="project", attempt_id="attempt", lease_token="lease",
+    ))
+    context.mark_workspace_checkpoint_directory(layout.audio_chunk)
+    journal = PublicationJournal(tmp_path, attempt / "publication.json")
+    journal.prepare()
+    context._publication_journal = journal
+    monkeypatch.setattr(task_context, "task_attempt_path", lambda *args: attempt / args[-1])
+    # Hold all 128 successes in one batch. No timer-triggered manifest/progress
+    # flush may split the reproduction into smaller batches.
+    clock = SimpleNamespace(monotonic=lambda: 0.0, strftime=time.strftime)
+    monkeypatch.setattr(tts_batch, "time", clock)
+    monkeypatch.setattr(task_context, "time", clock)
+    monkeypatch.setattr(tts_batch, "resolve_engine", lambda: (Path("python"), Path("worker")))
+    real_publish = journal.publish
+    moves = []
+    def publish(index, source):
+        if source.suffix == ".mp3":
+            moves.append(source)
+            if len(moves) == fail_at:
+                raise OSError("injected audio move failure")
+        return real_publish(index, source)
+    monkeypatch.setattr(journal, "publish", publish)
+    outputs = []
+    def run_worker(cmd, handle, on_line, **kwargs):
+        rows = json.loads(Path(cmd[cmd.index("--segments-file") + 1]).read_text())
+        final = Path(cmd[cmd.index("--out-dir") + 1])
+        outputs.append(final)
+        for row in rows:
+            filename = f"{row['file_index'] + 1:04d}.mp3"
+            staged = Path(row["out_dir"]) / filename
+            staged.write_bytes(b"new audio")
+            if existing_originals:
+                (final / filename).write_bytes(b"old audio")
+        for row in rows:
+            staged = Path(row["out_dir"]) / f"{row['file_index'] + 1:04d}.mp3"
+            on_line(f"[segment] {row['index']} ok {staged}")
+        return deque()
+    monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
+    workspace_token = bind_workspace(layout.workspace)
+    config_token = bind_task_config(AppConfig())
+    try:
+        with pytest.raises(OSError, match="injected audio move failure"):
+            tts_batch.synthesize_multi(context, ["s.json"])
+        # This is the same cleanup boundary used by execute_tts_batch on failure.
+        context.rollback_publications()
+    finally:
+        reset_task_config(config_token)
+        reset_workspace(workspace_token)
+    final = outputs[0]
+    manifest = json.loads((final / "manifest.json").read_text())
+    assert sum(bool(row["ok"]) for row in manifest) == fail_at - 1
+    assert sum(path.read_bytes() == b"new audio" for path in final.glob("*.mp3")) == fail_at - 1
+    assert all(context.workspace_stage_published(final / f"{i+1:04d}.mp3") == (i < fail_at - 1)
+               for i in range(128))
+    with sessions() as db:
+        quota.release_attempt_holds("task", "attempt", db=db)
+        db.commit()
+    available, reserved, consumed, _, ledger = balances(sessions)
+    charged = [row for row in ledger if row.kind == "consume"]
+    assert len(charged) == consumed == fail_at - 1
+    assert (available, reserved) == (1000 - consumed, 0)
+    assert all(manifest[int(row.idempotency_key.rsplit(":", 1)[-1])]["ok"] for row in charged)
+    assert not list(attempt.glob("*-stage/*.mp3"))
+
+
+def test_durable_quota_buffer_rejects_missing_publication_identity(tmp_path, monkeypatch):
+    charged = []
+    monkeypatch.setattr(quota, "consume_tts_inputs", lambda rows: charged.extend(rows))
+    wrapped = _BatchRunLogHandle(SimpleNamespace(workspace_stage_published=lambda path: False),
+                                tmp_path / "run.log")
+    with pytest.raises(ValueError, match="缺少音频发布路径"):
+        wrapped.queue_tts_input(3, "a", "0")
+    wrapped.flush_workspace_stages(force=True)
+    assert not charged and not wrapped.quota_inputs

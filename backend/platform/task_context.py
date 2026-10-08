@@ -45,6 +45,7 @@ class EngineExecutionContext:
         self._guarded_workspace_paths: set[Path] = set()
         self._workspace_checkpoint_directories: set[Path] = set()
         self._rollback_lock: tuple | None = None
+        self._published_workspace_stages: set[Path] = set()
         self._pending_audio_stages: list[tuple[Path, Path]] = []
         self._audio_stage_started = 0.0
 
@@ -178,7 +179,12 @@ class EngineExecutionContext:
             staged.unlink(missing_ok=True)
             self._staged_workspace_paths.discard(staged)
             raise
+        self._published_workspace_stages.add(resolved)
         self._staged_workspace_paths.discard(staged)
+
+    def workspace_stage_published(self, final_path: Path) -> bool:
+        """Confirm this attempt moved new bytes; existing originals are not evidence."""
+        return final_path.resolve() in self._published_workspace_stages
 
     def publish_workspace_stages(self, stages: list[tuple[Path, Path]]) -> None:
         """Durably register completed audio together before moving any file."""
@@ -206,6 +212,7 @@ class EngineExecutionContext:
         )
         for index, (_final, staged) in zip(indices, stages):
             journal.publish(index, staged)
+            self._published_workspace_stages.add(journal.entries[index][0])
             self._staged_workspace_paths.discard(staged)
 
     def queue_workspace_stage(self, final_path: Path, staged: Path) -> None:
