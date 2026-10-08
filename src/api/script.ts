@@ -1,5 +1,6 @@
 import { listQuery, type ListPagination, type ListQuery } from '@/api/listPaging'
 import { API_BASE, http } from './client'
+import { submitTaskBatches } from './batchSubmission'
 import type { ParseChecks } from '@/types'
 
 /** 【取消全部】：cancel the given tasks AND stop their batch(es) from dispatching
@@ -91,7 +92,7 @@ export function runScriptParse(
   files: { name: string; sha256?: string | null }[],
   checks?: ParseChecks,
 ): Promise<{ task_ids: string[]; files: { name: string; task_id: string; input_sha256?: string | null }[] }> {
-  return http.post(`/api/v1/projects/${projectId}/script-parse/run`, { files, checks })
+  return submitTaskBatches(`/api/v1/projects/${projectId}/script-parse/run`, { files, checks }, 'files', projectId)
 }
 
 /** 项目绑定的解析结果读取 URL（ETag = 产物 sha256；内容变化必然 ETag 变化）。 */

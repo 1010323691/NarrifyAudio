@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from ..core import paths as core_paths
 from ..core.config import get_config
 from ..core.paths import get_or_prepare_layout, resolve_layout
+from ..core.input_versions import capture_files, value_version
 from ..engines import bgm as Bgm
 from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
@@ -35,6 +36,39 @@ MIX_MODULE = "bgm-mix"
 SEGMENT_MODULE = "bgm-segment"
 MIX_LABEL = "背景音乐混音"
 SEGMENT_LABEL = "段落分析"
+
+
+def _versioned_payload(layout, stem, payload, *, segment=False, assignment=None, analysis=None, analysis_bound=False):
+    names = [f"02_split_text/{stem}.txt"]
+    if segment or assignment is not None:
+        package = TtsBatch.package_for(Path(f"{stem}.json"))
+        names += [f"03_parsed_json/{stem}.json", f"05_audio_chunk/{package}/manifest.json",
+                  f"06_audio_merge/{stem}.mp3", f"06_audio_merge/{stem}.wav"]
+    if assignment is not None:
+        names.append(Bgm._timeline_path(layout, stem).relative_to(layout.workspace).as_posix())
+    try:
+        result = {**payload, "_input_files": capture_files(layout.workspace, names)}
+        if assignment is not None:
+            result["_assignment_version"] = value_version(assignment)
+            music_names = [assignment["music"]] if assignment.get("music") else []
+            if assignment.get("segment"):
+                timeline = Bgm.load_timeline(layout, stem) or {}
+                music_names = [span["music_id"] for span in timeline.get("timeline", [])
+                               if isinstance(span, dict) and span.get("music_id")]
+            result["_music_files"] = capture_files(music_engine._library_dir(), music_names)
+        if analysis_bound:
+            result["_segment_analysis_version"] = value_version(analysis)
+        if segment and not analysis_bound:
+            current = Bgm.load_analysis(layout, [stem]).get("chapters", {}).get(stem)
+            result["_chapter_analysis_version"] = value_version(current)
+        return result
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, "章节输入无法安全访问，请检查文件后重新提交。") from exc
+
+
+def _library_reference(config):
+    config["_music_inputs"] = capture_files(music_engine._library_dir(), ["music_index.json"])
+    return config
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +278,7 @@ class PackageRequest(BaseModel):
 
 
 class SegmentAnalyzeRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     chapters: list[str] = Field(max_length=1000)
 
 
@@ -258,7 +293,7 @@ def run_analyze_segment(
     _common.require_workspace()
     return submit_engine_batch(task_type="bgm.segment", request=req.model_dump(),
         prepare=lambda: _prepare_analyze_segment(req, ctx, db), ctx=ctx, db=db,
-        idempotency_key=idempotency_key, receipt_field="chapters")
+        idempotency_key=idempotency_key, receipt_field="chapters", project_id=req.project_id)
 
 
 def _prepare_analyze_segment(req, ctx, db):
@@ -286,8 +321,9 @@ def _prepare_analyze_segment(req, ctx, db):
         raise HTTPException(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
-    return ([{"label": f"{SEGMENT_LABEL}：{stem}", "payload": {"stem": stem},
-              "receipt": {"stem": stem}} for stem in stems], cfg.model_dump(mode="json"))
+    return ([{"label": f"{SEGMENT_LABEL}：{stem}",
+              "payload": _versioned_payload(layout, stem, {"stem": stem}, segment=True),
+              "receipt": {"stem": stem}} for stem in stems], _library_reference(cfg.model_dump(mode="json")))
 
 
 # --------------------------------------------------------------------------- #
@@ -295,6 +331,7 @@ def _prepare_analyze_segment(req, ctx, db):
 # --------------------------------------------------------------------------- #
 
 class MatchRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     chapters: list[str] | None = Field(default=None, max_length=1000)
     mode: str = "random"  # "random" | "segment"（段落级时间轴重算，零 LLM）
 
@@ -309,7 +346,7 @@ def run_match(
     """Submit durable chapter-level matching or paragraph timeline tasks."""
     _common.require_workspace()
     return submit_engine_batch(task_type="bgm.match", request=req.model_dump(),
-        prepare=lambda: _prepare_match(req, ctx, db), ctx=ctx, db=db, idempotency_key=idempotency_key)
+        prepare=lambda: _prepare_match(req, ctx, db), ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=req.project_id)
 
 
 def _prepare_match(req, ctx, db):
@@ -354,10 +391,12 @@ def _prepare_match(req, ctx, db):
             raise HTTPException(409, "以下章节匹配任务在途：" + "、".join(conflicts))
 
     config = get_config().model_dump(mode="json")
+    analysis = Bgm.load_segment_analysis(layout, stems).get("chapters", {}) if req.mode == "segment" else {}
     return ([{
             "label": f"BGM 匹配（{req.mode}） · {stem}",
-            "payload": {"chapters": [stem], "mode": req.mode},
-        } for stem in stems], config)
+            "payload": _versioned_payload(layout, stem, {"chapters": [stem], "mode": req.mode},
+                segment=req.mode == "segment", analysis=analysis.get(stem), analysis_bound=req.mode == "segment"),
+        } for stem in stems], _library_reference(config))
 
 
 class ChapterUpdateRequest(BaseModel):
@@ -420,6 +459,7 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
 # --------------------------------------------------------------------------- #
 
 class MixRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     chapters: list[str] = Field(max_length=1000)
 
 
@@ -434,7 +474,7 @@ def run_mix(
     _common.require_workspace()
     return submit_engine_batch(task_type="bgm.mix", request=req.model_dump(),
         prepare=lambda: _prepare_mix(req, ctx, db), ctx=ctx, db=db,
-        idempotency_key=idempotency_key, receipt_field="chapters")
+        idempotency_key=idempotency_key, receipt_field="chapters", project_id=req.project_id)
 
 
 def _prepare_mix(req, ctx, db):
@@ -469,8 +509,9 @@ def _prepare_mix(req, ctx, db):
     ]
     if conflicts:
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))
-    return ([{"label": f"{MIX_LABEL}：{stem}", "payload": {"stem": stem},
-              "receipt": {"stem": stem}} for stem in stems], cfg.model_dump(mode="json"))
+    return ([{"label": f"{MIX_LABEL}：{stem}",
+              "payload": _versioned_payload(layout, stem, {"stem": stem}, assignment=chapters[stem]),
+              "receipt": {"stem": stem}} for stem in stems], _library_reference(cfg.model_dump(mode="json")))
 
 
 @router.post("/package")

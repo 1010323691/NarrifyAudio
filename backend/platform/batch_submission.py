@@ -30,7 +30,7 @@ def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def _receipt(batch):
+def batch_receipt(batch):
     result = {"batch_id": batch.id, "task_ids": list(batch.task_ids)}
     result.update(batch.config.get("_batch_receipt") or {})
     if len(batch.task_ids) == 1:
@@ -44,7 +44,7 @@ def _replay(db, owner_id, key, intent):
         return None
     if batch.config.get("_batch_intent") != intent:
         raise TaskSubmissionError(409, "幂等键对应的请求内容不同")
-    return _receipt(batch)
+    return batch_receipt(batch)
 
 
 def _targets(kind, payload):
@@ -176,7 +176,7 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
             if ids:
                 db.add(OutboxEvent(aggregate_type="task", aggregate_id=ids[0], event_type="task.submitted",
                     payload={"task_id": ids[0], "task_type": task_type, "project_id": project.id, "batch_id": batch_id}))
-            response = _receipt(batch)
+            response = batch_receipt(batch)
             db.commit()
             return response
         except IntegrityError:

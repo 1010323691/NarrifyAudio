@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import closing
+from contextvars import ContextVar
 import hashlib
 import json
 from pathlib import Path
@@ -13,6 +14,37 @@ import uuid
 from .file_lock import exclusive_file_lock
 from .safe_filesystem import file_identity
 from .task_control import TaskCancelled
+from .safe_filesystem import safe_regular_path
+
+_reference = ContextVar("narrify_script_reference", default=None)
+
+
+def bind_reference(reference):
+    return _reference.set(reference)
+
+
+def reset_reference(token):
+    _reference.reset(token)
+
+
+def bound_reference():
+    return _reference.get()
+
+
+def capture_reference(paths, workspace, script):
+    paths = tuple(paths)
+    version, _sources = source_version(paths)
+    return {"version": version, "paths": [path.resolve().relative_to(workspace.resolve()).as_posix() for path in paths], "script": script}
+
+
+def reference_paths(reference, workspace):
+    names = reference.get("paths")
+    if not isinstance(names, list) or not names or any(
+        not isinstance(name, str) or not name.startswith("03_parsed_json/")
+        or len(name.split("/")) != 2 or not name.endswith(".json") for name in names
+    ):
+        raise ValueError("剧本快照引用无效")
+    return [safe_regular_path(workspace, name) for name in names]
 
 
 def source_version(paths):
@@ -31,12 +63,14 @@ def _connect(path):
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
 
 
-def open_snapshot(paths, directory, *, check=lambda: None, log=lambda *_: None, skip_invalid=False, speakers=None, cancelled=lambda: False):
+def open_snapshot(paths, directory, *, check=lambda: None, log=lambda *_: None, skip_invalid=False, speakers=None, cancelled=lambda: False, expected_version=None):
     check()  # never park a paused role while holding the shared build lock
     paths = tuple(Path(path) for path in paths)
     if not paths:
         raise RuntimeError("未找到脚本 JSON（03_parsed_json/）——请先在「文本解析」生成脚本。")
     version, sources = source_version(paths)
+    if expected_version is not None and version != expected_version:
+        raise RuntimeError("剧本输入已变更，请刷新后重新提交任务。")
     directory = Path(directory)
     if directory.is_symlink():
         raise ValueError("Script snapshot cache must not follow directory symlinks")

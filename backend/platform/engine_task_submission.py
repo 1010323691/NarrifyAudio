@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .task_submission import TaskSubmissionError, submit_task_record, task_dict
 from .deps import AuthContext
-from .project_context import active_project
+from .project_context import active_project, submission_project
 from .models import Task
 from .task_lifecycle import ACTIVE_TASK_STATUSES
 
@@ -35,7 +35,8 @@ def submit_engine_batch(*, task_type, request, prepare, ctx, db,
     def prepare_in_project():
         token = bind_workspace(project_workspace_path(db, ctx.user.username, project.id))
         try:
-            return prepare()
+            with submission_project(project.id):
+                return prepare()
         finally:
             reset_workspace(token)
     try:

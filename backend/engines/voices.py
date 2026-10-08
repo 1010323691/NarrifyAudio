@@ -50,6 +50,7 @@ import time
 import uuid
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from ..core.input_versions import check_bound_inputs
 from contextvars import copy_context
 from pathlib import Path
 
@@ -338,12 +339,19 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
 
 def _load_script(handle, script_name, speakers=None):
     """Lazily construct one immutable chapter-wise snapshot shared by role tasks."""
-    from ..core.script_snapshot import open_snapshot
-    paths = resolve_parsed_json_all() if script_name == ALL_PARSED_JSON else [resolve_parsed_json(script_name)]
+    from ..core.script_snapshot import bound_reference, open_snapshot, reference_paths
     layout = get_or_prepare_layout()
+    reference = bound_reference()
+    if reference is not None:
+        if reference.get("script") != script_name:
+            raise RuntimeError("任务剧本与共享快照引用不一致。")
+        paths = reference_paths(reference, layout.workspace)
+    else:
+        paths = resolve_parsed_json_all() if script_name == ALL_PARSED_JSON else [resolve_parsed_json(script_name)]
     return open_snapshot(paths, layout.temp / "script-snapshots", check=handle.check,
                          log=handle.log, skip_invalid=script_name == ALL_PARSED_JSON, speakers=speakers,
-                         cancelled=lambda: getattr(handle, "cancelled", False))
+                         cancelled=lambda: getattr(handle, "cancelled", False),
+                         expected_version=reference["version"] if reference else None)
 
 
 def _collect_samples(script):
@@ -592,6 +600,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         with exclusive_file_lock(foundation_lock):
             if getattr(handle, "cancelled", False):
                 raise TaskCancelled()
+            check_bound_inputs()
             _, latest = _load_voice_config(handle)
             # Alias hints are display metadata. Do not rewrite
             # them from this task's snapshot or restore a concurrently removed link.
@@ -802,6 +811,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         # All of this character's candidates have settled: apply them as ONE unit on the
         # single task thread (characters still in flight keep their pre-run entry).
         nonlocal ok, failed
+        check_bound_inputs()
         speaker_cancelled = getattr(handle, "speaker_cancelled", None)
         if callable(speaker_cancelled) and speaker_cancelled(sp):
             discard_stage = getattr(handle, "discard_workspace_stage", None)

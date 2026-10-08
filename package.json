@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:task-batch-submission": "node scripts/test-task-batch-submission.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "build:all": "node scripts/build-all.mjs",
@@ -19,7 +20,7 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs",
-    "test:production-workbench": "node --test scripts/test-production-workbench.mjs scripts/test-merge-submission.mjs",
+    "test:production-workbench": "node --test scripts/test-production-workbench.mjs scripts/test-merge-submission.mjs scripts/test-task-batch-submission.mjs",
     "test:voices-workbench": "node scripts/test-voices-workbench.mjs",
     "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs",
     "test:admin-console": "node scripts/test-admin-console.mjs",

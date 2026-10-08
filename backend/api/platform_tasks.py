@@ -39,11 +39,13 @@ TASK_HISTORY_PAGE_SIZE = 50
 @router.get("/submissions/{key}")
 def submission_receipt(key: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     from ..platform.tts_submission import batch_receipt
+    from ..platform.batch_submission import batch_receipt as independent_batch_receipt
     batch = db.scalar(select(TaskBatch).where(TaskBatch.owner_id == user.id, TaskBatch.idempotency_key == key))
     if batch is None:
         raise HTTPException(404, "尚未查到提交记录，请使用原幂等键确认")
     rows = db.execute(select(Task.id, Task.status).where(Task.batch_id == batch.id)).all()
-    return {**batch_receipt(batch), "project_id": batch.project_id, "task_type": batch.task_type,
+    receipt = independent_batch_receipt(batch) if "_batch_intent" in batch.config else batch_receipt(batch)
+    return {**receipt, "project_id": batch.project_id, "task_type": batch.task_type,
             "statuses": dict(rows)}
 
 

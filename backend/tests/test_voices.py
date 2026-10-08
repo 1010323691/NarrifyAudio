@@ -1750,3 +1750,26 @@ def test_list_voices_returns_candidates_and_selection(clone_ws):
     assert [x["id"] for x in c["candidates"]] == ["1"]
     assert c["candidates"][0]["preview"] == "designed_voices/c_legacy.wav"
     assert c["selected_audio_id"] is None
+
+
+@pytest.mark.parametrize("phase", ["foundation", "clone"])
+def test_role_checkpoint_rechecks_inputs_before_durable_publication(clone_ws, monkeypatch, phase):
+    from backend.core.input_versions import validating_inputs
+    _seed_script(clone_ws, {"Alice": 1})
+    _seed_foundations(clone_ws, ["Alice"])
+    before = (clone_ws / "04_voice_profiles" / "voice_config.json").read_bytes()
+    if phase == "clone":
+        _stub_design_engine(monkeypatch, clone_ws)
+    calls = []
+    def validator():
+        calls.append(True)
+        if len(calls) > 1:
+            raise RuntimeError("input changed before role checkpoint")
+    with pytest.raises(RuntimeError, match="input changed before role checkpoint"):
+        with validating_inputs(validator):
+            if phase == "foundation":
+                V.prepare_foundations(_Handle(), speakers=["Alice"], overrides={"Alice": "new description"})
+            else:
+                V.generate_voice_candidates(_Handle(), speakers=["Alice"], candidate_count=1)
+    assert (clone_ws / "04_voice_profiles" / "voice_config.json").read_bytes() == before
+    assert len(calls) == 2

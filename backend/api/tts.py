@@ -43,6 +43,7 @@ from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
 from ..core.role_hint_cache import cached_role_hints
+from ..core.script_snapshot import capture_reference, source_version
 from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
@@ -89,6 +90,7 @@ def status() -> dict:
 # ---------------------------------------------------------------------------
 
 class PrepareFoundationsRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     # Phase 1 (LLM only): None -> every character; a list -> only those (single-char regen).
     speakers: list[str] | None = Field(default=None, max_length=1000)
     # True -> regenerate only characters without a foundation yet.
@@ -100,6 +102,7 @@ class PrepareFoundationsRequest(BaseModel):
 
 
 class MakeClonesRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     # Phase 2 (TTS only): None -> every foundation-bearing character; a list -> only those.
     speakers: list[str] | None = Field(default=None, max_length=1000)
     # True -> limit to characters not yet holding a usable clone (also retries failed ones).
@@ -155,13 +158,18 @@ def prepare_foundations(
     """Submit one foundation task per selected character."""
     _common.require_workspace()
     return submit_engine_batch(task_type="voices.foundation", request=req.model_dump(),
-        prepare=lambda: _prepare_voice_foundations(req), ctx=ctx, db=db, idempotency_key=idempotency_key)
+        prepare=lambda: _prepare_voice_foundations(req), ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=req.project_id)
 
 
 def _prepare_voice_foundations(req):
     script = req.script or resolve_parsed_json(None).name
+    paths = resolve_parsed_json_all() if script == ALL_PARSED_JSON else [resolve_parsed_json(script)]
+    reference = capture_reference(paths, get_or_prepare_layout().workspace, script)
     targets = _voice_task_speakers(script, req.speakers, req.new_only)
+    if source_version(paths)[0] != reference["version"]:
+        raise HTTPException(409, "剧本在提交期间发生变化，请重新选择角色。")
     config = get_config().model_dump(mode="json")
+    config["_script_inputs"] = reference
     return ([{
             "label": f"语音推理基础 · {speaker}",
             "payload": {"speakers": [speaker], "new_only": req.new_only,
@@ -180,14 +188,19 @@ def make_clones(
     """Submit one clone task per selected foundation-bearing character."""
     _common.require_workspace()
     return submit_engine_batch(task_type="voices.clone", request=req.model_dump(),
-        prepare=lambda: _prepare_voice_clones(req), ctx=ctx, db=db, idempotency_key=idempotency_key)
+        prepare=lambda: _prepare_voice_clones(req), ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=req.project_id)
 
 
 def _prepare_voice_clones(req):
     script = req.script or resolve_parsed_json(None).name
+    paths = resolve_parsed_json_all() if script == ALL_PARSED_JSON else [resolve_parsed_json(script)]
+    reference = capture_reference(paths, get_or_prepare_layout().workspace, script)
     targets = _voice_task_speakers(script, req.speakers, req.new_only,
                                    clone=True, candidate_count=req.candidate_count)
+    if source_version(paths)[0] != reference["version"]:
+        raise HTTPException(409, "剧本在提交期间发生变化，请重新选择角色。")
     config = get_config().model_dump(mode="json")
+    config["_script_inputs"] = reference
     return ([{
             "label": f"克隆音频 · {speaker}",
             "payload": {"speakers": [speaker], "new_only": req.new_only,

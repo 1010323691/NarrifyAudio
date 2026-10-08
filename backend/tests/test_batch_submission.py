@@ -232,3 +232,41 @@ def test_parse_rejects_input_replaced_during_model_work(sessions, tmp_path, monk
         worker._execute_script_parse(claim)
     assert error.value.code == "input_changed"
     assert not output.exists()
+
+
+def test_explicit_project_pins_preparation_and_conflict_helpers_without_changing_ui(sessions, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from backend.platform.engine_task_submission import submit_engine_batch
+    from backend.platform.project_context import active_project
+    from backend.platform import storage
+    from backend.core.request_context import bound_workspace
+    with sessions.begin() as db:
+        db.add(Project(id="other", owner_id="owner", name="Other", directory_key="batch/other"))
+    monkeypatch.setattr(storage, "project_workspace_path", lambda db, username, project_id: tmp_path / project_id)
+    with sessions() as db:
+        ctx = SimpleNamespace(user=db.get(User, "owner"), session=SimpleNamespace(active_project_id="project"))
+        def prepare():
+            assert active_project(db, ctx.user, ctx.session).id == "other"
+            assert bound_workspace() == tmp_path / "other"
+            return entries("bgm.match"), {}
+        receipt = submit_engine_batch(task_type="bgm.match", request={"chapters": ["one", "two"]},
+            prepare=prepare, ctx=ctx, db=db, project_id="other", idempotency_key="other-project")
+        assert ctx.session.active_project_id == "project"
+        assert active_project(db, ctx.user, ctx.session).id == "project"
+        assert all(task.project_id == "other" for task in db.scalars(select(Task).where(Task.id.in_(receipt["task_ids"]))))
+
+
+def test_receipt_lookup_preserves_mapping_and_owner_isolation(sessions):
+    from fastapi import HTTPException
+    from backend.api.platform_tasks import submission_receipt
+    first = submit(sessions, kind="script.parse", key="receipt-lookup")
+    with sessions() as db:
+        restored = submission_receipt("receipt-lookup", db.get(User, "owner"), db)
+        assert restored["files"] == first["files"]
+        assert restored["task_ids"] == first["task_ids"]
+        assert restored["batch_id"] == first["batch_id"]
+        assert restored["project_id"] == "project"
+        assert restored["statuses"] == dict.fromkeys(first["task_ids"], "pending")
+        with pytest.raises(HTTPException) as error:
+            submission_receipt("receipt-lookup", User(id="another"), db)
+        assert error.value.status_code == 404

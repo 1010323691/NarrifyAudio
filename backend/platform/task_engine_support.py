@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 from ..core import config as core_config
 from ..core.request_context import bind_workspace, reset_workspace
+from ..core.script_snapshot import bind_reference, reset_reference
+from ..core.input_versions import bind_metadata, reset_metadata
 from .database import SessionLocal
 from .models import User
 from .storage import sha256_file, task_attempt_path, project_workspace_path
@@ -143,9 +145,13 @@ def engine_execution_context(claim: TaskClaim):
     if isinstance(snapshot, dict):
         config_token = core_config.bind_task_config(core_config.AppConfig.model_validate(snapshot))
     token = bind_workspace(workspace)
+    reference_token = bind_reference(snapshot.get("_script_inputs") if isinstance(snapshot, dict) else None)
+    metadata_token = bind_metadata(snapshot if isinstance(snapshot, dict) else {})
     try:
         yield workspace
     finally:
+        reset_metadata(metadata_token)
+        reset_reference(reference_token)
         reset_workspace(token)
         if config_token is not None:
             core_config.reset_task_config(config_token)

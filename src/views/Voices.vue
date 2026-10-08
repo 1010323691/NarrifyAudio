@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Pager from '@/views/textformat/Pager.vue'
+import BatchSubmissionRecovery from '@/components/BatchSubmissionRecovery.vue'
 import { useListPage } from '@/composables/useListPage'
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
@@ -685,6 +686,7 @@ watch(
     </header>
 
     <ProjectGateAlert />
+    <BatchSubmissionRecovery :routes="['/api/tts/prepare-foundations', '/api/tts/make-clones']" @committed="loadVoices(); reattachTasks()" />
 
     <Alert v-if="status && !(status.ready ?? status.implemented)" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>

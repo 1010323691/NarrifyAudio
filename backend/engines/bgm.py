@@ -836,6 +836,8 @@ def _copy_narration_after_merge_gate(handle, layout, stem: str, out: Path,
     if not merge_gate().acquire(stop_check=lambda: handle.cancelled):
         raise TaskCancelled()
     try:
+        from ..core.input_versions import check_bound_inputs
+        check_bound_inputs()
         latest_data = load_assignments(layout, [stem])
         latest_entry = (latest_data.get("chapters") or {}).get(stem)
         if not isinstance(latest_entry, dict):
@@ -1864,6 +1866,8 @@ def _mix_chapter_once(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
     try:
         # Revalidate after waiting for merge_gate: files, manifest, pauses,
         # assignment and timeline must still describe the same mix.
+        from ..core.input_versions import check_bound_inputs
+        check_bound_inputs()
         latest_data = load_assignments(layout, [stem])
         latest_entry = (latest_data.get("chapters") or {}).get(stem)
         if not isinstance(latest_entry, dict):

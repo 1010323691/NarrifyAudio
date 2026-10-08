@@ -30,6 +30,8 @@ from .task_context import EngineExecutionContext, cancellation_requested, update
 from .task_engine_support import (engine_execution_context, engine_result_outcome,
                                   write_task_outcome, task_outcome_file, file_task_outcome)
 from .resource_delivery import POLICY_VERSION
+from ..core.input_versions import validating_inputs
+from .task_input_validation import validate_task_inputs
 
 
 def _validate_deliveries(claim, payload):
@@ -392,7 +394,8 @@ def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
             if spec is None or not spec.legacy_engine:
                 raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
             runner = ENGINE_BRANCHES[claim.task_type]
-            result = runner(handle, claim, payload, side_effect_outputs, side_effect_deletes)
+            with validating_inputs(lambda: validate_task_inputs(payload)):
+                result = runner(handle, claim, payload, side_effect_outputs, side_effect_deletes)
             if isinstance(result, TaskOutcome):
                 return result
         except TaskCancelled as exc:
