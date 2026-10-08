@@ -263,10 +263,11 @@ def test_postgres_concurrent_batch_retries_charge_each_key_once(monkeypatch, wit
         engine.dispose()
 
 
+@pytest.mark.parametrize("mode", ["multi", "single", "selected"])
 @pytest.mark.parametrize("fail_at", [1, 11, 128])
 @pytest.mark.parametrize("existing_originals", [False, True])
 def test_partial_audio_publish_failure_charges_only_moved_files_and_keeps_manifest_consistent(
-    sessions, tmp_path, monkeypatch, fail_at, existing_originals,
+    sessions, tmp_path, monkeypatch, fail_at, existing_originals, mode,
 ):
     import json
     import time
@@ -316,16 +317,17 @@ def test_partial_audio_publish_failure_charges_only_moved_files_and_keeps_manife
     outputs = []
     def run_worker(cmd, handle, on_line, **kwargs):
         rows = json.loads(Path(cmd[cmd.index("--segments-file") + 1]).read_text())
-        final = Path(cmd[cmd.index("--out-dir") + 1])
+        stage_fallback = Path(cmd[cmd.index("--out-dir") + 1])
+        final = layout.audio_chunk / tts_batch.package_for(script)
         outputs.append(final)
         for row in rows:
-            filename = f"{row['file_index'] + 1:04d}.mp3"
-            staged = Path(row["out_dir"]) / filename
+            filename = f"{row.get('file_index', row['index']) + 1:04d}.mp3"
+            staged = Path(row.get("out_dir") or stage_fallback) / filename
             staged.write_bytes(b"new audio")
             if existing_originals:
                 (final / filename).write_bytes(b"old audio")
         for row in rows:
-            staged = Path(row["out_dir"]) / f"{row['file_index'] + 1:04d}.mp3"
+            staged = Path(row.get("out_dir") or stage_fallback) / f"{row.get('file_index', row['index']) + 1:04d}.mp3"
             on_line(f"[segment] {row['index']} ok {staged}")
         return deque()
     monkeypatch.setattr(tts_batch, "run_tts_subprocess", run_worker)
@@ -333,7 +335,11 @@ def test_partial_audio_publish_failure_charges_only_moved_files_and_keeps_manife
     config_token = bind_task_config(AppConfig())
     try:
         with pytest.raises(OSError, match="injected audio move failure"):
-            tts_batch.synthesize_multi(context, ["s.json"])
+            if mode == "multi":
+                tts_batch.synthesize_multi(context, ["s.json"])
+            else:
+                indices = list(range(128)) if mode == "selected" else None
+                tts_batch.synthesize(context, indices=indices, script="s.json")
         # This is the same cleanup boundary used by execute_tts_batch on failure.
         context.rollback_publications()
     finally:

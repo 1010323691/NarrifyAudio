@@ -351,6 +351,16 @@ def _flush_audio(handle, *, force: bool = True) -> None:
         flush(force=force)
 
 
+def _unpublished_segment_results(handle, results: dict, stage_dir):
+    """Use attempt publication evidence consistently in single and pooled manifests."""
+    published = getattr(handle, "workspace_stage_published", None)
+    if stage_dir is None or not callable(published):
+        return []
+    return [(index, {"ok": False, "path": "", "reason": "音频结果发布失败，需重试"})
+            for index, result in results.items()
+            if result.get("ok") and not published(Path(result["path"]))]
+
+
 def _handle_segment(line: str, by_index: dict, total: int, seg_results: dict, handle,
                     stage_dir=None, final_dir=None) -> dict | None:
     """Parse a ``[segment] <index> ok|error <detail>`` line into a result."""
@@ -903,6 +913,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         if not force and now - last_flush[0] < MANIFEST_FLUSH_INTERVAL:
             return
         _flush_audio(handle)
+        for index, result in _unpublished_segment_results(handle, seg_results, stage_out_dir):
+            seg_results[index] = result
         write_manifest_file(manifest_path, build_manifest(
             all_segments, old_entries, seg_results, root=ws,
             expected_voice_signatures=voice_signatures,
@@ -917,9 +929,9 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 line, by_index, run_total, seg_results, handle, stage_out_dir, out_dir,
             )
             if outcome and outcome.get("ok"):
-                from ..platform.quota import consume_tts_input
                 segment_index = outcome["index"]
-                consume_tts_input(len(by_index[segment_index]["text"]), "tts.batch", str(segment_index))
+                handle.queue_tts_input(len(by_index[segment_index]["text"]), "tts.batch",
+                                       str(segment_index), seg_results[segment_index]["path"])
             segment_log.add(outcome)
             _write_manifest()
             _report_stats()
@@ -1533,15 +1545,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         if f.error or not f.pending or not f.dirty:
             return
         _flush_audio(handle)
-        published = getattr(handle, "workspace_stage_published", None)
-        if callable(published) and f.stage_out_dir is not None:
-            # A failed batch may have moved only a prefix. Never persist completion
-            # for the remaining buffered successes, even if an old file still exists.
-            for local, result in list(f.seg_results.items()):
-                if result.get("ok") and not published(Path(result["path"])):
-                    _update_pool_result(f, local, {
-                        "ok": False, "path": "", "reason": "音频结果发布失败，需重试",
-                    })
+        for local, result in _unpublished_segment_results(handle, f.seg_results, f.stage_out_dir):
+            _update_pool_result(f, local, result)
         started = time.monotonic()
         write_manifest_file(f.manifest_path,
                             build_manifest(f.all_segments, f.old_entries, f.seg_results, root=ws,
