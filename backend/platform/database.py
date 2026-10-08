@@ -39,9 +39,10 @@ def _pool_setting(name: str, default: int, *, minimum: int) -> int:
 def _pool_kwargs(*, lock: bool = False) -> dict:
     role = database_role()
     prefix = f"NARRIFY_{role.upper()}_DB_{'LOCK_' if lock else ''}POOL_"
-    defaults = {"api": (8, 0) if lock else (16, 0), "worker": (1, 0) if lock else (3, 0)}
+    defaults = {"api": (8, 0) if lock else (16, 0), "worker": (1, 0) if lock else (6, 0)}
     size, overflow = defaults[role]
-    timeout = 3
+    # Worker publications, lease renewals and dispatch share this bounded pool.
+    timeout = 30 if role == "worker" and not lock else 3
     return {
         "pool_pre_ping": True,
         "pool_size": _pool_setting(prefix + "SIZE", size, minimum=1),
