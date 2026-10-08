@@ -5,7 +5,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,7 +16,7 @@ from ..platform.storage import safe_project_workspace_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
 from ..services.project_completion import COMPLETION_SECTIONS
-from ..services.project_progress import progress_summary
+from ..services.project_progress import progress_summary, request_progress_refresh
 from ..services.task_operations import owned_project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -167,7 +167,7 @@ def _project_progress(root: Path) -> dict:
 
 
 @router.get("/{project_id}/summary")
-def get_project_summary(project_id: str, progress: bool = False, section: str | None = None, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+def get_project_summary(project_id: str, background_tasks: BackgroundTasks, progress: bool = False, section: str | None = None, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     item = _owned(db, user, project_id)
     root = _safe_project_directory(db, user, item)
     if root is None:
@@ -175,13 +175,18 @@ def get_project_summary(project_id: str, progress: bool = False, section: str | 
     if section is not None and (not progress or section not in COMPLETION_SECTIONS):
         raise HTTPException(422, "无效的进度区域")
     if progress:
-        return {
+        result = {
             "project_id": item.id,
             "name": item.name,
             "updated_at": item.updated_at.isoformat(),
             "stage_keys": [], "split_volume_count": 0,
-            "stage_completion": progress_summary(db, user, item.id, root, section),
+            "stage_completion": progress_summary(db, user, item.id, root, section,
+                schedule_refresh=lambda: background_tasks.add_task(request_progress_refresh, user.id, item.id)),
         }
+        # Only plain response values/IDs escape this read. Release its business
+        # connection before background submission opens a separate transaction.
+        db.rollback()
+        return result
     active = db.scalar(select(Task.id).where(
         Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)
     ).limit(1)) is not None
