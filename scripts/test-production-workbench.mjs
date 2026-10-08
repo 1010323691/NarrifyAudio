@@ -557,6 +557,25 @@ test('returning after cancellation unlocks even when old tasks leave the replay 
   assert.equal(h.calls.length, 1)
 })
 
+test('late activation replay cannot unlock a synthesis submission already in flight', async () => {
+  const replay = deferred(), submission = deferred()
+  const h = harness('BatchTTS', { runBatch: () => submission.promise })
+  h.status.value = { ready: true, implemented: true }
+  h.taskStore.refresh = () => replay.promise
+  const activation = Promise.all(h.hooks.activate.map(fn => fn()))
+  await h.refreshRows()
+  h.selected['chapter.json'] = true
+  const running = h.doRun()
+  assert.equal(h.busy.value, true)
+  assert.equal(h.taskId.value, null)
+  replay.resolve()
+  await activation
+  assert.equal(h.busy.value, true)
+  submission.resolve({ task_ids: ['new-task'] })
+  await running
+  assert.equal(h.taskId.value, 'new-task')
+})
+
 test('batch snapshot retention does not traverse unrelated stream buffers', async () => {
   const h = harness('BatchTTS')
   h.taskBatch.track(['tracked'])
