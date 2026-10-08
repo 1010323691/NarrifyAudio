@@ -21,7 +21,7 @@ from .task_contracts import (
     TaskClaim, TaskExecutionError,
 )
 from .task_lifecycle import TERMINAL_TASK_STATUSES, append_task_event
-from .task_admission import llm_task_capacity_available
+from .task_admission import llm_task_capacity_available, LLM_TASK_TYPES
 from .gpu_scheduler.store import host_lock
 
 
@@ -346,8 +346,13 @@ class EngineExecutionContext:
                 return False
             if task.status != "queued" or task.error_code != "resume_waiting":
                 return task.status == "paused"
-            if not llm_task_capacity_available(db):
+            if task.task_type in LLM_TASK_TYPES and not llm_task_capacity_available(db):
                 return True
+            if task.task_type == "tts.batch":
+                from .tts_resource_budget import tts_capacity_available, set_tts_parked
+                if not tts_capacity_available(db, resume_claim=self.claim):
+                    return True
+                set_tts_parked(db, self.claim, False)
             task.status = "running"
             task.error_code = ""
             task.error_message = ""
@@ -360,6 +365,10 @@ class EngineExecutionContext:
         permits = [(resource, resource.suspend_current_thread()) for resource in (gate(), merge_gate())]
         if on_pause is not None:
             on_pause()
+        if getattr(self.claim, "task_type", None) == "tts.batch":
+            from .tts_resource_budget import set_tts_parked
+            with host_lock(), SessionLocal.begin() as db:
+                set_tts_parked(db, self.claim, True)
         delay = 0.25
         while self._paused():
             if self.cancelled:

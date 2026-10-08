@@ -291,10 +291,8 @@ def claim_task(
         if task is None or task.status in TERMINAL_TASK_STATUSES or task.status == "paused":
             return None
         if task.task_type == "tts.batch" and defer_workspace_conflicts:
-            from .tts_resource_budget import preparation_memory_available
-            if (not preparation_memory_available()) or db.scalar(select(Task.id).join(TaskAttempt).where(
-                Task.task_type == "tts.batch", Task.id != task.id, TaskAttempt.status == "running",
-                TaskAttempt.lease_expires_at > now).limit(1)):
+            from .tts_resource_budget import tts_capacity_available
+            if not tts_capacity_available(db, exclude_task_id=task.id):
                 return None
         if not claim_allowed(task.task_type, db):
             return None
@@ -377,6 +375,8 @@ def claim_task(
             "attempt_started",
             {"attempt_id": attempt.id, "attempt_no": attempt.attempt_no, "worker_id": worker_id},
         )
+        if task.task_type == "tts.batch":
+            task.ui_state = {**(task.ui_state or {}), "tts_slot": attempt.id, "tts_parked": False}
         db.commit()
         return TaskClaim(
             task_id=task.id,
@@ -413,10 +413,8 @@ def claim_fair_task(
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
         eligible_tasks = eligible_tasks & _foundation_claim_eligibility()
-        active_tts = db.scalar(select(Task.id).join(TaskAttempt).where(
-            Task.task_type == "tts.batch", TaskAttempt.status == "running", TaskAttempt.lease_expires_at > now).limit(1))
-        from .tts_resource_budget import preparation_memory_available
-        if active_tts or (not preparation_memory_available()):
+        from .tts_resource_budget import tts_capacity_available
+        if not tts_capacity_available(db):
             eligible_tasks = eligible_tasks & (Task.task_type != "tts.batch")
         # Resuming live attempts are continued by their existing execution thread.
         live_attempt = select(TaskAttempt.id).where(

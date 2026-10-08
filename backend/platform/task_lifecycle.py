@@ -57,6 +57,22 @@ def _update_ui_state(state: dict, event_type: str, payload: dict) -> None:
         state["segments"] = payload
 
 
+def hydrate_task_ui_states(db: Session, tasks) -> None:
+    """Preserve migrated chapter counters when attaching a pooled execution slot."""
+    old = {task.id: task for task in tasks if task.ui_state is None}
+    if not old:
+        return
+    latest = select(TaskEvent.task_id, TaskEvent.event_type, TaskEvent.payload,
+        func.row_number().over(partition_by=(TaskEvent.task_id, TaskEvent.event_type),
+                               order_by=TaskEvent.sequence.desc()).label('rn')).where(
+        TaskEvent.task_id.in_(old), TaskEvent.event_type.in_(['progress', 'phase', 'segments'])).subquery()
+    states = {task_id: {} for task_id in old}
+    for task_id, kind, payload in db.execute(select(latest.c.task_id, latest.c.event_type, latest.c.payload).where(latest.c.rn == 1)):
+        _update_ui_state(states[task_id], kind, payload)
+    for task_id, task in old.items():
+        task.ui_state = states[task_id]
+
+
 def compact_result(result: dict) -> dict:
     summary = {key: value for key, value in result.items() if isinstance(value, (int, float, bool)) or isinstance(value, str) and len(value) <= 1024}
     if isinstance(result.get('failed'), list):

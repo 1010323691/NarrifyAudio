@@ -28,6 +28,8 @@ def claim_tts_members(primary, task_ids):
                                             Task.status.in_(['pending', 'queued', 'retrying']))
                           .order_by(Task.id).with_for_update()).all()
         # Parked/expired attempts use the existing recovery path, not a bulk shortcut.
+        from .task_lifecycle import hydrate_task_ui_states
+        hydrate_task_ui_states(db, rows)
         numbers = dict(db.execute(select(TaskAttempt.task_id, func.max(TaskAttempt.attempt_no)).where(
             TaskAttempt.task_id.in_(task_ids)).group_by(TaskAttempt.task_id)).all())
         active = set(db.scalars(select(TaskAttempt.task_id).where(TaskAttempt.task_id.in_(task_ids),
@@ -45,6 +47,7 @@ def claim_tts_members(primary, task_ids):
             attempts.append(dict(id=attempt_id, task_id=row.id, attempt_no=attempt_no, worker_id=primary.worker_id,
                                  lease_token=token, status='running', lease_expires_at=now + timedelta(seconds=settings.task_lease_seconds)))
             row.status = 'running'; row.next_attempt_at = None; row.started_at = row.started_at or now
+            row.ui_state = {**(row.ui_state or {}), 'tts_slot': primary.attempt_id, 'tts_parked': False}
             row.updated_at = now; row.error_code = ''; row.error_message = ''
             row.event_sequence = (row.event_sequence or 0) + 1
             events.append(dict(id=new_id(), task_id=row.id, sequence=row.event_sequence, event_type='attempt_started',

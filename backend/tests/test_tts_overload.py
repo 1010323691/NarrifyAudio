@@ -322,3 +322,168 @@ def test_single_chapter_tts_startup_is_a_phase_not_audio_progress():
     context.progress(.5, '合成台词')
     assert phases == ['启动引擎', '加载模型']
     assert progress == [(50, '合成台词')]
+
+
+@pytest.fixture
+def peer_owner():
+    yield from owner.__wrapped__()
+
+
+@pytest.fixture
+def isolated_tts_slots():
+    # Other files retain historical live attempts in this worker's SQLite DB.
+    # Park only those pre-existing records, then restore them; actors created by
+    # this test still compete through the real host lock and admission query.
+    with SessionLocal.begin() as db:
+        rows = db.scalars(select(Task).join(TaskAttempt).where(
+            Task.task_type == 'tts.batch', TaskAttempt.status == 'running')).unique().all()
+        previous = {row.id: row.ui_state for row in rows}
+        for row in rows:
+            row.ui_state = {**(row.ui_state or {}), 'tts_parked': True}
+    yield
+    with SessionLocal.begin() as db:
+        for task_id, state in previous.items():
+            db.get(Task, task_id).ui_state = state
+
+
+@pytest.mark.parametrize('stage', ['preparation', 'model'])
+@pytest.mark.parametrize('paused_index', [0, 1])
+def test_paused_pool_releases_slot_and_resume_waits_for_other_user(owner, peer_owner, monkeypatch, isolated_tts_slots, stage, paused_index):
+    import time
+    from backend.platform import tts_resource_budget as budget
+    from backend.platform.task_worker import claim_task
+    from backend.platform.tts_batch_claims import claim_tts_members
+    from backend.platform.tts_batch_execution import TTSBatchContext
+    from backend.services.task_operations import control_task_category
+    monkeypatch.setattr(budget, 'preparation_memory_available', lambda: True)
+    receipt = submit(owner, ['pause-one.json', 'pause-two.json'])
+    primary = claim_task(receipt['task_ids'][0], 'paused-pool')
+    claims = [primary, *claim_tts_members(primary, receipt['task_ids'][1:])]
+    context = TTSBatchContext(claims, lambda *_: True, lambda *_: True)
+    paused = claims[paused_index]
+    with SessionLocal.begin() as db:
+        db.get(Task, paused.task_id).status = 'paused'
+    stopped = []
+    def stop_child():
+        with SessionLocal() as db:
+            assert not budget.tts_capacity_available(db)
+        stopped.append(True)
+    def park():
+        if stage == 'model':
+            context.finish_preparation()
+            context.check_interruptible(stop_child)
+        else:
+            context.check()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        parked = executor.submit(park)
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                with SessionLocal() as db:
+                    released = all(db.get(Task, c.task_id).ui_state.get('tts_parked') for c in claims)
+                if released:
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(.01)
+            assert bool(stopped) == (stage == 'model')
+            other = submit(peer_owner, ['other-user.json'])
+            claimed = claim_task(other['task_id'], 'other-worker')
+            assert claimed is not None
+            with SessionLocal.begin() as db:
+                control_task_category(db, owner[0], owner[1], 'tts', 'resume')
+            # Resume is queued, cannot reclaim the slot held by the other user.
+            assert context.contexts[context.entry_key(paused)]._paused()
+            with SessionLocal.begin() as db:
+                db.get(Task, claimed.task_id).status = 'cancelled'
+                db.get(TaskAttempt, claimed.attempt_id).status = 'cancelled'
+            parked.result(timeout=6)
+        finally:
+            if not parked.done():
+                with SessionLocal.begin() as db:
+                    for item in claims:
+                        db.get(Task, item.task_id).status = 'cancelling'
+                try:
+                    parked.result(timeout=6)
+                except Exception:
+                    pass
+    with SessionLocal() as db:
+        assert db.get(Task, paused.task_id).status == 'running'
+        assert all(not db.get(Task, c.task_id).ui_state['tts_parked'] for c in claims)
+
+
+def test_resume_and_new_claim_share_atomic_slot(owner, peer_owner, monkeypatch, isolated_tts_slots):
+    from threading import Barrier
+    from backend.platform import tts_resource_budget as budget
+    from backend.platform.task_context import EngineExecutionContext
+    from backend.platform.task_worker import claim_task
+    from backend.platform.gpu_scheduler.store import host_lock
+    from backend.services.task_operations import control_task_category
+    monkeypatch.setattr(budget, 'preparation_memory_available', lambda: True)
+    receipt = submit(owner, ['atomic-resume.json'])
+    claim = claim_task(receipt['task_id'], 'resume-worker')
+    with host_lock(), SessionLocal.begin() as db:
+        db.get(Task, claim.task_id).status = 'paused'
+        budget.set_tts_parked(db, claim, True)
+    other = submit(peer_owner, ['new-claim.json'])
+    with SessionLocal.begin() as db:
+        control_task_category(db, owner[0], owner[1], 'tts', 'resume')
+    context = EngineExecutionContext(claim)
+    monkeypatch.setattr(budget, 'preparation_memory_available', lambda: False)
+    assert context._paused()
+    monkeypatch.setattr(budget, 'preparation_memory_available', lambda: True)
+    barrier = Barrier(2)
+    def resume(): barrier.wait(); return not context._paused()
+    def start(): barrier.wait(); return claim_task(other['task_id'], 'new-worker')
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        a, b = executor.submit(resume), executor.submit(start)
+        resumed, claimed = a.result(), b.result()
+    assert resumed != (claimed is not None)
+
+
+@pytest.mark.parametrize('task_type', ['tts.batch', 'tts.reset'])
+@pytest.mark.parametrize('status', ['pending', 'succeeded'])
+def test_historical_tts_idempotency_survives_upgrade(owner, monkeypatch, task_type, status):
+    from backend.api.task_operations import TaskSubmit, submit_task
+    from backend.platform.task_submission import submit_task_record
+    from backend.platform.platform_settings import settings
+    payload, key = {'scripts': ['historical.json']}, 'historical-key'
+    with SessionLocal() as db:
+        user = db.get(User, owner[0])
+        historical = submit_task_record(db, user, project_id=owner[1], task_type=task_type, payload=payload, idempotency_key=key)
+        historical_id = historical.id
+    with SessionLocal.begin() as db:
+        db.get(Task, historical_id).status = status
+        db.get(UserQuotaAccount, owner[0]).available_units = 0
+    from dataclasses import replace
+    import backend.platform.tts_submission as submissions
+    monkeypatch.setattr(submissions, 'settings', replace(settings, tts_submissions_enabled=False))
+    request = TaskSubmit(project_id=owner[1], task_type=task_type, payload=payload, idempotency_key=key)
+    def replay():
+        with SessionLocal() as db:
+            return submit_task(request, user=db.get(User, owner[0]), db=db)['id']
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert list(executor.map(lambda _: replay(), range(2))) == [historical_id] * 2
+    with SessionLocal() as db:
+        assert len(db.scalars(select(Task).where(Task.owner_id == owner[0])).all()) == 1
+        assert not db.scalar(select(TaskBatch.id).where(TaskBatch.owner_id == owner[0]))
+        with pytest.raises(HTTPException) as changed:
+            submit_task(TaskSubmit(project_id=owner[1], task_type=task_type, payload={'scripts': ['changed.json']}, idempotency_key=key),
+                        user=db.get(User, owner[0]), db=db)
+        assert changed.value.status_code == 409
+
+
+def test_execution_slots_preserve_migrated_chapter_counters(owner):
+    from backend.platform.task_worker import claim_task
+    from backend.platform.tts_batch_claims import claim_tts_members
+    receipt = submit(owner, ['legacy-one.json', 'legacy-two.json'])
+    with SessionLocal.begin() as db:
+        for task_id in receipt['task_ids']:
+            task = db.get(Task, task_id)
+            task.ui_state = None
+            task.event_sequence = 2
+            db.add(TaskEvent(task_id=task_id, sequence=2, event_type='segments', payload={'done': 42, 'total': 100}))
+    primary = claim_task(receipt['task_ids'][0], 'legacy-counts', defer_workspace_conflicts=False)
+    members = claim_tts_members(primary, receipt['task_ids'][1:])
+    assert len(members) == 1
+    with SessionLocal() as db:
+        assert all(db.get(Task, task_id).ui_state['segments']['done'] == 42 for task_id in receipt['task_ids'])

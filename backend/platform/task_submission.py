@@ -41,6 +41,11 @@ def task_dict(task: Task) -> dict:
     }
 
 
+def task_request_hash(project_id: str, task_type: str, payload: dict) -> str:
+    body = {"project_id": project_id, "task_type": task_type, "payload": payload, "estimated_units": 0}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
 def submit_task_record(
     db: Session, user: User, *, project_id: str, task_type: str,
     payload: dict, idempotency_key: str, commit: bool = True,
@@ -60,11 +65,7 @@ def submit_task_record(
     # reached production sent 0, so replays of historical requests keep the
     # exact same hash (actual model output/input characters are metered by
     # the engines, never by this estimate).
-    request_body = {
-        "project_id": project_id, "task_type": task_type,
-        "payload": payload, "estimated_units": 0,
-    }
-    request_hash = hashlib.sha256(json.dumps(request_body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    request_hash = task_request_hash(project_id, task_type, payload)
     project = db.scalar(select(Project).where(
         Project.id == project_id, Project.owner_id == user.id, Project.deleted_at.is_(None),
     ).with_for_update())

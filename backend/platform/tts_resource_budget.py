@@ -102,3 +102,45 @@ def preparation_memory_available():
     elif available >= 3 * 1024 * MIB:
         _memory_paused = False
     return not _memory_paused
+
+
+def tts_capacity_available(db, *, exclude_task_id=None, resume_claim=None):
+    """One executing pool; parked attempts retain leases without retaining the slot.
+
+    Caller holds host_lock through any subsequent promotion/claim commit.
+    """
+    from sqlalchemy import select
+    from .models import Task, TaskAttempt, utcnow
+    if not preparation_memory_available():
+        return False
+    query = select(Task.id).join(TaskAttempt).where(
+        Task.task_type == 'tts.batch', TaskAttempt.status == 'running',
+        TaskAttempt.lease_expires_at > utcnow(),
+        Task.ui_state['tts_parked'].as_boolean().is_not(True),
+    )
+    if exclude_task_id:
+        query = query.where(Task.id != exclude_task_id)
+    if resume_claim:
+        task = db.get(Task, resume_claim.task_id)
+        slot = (task.ui_state or {}).get('tts_slot') if task else None
+        if slot:
+            query = query.where(Task.ui_state['tts_slot'].as_string().is_distinct_from(slot))
+        else:
+            query = query.where(Task.id != resume_claim.task_id)
+    return db.scalar(query.limit(1)) is None
+
+
+def set_tts_parked(db, claim, parked):
+    """Mark the actual claimed pool after stopping its child, under host_lock."""
+    from sqlalchemy import select
+    from .models import Task, TaskAttempt, utcnow
+    current = db.get(Task, claim.task_id)
+    slot = (current.ui_state or {}).get('tts_slot') if current else None
+    query = select(Task).join(TaskAttempt).where(
+        Task.owner_id == claim.owner_id, Task.project_id == claim.project_id,
+        Task.task_type == 'tts.batch', TaskAttempt.status == 'running',
+        TaskAttempt.lease_expires_at > utcnow(),
+    )
+    query = query.where(Task.ui_state['tts_slot'].as_string() == slot) if slot else query.where(Task.id == claim.task_id)
+    for task in db.scalars(query.order_by(Task.id).with_for_update()):
+        task.ui_state = {**(task.ui_state or {}), 'tts_parked': parked}

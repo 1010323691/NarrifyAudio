@@ -41,11 +41,13 @@ def submit_task(payload: TaskSubmit, *, user: User, db: Session) -> dict:
     if payload.task_type in {'tts.batch', 'tts.reset'}:
         from types import SimpleNamespace
         from ..platform.tts_submission import submit_tts_tasks
+        from ..platform.task_submission import task_request_hash
         receipt = submit_tts_tasks(task_type=payload.task_type, entries=[{
             'label': payload.payload.get('label', '音频合成' if payload.task_type == 'tts.batch' else '重置音频'),
             'payload': payload.payload,
         }], ctx=SimpleNamespace(user=user, session=None), db=db,
-            idempotency_key=payload.idempotency_key, project_id=payload.project_id)
+            idempotency_key=payload.idempotency_key, project_id=payload.project_id,
+            legacy_request_hash=task_request_hash(payload.project_id, payload.task_type, payload.payload))
         from ..platform.models import Task
         return task_dict(db.get(Task, receipt['task_id']))
     try:

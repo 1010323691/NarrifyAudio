@@ -35,7 +35,7 @@ def _packages(payload):
 
 
 @timed_tts_stage('submission')
-def submit_tts_tasks(*, task_type, entries, ctx, db, idempotency_key=None, project_id=None):
+def submit_tts_tasks(*, task_type, entries, ctx, db, idempotency_key=None, project_id=None, legacy_request_hash=None):
     if not 1 <= len(entries) <= MAX_BATCH_CHAPTERS:
         raise HTTPException(422, "一次最多提交 500 章")
     for entry in entries:
@@ -71,6 +71,13 @@ def submit_tts_tasks(*, task_type, entries, ctx, db, idempotency_key=None, proje
                 db.flush()
             db.scalar(select(Project).where(Project.id == project.id).with_for_update())
             account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == ctx.user.id).with_for_update())
+            historical = db.scalar(select(Task).where(Task.owner_id == ctx.user.id, Task.idempotency_key == key))
+            if historical:
+                if legacy_request_hash is None or historical.payload.get('_request_hash') != legacy_request_hash:
+                    raise HTTPException(409, "幂等键对应的请求内容不同")
+                receipt = {"task_id": historical.id, "task_ids": [historical.id]}
+                db.rollback()
+                return receipt
             existing = db.scalar(select(TaskBatch).where(TaskBatch.owner_id == ctx.user.id, TaskBatch.idempotency_key == key))
             if existing:
                 if existing.request_hash != digest:
