@@ -2870,3 +2870,32 @@ def test_long_same_named_uploads_and_worker_outputs_keep_file_indexes(client: Te
         assert {object_path(row.object_key, configured_storage_root(db)).read_text().strip() for row in outputs} == {
             "first", "second",
         }
+
+
+@pytest.mark.parametrize("target_enabled", [False, True])
+def test_smart_split_snapshot_uses_target_project_not_active_project(client: TestClient, target_enabled: bool):
+    account = _register(client, f"{uuid.uuid4()}@example.com")
+    csrf = {"X-CSRF-Token": account["csrf_token"]}
+    saved = client.put("/api/config", headers=csrf,
+                       json={"text": {"split_long_continuous_chapters": target_enabled}})
+    assert saved.status_code == 200, saved.text
+    uploaded = client.post("/api/files/upload", headers=csrf,
+                           files={"file": ("target.txt", "第1章 正文。".encode(), "text/plain")})
+    assert uploaded.status_code == 200, uploaded.text
+    source = uploaded.json()
+    other = client.post("/api/v1/projects", headers=csrf, json={"name": "Other active book"})
+    assert other.status_code == 201, other.text
+    activated = client.put("/api/v1/projects/active", headers=csrf, json={"project_id": other.json()["id"]})
+    assert activated.status_code == 200, activated.text
+    saved = client.put("/api/config", headers=csrf,
+                       json={"text": {"split_long_continuous_chapters": not target_enabled}})
+    assert saved.status_code == 200, saved.text
+    request = {"project_id": source["project_id"], "task_type": "book.split",
+               "payload": {"input_file_id": source["file_id"], "smart": True},
+               "idempotency_key": f"target-policy-{uuid.uuid4()}"}
+    submitted = client.post("/api/v1/tasks", headers=csrf, json=request)
+    assert submitted.status_code == 201, submitted.text
+    with SessionLocal() as db:
+        assert db.get(Task, submitted.json()["id"]).payload["split_policy"]["split_long_continuous_chapters"] is target_enabled
+    # Temporary target binding must not leak back into the active project.
+    assert client.get("/api/config").json()["text"]["split_long_continuous_chapters"] is not target_enabled
