@@ -198,3 +198,87 @@ def test_concurrent_cold_sections_create_one_rebuild():
     assert results == [{}, {}, {}]
     with SessionLocal() as db:
         assert len(db.scalars(select(Task).where(Task.project_id == project_id)).all()) == 1
+
+
+def test_http_returns_stale_snapshot_before_submitting_rebuild(monkeypatch):
+    from fastapi.testclient import TestClient
+    from backend.main import app
+    from backend.api import project_resources
+    from threading import Event
+
+    sent = Event()
+    async def observe_response(scope, receive, send):
+        async def observe(message):
+            await send(message)
+            if (scope.get('path', '').endswith('/summary')
+                    and message['type'] == 'http.response.body'
+                    and not message.get('more_body', False)):
+                sent.set()
+        await app(scope, receive, observe)
+
+    calls = []
+    def submit(owner, project):
+        assert sent.is_set(), 'Rebuild submission must not delay the response body'
+        calls.append((owner, project))
+    monkeypatch.setattr(project_resources, 'request_progress_refresh', submit)
+    suffix = uuid4().hex[:12]
+    with TestClient(observe_response) as client:
+        registered = client.post('/api/auth/register', json={
+            'email': f'{suffix}@example.test', 'username': f'refresh{suffix}', 'password': 'test-pass-1234',
+        })
+        assert registered.status_code == 201
+        owner = registered.json()['user']['id']
+        project_id = client.get('/api/v1/projects').json()[0]['id']
+        stages = {'02_split_text': {'completed': 1, 'total': 2, 'unit': '章节', 'percent': 50}}
+        with SessionLocal() as db:
+            db.add(ProjectProgress(project_id=project_id, signature='0' * 64, stages=stages))
+            db.commit()
+        for section in ('text', 'catalog', 'production'):
+            sent.clear()
+            response = client.get(f'/api/v1/projects/{project_id}/summary?progress=true&section={section}')
+            assert response.status_code == 200
+            assert response.json()['stage_completion'] == (stages if section == 'text' else {})
+        assert calls == [(owner, project_id)] * 3
+
+
+def test_deferred_refresh_revalidates_project_and_coalesces(monkeypatch):
+    from backend.services.project_progress import request_progress_refresh
+    from backend.platform.models import utcnow
+    suffix = uuid4().hex
+    with SessionLocal() as db:
+        user = User(username=f'deferred-{suffix}', email=f'{suffix}@example.test', password_hash='test')
+        db.add(user)
+        db.flush()
+        project = Project(owner_id=user.id, name='Deferred', directory_key=f'{user.username}/book')
+        db.add(project)
+        db.commit()
+        owner, project_id = user.id, project.id
+        root = project_workspace_path(db, user.username, project_id)
+        root.mkdir(parents=True)
+        scheduled = []
+        assert progress_summary(db, user, project_id, root, 'text',
+                                schedule_refresh=lambda: scheduled.append(True)) == {}
+        assert scheduled == [True]
+        assert db.scalar(select(Task.id).where(Task.project_id == project_id)) is None
+    for _ in range(3):
+        request_progress_refresh(owner, project_id)
+    with SessionLocal() as db:
+        assert len(db.scalars(select(Task).where(Task.project_id == project_id)).all()) == 1
+        db.get(Project, project_id).deleted_at = utcnow()
+        db.commit()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Deleted or foreign projects must not submit a refresh')
+    monkeypatch.setattr('backend.services.project_progress._submit_progress_refresh', forbidden)
+    request_progress_refresh(owner, project_id)
+    request_progress_refresh('missing-user', project_id)
+
+
+@pytest.mark.parametrize('locked', [True, False])
+def test_deferred_refresh_does_not_resolve_workspace_during_migration(monkeypatch, locked):
+    from backend.services import project_progress
+    monkeypatch.setattr(project_progress, 'lock_storage_migration', lambda *args, **kwargs: locked)
+    monkeypatch.setattr(project_progress, 'storage_migration', lambda db: object())
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Do not resolve or write a migrating workspace')
+    monkeypatch.setattr(project_progress, 'safe_project_workspace_path', forbidden)
+    project_progress.request_progress_refresh('user', 'project')

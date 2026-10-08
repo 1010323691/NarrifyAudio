@@ -3,14 +3,18 @@ import hashlib
 import json
 import time
 from pathlib import Path
+from typing import Callable
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ..platform.database import SessionLocal
 from ..platform.models import ProjectProgress, Task, User
+from ..platform.storage import lock_storage_migration, safe_project_workspace_path, storage_migration
 from ..platform.task_submission import submit_task_record
 from ..core.file_lock import exclusive_file_lock
 from ..core.safe_filesystem import is_link_or_junction, safe_regular_path
+from .task_operations import owned_project
 
 STAGE_SECTIONS = {
     'text': ('02_split_text',),
@@ -56,29 +60,51 @@ def progress_signature(db: Session, user: User, project_id: str, root: Path) -> 
     return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
 
-def progress_summary(db: Session, user: User, project_id: str, root: Path, section: str | None) -> dict:
+def request_progress_refresh(user_id: str, project_id: str) -> None:
+    """Submit after the response, using fresh ownership and session state."""
+    with SessionLocal() as db:
+        # The HTTP migration guard has ended by now. Resolve and use the root
+        # only while this fresh transaction holds its own shared guard.
+        if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
+            return
+        user = db.get(User, user_id)
+        if user is None or owned_project(db, user_id, project_id) is None:
+            return
+        root = safe_project_workspace_path(db, user.username, project_id)
+        if root is None:
+            return
+        signature = progress_signature(db, user, project_id, root)
+        snapshot = db.get(ProjectProgress, project_id)
+        if snapshot is None or snapshot.signature != signature:
+            _submit_progress_refresh(db, user, project_id, root, signature)
+
+
+def _submit_progress_refresh(db: Session, user: User, project_id: str, root: Path, signature: str) -> None:
+    # Independent card reads coalesce to one task under the submission lock.
+    try:
+        lock = _progress_request_lock(root)
+    except (OSError, ValueError):
+        lock = None
+    try:
+        if lock is not None:
+            with exclusive_file_lock(lock, timeout=1):
+                submit_task_record(db, user, project_id=project_id, task_type='project.progress',
+                                   payload={'signature': signature},
+                                   idempotency_key=f'progress:{project_id}:{signature}:{int(time.time() // 30)}')
+                db.commit()
+    except (TimeoutError, OSError):
+        pass  # Keep serving the snapshot; a later read can retry reconciliation.
+
+
+def progress_summary(db: Session, user: User, project_id: str, root: Path, section: str | None,
+                     *, schedule_refresh: Callable[[], None] | None = None) -> dict:
     snapshot = db.get(ProjectProgress, project_id)
     signature = progress_signature(db, user, project_id, root)
     if snapshot is None or snapshot.signature != signature:
-        # Three independent card reads coalesce to one task under the submission lock.
-        try:
-            lock = _progress_request_lock(root)
-        except (OSError, ValueError):
-            # Keep the last snapshot when the lock path is unsafe or unavailable.
-            lock = None
-        try:
-            if lock is not None:
-                with exclusive_file_lock(lock, timeout=1):
-                    submit_task_record(db, user, project_id=project_id, task_type='project.progress',
-                                       payload={'signature': signature},
-                                       idempotency_key=f'progress:{project_id}:{signature}:{int(time.time() // 30)}')
-                    db.commit()  # Release submission row locks even when an active job was reused.
-        except TimeoutError:
-            pass  # Another reader is already submitting; the next poll can retry.
-        except OSError:
-            # An unsafe/unavailable temp directory must never redirect this GET's writes.
-            # Keep serving the last snapshot; reconciliation can retry once repaired.
-            pass
+        if schedule_refresh is not None:
+            schedule_refresh()
+        else:
+            _submit_progress_refresh(db, user, project_id, root, signature)
     if snapshot is None:
         return {}  # Existing views show "正在读取进度" until the first snapshot arrives.
     stages = snapshot.stages
