@@ -488,7 +488,8 @@ def test_disjoint_matching_overlaps_without_losing_shared_assignments(audio_proj
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(_run_claim_fenced, claim) for claim in claims]
         assert [future.result(timeout=10) for future in futures] == ["succeeded", "succeeded"]
-    data = json.loads((workspace / "08_bgm" / "bgm_assignments.json").read_text("utf-8"))
+    from types import SimpleNamespace
+    data = bgm.load_assignments(SimpleNamespace(bgm=workspace / "08_bgm"))
     assert set(data["chapters"]) == {"one", "two"}
 
 

@@ -319,7 +319,7 @@ def test_analysis_save_roundtrip_no_crlf(sandbox):
     data["chapters"][STEM] = {"scene": ["战斗"], "mood": ["紧张"], "emotion": [],
                               "custom": [], "analyzed_at": "t", "edited": False}
     bgm_engine.save_analysis(layout, data)
-    raw = (sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME).read_bytes()
+    raw = bgm_storage.chapter_path(layout, bgm_engine.ANALYSIS_NAME, STEM).read_bytes()
     assert b"\r\n" not in raw
     again = bgm_engine.load_analysis(layout)
     assert again["chapters"][STEM]["mood"] == ["紧张"]
@@ -340,10 +340,14 @@ def test_analysis_cache_update_uses_task_publication_handle(sandbox):
         handle=_JournalHandle(),
     )
 
-    assert staged == [(
-        sandbox["ws"] / "08_bgm" / bgm_engine.ANALYSIS_NAME,
-        {"version": 1, "model": "", "chapters": {STEM: {"scene": ["test"]}}},
-    )]
+    assert len(staged) == 3  # chapter, summary and small publication version
+    assert [path for path, _ in staged[:2]] == [
+        bgm_storage.chapter_path(layout, bgm_engine.ANALYSIS_NAME, STEM),
+        bgm_storage.chapter_path(layout, bgm_engine.ANALYSIS_NAME, STEM, summary=True),
+    ]
+    for _, entry in staged[:2]:
+        assert entry["version"] == 2 and entry["stem"] == STEM
+        assert entry["entry"] == {"scene": ["test"]}
     assert not staged[0][0].exists()
 
 
@@ -550,11 +554,9 @@ def test_match_stems_single_chapter_boundary_uses_existing_neighbours(sandbox):
     # one enabled track left → the prev exclusion fully blocks the pool → relaxed
     music_engine.update_index(lambda idx: idx["tracks"].update(
         {n: {**t, "enabled": n == "battle.mp3"} for n, t in idx["tracks"].items()}))
-    before = json.loads((sandbox["ws"] / "08_bgm" / bgm_engine.ASSIGNMENTS_NAME)
-                        .read_bytes().decode("utf-8"))
+    before = bgm_engine.load_assignments(layout)
     res = bgm_engine.match_stems(layout, [STEM2], "random", 1, rng=random.Random(1))
-    after = json.loads((sandbox["ws"] / "08_bgm" / bgm_engine.ASSIGNMENTS_NAME)
-                       .read_bytes().decode("utf-8"))
+    after = bgm_engine.load_assignments(layout)
     assert after["chapters"][STEM] == before["chapters"][STEM]  # neighbour untouched
     # prev = battle.mp3 → blocked; only enabled track → relaxed re-pick of battle.mp3
     assert res["assignments"]["chapters"][STEM2]["music"] == "battle.mp3"
@@ -1308,15 +1310,14 @@ def _seed_segment_assignment(sandbox, stem, locked=False, music=None):
 
 def _assignments_before(sandbox):
     layout = core_paths.get_or_prepare_layout()
-    p = layout.bgm / bgm_engine.ASSIGNMENTS_NAME
-    return p.read_bytes() if p.is_file() else None
+    return {path.relative_to(layout.bgm).as_posix(): path.read_bytes()
+            for path in (layout.bgm / bgm_storage.STATE_DIR / "assignments").glob("*.json")}
 
 
 def _assert_zero_drop(sandbox, stem, before):
     layout = core_paths.get_or_prepare_layout()
     assert not bgm_engine._timeline_path(layout, stem).exists()  # 无时间轴文件
-    p = layout.bgm / bgm_engine.ASSIGNMENTS_NAME
-    assert (p.read_bytes() if p.is_file() else None) == before  # assignments 字节不变
+    assert _assignments_before(sandbox) == before  # all canonical assignment bytes unchanged
 
 
 def test_recompute_cursor_walk_and_scene_spans(sandbox, monkeypatch):
@@ -2177,8 +2178,7 @@ def test_analyze_segment_all_failures_zero_writes(sandbox, monkeypatch):
     assert len(seen) == 3  # 第 1 批耗尽即中止，不再跑第 2/3 批
     assert not (sandbox["ws"] / "08_bgm" / bgm_engine.SEGMENT_ANALYSIS_NAME).exists()  # 零落盘
     assert (sandbox["lib"] / "music_index.json").read_bytes() == before_idx  # 词表未动
-    p = layout.bgm / bgm_engine.ASSIGNMENTS_NAME
-    assert (p.read_bytes() if p.is_file() else None) == before_asg
+    assert _assignments_before(sandbox) == before_asg
     assert not bgm_engine._timeline_path(layout, STEM).exists()
     assert concurrency.gate().active == 0
 

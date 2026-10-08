@@ -186,6 +186,17 @@ def test_mix_submits_durable_tasks_and_rejects_same_chapter_conflict(workspace, 
     assert exc.value.status_code == 409
 
 
+def test_mix_submission_never_loads_or_probes_segment_timeline(workspace, monkeypatch):
+    created = _install_durable_mocks(monkeypatch)
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("heavy mix preflight must run in the Worker")
+    monkeypatch.setattr(bgm_engine, "load_segment_timeline", unexpected)
+    monkeypatch.setattr(bgm_engine, "probe_duration", unexpected)
+    result = api_bgm.run_mix(api_bgm.MixRequest(chapters=["ch1", "ch2"]), _api_context(), object())
+    assert len(created) == 2 and result["task_ids"] == ["task-1", "task-2"]
+
+
+
 def test_durable_audio_conflicts_include_unscoped_batches(workspace, monkeypatch):
     payloads = [{"script": None, "scripts": []}]
     monkeypatch.setattr(api_bgm, "active_durable_targets", lambda **kw: set())

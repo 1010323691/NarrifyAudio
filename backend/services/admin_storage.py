@@ -1,7 +1,7 @@
 """Filesystem inventory helpers shared by administrative API routes."""
 from __future__ import annotations
 
-import json
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 
@@ -49,12 +49,13 @@ def project_storage_path(root: Path, username: str, directory_key: str) -> Path 
 
 def read_bgm_usage(workspace: Path) -> dict[str, int]:
     """Count saved chapter assignments without reading audio or analysis content."""
-    path = workspace / "08_bgm" / "bgm_assignments.json"
+    from ..engines.bgm_storage import load_assignments
+    bgm = workspace / "08_bgm"
     try:
-        if path.is_symlink() or path.parent.is_symlink() or not path.is_file() or path.stat().st_size > 5 * 1024 * 1024:
+        if bgm.is_symlink() or not bgm.is_dir():
             return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        data = load_assignments(SimpleNamespace(bgm=bgm), max_bytes=5 * 1024 * 1024)
+    except (OSError, ValueError, RuntimeError):
         return {}
     chapters = data.get("chapters") if isinstance(data, dict) else None
     if not isinstance(chapters, dict):
@@ -97,5 +98,3 @@ def music_use_counts(workspaces: list[tuple[Project, str]], root: Path) -> dict[
         for name, count in read_bgm_usage(path).items():
             counts[name] = counts.get(name, 0) + count
     return counts
-
-

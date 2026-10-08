@@ -88,19 +88,12 @@ def _locked_references(name: str) -> list[str]:
     bgm = layout.bgm
     if bgm is None or not bgm.exists():
         return []
-    f = bgm / "bgm_assignments.json"
-    if not f.exists():
-        return []
     try:
-        data = json.loads(f.read_bytes().decode("utf-8"))
-        chapters = data.get("chapters") if isinstance(data, dict) else None
-        if not isinstance(chapters, dict):
-            return []
-        return [
-            stem for stem, ch in chapters.items()
-            if isinstance(ch, dict) and ch.get("locked") and ch.get("music") == name
-        ]
-    except Exception:
+        from ..engines.bgm_storage import load_assignments
+        chapters = load_assignments(layout, max_bytes=5 * 1024 * 1024).get("chapters") or {}
+        return [stem for stem, chapter in chapters.items()
+                if isinstance(chapter, dict) and chapter.get("locked") and chapter.get("music") == name]
+    except (OSError, ValueError, RuntimeError):
         return []
 
 
@@ -208,19 +201,13 @@ def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depe
             try:
                 if not workspace_root.resolve().is_relative_to(root):
                     continue
-                assignments = workspace_root / "08_bgm" / "bgm_assignments.json"
-                if assignments.is_symlink() or assignments.parent.is_symlink() or not assignments.is_file() or assignments.stat().st_size > 5 * 1024 * 1024:
-                    continue
-                data = json.loads(assignments.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
+                from ..services.admin_storage import read_bgm_usage
+                counts = read_bgm_usage(workspace_root)
+            except (OSError, ValueError, RuntimeError):
                 continue
-            chapters = data.get("chapters") if isinstance(data, dict) else None
-            if not isinstance(chapters, dict):
-                continue
-            for entry in chapters.values():
-                if isinstance(entry, dict) and isinstance(entry.get("music"), str):
-                    music_name = entry["music"]
-                    usage_counts[music_name] = usage_counts.get(music_name, 0) + 1
+            for music_name, count in counts.items():
+                usage_counts[music_name] = usage_counts.get(music_name, 0) + count
+
     tracks = {
         name: {**track, "size_bytes": _track_size(name),
                "use_count": usage_counts.get(name, 0) if is_admin and (page is None or include_usage) else None}
@@ -689,7 +676,7 @@ def _propagate_chapter_analysis(old: str, new: str | None, category: str) -> Non
 
     layout = get_or_prepare_layout()
     bgm = layout.bgm
-    if bgm is None or not (bgm / bgm_storage.ANALYSIS_NAME).exists():
+    if bgm is None or not ((bgm / bgm_storage.ANALYSIS_NAME).exists() or (bgm / bgm_storage.STATE_DIR).exists()):
         return
 
     def _mutate(data: dict) -> None:

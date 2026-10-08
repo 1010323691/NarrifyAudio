@@ -6,7 +6,6 @@ labels retain their legacy names for the existing task UI.
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -21,7 +20,6 @@ from ..core.paths import get_or_prepare_layout, resolve_layout
 from ..engines import bgm as Bgm
 from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
-from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_legacy_engine_tasks
@@ -118,14 +116,14 @@ def list_chapters(page: Annotated[int | None, Query(ge=1)] = None,
     if layout.split_text is None:
         return {"chapters": [], "mode": "random"}
     lib_dir = core_paths.MUSIC_LIBRARY_DIR
-    seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
-    data = Bgm.load_assignments(layout)
-    chapters = data.get("chapters") or {}
     rows = []
     stems = [stem for stem in Bgm.list_chapter_stems(layout) if q.strip().casefold() in stem.casefold()]
     total = len(stems)
     if page is not None and filter == "all" and not keys_only:
         stems = page_slice(stems, page, page_size)
+    seg_data = Bgm.load_segment_summaries(layout, stems).get("chapters") or {}
+    data = Bgm.load_assignments(layout, stems)
+    chapters = data.get("chapters") or {}
     for stem in stems:
         e = chapters.get(stem)
         e_out = None
@@ -152,23 +150,13 @@ def list_chapters(page: Annotated[int | None, Query(ge=1)] = None,
         # stale = 分析指纹 vs 当前 03 条目（03 缺失/损坏 → 指纹必不匹配 → True）。
         sa = seg_data.get(stem)
         segment_analysis = None
-        if isinstance(sa, dict) and (sa.get("blocks") or sa.get("entries")):
+        if isinstance(sa, dict) and sa.get("has_analysis"):
             try:
                 stale = (sa.get("fingerprint")
                          != Bgm.segment_fingerprint(Bgm._load_parsed_entries(layout, stem)))
             except Exception:  # noqa: BLE001 — 03 缺失/损坏 = 分析已不可用
                 stale = True
-            segment_tags = {c: [] for c in music_engine.TAG_CATEGORIES}
-            for block in sa.get("blocks") or sa.get("entries") or []:
-                if not isinstance(block, dict) or block.get("extend"):
-                    continue
-                tags = block.get("music_tags") or block.get("tags") or {}
-                if not isinstance(tags, dict):
-                    continue
-                for category in music_engine.TAG_CATEGORIES:
-                    for tag in tags.get(category) or []:
-                        if isinstance(tag, str) and tag not in segment_tags[category]:
-                            segment_tags[category].append(tag)
+            segment_tags = {c: list((sa.get("tags") or {}).get(c) or []) for c in music_engine.TAG_CATEGORIES}
             segment_analysis = {
                 "analyzed_at": sa.get("analyzed_at", ""),
                 "entry_count": sa.get("entry_count", 0),
@@ -424,7 +412,7 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
             e["locked"] = bool(req.locked)
         chapters[stem] = e
 
-    data = Bgm.update_assignments(layout, _mutate_d)
+    data = Bgm.update_assignments(layout, _mutate_d, stems=[stem])
     return data["chapters"][stem]
 
 
@@ -434,42 +422,6 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
 
 class MixRequest(BaseModel):
     chapters: list[str]
-
-
-def _validate_mix_chapter(layout, stem: str, entry: dict, lib_dir: Path, ffprobe_path: str) -> None:
-    """One chapter's pre-submission guard (raises HTTPException on a doomed mix).
-
-    Runs concurrently across chapters (Q20): the per-chapter ffprobe used to
-    serialize, so submitting N chapters cost N sequential probes of latency.
-    The engine-side guards are unchanged — this only fails the request early.
-    """
-    narration = Bgm._find_narration(layout, stem)
-    if narration is None:
-        raise HTTPException(400,
-            f"未找到旁白音频（06_audio_merge/{stem}.mp3），请先完成音频合并。")
-    m = entry.get("music")
-    if m and not (lib_dir / m).is_file():
-        raise HTTPException(400,
-            f"音乐库中找不到 {m}，请先到「音乐库」页检查或重新匹配（{stem}）。")
-    # 段落级时间轴的前置守卫——不让「⚠ 行」发起必败任务：时间轴缺失/过期
-    #（旁白时长变化）/ span 曲目出库 → 400（引擎侧同守卫）。章节级匹配
-    # 若只重置了 assignment.segment，但段落分析和时间轴仍有效，也继续认这份结果。
-    tl = Bgm.load_segment_timeline(layout, stem, entry)
-    if entry.get("segment") or tl is not None:
-        if tl is None:
-            raise HTTPException(
-                400, f"该章没有时间轴，请重新进行段落分析（{stem}）。")
-        d, _perr = probe_duration(narration, ffprobe_path)
-        if (d > 0
-                and abs(d - float(tl.get("duration") or 0.0)) > Bgm._STALE_TOLERANCE_S):
-            raise HTTPException(
-                400, f"时间轴已过期（旁白时长变化），请重新进行段落分析（{stem}）。")
-        for sp in tl.get("timeline") or []:
-            mid = sp.get("music_id") or ""
-            if not (lib_dir / mid).is_file():
-                raise HTTPException(
-                    400,
-                    f"音乐库中找不到 {mid}，请先到「音乐库」页检查或重新匹配（{stem}）。")
 
 
 @router.post("/mix")
@@ -484,36 +436,15 @@ def run_mix(
     stems = _validated_stems(layout, req.chapters or [])
     if not stems:
         raise HTTPException(400, "请选择要混音的章节。")
-    data = Bgm.load_assignments(layout)
+    data = Bgm.load_assignments(layout, stems)
     chapters = data.get("chapters") or {}
-    entries: dict[str, dict] = {}
     for s in stems:
         e = chapters.get(s)
         if not isinstance(e, dict):
             raise HTTPException(400, f"该章从未匹配，请先匹配（{s}）。")
-        entries[s] = e
-    # Q20: the per-chapter ffprobe prechecks ran in parallel — a multi-chapter
-    # mix submission no longer blocks on N sequential probe spawns. The first
-    # failure in selection order keeps the 400 semantics.
-    failures: dict[str, HTTPException] = {}
-    lib_dir = core_paths.MUSIC_LIBRARY_DIR
+    # The Worker validates timelines, audio durations and library tracks against
+    # current inputs. Submission performs bounded reference/conflict checks only.
     cfg = get_config()
-    ffprobe_path = cfg.ffmpeg.ffprobe_path
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {
-            pool.submit(_validate_mix_chapter, layout, s, entries[s], lib_dir, ffprobe_path): s
-            for s in stems
-        }
-        for future in as_completed(futures):
-            exc = future.exception()
-            if exc is None:
-                continue
-            if isinstance(exc, HTTPException):
-                failures[futures[future]] = exc
-            else:
-                raise exc
-    if failures:
-        raise failures[min(failures, key=lambda s: stems.index(s))]
     audio_conflicts = _durable_audio_conflicts(stems, ctx, db)
     if audio_conflicts:
         raise HTTPException(

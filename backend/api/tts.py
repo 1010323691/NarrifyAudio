@@ -1473,7 +1473,7 @@ def preview_chapter(name: str) -> dict:
     from ..core.filenames import package_aliases
     stems = package_aliases(pkg)
     timeline_exists = bool(layout.bgm and any((layout.bgm / "timelines" / f"{stem}.json").is_file() for stem in stems))
-    seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
+    seg_data = Bgm.load_segment_analysis(layout, [pkg]).get("chapters") or {}
     sa = seg_data.get(pkg)
     segment_stale = False
     if isinstance(sa, dict) and (sa.get("blocks") or sa.get("entries")):

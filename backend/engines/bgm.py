@@ -60,7 +60,7 @@ from .bgm_storage import (
     _atomic_write_json, _bgm_dir, load_analysis, load_assignments,
     load_segment_analysis, save_analysis, save_assignments,
     save_segment_analysis, update_analysis, update_assignments,
-    update_segment_analysis,
+    update_segment_analysis, load_segment_summaries,
 )
 from backend.engines import tts_batch
 from backend.engines.merge import boundary_gap_ms, collect_segments, thread_budget
@@ -727,7 +727,7 @@ def load_segment_timeline(layout, stem: str, assignment: dict | None = None) -> 
     timeline = load_timeline(layout, stem)
     if timeline is None:
         return None
-    segment = (load_segment_analysis(layout).get("chapters") or {}).get(stem)
+    segment = (load_segment_analysis(layout, [stem]).get("chapters") or {}).get(stem)
     if isinstance(segment, dict) and (segment.get("blocks") or segment.get("entries")):
         try:
             entries = _load_parsed_entries(layout, stem)
@@ -836,7 +836,7 @@ def _copy_narration_after_merge_gate(handle, layout, stem: str, out: Path,
     if not merge_gate().acquire(stop_check=lambda: handle.cancelled):
         raise TaskCancelled()
     try:
-        latest_data = load_assignments(layout)
+        latest_data = load_assignments(layout, [stem])
         latest_entry = (latest_data.get("chapters") or {}).get(stem)
         if not isinstance(latest_entry, dict):
             raise RuntimeError("混音输入在等待期间已变化，请重新发起混音。")
@@ -1094,7 +1094,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
     registry = music_engine.load_index()["tags"]
     total_batches = len(batches)
     # 全章气氛参考（章节分析缓存，若存在）——给场景规划一点整章背景。
-    chapter_tags = load_analysis(layout).get("chapters", {}).get(stem)
+    chapter_tags = load_analysis(layout, [stem]).get("chapters", {}).get(stem)
     if not isinstance(chapter_tags, dict):
         chapter_tags = None
 
@@ -1247,7 +1247,7 @@ def analyze_segment_chapter(handle, stem: str, llm_cfg, bgm_cfg) -> dict:
         update_segment_analysis(layout, lambda d: (
             d.update({"model": llm_cfg.model_name}),
             d["chapters"].__setitem__(stem, entry),
-        ), handle=handle)
+        ), handle=handle, stems=[stem])
         handle.log(f"段落分析完成：{n} 段（{total_batches} 批）")
 
         handle.progress(0.95, "生成时间轴")
@@ -1321,7 +1321,7 @@ def recompute_segment_timelines(
     """
     idx = music_engine.load_index()
     tracks = list(idx["tracks"].items())
-    seg_data = load_segment_analysis(layout).get("chapters") or {}
+    seg_data = load_segment_analysis(layout, stems).get("chapters") or {}
     now = datetime.now().isoformat(timespec="seconds")
     timeline_writes: list[tuple[str, dict]] = []
     assign_entries: dict[str, dict] = {}
@@ -1682,7 +1682,7 @@ def recompute_segment_timelines(
             chapters[stem] = e
         data["updated_at"] = now
 
-    cur_chapters = load_assignments(layout).get("chapters") or {}
+    cur_chapters = load_assignments(layout, assign_entries).get("chapters") or {}
     skipped_locked = sum(
         1 for stem in assign_entries
         if isinstance(cur_chapters.get(stem), dict) and cur_chapters[stem].get("locked")
@@ -1690,7 +1690,7 @@ def recompute_segment_timelines(
     if timeline_writes:
         for stem, tl in timeline_writes:
             _atomic_write_json(_timeline_path(layout, stem), tl, handle)
-        update_assignments(layout, _mutate, handle=handle)
+        update_assignments(layout, _mutate, handle=handle, stems=assign_entries)
     return {"mode": "segment", "matched": matched, "no_bgm": no_bgm,
             "skipped_locked": skipped_locked}
 
@@ -1751,7 +1751,7 @@ def _mix_chapter_once(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
             f"未找到旁白音频（06_audio_merge/{stem}.mp3），请先完成音频合并。"
         )
 
-    data = load_assignments(layout)
+    data = load_assignments(layout, [stem])
     entry = (data.get("chapters") or {}).get(stem)
     if not isinstance(entry, dict):
         raise RuntimeError("该章从未匹配，请先匹配。")
@@ -1864,7 +1864,7 @@ def _mix_chapter_once(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
     try:
         # Revalidate after waiting for merge_gate: files, manifest, pauses,
         # assignment and timeline must still describe the same mix.
-        latest_data = load_assignments(layout)
+        latest_data = load_assignments(layout, [stem])
         latest_entry = (latest_data.get("chapters") or {}).get(stem)
         if not isinstance(latest_entry, dict):
             raise RuntimeError("混音输入在等待期间已变化，请重新发起混音。")
@@ -2039,6 +2039,11 @@ def match_stems(
     stem_positions = {stem: i for i, stem in enumerate(chapter_stems)}
     rng = rng or random.Random()
     counts: dict[str, int] = {}
+    scope = set(stems)
+    for stem in stems:
+        position = stem_positions.get(stem)
+        if position is not None:
+            scope.update(chapter_stems[max(0, position - 1):position + 2])
 
     def _mutate(data: dict) -> None:
         chapters = data.setdefault("chapters", {})
@@ -2103,6 +2108,6 @@ def match_stems(
         data["updated_at"] = now
         counts.update(matched=matched, no_bgm=no_bgm, skipped_locked=skipped_locked)
 
-    data = update_assignments(layout, _mutate, handle=handle)
+    data = update_assignments(layout, _mutate, handle=handle, stems=scope)
     return {"mode": mode, "matched": counts["matched"], "no_bgm": counts["no_bgm"],
             "skipped_locked": counts["skipped_locked"], "assignments": data}
