@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from contextlib import contextmanager
 from typing import Any, Callable
 
@@ -11,6 +12,43 @@ from .database import SessionLocal
 from .models import User
 from .storage import sha256_file, task_attempt_path, project_workspace_path
 from .task_contracts import TaskClaim, TaskExecutionError, TaskFileOutcome, TaskOutcome
+
+
+@contextmanager
+def task_outcome_file(claim: TaskClaim, output_name: str):
+    """Reserve an attempt-owned disk artifact; remove incomplete writes on error."""
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        if user is None:
+            raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+        path = task_attempt_path(db, user.username, claim.project_id,
+                                 claim.task_id, claim.attempt_id, output_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        yield path
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def file_task_outcome(path, output_name: str, content_type: str,
+                      metadata: dict[str, Any], *, publish_module=None,
+                      check: Callable[[], None] | None = None) -> TaskOutcome:
+    """Describe a closed attempt artifact without materializing its contents."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            if check:
+                check()
+            size += len(chunk)
+            digest.update(chunk)
+    if check:
+        check()
+    return TaskOutcome(temp_path=path, output_name=output_name,
+                       content_type=content_type, size_bytes=size,
+                       sha256=digest.hexdigest(), metadata=metadata,
+                       publish_module=publish_module)
 
 
 def write_task_outcome(

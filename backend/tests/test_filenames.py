@@ -4,6 +4,7 @@ import io
 import hashlib
 import zipfile
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,14 +108,15 @@ def test_zip_deduplicates_final_names_and_preserves_both_contents(tmp_path, monk
         path.write_bytes(bytes([index]))
     payload = {"files": [{"relative_path": path.name, "name": name} for path, name in zip(
         sources, ['A?.mp3', 'A*.mp3', 'a_.mp3'])]}
-    monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {p.name: {} for p in sources})
+    from backend.core.safe_filesystem import file_identity
+    monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {p.name: {"identity": list(file_identity(p.stat()))} for p in sources})
     monkeypatch.setattr(executor, "get_or_prepare_layout", lambda: SimpleNamespace(workspace=tmp_path))
     monkeypatch.setattr(executor, "_check_delivery_identity", lambda *_: None)
     monkeypatch.setattr(executor, "cancellation_requested", lambda *_: False)
     monkeypatch.setattr(executor, "update_progress", lambda *_: None)
-    monkeypatch.setattr(executor, "write_task_outcome", lambda *args, **kwargs: args[3])
-    data = executor._run_audio_zip(SimpleNamespace(progress_percent=lambda *_: None), None, payload, [], [])
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+    monkeypatch.setattr(executor, "task_outcome_file", lambda *_: nullcontext(tmp_path / "archive.zip"))
+    result = executor._run_audio_zip(SimpleNamespace(progress_percent=lambda *_: None), None, payload, [], [])
+    with zipfile.ZipFile(result.temp_path) as archive:
         names = archive.namelist()
         assert names == ['A_.mp3', 'A_ (2).mp3', 'a_ (3).mp3']
         assert [archive.read(name) for name in names] == [b'\x00', b'\x01', b'\x02']

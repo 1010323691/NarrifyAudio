@@ -9,6 +9,54 @@ from backend.platform import task_engine_support
 from backend.platform.task_contracts import TaskCancelledError, TaskClaim
 
 
+@pytest.mark.parametrize("kind", ["audio.zip", "bgm.package"])
+def test_disk_zip_cancellation_removes_partial_artifact(tmp_path, monkeypatch, kind):
+    from backend.platform import engine_task_executor as executor
+    from backend.core.safe_filesystem import file_identity
+    source = tmp_path / "chapter.mp3"
+    source.write_bytes(b"a" * (4 * 1024 * 1024))
+    staged = tmp_path / "attempt" / "book.zip"
+    claim = SimpleNamespace(owner_id="owner", project_id="project", task_id="task", attempt_id="attempt")
+    db = SimpleNamespace(get=lambda *_: SimpleNamespace(username="user"))
+    monkeypatch.setattr(task_engine_support, "SessionLocal", lambda: nullcontext(db))
+    monkeypatch.setattr(task_engine_support, "task_attempt_path", lambda *_: staged)
+    relative = "08_bgm/chapter.mp3" if kind == "bgm.package" else source.name
+    monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {relative: {"identity": list(file_identity(source.stat()))}})
+    monkeypatch.setattr(executor, "get_or_prepare_layout", lambda: SimpleNamespace(workspace=tmp_path, bgm=tmp_path))
+    monkeypatch.setattr(executor, "update_progress", lambda *_: None)
+    calls = 0
+    def cancelled(_):
+        nonlocal calls
+        calls += 1
+        return calls >= 5
+    monkeypatch.setattr(executor, "cancellation_requested", cancelled)
+    payload = {"base": "book", "chapters": ["chapter"], "files": [{"relative_path": source.name}]}
+    runner = executor._run_bgm_package if kind == "bgm.package" else executor._run_audio_zip
+    with pytest.raises(TaskCancelledError):
+        runner(SimpleNamespace(progress_percent=lambda *_: None), claim, payload, [], [])
+    assert not staged.exists()
+    assert source.stat().st_size == 4 * 1024 * 1024
+
+
+def test_cancelled_disk_outcome_hash_removes_staged_artifact(tmp_path, monkeypatch):
+    db = SimpleNamespace(get=lambda *_: SimpleNamespace(username="user"))
+    claim = SimpleNamespace(owner_id="owner", project_id="project", task_id="task", attempt_id="attempt")
+    staged = tmp_path / "attempt" / "book.zip"
+    monkeypatch.setattr(task_engine_support, "SessionLocal", lambda: nullcontext(db))
+    monkeypatch.setattr(task_engine_support, "task_attempt_path", lambda *_: staged)
+    calls = 0
+    def check():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise TaskCancelledError()
+    with pytest.raises(TaskCancelledError):
+        with task_engine_support.task_outcome_file(claim, "book.zip") as path:
+            path.write_bytes(b"a" * (3 * 1024 * 1024))
+            task_engine_support.file_task_outcome(path, "book.zip", "application/zip", {}, check=check)
+    assert not staged.exists()
+
+
 @pytest.mark.parametrize('cancel_after', [1, 2])
 def test_cancelled_progress_callback_removes_all_attempt_outputs(tmp_path, monkeypatch, cancel_after):
     attempt_dir = tmp_path / 'user' / 'project' / '00_temp' / 'tasks' / 'task' / 'attempt'

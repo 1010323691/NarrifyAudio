@@ -182,12 +182,12 @@ def test_legacy_zip_rechecks_source_identity_during_archive_creation(client, wor
     _delivery(workspace, "07_output/ready.wav")
     task_id = _submit(client, workspace, "audio.zip", {"base": "book", "files": [{"name": "ready.wav", "relative_path": "07_output/ready.wav"}]})
     claim = claim_task(task_id, "delivery-zip-worker", lease_seconds=600)
-    original = zipfile.ZipFile.write
-    def replaced(archive, *args, **kwargs):
-        result = original(archive, *args, **kwargs)
+    original = zipfile._ZipWriteFile.write
+    def replaced(writer, *args, **kwargs):
+        result = original(writer, *args, **kwargs)
         source.write_bytes(b"replaced incomplete audio")
         return result
-    monkeypatch.setattr(zipfile.ZipFile, "write", replaced)
+    monkeypatch.setattr(zipfile._ZipWriteFile, "write", replaced)
     with pytest.raises(TaskExecutionError, match="成品在导出期间发生变化"):
         execute_claim(claim)
     with SessionLocal() as db:
