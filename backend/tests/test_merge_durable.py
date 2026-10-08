@@ -32,33 +32,24 @@ def _ctx():
 
 def test_merge_submits_one_durable_task_per_unique_package(workspace, monkeypatch):
     submitted = []
-    monkeypatch.setattr(api_tts, "active_durable_targets", lambda **_kwargs: set())
-
     def submit(**kwargs):
         submitted.append(kwargs)
-        return {"id": f"task-{len(submitted)}"}
-
-    monkeypatch.setattr(api_tts, "submit_legacy_engine_task", submit)
-    result = api_tts.run_merge(
-        api_tts.MergeRequest(packages=["pkg1", "pkg2", "pkg1"]),
-        ctx=_ctx(), db=object(),
-    )
-
-    assert result == {
-        "task_ids": ["task-1", "task-2"],
-        "packages": [
-            {"package": "pkg1", "task_id": "task-1"},
-            {"package": "pkg2", "task_id": "task-2"},
-        ],
-    }
-    assert [item["task_type"] for item in submitted] == ["tts.merge", "tts.merge"]
-    assert [item["payload"]["package"] for item in submitted] == ["pkg1", "pkg2"]
+        return {"batch_id": "batch", "task_ids": ["task-1", "task-2"],
+                "packages": [{"package": "pkg1", "task_id": "task-1"},
+                             {"package": "pkg2", "task_id": "task-2"}]}
+    monkeypatch.setattr(api_tts, "submit_merge_tasks", submit)
+    result = api_tts.run_merge(api_tts.MergeRequest(packages=["pkg1", "pkg2", "pkg1"]),
+                               ctx=_ctx(), db=object(), idempotency_key="key")
+    assert result["task_ids"] == ["task-1", "task-2"]
+    assert len(submitted) == 1
+    assert submitted[0]["packages"] == ["pkg1", "pkg2"]
+    assert submitted[0]["idempotency_key"] == "key"
 
 
 def test_merge_rejects_package_with_active_durable_task(workspace, monkeypatch):
-    monkeypatch.setattr(api_tts, "active_durable_targets", lambda **_kwargs: {"pkg1"})
-    monkeypatch.setattr(api_tts, "submit_legacy_engine_task", lambda **_kwargs: pytest.fail("must not submit"))
-
+    def reject(**kwargs):
+        raise HTTPException(409, "已有合并任务在途")
+    monkeypatch.setattr(api_tts, "submit_merge_tasks", reject)
     with pytest.raises(HTTPException) as exc:
         api_tts.run_merge(api_tts.MergeRequest(packages=["pkg1"]), ctx=_ctx(), db=object())
     assert exc.value.status_code == 409
@@ -178,3 +169,100 @@ def test_merge_rows_display_source_titles_without_changing_package_identity(work
     assert row["name"] == stem
     assert row["display_name"] == "第 001 章 标题【章节内标签】！"
     assert row["complete"] is True
+
+
+def test_merge_cache_singleflight_and_copy(workspace, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    api_tts.reset_batch_status_cache()
+    layout = core_paths.resolve_layout()
+    calls = []
+    def compute(name, layout, voice_config, **kwargs):
+        calls.append(name)
+        time.sleep(.03)
+        return {'name': name, 'complete': True}
+    monkeypatch.setattr(api_tts, '_package_merge_status', compute)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(lambda _: api_tts._cached_package_merge_status('one', layout, {}), range(8)))
+    assert calls == ['one']
+    rows[0]['complete'] = False
+    assert api_tts._cached_package_merge_status('one', layout, {})['complete'] is True
+
+
+def test_merge_cache_invalidates_inputs_and_expires(workspace, monkeypatch):
+    api_tts.reset_batch_status_cache()
+    clock = [0.0]
+    monkeypatch.setattr(api_tts, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    _seed_package(workspace, 'p1', 2, 2)
+    pkg = workspace / '05_audio_chunk' / 'p1'
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['complete']
+    # Directory fingerprint detects a deleted segment immediately.
+    (pkg / '0001.mp3').unlink()
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['completed'] == 1
+    (pkg / '0001.mp3').write_bytes(b'audio')
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['completed'] == 2
+    source = workspace / '03_parsed_json' / 'p1.json'
+    data = json.loads(source.read_text()); data.append({'speaker': 'NARRATOR', 'text': 'new'})
+    source.write_text(json.dumps(data))
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['total'] == 3
+    # Even when a caller restores the directory fingerprint, expiry rechecks existence.
+    before = api_tts._stat_key(pkg)
+    stat_key = api_tts._stat_key
+    monkeypatch.setattr(api_tts, "_stat_key", lambda path: before if path == pkg else stat_key(path))
+    (pkg / '0001.mp3').unlink()
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['completed'] == 2
+    clock[0] = 2.01
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['completed'] == 1
+    (pkg / 'manifest.json').write_text('broken')
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['completed'] == 0
+
+
+def test_merge_cache_voice_title_and_workspace_fences(workspace, monkeypatch):
+    from backend.core.request_context import bind_workspace, reset_workspace
+    api_tts.reset_batch_status_cache()
+    _seed_package(workspace, 'p1', 1, 1)
+    voice = workspace / '04_voice_profiles' / 'voice_config.json'
+    voice.parent.mkdir(exist_ok=True)
+    assert api_tts.merge_status(packages=['p1'])['packages'][0]['complete']
+    voice.write_text(json.dumps({'NARRATOR': {'voice': 'new'}}))
+    # Changed voice params invalidate previously completed legacy segments.
+    assert not api_tts.merge_status(packages=['p1'])['packages'][0]['complete']
+    other = workspace.parent / 'Other'; other.mkdir()
+    token = bind_workspace(other)
+    try:
+        assert api_tts.merge_status(packages=['p1'])['packages'][0]['total'] == 0
+    finally:
+        reset_workspace(token)
+
+
+def test_merge_cache_reads_voice_config_once_per_request(workspace, monkeypatch):
+    api_tts.reset_batch_status_cache()
+    for name in ['one', 'two']:
+        _seed_package(workspace, name, 1, 1)
+    calls = []
+    original = api_tts._read_voice_config
+    monkeypatch.setattr(api_tts, '_read_voice_config', lambda layout: calls.append(True) or original(layout))
+    api_tts.merge_status(packages=['one', 'two'])
+    assert len(calls) == 1
+
+
+def test_merge_cache_title_fingerprint_and_bounded_entries(workspace, monkeypatch):
+    api_tts.reset_batch_status_cache()
+    name = '第 001 章 标题'
+    _seed_package(workspace, name, 1, 1)
+    source = workspace / '02_split_text' / f'{name}.txt'
+    source.parent.mkdir(exist_ok=True)
+    source.write_text('第1章 原标题\n正文', encoding='utf-8')
+    first = api_tts.merge_status(packages=[name])['packages'][0]
+    source.write_text('第1章 新标题更长\n正文', encoding='utf-8')
+    second = api_tts.merge_status(packages=[name])['packages'][0]
+    assert first['display_name'] != second['display_name']
+    def compute(name, layout, voice_config, **kwargs):
+        return {'name': name, 'total': 0, 'completed': 0, 'remaining': 0, 'complete': False}
+    monkeypatch.setattr(api_tts, '_package_merge_status', compute)
+    layout = core_paths.resolve_layout()
+    for i in range(2050):
+        api_tts._cached_package_merge_status(f'new-{i}', layout, {})
+    assert len(api_tts._MERGE_STATUS_CACHE) <= 2048
+    assert len(api_tts._MERGE_INPUT_CACHE) <= 2048
+    assert api_tts._MERGE_INPUT_CACHE.retained_bytes <= api_tts._MERGE_INPUT_CACHE.max_bytes

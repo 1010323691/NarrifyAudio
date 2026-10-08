@@ -50,7 +50,7 @@ def test_default_synthesis_page_only_checks_visible_files_and_bulk_keeps_all(sco
     monkeypatch.setattr(tts, 'resolve_parsed_json_all', lambda: [layout.parsed_json / n for n in names])
     monkeypatch.setattr(tts, '_read_voice_config', lambda _: {})
     checked = []
-    def status(name, *_):
+    def status(name, *_, **kwargs):
         checked.append(name)
         return {'name': name, 'is_script': True, 'complete': False, 'missing': []}
     monkeypatch.setattr(tts, '_cached_file_batch_status', status)
@@ -91,7 +91,7 @@ def test_merge_page_enriches_only_page_and_full_selection_keeps_done_and_ready(s
     for i in range(61): (layout.audio_chunk / f'p{i:03}').mkdir()
     (layout.audio_merge / 'p000.mp3').touch()
     checked = []
-    def status(name, *_):
+    def status(name, *_, **kwargs):
         checked.append(name)
         return {'name': name, 'complete': True}
     monkeypatch.setattr(tts, '_package_merge_status', status)

@@ -19,7 +19,7 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs",
-    "test:production-workbench": "node scripts/test-production-workbench.mjs",
+    "test:production-workbench": "node --test scripts/test-production-workbench.mjs scripts/test-merge-submission.mjs",
     "test:voices-workbench": "node scripts/test-voices-workbench.mjs",
     "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs",
     "test:admin-console": "node scripts/test-admin-console.mjs",
@@ -27,7 +27,8 @@
     "test:ten-row-layout": "node scripts/test-ten-row-layout.mjs",
     "test:project-cards": "node scripts/test-project-cards.mjs",
     "test:project-cards-browser": "node scripts/test-project-cards-browser.mjs",
-    "test:tts-submission": "node scripts/test-tts-submission.mjs"
+    "test:tts-submission": "node scripts/test-tts-submission.mjs",
+    "test:merge-submission": "node scripts/test-merge-submission.mjs"
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

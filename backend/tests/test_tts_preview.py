@@ -631,6 +631,7 @@ def test_merge_submission_rejected_while_chapter_lock_held(workspace, monkeypatc
     _no_conflicts(monkeypatch)
     monkeypatch.setattr(api_tts, "submit_legacy_engine_task",
                         lambda **kw: pytest.fail("must not submit"))
+    monkeypatch.setattr(api_tts, "submit_merge_tasks", lambda **kwargs: kwargs["preflight"](kwargs["packages"]))
     layout = core_paths.get_or_prepare_layout()
     lock_path = Batch.preview_lock_path(layout, "s")
 

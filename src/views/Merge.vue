@@ -18,8 +18,9 @@ import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useWorkbenchRefresh } from '@/composables/useWorkbenchRefresh'
 import { useWorkbenchTaskControl } from '@/composables/useWorkbenchTaskControl'
 import { useTaskStore } from '@/stores/task'
+import { useMergeSubmission } from '@/composables/useMergeSubmission'
 import { useToast } from '@/components/ui/toast'
-import { mergeList, runMerge, ttsStatus } from '@/api/tts'
+import { mergeList, ttsStatus } from '@/api/tts'
 import { previewUrl } from '@/utils/fileops'
 import type { MergePackageStatus, MergeResult, TaskSnapshot, TTSStatus } from '@/types'
 
@@ -70,7 +71,16 @@ const diskMp3 = ref<Record<string, string>>({}) // 包名 -> 06 下的产物文�
 const mergedNames = ref<Record<string, string>>({})
 
 const selected = reactive<Record<string, boolean>>({})
-const submitting = ref(false)
+const mergeSubmission = useMergeSubmission((receipt) => {
+  for (const row of receipt.packages) delete selected[row.package]
+  const isCurrent = captureScope()
+  void taskStore.refresh().catch(() => {
+    if (!isCurrent()) return
+    toast({ title: '合并任务已提交', description: '任务状态刷新暂时失败，可稍后刷新任务记录。' })
+  })
+  scheduleRowsRefresh()
+})
+const { submitting, failure: submissionFailure, remaining: submissionRemaining, label: submissionLabel } = mergeSubmission
 const rowsLoading = ref(false)
 const rowsError = ref('')
 const error = ref('')
@@ -238,7 +248,6 @@ async function doRun() {
     !selectionReady.value
   )
     return
-  submitting.value = true
   error.value = ''
   try {
     const names = [...selectedNames.value]
@@ -254,8 +263,7 @@ async function doRun() {
     )
       return
     if (!selectionReady.value) return
-    await withinScope(runMerge(names), isCurrent)
-    await withinScope(taskStore.refresh(), isCurrent)
+    await withinScope(mergeSubmission.submit(names), isCurrent)
     // 完成由下方的 SSE 驱动 watcher 处理（逐包终态 → 行状态流转）。
   } catch (e: any) {
     if (!isCurrent()) return
@@ -264,10 +272,6 @@ async function doRun() {
     error.value = msg
     if (msg.includes('在途')) {
       toast({ title: '提交被拒绝', variant: 'destructive', description: msg })
-    }
-  } finally {
-    if (isCurrent()) {
-      submitting.value = false
     }
   }
 }
@@ -422,7 +426,6 @@ function blockedReason(row: MergeRow) {
 }
 
 onDeactivated(() => {
-  submitting.value = false
   stopScheduledRefresh()
 })
 onBeforeUnmount(stopScheduledRefresh)
@@ -608,13 +611,16 @@ onBeforeUnmount(stopScheduledRefresh)
         </p>
       </template>
       <Button
-        :disabled="!projectSet || !engineReady || submitting || rowsLoading || !!rowsError || !selectionReady"
+        :disabled="!projectSet || !engineReady || submitting || !!submissionRemaining || rowsLoading || !!rowsError || !selectionReady"
         @click="doRun"
         ><Loader2 v-if="submitting" class="h-4 w-4 animate-spin" /><Combine
           v-else
           class="h-4 w-4"
-        />{{ submitting ? '提交中…' : `合并所选（${selectedNames.length} 章）` }}</Button
-      ><Button v-if="mergeActive.length" variant="destructive" @click="cancelAll"
+        />{{ submitting ? submissionLabel : `合并所选（${selectedNames.length} 章）` }}</Button
+      ><Button v-if="submissionRemaining && !submitting" @click="mergeSubmission.submit()"
+        >重试未提交（{{ submissionRemaining }} 章）</Button
+      ><span v-if="submissionFailure" class="text-destructive text-sm">{{ submissionFailure }}</span>
+      <Button v-if="mergeActive.length" variant="destructive" @click="cancelAll"
         >取消全部合并</Button
       ><Button
         v-if="pipeline.mergeResult && settings.config?.ui.show_audio_split"

@@ -133,6 +133,8 @@ function harness(view, api = {}) {
     },
     '@/components/ui/toast': { useToast: () => ({ push: (value) => calls.push(value) }) },
     '@/components/ui/dialog': { showConfirm: async () => true },
+    '@/utils/uuid': { randomUuid: () => 'test-merge-key' },
+    '@/api/client': { ApiError: class ApiError extends Error {} },
     '@/api/files': { listDir: async () => ({ items: [] }), ...api },
     '@/api/tts': {
       batchList: async () => {
@@ -157,6 +159,7 @@ function harness(view, api = {}) {
       },
       runMerge: async (value) => {
         calls.push(value)
+        return { batch_id: "merge-batch", task_ids: value.map(n => `task-${n}`), packages: value.map(n => ({ package: n, task_id: `task-${n}` })) }
       },
       ...api,
     },
@@ -179,6 +182,7 @@ function harness(view, api = {}) {
       module,
       exports: module.exports,
       DOMException,
+      localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
       AbortController,
       console,
       setInterval: () => 1,
@@ -189,7 +193,7 @@ function harness(view, api = {}) {
       window: { setTimeout, clearTimeout },
       require(name) {
         if (overrides[name]) return overrides[name]
-        if (name.includes('useListPage') || name.includes('useWorkbench') || name.includes('useLabelDerivedTasks')) {
+        if (name.includes('useListPage') || name.includes('useWorkbench') || name.includes('useLabelDerivedTasks') || name.includes('useMergeSubmission')) {
           const base = name.split('/').pop()
           if (!cache.has(base))
             cache.set(
