@@ -1,7 +1,10 @@
 """HTTP reads never scan; one fenced Worker publishes a reusable DB snapshot."""
 import json
+import os
+import subprocess
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import select
 
 from backend.platform.database import SessionLocal
@@ -10,6 +13,63 @@ from backend.platform.storage import project_workspace_path
 from backend.platform.task_worker import claim_task, complete_claim, execute_claim
 from backend.services.project_progress import progress_summary
 from backend.services.project_overview import overview_tasks
+
+
+@pytest.mark.parametrize('linked_part', ['directory', 'lock', 'dangling_lock', 'junction'])
+@pytest.mark.parametrize('cached', [False, True])
+def test_progress_reads_reject_linked_lock_paths(tmp_path, linked_part, cached):
+    from backend.platform.storage import safe_project_workspace_path
+    if linked_part == 'junction' and os.name != 'nt':
+        pytest.skip('Windows junction regression')
+    suffix = uuid4().hex
+    with SessionLocal() as db:
+        user = User(username=f'lock-{suffix}', email=f'{suffix}@example.test', password_hash='test')
+        db.add(user)
+        db.flush()
+        project = Project(owner_id=user.id, name='Linked lock', directory_key=f'{user.username}/book')
+        db.add(project)
+        db.commit()
+        root = project_workspace_path(db, user.username, project.id)
+        root.mkdir(parents=True)
+        outside = tmp_path / 'outside'
+        outside.mkdir()
+        target = outside / 'progress-request.lock'
+        if linked_part == 'junction':
+            subprocess.run(['cmd', '/c', 'mklink', '/J', str(root / '00_temp'), str(outside)], check=True, capture_output=True)
+        else:
+            try:
+                if linked_part == 'directory':
+                    (root / '00_temp').symlink_to(outside, target_is_directory=True)
+                else:
+                    (root / '00_temp').mkdir()
+                    if linked_part == 'lock':
+                        target.write_bytes(b'untouched')
+                    (root / '00_temp/progress-request.lock').symlink_to(target)
+            except OSError:
+                pytest.skip('Directory/file symlinks unavailable')
+        assert safe_project_workspace_path(db, user.username, project.id) == root
+        stages = {'02_split_text': {'completed': 1, 'total': 2, 'unit': '章节', 'percent': 50}}
+        if cached:
+            db.add(ProjectProgress(project_id=project.id, signature='0' * 64, stages=stages))
+            db.commit()
+        try:
+            assert progress_summary(db, user, project.id, root, 'text') == (stages if cached else {})
+            assert db.scalar(select(Task.id).where(Task.project_id == project.id)) is None
+            if linked_part == 'lock':
+                assert target.read_bytes() == b'untouched'
+            else:
+                assert not target.exists()
+        finally:
+            # Junction removal must remove the link, never traverse its external target.
+            if linked_part == 'junction':
+                os.rmdir(root / '00_temp')
+
+
+def test_progress_lock_prepares_a_new_workspace(tmp_path):
+    from backend.services.project_progress import _progress_request_lock
+    root = tmp_path / 'new-project'
+    assert _progress_request_lock(root) == root / '00_temp/progress-request.lock'
+    assert (root / '00_temp').is_dir()
 
 
 def test_cold_reads_coalesce_worker_persists_and_warm_reads_do_not_scan(monkeypatch):
