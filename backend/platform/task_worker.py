@@ -1031,6 +1031,7 @@ def _execute_book_split(claim: TaskClaim) -> TaskOutcome:
         repair = smart_repair(
             source_text, chapters,
             split_long_chapters=policy.get("smart_split_long_chapters") is True,
+            split_long_continuous_chapters=policy.get("split_long_continuous_chapters") is True,
             length_target=policy.get("length_target", DEFAULT_LENGTH_TARGET_CHARS),
         )
         if repair["status"] == "error":

@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 
 from ..core.config import get_config
 from ..core.filenames import workspace_audio_identity
+from ..core.request_context import bind_workspace, reset_workspace
 from .models import OutboxEvent, Project, ProjectFile, Task, User, UserQuotaAccount, utcnow
-from .storage import lock_storage_migration, storage_migration
+from .storage import lock_storage_migration, project_workspace_path, storage_migration
 from .task_lifecycle import append_task_event
 from .task_types import ADMIN_ONLY_TASK_TYPES, BILLABLE_TASK_TYPES, SUPPORTED_TASK_TYPES
 from .task_validation import legacy_task_payload_error
@@ -43,6 +44,7 @@ def task_dict(task: Task) -> dict:
 def submit_task_record(
     db: Session, user: User, *, project_id: str, task_type: str,
     payload: dict, idempotency_key: str, commit: bool = True,
+    split_long_continuous_chapters: bool | None = None,
 ) -> Task:
     if task_type not in SUPPORTED_TASK_TYPES:
         raise TaskSubmissionError(422, f"不支持的任务类型：{task_type}")
@@ -158,9 +160,18 @@ def submit_task_record(
     elif task_type == "resources.cleanup":
         stored_payload["cleanup_id"] = idempotency_key
     if task_type == "book.split":
-        split = get_config().split
+        # Tasks can target an owned project other than the active UI project.
+        token = bind_workspace(project_workspace_path(db, user.username, project.id))
+        try:
+            config = get_config()
+        finally:
+            reset_workspace(token)
+        split = config.split
         stored_payload["split_policy"] = {
             "smart_split_long_chapters": split.smart_split_long_chapters,
+            "split_long_continuous_chapters": (config.text.split_long_continuous_chapters
+                                               if split_long_continuous_chapters is None
+                                               else split_long_continuous_chapters),
             "length_target": split.length_target,
         }
     # Compute this server-side; callers cannot choose a lock/scheduler identity.

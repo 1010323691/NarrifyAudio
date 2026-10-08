@@ -321,6 +321,10 @@ test('settingsDirty compares the flow config snapshot against the current config
   const settings = load('@/stores/settings').useSettingsStore()
   settings.config = { text: { merge_adjacent_same_speaker: true, x: 1 } }
   assert.equal(wb.settingsDirty.value, false) // 键序不同但值相同 → 规范化后相等
+  settings.config = { text: { merge_adjacent_same_speaker: true, x: 1, split_long_continuous_chapters: false } }
+  assert.equal(wb.settingsDirty.value, false) // 旧快照缺字段与默认关闭等价
+  settings.config.text.split_long_continuous_chapters = true
+  assert.equal(wb.settingsDirty.value, true)
   settings.config = { text: { merge_adjacent_same_speaker: false, x: 1 } }
   assert.equal(wb.settingsDirty.value, true)
   settings.config = { text: { x: 1 } }

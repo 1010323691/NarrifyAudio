@@ -15,10 +15,12 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.chapter_titles import clean_chapter_title
+from ..core.config import TextConfig
 from ..platform.models import ChapterReviewMark, Project, ProjectFile, Task, TextFormatFlow, User
 from ..platform.storage import configured_storage_root, object_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
@@ -440,7 +442,8 @@ def _advance(db: Session, user: User, project: Project, flow: TextFormatFlow) ->
             mode, payload = "by_length", {**base, "by_length": True}
         flow.split_mode = mode
         task = submit_task_record(db, user, project_id=project.id, task_type="book.split",
-            payload=payload, idempotency_key=f"tflow:{flow.id}:split")
+            payload=payload, idempotency_key=f"tflow:{flow.id}:split",
+            split_long_continuous_chapters=(flow.config_snapshot or {}).get("split_long_continuous_chapters") is True)
         flow.split_task_id = task.id
         return
     split_task = db.get(Task, flow.split_task_id)
@@ -506,7 +509,12 @@ def start_or_continue_flow(
             raise WorkbenchError(409, "有排版分册任务正在进行，暂时无法开始处理")
         # 章节识别恒开：detect_chapters 已并入「分册方式」、不再是用户开关，
         # 落快照前强制置真——排版质量不依赖调用方传值或平台默认。
-        snapshot = {**(config or {}), "detect_chapters": True}
+        try:
+            text_config = TextConfig.model_validate(config or {})
+        except ValidationError as exc:
+            raise WorkbenchError(422, "文本处理设置无效") from exc
+        snapshot = {**(config or {}), "detect_chapters": True,
+                    "split_long_continuous_chapters": text_config.split_long_continuous_chapters}
         flow = TextFormatFlow(
             project_id=project.id, owner_id=user.id, source_file_id=sources[0], source_file_ids=sources,
             config_snapshot=snapshot, whole_book=bool(whole_book),

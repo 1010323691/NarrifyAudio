@@ -116,7 +116,7 @@ async function save() {
   }
   try {
     const patch: Record<string, unknown> = {
-      text: config.text,
+      text: Object.fromEntries(Object.entries(config.text).filter(([key]) => key !== 'split_long_continuous_chapters')),
       audio: config.audio,
       tts,
       llm: config.llm,

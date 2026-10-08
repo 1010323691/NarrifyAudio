@@ -1205,7 +1205,7 @@ def _balance_long_chapters(text: str, chapters: list[dict], fallback_target: int
     warnings: list[dict] = []
     for index, chapter in enumerate(chapters, 1):
         source = {**chapter, "source_chapter_id": str(index)}
-        if chapter["chars"] < target * LONG_CHAPTER_RATIO:
+        if chapter.get("_continuous_protected") or chapter["chars"] < target * LONG_CHAPTER_RATIO:
             out.append(source)
             continue
         wanted = max(2, int(chapter["chars"] / target + 0.5))
@@ -1235,11 +1235,12 @@ def _balance_long_chapters(text: str, chapters: list[dict], fallback_target: int
 
 def smart_repair(
     text: str, chapters: list[dict], *, split_long_chapters: bool = False,
-    length_target: int = 3_000,
+    length_target: int = 3_000, split_long_continuous_chapters: bool = False,
 ) -> dict:
     """Mechanically repair the chapter structure of ``chapters`` (as produced
     by ``analyze_text``) and renumber 1..N in physical order. Pure function:
-    inputs are not mutated.
+    inputs are not mutated. Continuous original runs are protected from
+    length-only splits unless both splitting options are enabled.
 
     Returns ``{status: "ok"|"clean", chapters (with start/end/final_num/
     repair), final_numbers, report {actions, warnings, removed},
@@ -1267,6 +1268,17 @@ def smart_repair(
     work = [dict(c) for c in chapters]
     for c in work:
         c["chars"] = char_count(c["start"], c["end"])
+
+    # Protect original local runs, before repairs can introduce new numbers.
+    for c in work:
+        c["_continuous_protected"] = False
+    if not (split_long_chapters and split_long_continuous_chapters):
+        for left, right in zip(work, work[1:]):
+            if (left.get("section") == right.get("section")
+                    and left.get("num") is not None and right.get("num") is not None
+                    and right["num"] == left["num"] + 1
+                    and left.get("range_end") is None and right.get("range_end") is None):
+                left["_continuous_protected"] = right["_continuous_protected"] = True
 
     # -- step 1: baseline (median) + abnormally-long flags -----------------
     baseline: Optional[float] = None
@@ -1497,6 +1509,7 @@ def smart_repair(
             needs_mechanical_split = (
                 chapter_average is not None
                 and (nxt is None or len(gap) > MAX_INFERRED_MISSING_CHAPTERS)
+                and (not c["_continuous_protected"] or bool(gap))
             )
             if needs_mechanical_split:
                 cuts, segment_count = _mechanical_cut_points(
@@ -1842,6 +1855,7 @@ def smart_repair(
     for c in new_work:
         out = dict(c)
         for key in (
+            "_continuous_protected",
             "_long",
             "_explained",
             "_parent_seq",

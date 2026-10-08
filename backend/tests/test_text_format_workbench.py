@@ -423,14 +423,14 @@ def test_flow_snapshot_forces_detect_chapters_on(client: TestClient):
     assert snapshot["detect_chapters"] is True
     assert snapshot["sentence_break"] is False
 
-    # 缺省（API 直调不传 config）：快照只含强制的 detect_chapters。
+    # 缺省（API 直调不传 config）：连续章节拆分默认关闭。
     second = _register(client, f"{uuid.uuid4()}@example.test")
     csrf2 = second["csrf_token"]
     project_id2 = client.get("/api/v1/projects/active").json()["project_id"]
     uploaded2 = _upload(client, csrf2, "detect-force-2.txt", CHAPTERED_BODY)
     response2 = _post_flow(client, csrf2, project_id2, {"source_file_id": uploaded2["file_id"]})
     assert response2.status_code == 200, response2.text
-    assert response2.json()["flow"]["config_snapshot"] == {"detect_chapters": True}
+    assert response2.json()["flow"]["config_snapshot"] == {"detect_chapters": True, "split_long_continuous_chapters": False}
 
 
 def test_review_marks_are_version_scoped_and_idempotent(client: TestClient):
@@ -962,3 +962,23 @@ def test_semicolon_title_passes_full_pipeline_and_saved_filename(client: TestCli
     state = _drive_to_ready(client, csrf, source['project_id'], {'source_file_ids': [source['file_id']]})
     assert state['version']['chapters'][0]['title'] == title
     assert state['version']['files'][0]['name'] == f'第 001 章 {title}.txt'
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_flow_continuous_chapter_setting_is_frozen_for_split(client: TestClient, enabled: bool):
+    first = _register(client, f"{uuid.uuid4()}@example.test")
+    csrf = first["csrf_token"]
+    project_id = client.get("/api/v1/projects/active").json()["project_id"]
+    uploaded = _upload(client, csrf, "continuous.txt", CHAPTERED_BODY)
+    body = {"source_file_id": uploaded["file_id"],
+            "config": {"split_long_continuous_chapters": enabled}}
+    response = _post_flow(client, csrf, project_id, body)
+    assert response.status_code == 200, response.text
+    assert response.json()["flow"]["config_snapshot"]["split_long_continuous_chapters"] is enabled
+    saved = client.put("/api/config", headers={"X-CSRF-Token": csrf},
+                       json={"text": {"split_long_continuous_chapters": not enabled}})
+    assert saved.status_code == 200, saved.text
+    state = _drive_to_ready(client, csrf, project_id, body)
+    with SessionLocal() as db:
+        split = db.get(Task, state["flow"]["split_task_id"])
+        assert split.payload["split_policy"]["split_long_continuous_chapters"] is enabled
