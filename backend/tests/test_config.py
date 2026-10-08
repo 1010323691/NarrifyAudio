@@ -565,3 +565,23 @@ def test_split_target_is_admin_managed_workspace_values_ignored(sandbox, monkeyp
     saved = _read(ws / "config" / "setting.json")
     assert saved["log"]["level"] == "DEBUG"
     assert saved["split"]["length_target"] == SplitConfig().length_target
+
+
+def test_continuous_chapter_split_config_defaults_and_project_persistence(sandbox, monkeypatch):
+    from backend.core.config import TextConfig
+
+    assert TextConfig().split_long_continuous_chapters is False
+    assert TextConfig.model_validate({"sentence_break": False}).split_long_continuous_chapters is False
+    ws = sandbox / "continuous-project"
+    core_config.init_workspace_config(ws)
+    core_config.set_workspace_pointer(str(ws))
+    cfg = core_config.update_config({"text": {"split_long_continuous_chapters": True}})
+    assert cfg.text.split_long_continuous_chapters is True
+    core_config.reset_config_cache()
+    assert core_config.get_config().text.split_long_continuous_chapters is True
+    monkeypatch.setattr(core_config, "_platform_defaults_provider", lambda: {
+        "text": {"split_long_continuous_chapters": False, "sentence_break": False},
+    })
+    effective = core_config.get_config().text
+    assert effective.split_long_continuous_chapters is True
+    assert effective.sentence_break is False

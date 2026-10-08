@@ -89,6 +89,7 @@ const splitMode = ref<SplitMode>('smart')
 const settingsOpen = ref(false)
 
 const DEFAULT_TOGGLES: TextToggles = {
+  split_long_continuous_chapters: false,
   keep_single_space: false,
   sentence_break: true,
   dialogue_separate: true,

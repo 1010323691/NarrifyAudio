@@ -35,6 +35,7 @@ const mode = ref<SplitMode>('smart')
  *  处理恒开（服务端落流程快照时固定 detect_chapters=true），两种分册方式下
  *  排版质量都不降级。 */
 const fallbackToggles: TextToggles = {
+  split_long_continuous_chapters: false,
   keep_single_space: false,
   sentence_break: true,
   dialogue_separate: true,
@@ -48,7 +49,7 @@ const fallbackToggles: TextToggles = {
 }
 
 interface ToggleField {
-  key: Exclude<keyof TextToggles, 'live' | 'detect_chapters'>
+  key: Exclude<keyof TextToggles, 'live' | 'detect_chapters' | 'split_long_continuous_chapters'>
   label: string
   hint: string
 }
@@ -77,7 +78,7 @@ watch(
   () => props.open,
   (open) => {
     if (open) {
-      draft.value = { ...(props.initial ?? fallbackToggles) }
+      draft.value = { ...fallbackToggles, ...props.initial }
       mode.value = props.splitMode
       returnFocus = document.activeElement as HTMLElement | null
     } else {
@@ -88,15 +89,17 @@ watch(
 watch(
   () => props.initial,
   (value) => {
-    if (props.open && value) draft.value = { ...value }
+    if (props.open && value) draft.value = { ...fallbackToggles, ...value }
   },
 )
 
 const dirty = computed(() => {
   if (!draft.value) return false
   const a = draft.value as unknown as Record<string, unknown>
-  const b = (props.initial ?? fallbackToggles) as unknown as Record<string, unknown>
-  return ALL_FIELDS.some((f) => a[f.key] !== b[f.key]) || mode.value !== props.splitMode
+  const b = { ...fallbackToggles, ...props.initial } as unknown as Record<string, unknown>
+  return ALL_FIELDS.some((f) => a[f.key] !== b[f.key])
+    || a.split_long_continuous_chapters !== b.split_long_continuous_chapters
+    || mode.value !== props.splitMode
 })
 
 /** 落盘前固定 detect_chapters=true（章节识别恒开，见上方注释）。 */
@@ -213,6 +216,18 @@ onBeforeUnmount(() => {
               </span>
             </p>
           </div>
+
+          <label class="flex items-start justify-between gap-3 rounded-lg border p-4">
+            <span class="min-w-0">
+              <span class="block text-sm font-medium">拆分连续章节中的超长章</span>
+              <span class="block text-xs text-muted-foreground">默认关闭，保留连续章号段中的完整章节。开启后按正常章节平均字数拆分超长章，后续章节会重新编号；仅对智能分册生效，并受管理员拆分总开关控制。</span>
+            </span>
+            <Switch
+              :model-value="!!draft?.split_long_continuous_chapters"
+              :disabled="props.busy || mode !== 'smart'"
+              @update:model-value="(v: boolean) => { if (draft) draft.split_long_continuous_chapters = v }"
+            />
+          </label>
 
           <!-- 两组设置：桌面双列、窄屏单列。 -->
           <div class="grid grid-cols-1 gap-3 md:grid-cols-2">

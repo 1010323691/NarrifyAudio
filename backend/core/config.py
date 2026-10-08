@@ -36,6 +36,7 @@ class PathsConfig(BaseModel):
 
 
 class TextConfig(BaseModel):
+    split_long_continuous_chapters: bool = False
     # 10 formatting toggles (ported from TextFormatter's ``tf.config``).
     keep_single_space: bool = False
     sentence_break: bool = True
@@ -397,6 +398,8 @@ def get_config() -> AppConfig:
         if platform_config:
             data = config.model_dump()
             _deep_update(data, platform_config)
+            # Project-only splitting preference must survive admin text defaults.
+            data["text"]["split_long_continuous_chapters"] = config.text.split_long_continuous_chapters
             config = AppConfig.model_validate(data)
         return config
 

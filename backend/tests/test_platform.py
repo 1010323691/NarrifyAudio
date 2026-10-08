@@ -813,12 +813,19 @@ def test_smart_split_admin_policy_snapshot_idempotency_retry_and_legacy(client: 
         previous = db.get(SystemConfig, "application.features")
         previous_value = dict(previous.value) if previous else None
     try:
-        response = client.patch(settings_url, headers=csrf, json={"split": {"length_target": 2000, "smart_split_long_chapters": True}})
+        response = client.patch(settings_url, headers=csrf, json={
+            "split": {"length_target": 2000, "smart_split_long_chapters": True},
+            "text": {"split_long_continuous_chapters": True},
+        })
         assert response.status_code == 200, response.text
         assert response.json()["config"]["split"]["smart_split_long_chapters"] is True
-        saved = client.put("/api/config", headers=csrf, json={"split": {"smart_split_long_chapters": False}})
+        saved = client.put("/api/config", headers=csrf, json={"split": {"smart_split_long_chapters": False},
+                                                          "text": {"split_long_continuous_chapters": False}})
         assert saved.status_code == 200, saved.text
         assert saved.json()["split"]["smart_split_long_chapters"] is True
+        assert saved.json()["text"]["split_long_continuous_chapters"] is False
+        with SessionLocal() as db:
+            assert "split_long_continuous_chapters" not in db.get(SystemConfig, "application.features").value["text"]
 
         text = "\n\n".join(
             f"第{i}章 标题{i}\n\n" + (chr(ord("甲") + i) * 99 + "。") * (150 if i == 2 else 30)
@@ -833,12 +840,25 @@ def test_smart_split_admin_policy_snapshot_idempotency_retry_and_legacy(client: 
                         "split_policy": {"smart_split_long_chapters": False, "length_target": 100}},
             "idempotency_key": f"smart-policy-{uuid.uuid4()}",
         }
+        # Direct submissions use the project preference, ignoring forged policy.
+        request["payload"]["split_policy"]["split_long_continuous_chapters"] = True
+        protected = client.post("/api/v1/tasks", headers=csrf, json=request)
+        assert protected.status_code == 201, protected.text
+        protected_id = protected.json()["id"]
+        with SessionLocal() as db:
+            assert db.get(Task, protected_id).payload["split_policy"]["split_long_continuous_chapters"] is False
+        assert process_task_message({"payload": {"task_id": protected_id}}, worker_id="test-protected-policy") == "succeeded"
+        assert client.get(f"/api/v1/tasks/{protected_id}").json()["result"]["file_count"] == 5
+        saved = client.put("/api/config", headers=csrf, json={"text": {"split_long_continuous_chapters": True}})
+        assert saved.status_code == 200 and saved.json()["text"]["split_long_continuous_chapters"] is True
+        request["idempotency_key"] = f"smart-policy-{uuid.uuid4()}"
         submitted = client.post("/api/v1/tasks", headers=csrf, json=request)
         assert submitted.status_code == 201, submitted.text
         task_id = submitted.json()["id"]
         with SessionLocal() as db:
             snapshot = db.get(Task, task_id).payload["split_policy"]
-            assert snapshot == {"smart_split_long_chapters": True, "length_target": 2000}
+            assert snapshot == {"smart_split_long_chapters": True, "length_target": 2000,
+                                "split_long_continuous_chapters": True}
         response = client.patch(settings_url, headers=csrf, json={"split": {"length_target": 5000, "smart_split_long_chapters": False}})
         assert response.status_code == 200, response.text
         replay = client.post("/api/v1/tasks", headers=csrf, json=request)

@@ -200,6 +200,8 @@ def update_application_settings(payload: dict, actor: User = Depends(require_adm
         value = getattr(merged, key).model_dump()
         if key == "generation":
             value = {k: v for k, v in value.items() if k not in _USER_OWNED_CHECKS}
+        if key == "text":
+            value.pop("split_long_continuous_chapters", None)
         sections[key] = value
     config.value = {**(config.value if isinstance(config.value, dict) else {}), **sections}
     db.add(AuditLog(actor_user_id=actor.id, action="admin.application_features_changed", target_type="system_config", target_id="application.features", metadata_json={"sections": sorted(patch)}))

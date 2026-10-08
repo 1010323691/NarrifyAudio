@@ -324,7 +324,7 @@ def balanced_fixture(lengths, *, separator="\n\n", numbers=None, sentence_chars=
 def test_long_chapter_balance_average_lossless_and_no_short_tail():
     for separator in ["\n\n", "\r\n\r\n", ""]:
         text, chapters = balanced_fixture([6000, 26000, 6000, 6000, 6000], separator=separator)
-        result = B.smart_repair(text, chapters, split_long_chapters=True)
+        result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
         parts = [c for c in result["chapters"] if "long_split" in c]
         assert result["split_policy"]["target_chars"] == 6000, (separator,)
         assert result["split_policy"]["normal_sample_count"] == 4, (separator,)
@@ -342,13 +342,13 @@ def test_long_chapter_balance_average_lossless_and_no_short_tail():
 def test_long_chapter_balance_two_times_threshold():
     for length, expected in [(11999, 0), (12000, 2)]:
         text, chapters = balanced_fixture([6000, length, 6000, 6000, 6000])
-        result = B.smart_repair(text, chapters, split_long_chapters=True)
+        result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
         assert sum("long_split" in c for c in result["chapters"]) == expected, (length, expected,)
 
 
 def test_long_chapter_balance_multiple_and_unparseable_numbers():
     text, chapters = balanced_fixture([3000, 15000, 3000, 9000, 3000, 3000], numbers=[1, None, 3, 4, 5, 6])
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
     parts = [c for c in result["chapters"] if "long_split" in c]
     assert len(parts) == 8
     assert {c["source_chapter_id"] for c in parts} == {"2", "4"}
@@ -359,7 +359,7 @@ def test_long_chapter_balance_multiple_and_unparseable_numbers():
 def test_long_chapter_balance_uses_fallback_when_baseline_unreliable():
     for lengths in [[500, 5000], [100, 5000, 100, 100, 100]]:
         text, chapters = balanced_fixture(lengths)
-        result = B.smart_repair(text, chapters, split_long_chapters=True, length_target=2000)
+        result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True, length_target=2000)
         assert result["split_policy"]["target_source"] == "length_target", (lengths,)
         assert result["split_policy"]["target_chars"] == 2000, (lengths,)
         assert any("long_chapter_split" in c["repair"]["actions"] for c in result["chapters"]), (lengths,)
@@ -369,7 +369,7 @@ def test_long_chapter_balance_boundary_guardrails():
     # long chapter balance no safe boundaries is reported on chapter
     text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], separator="")
     text = text[:chapters[1]["start"]] + text[chapters[1]["start"]:chapters[1]["end"]].replace("。", "乙") + text[chapters[1]["end"]:]
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
     kept = result["chapters"][1]
     assert kept["chars"] == 15000
     assert "long_chapter_split_skipped" in kept["repair"]["reasons"]
@@ -377,7 +377,7 @@ def test_long_chapter_balance_boundary_guardrails():
 
     # long chapter balance reduces count at safe boundaries
     text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], separator="", sentence_chars=7500)
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
     parts = [c for c in result["chapters"] if "long_split" in c]
     assert [p["chars"] for p in parts] == [7500, 7500]
     assert all("long_chapter_split_reduced" in p["repair"]["reasons"] for p in parts)
@@ -391,7 +391,7 @@ def test_long_chapter_balance_composes_with_structural_repair():
         if kind == "range":
             chapters[1]["range_end"] = 3
         old = B.smart_repair(text, chapters)
-        result = B.smart_repair(text, chapters, split_long_chapters=True)
+        result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
         assert result["status"] == "ok", (kind,)
         assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text, (kind,)
         assert result["final_numbers"] == list(range(1, len(result["chapters"]) + 1)), (kind,)
@@ -876,6 +876,10 @@ def test_smart_long_split_fallbacks():
         + [(10, "标题10", smart_body(120, 10))]
     )
     res = smart_run(text)
+    assert res["status"] == "clean"
+    assert len(res["chapters"]) == 10
+    res = B.smart_repair(text, B.analyze_text(text)["chapters"],
+                         split_long_chapters=True, split_long_continuous_chapters=True)
     assert res["status"] == "ok"
     assert any(w["type"] == "mechanical_split" for w in res["report"]["warnings"])
     assert len(res["chapters"]) > 10
@@ -1235,7 +1239,7 @@ def test_long_chapter_balance_reserves_later_boundaries():
         text = separator.join(f"第{i}章 标题{i}{separator}{long_body if i == 2 else normal}{separator}" for i in range(1, 6))
         raw = B.analyze_text(text)
         assert len(raw["chapters"]) == 5, (separator,)
-        result = B.smart_repair(text, raw["chapters"], split_long_chapters=True)
+        result = B.smart_repair(text, raw["chapters"], split_long_chapters=True, split_long_continuous_chapters=True)
         parts = [c for c in result["chapters"] if "long_split" in c]
         assert len(parts) == 4, (separator,)
         assert all(c["chars"] > 0 and c["long_split"]["segment_count"] == 4 for c in parts), (separator,)
@@ -1293,7 +1297,7 @@ def test_printed_contents_are_not_chapter_boundaries():
     text = 'CONTENTS\n\n' + '\n\n'.join(headers) + '\n\n' + body
     chapters = B.analyze_text(text)['chapters']
     assert len(chapters) == len(headers)
-    repaired = B.smart_repair(text, chapters, split_long_chapters=True)
+    repaired = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
     assert len(repaired['chapters']) == len(headers)
     assert ''.join(text[c['start']:c['end']] for c in repaired['chapters']) == text
 
@@ -1305,7 +1309,7 @@ def test_short_chapters_without_repeated_body_titles_are_preserved():
 
 def test_short_entries_do_not_shrink_mechanical_split_target():
     text, chapters = balanced_fixture([20] * 8 + [1000] * 5 + [20000])
-    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    result = B.smart_repair(text, chapters, split_long_chapters=True, split_long_continuous_chapters=True)
     assert result['status'] != 'error'
     assert len(result['chapters']) < 40
     assert ''.join(text[c['start']:c['end']] for c in result['chapters']) == text
@@ -1336,3 +1340,58 @@ def test_explicit_contents_with_arc_heading_can_match_body_in_next_section():
     result = B.smart_repair(text, chapters)
     assert len(result['chapters']) == 4
     assert ''.join(text[c['start']:c['end']] for c in result['chapters']) == text
+
+
+def test_continuous_long_chapters_default_protection_and_opt_in():
+    for position in (0, 2, 4):
+        lengths = [3000] * 5
+        lengths[position] = 15000
+        text, chapters = balanced_fixture(lengths)
+        for enabled in (False, True):
+            result = B.smart_repair(text, chapters, split_long_chapters=True,
+                                    split_long_continuous_chapters=enabled)
+            assert len(result["chapters"]) == (9 if enabled else 5)
+            assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+            assert result["final_numbers"] == list(range(1, len(result["chapters"]) + 1))
+            assert all("_continuous_protected" not in c for c in result["chapters"])
+        # The last-chapter structural fallback is also length-only.
+        protected = B.smart_repair(text, chapters)
+        assert len(protected["chapters"]) == 5
+
+
+def test_continuous_protection_is_local_and_preserves_gap_repair():
+    text, chapters = balanced_fixture([3000, 15000, 3000, 15000, 3000, 3000],
+                                      numbers=[1, 2, 4, 5, 6, 7])
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    # Chapter 2 fills the explicit missing chapter; chapter 5 stays whole.
+    assert any("inferred_split" in c["repair"]["actions"] for c in result["chapters"])
+    kept = [c for c in result["chapters"] if c["num"] == 5]
+    assert len(kept) == 1 and kept[0]["chars"] == 15000
+    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+
+
+def test_continuous_protection_does_not_cross_sections_or_range_headers():
+    text, chapters = balanced_fixture([3000, 12000, 3000, 3000, 3000])
+    chapters[0]["section"] = "上卷"
+    for c in chapters[1:]:
+        c["section"] = "下卷"
+    # Right neighbor is not consecutive; left neighbor is in another section.
+    chapters[2]["num"] = None
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    assert any("mechanical_split" in c["repair"]["actions"] for c in result["chapters"])
+
+    text, chapters = balanced_fixture([3000, 15000, 3000, 3000, 3000], numbers=[1, 2, 4, 5, 6])
+    chapters[1]["range_end"] = 3
+    result = B.smart_repair(text, chapters, split_long_chapters=True)
+    assert any("range_split" in c["repair"]["actions"] for c in result["chapters"])
+    assert "".join(text[c["start"]:c["end"]] for c in result["chapters"]) == text
+
+
+def test_continuous_opt_in_obeys_balance_master_switch():
+    for position in (0, 2, 4):
+        lengths = [3000] * 5
+        lengths[position] = 12000
+        text, chapters = balanced_fixture(lengths)
+        result = B.smart_repair(text, chapters, split_long_continuous_chapters=True)
+        assert len(result["chapters"]) == 5
+        assert result["split_policy"] == {"enabled": False}

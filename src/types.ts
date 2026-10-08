@@ -31,6 +31,7 @@ export interface TextStats {
   chapters: number
 }
 export interface TextToggles {
+  split_long_continuous_chapters: boolean
   keep_single_space: boolean
   sentence_break: boolean
   dialogue_separate: boolean
