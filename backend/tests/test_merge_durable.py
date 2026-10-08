@@ -266,3 +266,56 @@ def test_merge_cache_title_fingerprint_and_bounded_entries(workspace, monkeypatc
     assert len(api_tts._MERGE_STATUS_CACHE) <= 2048
     assert len(api_tts._MERGE_INPUT_CACHE) <= 2048
     assert api_tts._MERGE_INPUT_CACHE.retained_bytes <= api_tts._MERGE_INPUT_CACHE.max_bytes
+
+
+def test_merge_cache_reselects_restored_and_deleted_voice_versions(workspace, monkeypatch):
+    from backend.engines import tts_batch as batch
+    api_tts.reset_batch_status_cache()
+    clock = [0.0]
+    monkeypatch.setattr(api_tts, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    _seed_package(workspace, 'versions', 1, 1)
+    layout = core_paths.resolve_layout()
+    voice = {'NARRATOR': {'voice': 'B'}}
+    layout.voice_profiles.mkdir(exist_ok=True)
+    (layout.voice_profiles / 'voice_config.json').write_text(json.dumps(voice))
+    package = layout.audio_chunk / 'versions'
+    nested = package / 'history'; nested.mkdir()
+    first = nested / 'first.mp3'; second = nested / 'second.mp3'
+    manifest = [{'index': 0, 'speaker': 'NARRATOR', 'path': str(package / '0000.mp3'),
+                 'ok': True, 'voice_used': batch.voice_params('NARRATOR', {'NARRATOR': {'voice': 'A'}}),
+                 'voice_versions': [{'path': str(path), 'voice_used': batch.voice_params('NARRATOR', voice)}
+                                    for path in [first, second]]}]
+    (package / 'manifest.json').write_text(json.dumps(manifest))
+    assert api_tts.merge_status(packages=['versions'])['packages'][0]['completed'] == 0
+    # Only a nested directory changes: the package directory fingerprint is stable.
+    first.write_bytes(b'audio')
+    clock[0] = 2.01
+    assert api_tts.merge_status(packages=['versions'])['packages'][0]['completed'] == 1
+    first.unlink(); second.write_bytes(b'audio')
+    clock[0] = 4.02
+    cached = api_tts.merge_status(packages=['versions'])['packages'][0]
+    assert cached == api_tts._package_merge_status('versions', layout, voice)
+    assert cached['completed'] == 1
+    second.unlink(); clock[0] = 6.03
+    assert api_tts.merge_status(packages=['versions'])['packages'][0]['completed'] == 0
+
+
+@pytest.mark.parametrize('config_text', ['{}', 'broken', None])
+def test_merge_manifest_uses_request_voice_snapshot(workspace, monkeypatch, config_text):
+    from backend.core import bounded_json
+    api_tts.reset_batch_status_cache()
+    layout = core_paths.resolve_layout()
+    for name in ['one', 'two']:
+        _seed_package(workspace, name, 1, 1)
+    path = layout.voice_profiles / 'voice_config.json'
+    if config_text is not None:
+        path.parent.mkdir(exist_ok=True); path.write_text(config_text)
+    reads = []
+    original = bounded_json.read_json
+    def read(source, *args, **kwargs):
+        reads.append(source)
+        return original(source, *args, **kwargs)
+    monkeypatch.setattr(bounded_json, 'read_json', read)
+    api_tts.merge_status(packages=['one', 'two'])
+    assert path not in reads
+    assert sum(str(source).endswith('manifest.json') for source in reads) == 2

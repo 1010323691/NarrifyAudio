@@ -898,7 +898,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     segs = Batch.build_segments(data)
     pkg_dir = out_dir or layout.audio_chunk / Batch.package_for(src)
     expected_params = _expected_voice_params(layout, segs, voice_config)
-    manifest = Batch.read_manifest(pkg_dir)
+    manifest = Batch.read_manifest(pkg_dir, voice_config=voice_config)
     c = _chapter_completion(segs, manifest, pkg_dir, expected_params)
     out["total"], out["completed"], out["remaining"] = c["total"], c["completed"], c["remaining"]
     out["complete"] = c["total"] > 0 and c["completed"] == c["total"]
@@ -1123,7 +1123,13 @@ def _package_merge_status(name: str, layout, voice_config: dict | None = None, *
     """
     out = {"name": name, "display_name": chapter_display_name(name, layout),
            "total": 0, "completed": 0, "remaining": 0, "complete": False}
-    manifest = Batch.read_manifest(layout.audio_chunk / name)
+    if voice_config is None:
+        voice_config = _read_voice_config(layout)
+    manifest = Batch.read_manifest(layout.audio_chunk / name, voice_config=voice_config)
+    if probe is not None:
+        # Version selection depends on file existence, including nested directories.
+        # Re-normalize these manifests after the short existence cache expires.
+        probe["dynamic_versions"] = any(entry.get("voice_versions") for entry in manifest.values())
     src = layout.parsed_json / f"{name}.json"
     if src.exists():
         try:
@@ -1201,8 +1207,9 @@ def _cached_package_merge_status(name, layout, voice_config, metrics=None):
         if inputs is None:
             probe = {"candidates": []}
             row = _package_merge_status(name, layout, voice_config, probe=probe)
-            with _MERGE_STATUS_CACHE_LOCK:
-                _MERGE_INPUT_CACHE[input_key] = (dict(row), probe["candidates"])
+            if not probe.get("dynamic_versions"):
+                with _MERGE_STATUS_CACHE_LOCK:
+                    _MERGE_INPUT_CACHE[input_key] = (dict(row), probe["candidates"])
         else:
             base, candidates = inputs
             minimal = {index: {"ok": True, "path": path} for index, path in candidates}
