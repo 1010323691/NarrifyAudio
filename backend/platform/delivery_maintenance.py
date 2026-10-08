@@ -1,4 +1,4 @@
-"""Single-host delivery backfill and legacy-layout maintenance coordinator."""
+"""Single-host recovery, outbox, delivery and retention maintenance coordinator."""
 import logging
 import time
 from ..core.audio_probe_cache import prune_cache
@@ -10,11 +10,63 @@ from .delivery_index import backfill_pending_project
 from .artifact_maintenance import retire_legacy_artifacts, remove_retired_files
 
 
-def run(stop):
+def run_dispatch_once(*, recover, publish):
+    """One-shot workers also respect an already running maintenance owner."""
+    acquired = False
+    try:
+        with exclusive_file_lock(PROJECT_ROOT / ".narrify" / "host-maintenance.lock", timeout=0):
+            acquired = True
+            recover(limit=100)
+            publish(limit=100)
+            return True
+    except TimeoutError:
+        if acquired:
+            raise
+        return False
+
+
+class MaintenanceSchedule:
+    """Schedules bounded callbacks without holding a session across waits or calls."""
+
+    def __init__(self, *, recover=None, publish=None, retention=None):
+        self.recover, self.publish, self.retention = recover, publish, retention
+        self.cursor = ""
+        self.next_recovery = self.next_publish = self.next_retention = 0.
+        self.retention_startup = True
+
+    def tick(self):
+        logger = logging.getLogger("audiobook.worker")
+        now = time.monotonic()
+        if self.recover is not None and now >= self.next_recovery:
+            self.next_recovery = now + 10
+            try:
+                _count, self.cursor = self.recover(limit=100, after_id=self.cursor)
+            except Exception:
+                logger.exception("Task lease recovery failed; cursor retained")
+        if self.publish is not None and now >= self.next_publish:
+            self.next_publish = now + 1
+            try:
+                self.publish(limit=100)
+            except Exception:
+                logger.exception("Outbox maintenance failed; pending events retained")
+        if self.retention is not None and now >= self.next_retention:
+            self.next_retention = now + 60 if self.retention_startup else now + 86400
+            try:
+                purged = self.retention()
+                if purged or not self.retention_startup:
+                    self.next_retention = now + 86400
+            except Exception:
+                logger.exception("Retention maintenance failed; will retry")
+                self.next_retention = now + 60
+            self.retention_startup = False
+
+
+def run(stop, *, recover=None, publish=None, retention=None):
     logger = logging.getLogger("audiobook.worker")
     while not stop.is_set():
         try:
-            with exclusive_file_lock(PROJECT_ROOT / ".narrify" / "delivery-maintenance.lock", timeout=0):
+            with exclusive_file_lock(PROJECT_ROOT / ".narrify" / "host-maintenance.lock", timeout=0):
+                schedule = MaintenanceSchedule(recover=recover, publish=publish, retention=retention)
                 cursor = ""
                 scanned = False
                 last_prune = time.monotonic()
@@ -35,10 +87,12 @@ def run(stop):
                                 db.commit()
                         cursor, scanned = next_cursor, next_scanned
                         remove_retired_files(retired)
+                        if not paused:
+                            schedule.tick()
                         if not paused and time.monotonic() - last_prune >= 3600:
                             prune_cache()
                             last_prune = time.monotonic()
-                        stop.wait(10 if paused else 0.2 if pending or not scanned else 10)
+                        stop.wait(10 if paused else 0.2 if pending or not scanned else 1 if publish is not None else 10)
                     except Exception:
                         logger.exception("Delivery index maintenance failed; retrying")
                         stop.wait(10)

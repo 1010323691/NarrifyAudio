@@ -1737,27 +1737,50 @@ def process_stream_entry(
 
 def recover_database_tasks(limit: int = 100) -> int:
     """Recreate dispatch events after Redis loss or a dead worker."""
+    recovered, _cursor = recover_database_task_page(limit=limit)
+    return recovered
+
+
+def recover_database_task_page(limit: int = 100, after_id: str = "") -> tuple[int, str]:
+    """Bounded eligible page; advance past already-dispatched rows to avoid starvation."""
+    if not 1 <= limit <= 100:
+        raise ValueError("recovery page must contain 1..100 tasks")
     now = utcnow()
     recovered = 0
+    live_attempt = select(TaskAttempt.id).where(
+        TaskAttempt.task_id == Task.id, TaskAttempt.status == "running",
+        TaskAttempt.lease_expires_at > now,
+    ).exists()
     with SessionLocal() as db:
         tasks = db.scalars(
             select(Task)
-            .where(Task.status.in_(["pending", "queued", "retrying", "running", "cancelling"]))
-            .order_by(Task.updated_at)
+            .where(
+                Task.status.in_(["pending", "queued", "retrying", "running", "cancelling"]),
+                ~live_attempt, Task.id > after_id,
+                or_(Task.status == "cancelling", Task.next_attempt_at.is_(None), Task.next_attempt_at <= now),
+            )
+            .order_by(Task.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
         ).all()
         for task in tasks:
             attempt = db.scalar(
                 select(TaskAttempt)
-                .where(TaskAttempt.task_id == task.id, TaskAttempt.status == "running")
+                .where(TaskAttempt.task_id == task.id)
                 .order_by(TaskAttempt.attempt_no.desc())
+                .limit(1)
                 .with_for_update()
             )
-            if attempt is not None and _as_utc(attempt.lease_expires_at) and _as_utc(attempt.lease_expires_at) > now:
+            if attempt is not None and attempt.status == "running" and _as_utc(attempt.lease_expires_at) and _as_utc(attempt.lease_expires_at) > now:
                 continue
             if attempt is not None and attempt.status == "running":
-                _reconcile_attempt_publication(db, task, attempt)
+                try:
+                    _reconcile_attempt_publication(db, task, attempt)
+                except (OSError, ValueError, RuntimeError):
+                    # Unsafe/missing workspaces must remain fenced for diagnosis,
+                    # but cannot hold up every later recovery candidate forever.
+                    logging.getLogger(__name__).exception("Recovery reconciliation deferred task=%s", task.id)
+                    continue
                 attempt.status = "expired"
                 attempt.finished_at = now
                 attempt.error_message = "worker lease expired during recovery"
@@ -1797,7 +1820,8 @@ def recover_database_tasks(limit: int = 100) -> int:
             # Outbox ids are UUID-sized (VARCHAR(36)); use a deterministic UUID
             # so recovery remains idempotent without overflowing the column.
             event_id = str(uuid5(NAMESPACE_URL, f"recover:{task.id}:{attempt_number}"))
-            if db.get(OutboxEvent, event_id) is None:
+            recovery_event = db.get(OutboxEvent, event_id)
+            if recovery_event is None:
                 db.add(
                     OutboxEvent(
                         id=event_id,
@@ -1810,8 +1834,18 @@ def recover_database_tasks(limit: int = 100) -> int:
                 )
                 append_task_event(db, task.id, "dispatch_recovered", {"attempt_no": attempt_number})
                 recovered += 1
+            elif (_as_utc(recovery_event.published_at) is not None
+                  and _as_utc(recovery_event.published_at) <= now - timedelta(seconds=10)):
+                # Redis may lose the stream again before this task is claimed.
+                # Replay the same id, with a bounded cadence and no new DB row.
+                recovery_event.published_at = None
+                recovery_event.available_at = task.next_attempt_at or now
+                recovered += 1
+        next_cursor = tasks[-1].id if len(tasks) == limit else ""
         db.commit()
-    return recovered
+    # The next pass wraps after a short page, including after a deleted cursor.
+    # Advance only after commit: publication reconciliation and dispatch are atomic.
+    return recovered, next_cursor
 
 
 # 恢复探测通过后重派仍连续失败（如端点 /models 与 chat 矛盾）时的终止阈值：

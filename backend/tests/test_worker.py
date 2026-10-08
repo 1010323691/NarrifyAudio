@@ -240,7 +240,9 @@ def test_worker_lane_starts_only_its_own_background_channels(monkeypatch,lane):
     assert set(registry[0]['capabilities']['task_types'])==set(worker.WORKER_LANES[lane])
     assert dispatch[0]['lane']==lane
     model_targets={worker._parse_worker_coordinator,worker._gpu_task_loop,worker._llm_recovery_probe_loop}
-    mechanical_targets={worker._merge_worker_loop,worker._project_retention_loop}
+    mechanical_targets={worker._merge_worker_loop}
+    assert targets.count(worker._host_maintenance_loop) == 1
+    assert worker._project_retention_loop not in targets
     if lane=='mechanical':
         assert mechanical_targets <= set(targets)
         assert not model_targets.intersection(targets)

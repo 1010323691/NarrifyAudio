@@ -230,6 +230,7 @@ class Task(Base):
         Index("ix_tasks_scope_status", "owner_id", "project_id", "status"),
         Index("ix_tasks_owner_created", "owner_id", "created_at", "id"),
         Index("ix_tasks_entry_created", "owner_id", "project_id", "task_type", "created_at", "id"),
+        Index("ix_tasks_recovery_page", "status", "id"),
         UniqueConstraint("owner_id", "idempotency_key", name="uq_tasks_owner_idempotency"),
         CheckConstraint("progress >= 0 and progress <= 100", name="ck_tasks_progress"),
         CheckConstraint("status in ('pending','queued','running','paused','cancelling','cancelled','succeeded','failed','retrying','timeout')", name="ck_tasks_status"),
@@ -251,7 +252,10 @@ class TaskAttempt(Base):
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="attempts")
-    __table_args__ = (UniqueConstraint("task_id", "attempt_no", name="uq_task_attempt_number"),)
+    __table_args__ = (
+        UniqueConstraint("task_id", "attempt_no", name="uq_task_attempt_number"),
+        Index("ix_task_attempts_live_lease", "task_id", "status", "lease_expires_at"),
+    )
 
 
 class TaskEvent(Base):

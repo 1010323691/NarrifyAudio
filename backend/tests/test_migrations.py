@@ -39,6 +39,8 @@ def test_upgrade_from_empty_database_to_head(tmp_path, preexisting_hold_table):
         assert "quota_holds" in inspector.get_table_names()
         assert "workspaces" not in inspector.get_table_names()
         assert "next_attempt_at" in {column["name"] for column in inspector.get_columns("tasks")}
+        assert "ix_tasks_recovery_page" in {index["name"] for index in inspector.get_indexes("tasks")}
+        assert "ix_task_attempts_live_lease" in {index["name"] for index in inspector.get_indexes("task_attempts")}
         assert {"directory_key", "last_selected_at"} <= {column["name"] for column in inspector.get_columns("projects")}
         assert "uq_quota_hold_attempt_operation" in {index["name"] for index in inspector.get_indexes("quota_holds")}
         assert {"text_format_flows", "chapter_review_marks"} <= set(inspector.get_table_names())

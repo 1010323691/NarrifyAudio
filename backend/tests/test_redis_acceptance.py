@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 import redis
+from sqlalchemy import func, select
 from backend.platform.database import SessionLocal, initialize_schema
 from backend.platform.models import Project, Task, User
 from backend.platform.outbox import STREAM_NAME, publish_pending
@@ -98,6 +99,20 @@ def test_redis_dispatch_and_database_recovery(isolated_redis_url, monkeypatch):
 
         assert recover_database_tasks() >= 1
         assert publish_pending(isolated_redis_url) >= 1
+        client.flushdb()  # Lose the recovery stream too, before any claim.
+        from datetime import timedelta
+        from backend.platform.models import OutboxEvent, utcnow
+        with SessionLocal.begin() as db:
+            recovery = db.scalar(select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == recovered_id, OutboxEvent.event_type == 'task.recovered'))
+            original_event_id = recovery.id
+            recovery.published_at = utcnow() - timedelta(seconds=11)
+        assert recover_database_tasks() >= 1
+        assert publish_pending(isolated_redis_url) >= 1
+        with SessionLocal() as db:
+            assert db.get(OutboxEvent, original_event_id).published_at is not None
+            assert db.scalar(select(func.count()).select_from(OutboxEvent).where(
+                OutboxEvent.aggregate_id == recovered_id, OutboxEvent.event_type == 'task.recovered')) == 1
         assert _deliver_task(client, recovered_id, "recovery-worker") == "succeeded"
         with SessionLocal() as db:
             recovered = db.get(Task, recovered_id)
