@@ -696,7 +696,7 @@ def test_synthesize_aggregates_segment_logs(workspace, monkeypatch):
 
     segment_logs = [msg for _level, msg in h.logs if msg.startswith("合成进度：")]
     assert len(segment_logs) == 1
-    assert "新增成功 2 段" in segment_logs[0]
+    assert "成功 2 段" in segment_logs[0]
     assert not any(msg.startswith("[1/2]") or msg.startswith("[2/2]") for _level, msg in h.logs)
 
 
@@ -749,18 +749,18 @@ def test_synthesize_logs_batch_performance_to_task_and_workspace_log(workspace, 
             "rows": 2, "chars": 10, "seconds": 2.5,
             "throughput_chars_per_sec": 4.0,
         })
-        on_line(line)
-        mirrored = kw["log_line"](line)
-        captured["log_file"].parent.mkdir(parents=True, exist_ok=True)
-        if mirrored is not None:
-            with open(captured["log_file"], "a", encoding="utf-8") as f:
-                f.write(f"[out] {mirrored}\n")
         with open(cmd[cmd.index("--segments-file") + 1], encoding="utf-8") as f:
             segs = json.load(f)
         out_dir = cmd[cmd.index("--out-dir") + 1]
         for s in segs:
             on_line(f"[segment] {s['index']} ok "
                     f"{os.path.join(out_dir, str(s['index'] + 1).zfill(4) + '.mp3')}")
+        on_line(line)
+        mirrored = kw["log_line"](line)
+        captured["log_file"].parent.mkdir(parents=True, exist_ok=True)
+        if mirrored is not None:
+            with open(captured["log_file"], "a", encoding="utf-8") as f:
+                f.write(f"[out] {mirrored}\n")
         return deque()
 
     monkeypatch.setattr(tts_batch, "resolve_engine",
@@ -770,11 +770,11 @@ def test_synthesize_logs_batch_performance_to_task_and_workspace_log(workspace, 
     tts_batch.synthesize(h, None, "s.json", 4)
 
     assert any(
-        msg == "性能：批内数量 2 · 总字数 10 · 总耗时 2.50 秒 · 吞吐量 4.00 字/秒"
+        msg == "性能：批次 clone#1 · 批内数量 2 · 总字数 10 · 总耗时 2.50 秒 · 吞吐量 4.00 字/秒 · 成功 2 段、失败 0 段；累计完成 2/2 段"
         for _level, msg in h.logs
     )
     text = captured["log_file"].read_text(encoding="utf-8")
-    assert "性能：批内数量 2 · 总字数 10 · 总耗时 2.50 秒 · 吞吐量 4.00 字/秒" in text
+    assert "性能：批次 clone#1 · 批内数量 2 · 总字数 10 · 总耗时 2.50 秒 · 吞吐量 4.00 字/秒 · 成功 2 段、失败 0 段；累计完成 2/2 段" in text
     assert "[out] [perf]" not in text
 
 
@@ -2736,3 +2736,63 @@ def test_batch_status_script_identity_is_independent_of_segment_count(workspace,
     row = batch_status(scripts=["zero.json"])["files"][0]
     assert row["is_script"] is is_script
     assert row["total"] == 0
+
+
+@pytest.mark.parametrize("line", [
+    "[segment] 0 ok /audio.mp3", '[perf] {"stage":"batch","event":"start"}',
+    '[perf] {"stage":"encode_write","event":"start"}',
+    "子批（clone）：128 段（当前预定并发 128）",
+    "子批 clone#1（128 段）生成中… 已用时 10s / 预算 90s",
+    "机械后处理流水线：1 个消费者，队列上限 2", "Loading Base model…",
+])
+def test_default_batch_log_filters_noise_without_affecting_protocol(line):
+    assert tts_batch._format_batch_log_line(line) is None
+
+
+def test_debug_batch_log_retains_protocol(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(tts_batch, "get_config", lambda: SimpleNamespace(log=SimpleNamespace(level="DEBUG")))
+    line = '[perf] {"stage":"batch","event":"start"}'
+    assert tts_batch._format_batch_log_line(line) == line
+
+
+def test_batch_summary_combines_performance_and_bounded_failure_examples():
+    h = _Handle()
+    buffer = tts_batch._SegmentLogBuffer(h, 100)
+    for i in range(10):
+        buffer.add({"ok": i < 5, "index": i, "label": f"段 {i}", "detail": "failed"})
+    line = '[perf] ' + json.dumps({"stage": "batch", "event": "end", "batch": "clone#7",
+                                 "rows": 10, "chars": 200, "seconds": 2})
+    buffer.flush(tts_batch._format_batch_performance(line))
+    buffer.flush()
+    assert len(h.logs) == 1
+    assert "clone#7" in h.logs[0][1] and "成功 5 段、失败 5 段" in h.logs[0][1]
+    assert "另有 2 条失败" in h.logs[0][1]
+    assert buffer.mirror(line) is None
+
+
+def test_multi_manifest_does_not_publish_unchanged_chapters(workspace, monkeypatch):
+    _seed_second_file(workspace)
+    _stub_engine_pool(monkeypatch, [])
+    writes = []
+    original = tts_batch.write_manifest_file
+    def record(path, *args, **kwargs):
+        writes.append(path.parent.name)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(tts_batch, "write_manifest_file", record)
+    tts_batch.synthesize_multi(_Handle(), ["s.json", "t.json"], 4)
+    # Initial manifest, followed by completion; final forced flush must not
+    # publish an already settled chapter again.
+    assert writes.count("s") <= 3
+    assert writes.count("t") <= 3
+
+
+def test_run_log_receives_same_summary_immediately(tmp_path):
+    h = _Handle()
+    path = tmp_path / "run.log"
+    handle = tts_batch._BatchRunLogHandle(h, path)
+    handle.log("批次 clone#1 完成")
+    assert "批次 clone#1 完成" in path.read_text("utf-8")
+    handle.log("显存不足，正在自动重试", "WARNING")
+    assert "显存不足，正在自动重试" in path.read_text("utf-8")
+    assert len(h.logs) == 2

@@ -378,3 +378,81 @@ def test_batch_removal_can_be_rolled_back(tmp_path):
     assert not any(path.exists() for path in finals)
     journal.rollback()
     assert all(path.read_text() == path.name for path in finals)
+
+
+@pytest.mark.parametrize("suffix", [b'{"files":[', b'{"index":0,"sha256":"unfinished"}'])
+def test_append_journal_ignores_only_unterminated_tail(tmp_path, suffix):
+    final = tmp_path / "audio.mp3"
+    staged = tmp_path / "staged.mp3"
+    staged.write_bytes(b"completed")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final, checkpoint=True), staged)
+    with journal.path.open("ab") as stream:
+        stream.write(suffix)
+    assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert final.read_bytes() == b"completed"
+
+
+def test_corrupt_complete_record_does_not_modify_outputs(tmp_path):
+    final = tmp_path / "result.txt"
+    staged = tmp_path / "staged.txt"
+    staged.write_bytes(b"new")
+    journal = _journal(tmp_path)
+    journal.prepare()
+    journal.publish(journal.add(final), staged)
+    with journal.path.open("ab") as stream:
+        stream.write(b'not json\n')
+    with pytest.raises(ValueError):
+        PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert final.read_bytes() == b"new"
+    assert journal.path.exists()
+
+
+@pytest.mark.parametrize("field,value", [("final", "../escape"), ("backup", "../../escape")])
+def test_append_journal_rejects_escaping_paths(tmp_path, field, value):
+    import json
+    journal = _journal(tmp_path)
+    journal.prepare()
+    record = {"final": "audio.mp3", "backup": "publication-backup-0.bin", "had_original": False}
+    record[field] = value
+    with journal.path.open("a") as stream:
+        stream.write(json.dumps({"files": [record]}) + "\n")
+    with pytest.raises(ValueError):
+        PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert journal.path.exists()
+
+
+def test_pretty_printed_legacy_journal_can_be_recovered(tmp_path):
+    import json
+    journal = _journal(tmp_path)
+    journal.path.parent.mkdir(parents=True)
+    journal.path.write_text(json.dumps({"version": 1, "files": []}, indent=2))
+    assert PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+
+
+def test_full_book_journal_appends_linear_bytes_and_batches_fsync(tmp_path, monkeypatch):
+    import os
+    journal = _journal(tmp_path)
+    syncs = []
+    monkeypatch.setattr(os, "fsync", lambda fd: syncs.append(fd))
+    journal.prepare()
+    midpoint = 0
+    for start in range(0, 42000, 128):
+        count = min(128, 42000 - start)
+        journal.add_many([
+            tmp_path / "05_audio_chunk" / f"chapter-{i % 620:03d}" / f"{i:05d}.mp3"
+            for i in range(start, start + count)
+        ], checkpoints=[True] * count)
+        if start + count == 20992:
+            midpoint = journal.path.stat().st_size
+    size = journal.path.stat().st_size
+    assert len(journal.entries) == 42000
+    assert len(syncs) == 1 + (42000 + 127) // 128
+    assert 1.9 * midpoint < size < 2.1 * midpoint
+    assert size < 10_000_000
+    # The original prefix remains untouched when registering another batch.
+    before = journal.path.read_bytes()
+    journal.add(tmp_path / "extra.txt")
+    assert journal.path.read_bytes().startswith(before)
+    journal.finish()

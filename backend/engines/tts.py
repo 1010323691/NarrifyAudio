@@ -22,6 +22,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from ..core.config import get_config
 from ..core.paths import PROJECT_ROOT
 from ..platform.gpu_scheduler.admission import gpu_permit, release_paused_tts
 from ..platform.gpu_scheduler.config import load_config
@@ -170,17 +171,15 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
     (minutes) before being seen; the per-line check bounds the cancel latency to a
     single line's worth of processing. A pause halts the drain at the next line
     likewise, and cancel still wins (``check()`` re-tests it every 0.1 s). The run
-    mirror (``log_file``) is block-buffered — a line-buffered mirror would pay one
-    OS write (plus the AV-scan tax) per line on the hot path — and flushes at the
-    attempt's end.
+    mirror (``log_file``) flushes selected summaries immediately; unselected
+    protocol lines perform no log I/O.
 
     * ``[progress] <frac> <label>`` stdout lines are reported via
       ``handle.progress`` here; every other non-empty stdout line is passed to
       ``on_line`` (decoded, stripped) for stage-specific parsing.
-    * When ``log_file`` is given, the whole transcript is mirrored to that file
-      (append mode, line-buffered) — stdout lines as ``[out] …``, stderr lines as
-      ``[err] …``, bracketed by ``=== attempt started/ended ===`` markers — so a
-      run leaves a persistent, on-disk trail (the task events remain queryable in the durable task history). ``None`` (the default) changes nothing.
+    * ``log_file`` retains selected stdout and attempt boundaries. Private
+      stderr is deduplicated and bounded at exit; DEBUG retains full stderr.
+      Startup commands are omitted to avoid exposing configuration values.
     * ``log_line``, when supplied, transforms stdout lines before they are mirrored to
       ``log_file``; returning ``None`` filters a line. The Task still receives the original
       line through ``on_line`` so a stage can parse structured worker events without exposing
@@ -205,24 +204,15 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
     err_q: "queue.Queue" = queue.Queue()
     stderr_tail: deque = deque(maxlen=40)
 
-    # Persistent run mirror: the task history persists selected events, while this file keeps the raw child transcript
-    # for diagnosis after a failed run. When a stage names a log file, every stdout line
-    # ([out]), stderr line ([err]) and the attempt boundary markers are also appended there
-    # (line-buffered, append mode) — each restart attempt appends its own section, so the
-    # file is the forensic record of what the engine actually said before it died.
-    # Block-buffered (NOT line-buffered): the mirror sits on the hot path — every line the
-    # worker emits is written here while the main loop drains the queues. Line buffering made
-    # that one OS write (and one real-time-AV-scan hit) per line, which on a loaded machine
-    # stalled the loop that must stay responsive to cancel. The block flushes at the attempt's
-    # end (the close in finally); a hard backend kill loses at most the buffer — the same
-    # order of loss as the undrained queues already have.
+    # Stage callbacks select normal output; private stderr is retained once
+    # as a bounded tail at exit. DEBUG keeps the full diagnostic stream.
     run_log = None
     if log_file is not None:
         try:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             run_log = open(log_file, "a", encoding="utf-8", buffering=64 * 1024)
             run_log.write(f"\n=== attempt started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-            run_log.write("cmd: " + " ".join(str(c) for c in cmd) + "\n")
+            run_log.flush()
         except OSError:
             run_log = None
 
@@ -242,6 +232,9 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
     gpu_oom = False
     batch_rows = 0
     pause_requested = False
+    saving_announced = False
+    debug_log = get_config().log.level.upper() == "DEBUG"
+    important_errors: deque = deque(maxlen=3)
     require_ready = gpu_request_id is not None and load_config().enabled
     ready = not require_ready
     ready_deadline = time.monotonic() + load_config().startup_timeout if require_ready else 0
@@ -251,6 +244,9 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
             def stop_for_pause() -> None:
                 nonlocal pause_requested
                 pause_requested = True
+                flush_audio = getattr(handle, "flush_workspace_stages", None)
+                if callable(flush_audio):
+                    flush_audio(force=True)
                 if proc.poll() is None:
                     _kill_worker_tree(proc)
                 GPUServiceManager.finish_tts(proc)
@@ -261,9 +257,20 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
         else:
             handle.check()
 
+    def report_saving() -> None:
+        nonlocal saving_announced
+        if (interrupt_on_pause and not saving_announced and proc.poll() is not None
+                and proc.returncode == 0):
+            saving_announced = True
+            phase = getattr(handle, "phase", None)
+            if callable(phase):
+                phase("正在保存合成结果")
+            handle.log("引擎已退出，正在保存合成结果")
+
     try:
         while True:
             check()  # cooperative cancel/pause
+            report_saving()
             if not ready and time.monotonic() >= ready_deadline:
                 raise TTSStartupError("TTS 模型加载及 warmup 就绪检查超时")
             try:
@@ -278,6 +285,10 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                     # look like "it never stops". Checking per line bounds the latency to one
                     # line (a pause parked here likewise; cancel still wins the busy-wait).
                     check()
+                    report_saving()
+                    flush_audio = getattr(handle, "flush_workspace_stages", None)
+                    if callable(flush_audio):
+                        flush_audio()
                     line = raw.decode("utf-8", "replace").strip()
                     if not line:
                         continue
@@ -289,11 +300,17 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                                     batch_rows = max(0, int(event.get("rows", 0)))
                                 elif event.get("event") == "error":
                                     gpu_oom = gpu_oom or bool(event.get("oom"))
+                                    if isinstance(event.get("error"), str):
+                                        important_errors.append(event["error"][:2000])
                         except (ValueError, TypeError, AttributeError):
                             pass
                     if line in {"[ready] tts", "[noop] tts"}:
                         ready = True
                         GPUServiceManager.tts_ready(gpu_request_id)
+                        if interrupt_on_pause and not saving_announced:
+                            phase = getattr(handle, "phase", None)
+                            if callable(phase):
+                                phase("音频合成")
                     elif line.startswith("[progress]"):
                         parts = line.split(None, 2)
                         try:
@@ -307,6 +324,7 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                             mirrored = log_line(line) if log_line is not None else line
                             if mirrored is not None:
                                 run_log.write(f"[out] {mirrored}\n")
+                                run_log.flush()
             except queue.Empty:
                 pass
             try:
@@ -322,10 +340,16 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
                         gpu_oom = gpu_oom or _is_gpu_oom(line)
                         if not private_errors:
                             handle.log(line, "WARNING")
-                        if run_log:
+                        if _is_gpu_oom(line) or "Error:" in line or "Exception:" in line:
+                            important_errors.append(line[:2000])
+                        if run_log and (debug_log or not private_errors):
                             run_log.write(f"[err] {line}\n")
+                            run_log.flush()
             except queue.Empty:
                 pass
+            flush_audio = getattr(handle, "flush_workspace_stages", None)
+            if callable(flush_audio):
+                flush_audio()
             if proc.poll() is not None and out_done and err_done:
                 break
             time.sleep(0.15)
@@ -334,6 +358,12 @@ def _run_tts_subprocess_once(cmd: list, handle, on_line, *, fail_prefix: str = "
             _kill_worker_tree(proc)
         GPUServiceManager.finish_tts(proc)
         if run_log:
+            if private_errors and not debug_log and (stderr_tail or important_errors):
+                # Store one bounded diagnostic tail, plus errors which fell out
+                # of it; repeated traceback frames are recorded only once.
+                diagnostics = dict.fromkeys([*important_errors, *stderr_tail])
+                for line in diagnostics:
+                    run_log.write(f"[err] {line[:2000]}\n")
             run_log.write(
                 f"=== attempt ended rc={proc.returncode} "
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")

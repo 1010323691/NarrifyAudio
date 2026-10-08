@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import secrets
+import logging
 import shutil
 import time
 from datetime import datetime, timezone
@@ -44,6 +45,8 @@ class EngineExecutionContext:
         self._guarded_workspace_paths: set[Path] = set()
         self._workspace_checkpoint_directories: set[Path] = set()
         self._rollback_lock: tuple | None = None
+        self._pending_audio_stages: list[tuple[Path, Path]] = []
+        self._audio_stage_started = 0.0
 
     @property
     def cancelled(self) -> bool:
@@ -54,6 +57,9 @@ class EngineExecutionContext:
 
     def progress_percent(self, percent: float, current: str = "") -> None:
         update_progress(self.claim, round(max(0.0, min(100.0, percent))), current)
+
+    def chapter_snapshot(self, done: int, total: int, chars: int, chars_total: int, current: str) -> bool:
+        return update_chapter_snapshot(self.claim, done, total, chars, chars_total, current)
 
     def phase(self, name: str) -> None:
         _append_claim_event(self.claim, "phase", {"phase": name})
@@ -145,6 +151,8 @@ class EngineExecutionContext:
         self._staged_workspace_directories.discard(resolved)
 
     def _publish_staged_workspace_file(self, final_path: Path, staged: Path) -> None:
+        # A manifest/metadata checkpoint must never precede its completed audio.
+        self.flush_workspace_stages(force=True)
         with SessionLocal() as db:
             user = db.get(User, self.claim.owner_id)
             if user is None:
@@ -171,6 +179,55 @@ class EngineExecutionContext:
             self._staged_workspace_paths.discard(staged)
             raise
         self._staged_workspace_paths.discard(staged)
+
+    def publish_workspace_stages(self, stages: list[tuple[Path, Path]]) -> None:
+        """Durably register completed audio together before moving any file."""
+        if not stages:
+            return
+        with SessionLocal() as db:
+            user = db.get(User, self.claim.owner_id)
+            if user is None:
+                raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+            attempt_root = task_attempt_path(
+                db, user.username, self.claim.project_id, self.claim.task_id,
+                self.claim.attempt_id, "publication-check",
+            ).parent.resolve()
+        for _final, staged in stages:
+            if not staged.resolve().is_relative_to(attempt_root) or not staged.is_file():
+                raise ValueError("Staged workspace output is outside the active task attempt")
+        journal = self._ensure_publication_journal()
+        finals = [final.resolve() for final, _staged in stages]
+        indices = journal.add_many(
+            finals,
+            guards=[final in self._guarded_workspace_paths for final in finals],
+            checkpoints=[any(final.is_relative_to(directory)
+                             for directory in self._workspace_checkpoint_directories)
+                         for final in finals],
+        )
+        for index, (_final, staged) in zip(indices, stages):
+            journal.publish(index, staged)
+            self._staged_workspace_paths.discard(staged)
+
+    def queue_workspace_stage(self, final_path: Path, staged: Path) -> None:
+        # Only completed incremental audio may wait briefly for batch registration.
+        if not any(final_path.resolve().is_relative_to(directory)
+                   for directory in self._workspace_checkpoint_directories):
+            self.publish_workspace_stage(final_path, staged)
+            return
+        if not self._pending_audio_stages:
+            self._audio_stage_started = time.monotonic()
+        self._pending_audio_stages.append((final_path, staged))
+        self.flush_workspace_stages()
+
+    def flush_workspace_stages(self, *, force: bool = False) -> None:
+        pending = self._pending_audio_stages
+        if not pending or (not force and len(pending) < 128
+                           and time.monotonic() - self._audio_stage_started < 0.25):
+            return
+        # Clear before publication: on an I/O error the recovery journal owns
+        # partial moves; never retry a moved source or register it twice.
+        self._pending_audio_stages = []
+        self.publish_workspace_stages(pending)
 
     def publish_workspace_stage(self, final_path: Path, staged: Path) -> None:
         self._publish_staged_workspace_file(final_path, staged)
@@ -236,6 +293,12 @@ class EngineExecutionContext:
         self._ensure_publication_journal().remove(final_path)
 
     def rollback_publications(self) -> None:
+        # Cooperative failure/cancel retains completed incremental audio, even
+        # when it arrived just before the batching deadline.
+        try:
+            self.flush_workspace_stages(force=True)
+        except Exception:
+            logging.getLogger(__name__).exception("Could not publish buffered audio before rollback")
         for staged in self._staged_workspace_paths:
             staged.unlink(missing_ok=True)
         self._staged_workspace_paths.clear()
@@ -340,6 +403,26 @@ def update_progress(claim: TaskClaim, progress: int, current: str) -> bool:
             return False
         task.progress = max(0, min(100, int(progress)))
         task.updated_at = utcnow()
+        append_task_event(db, task.id, "progress", {"progress": task.progress, "current": current})
+        db.commit()
+        return True
+
+
+def update_chapter_snapshot(claim: TaskClaim, done: int, total: int, chars: int,
+                            chars_total: int, current: str) -> bool:
+    """Publish counters and the visible task progress under a single lease fence."""
+    with SessionLocal() as db:
+        task, attempt = _attempt_is_current(db, claim)
+        if task is None or attempt is None:
+            db.rollback()
+            return False
+        done, total = max(0, int(done)), max(0, int(total))
+        task.progress = round(max(0, min(1, done / max(1, total))) * 100)
+        task.updated_at = utcnow()
+        append_task_event(db, task.id, "segments", {
+            "done": done, "total": total, "chars_done": max(0, int(chars)),
+            "chars_total": max(0, int(chars_total)),
+        })
         append_task_event(db, task.id, "progress", {"progress": task.progress, "current": current})
         db.commit()
         return True

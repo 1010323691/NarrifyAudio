@@ -4,11 +4,10 @@ One long-running Task drives the worker's ``batch`` mode: a single shared ``.ven
 subprocess loads the needed model(s) once and synthesizes all segments in JSON
 order, so a full book runs in one process (models loaded once) while the 3.14
 backend still never imports torch. The child's stdout is pumped line-by-line into
-the task's progress/log — the real-time "第 i/N 段 · 角色：X · 正在生成" stream — and
-each per-segment ``[segment]`` line is recorded, so a single failure never freezes
-the run. A manifest of what was produced is written for the Merge stage. Durable task events retain progress and selected logs; the child's full transcript is
-also mirrored to ``<workspace>/logs/tts_batch_<timestamp>.log`` — the persistent
-forensic trail for a run that dies mid-batch.
+progress counters and manifests, so a single failure never freezes the run.
+Task history and ``<workspace>/logs/tts_batch_<timestamp>.log`` retain one
+summary per batch, transitions and bounded failure diagnostics. DEBUG retains
+internal protocol output as well.
 
 ``synthesize`` is a durable engine operation (first arg is the task context), mirroring
 ``engines/tts.py``: it streams progress/log, honours cooperative cancel (killing
@@ -189,6 +188,79 @@ def _load_script(script_path):
     return data
 
 
+class _BatchRunLogHandle:
+    """Write the same concise task messages to the run's diagnostic file."""
+
+    def __init__(self, handle, path: Path):
+        self.handle = handle
+        self.path = path
+        self.quota_inputs = []
+        self.quota_started = 0.0
+        self.quota_seconds = 0.0
+        self.manifest_seconds = 0.0
+        self.events_seconds = 0.0
+        self.stage_dirs = []
+        self.expected_audio = 0
+        self.last_metrics = time.monotonic()
+        self.last_published = 0
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def queue_tts_input(self, count, operation, key):
+        if not self.quota_inputs:
+            self.quota_started = time.monotonic()
+        self.quota_inputs.append((count, operation, key))
+        self.flush_workspace_stages()
+
+    def flush_workspace_stages(self, *, force=False):
+        flush = getattr(self.handle, "flush_workspace_stages", None)
+        if callable(flush):
+            flush(force=force)
+        if self.quota_inputs and (force or len(self.quota_inputs) >= 128
+                                  or time.monotonic() - self.quota_started >= 0.25):
+            # Never declare counters/manifest complete before audio and quota are durable.
+            if callable(flush):
+                flush(force=True)
+            from ..platform.quota import consume_tts_inputs
+            started = time.monotonic()
+            consume_tts_inputs(self.quota_inputs)
+            self.quota_seconds += time.monotonic() - started
+            self.quota_inputs.clear()
+        self.report_publication()
+
+    def report_publication(self, *, force=False):
+        now = time.monotonic()
+        if not self.expected_audio or (not force and now - self.last_metrics < 30):
+            return
+        journal = getattr(self.handle, "_publication_journal", None)
+        metrics = getattr(journal, "metrics", {})
+        if not isinstance(metrics, dict):
+            return
+        published = metrics.get("published_audio", 0)
+        pending = sum(1 for directory in self.stage_dirs for _ in directory.glob("*.mp3"))
+        elapsed = max(0.001, now - self.last_metrics)
+        rate = max(0, published - self.last_published) / elapsed
+        self.last_metrics, self.last_published = now, published
+        self.log(
+            f"发布统计：已生成文件 {published + pending}/{self.expected_audio} 段 · "
+            f"已发布 {published} 段 · 暂存待发布 {pending} 段 · "
+            f"发布速率 {rate:.1f} 段/秒 · 恢复记录写入 {metrics.get('journal_bytes', 0)} 字节 · "
+            f"累计耗时：记录 {metrics.get('journal_seconds', 0):.2f}s、"
+            f"移动 {metrics.get('move_seconds', 0):.2f}s、额度 {self.quota_seconds:.2f}s、"
+            f"清单 {self.manifest_seconds:.2f}s、进度事件 {self.events_seconds:.2f}s"
+        )
+
+    def log(self, message: str, level: str = "INFO") -> None:
+        self.handle.log(message, level)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(f"{time.strftime('%H:%M:%S')} [{level}] {message}\n")
+        except OSError:
+            pass  # logging must not abort an otherwise recoverable synthesis
+
+
 class _SegmentLogBuffer:
     """Aggregate per-segment results before sending a task-log entry.
 
@@ -204,6 +276,7 @@ class _SegmentLogBuffer:
         self.pending_completed = 0
         self.pending_failed = 0
         self.pending_failure_details: list[str] = []
+        self.last_summary: str | None = None
 
     def add(self, result: dict | None) -> None:
         if not result:
@@ -221,23 +294,29 @@ class _SegmentLogBuffer:
                 detail = result.get("detail") or "未知原因"
                 self.pending_failure_details.append(f"{label}：{detail}")
 
-    def flush(self) -> None:
-        if not self.pending_completed and not self.pending_failed:
+    def flush(self, performance: str | None = None) -> None:
+        if not performance and not self.pending_completed and not self.pending_failed:
             return
-        message = (
-            f"合成进度：本批新增成功 {self.pending_completed} 段、失败 {self.pending_failed} 段；"
-            f"累计完成 {self.completed}/{self.total} 段"
-        )
+        counts = (f"成功 {self.pending_completed} 段、失败 {self.pending_failed} 段；"
+                  f"累计完成 {self.completed}/{self.total} 段")
+        message = f"{performance} · {counts}" if performance else f"合成进度：{counts}"
         if self.pending_failure_details:
             extra = "；".join(self.pending_failure_details)
             remaining = self.pending_failed - len(self.pending_failure_details)
             if remaining > 0:
                 extra += f"；另有 {remaining} 条失败"
             message += f"；失败示例：{extra}"
+        self.last_summary = message
         self.handle.log(message, "WARNING" if self.pending_failed else "INFO")
         self.pending_completed = 0
         self.pending_failed = 0
         self.pending_failure_details.clear()
+
+
+    def mirror(self, line: str) -> str | None:
+        # Human summaries/transitions are already mirrored by the handle.
+        # DEBUG additionally retains internal protocol diagnostics.
+        return line if get_config().log.level.upper() == "DEBUG" else None
 
 
 def _published_segment_path(handle, detail: str, stage_dir, final_dir) -> str:
@@ -248,8 +327,15 @@ def _published_segment_path(handle, detail: str, stage_dir, final_dir) -> str:
     if not staged_file.is_relative_to(staged_root) or not staged_file.is_file():
         raise RuntimeError(f"TTS worker returned an invalid staged audio path: {detail}")
     final_file = Path(final_dir) / staged_file.relative_to(staged_root)
-    handle.publish_workspace_stage(final_file, staged_file)
+    publish = getattr(handle, "queue_workspace_stage", handle.publish_workspace_stage)
+    publish(final_file, staged_file)
     return str(final_file)
+
+
+def _flush_audio(handle, *, force: bool = True) -> None:
+    flush = getattr(handle, "flush_workspace_stages", None)
+    if callable(flush):
+        flush(force=force)
 
 
 def _handle_segment(line: str, by_index: dict, total: int, seg_results: dict, handle,
@@ -313,16 +399,24 @@ def _format_batch_performance(line: str) -> str | None:
         throughput = chars / seconds if seconds > 0 else 0.0
     if throughput < 0:
         return None
-    return (f"性能：批内数量 {rows} · 总字数 {chars} · 总耗时 {seconds:.2f} 秒 · "
+    return (f"性能：批次 {event.get('batch', '?')} · 批内数量 {rows} · 总字数 {chars} · 总耗时 {seconds:.2f} 秒 · "
             f"吞吐量 {throughput:.2f} 字/秒")
 
 
 def _format_batch_log_line(line: str) -> str | None:
-    """Mirror readable worker summaries, not the per-segment protocol, to the run log."""
-    if line.startswith("[segment]"):
+    """Keep batch summaries and meaningful transitions; protocol remains internal."""
+    if get_config().log.level.upper() == "DEBUG":
+        return line
+    if line.startswith(("[segment]", "[progress]")):
         return None
-    if line.startswith("[perf] "):
-        return _format_batch_performance(line) or line
+    if line.startswith("[perf]"):
+        return _format_batch_performance(line)
+    if line.startswith(("子批（", "[watchdog]", "[restore]", "[oom-restore]")):
+        return None  # handled as an explicit transition/warning by the caller
+    if "生成中… 已用时" in line or line.startswith(("[perf]", "机械后处理流水线", "vocoder：")):
+        return None
+    if line.startswith(("device =", "需加载模型", "Loading", "自动批内上限")):
+        return None
     return line
 
 
@@ -407,12 +501,13 @@ class _PooledFile:
     voice_signatures: dict[int, str] | None = None
     seg_results: dict = field(default_factory=dict)
     pending: list = field(default_factory=list)
-    # Pre-run completion snapshot (the manifest's done set, and its total chars) — the
-    # baseline the 进度指标 (已合成/总段数 · 字数) counts on top of this run's completions.
+    # Seed counters from the resume snapshot, then update them only when a
+    # segment changes completion state (including retries and watchdog errors).
     done_set: set = field(default_factory=set)
     done_count: int = 0
     done_chars: int = 0
     all_count: int = 0
+    all_chars: int = 0
     error: str | None = None
     dirty: bool = False
     cancelled: bool = False
@@ -448,6 +543,16 @@ def _build_pool_rows(files, pool_start: int = 0) -> tuple:
     return pool_rows, pool_owners
 
 
+def _update_pool_result(f, local: int, result: dict) -> None:
+    previous = local in f.done_set or bool((f.seg_results.get(local) or {}).get("ok"))
+    completed = local in f.done_set or bool(result.get("ok"))
+    delta = int(completed) - int(previous)
+    f.done_count += delta
+    f.done_chars += delta * len(f.by_index[local]["text"])
+    f.seg_results[local] = result
+    f.dirty = True
+
+
 def _handle_segment_pool(line: str, pool_map: dict, pool_total: int, handle) -> dict | None:
     """Route a ``[segment] <pool-index> ok|error <detail>`` line to its owning chapter.
 
@@ -481,16 +586,14 @@ def _handle_segment_pool(line: str, pool_map: dict, pool_total: int, handle) -> 
     speaker = (f.by_index.get(local) or {}).get("speaker") or "(未知)"
     if status == "ok":
         detail = _published_segment_path(handle, detail, f.stage_out_dir, f.out_dir)
-        f.seg_results[local] = {"ok": True, "path": detail, "reason": ""}
-        f.dirty = True
+        _update_pool_result(f, local, {"ok": True, "path": detail, "reason": ""})
         return {
             "ok": True,
             "index": pool_index,
             "label": f"[{pool_index + 1}/{pool_total}] {f.name} · {speaker}",
         }
     else:
-        f.seg_results[local] = {"ok": False, "path": "", "reason": detail}
-        f.dirty = True
+        _update_pool_result(f, local, {"ok": False, "path": "", "reason": detail})
         return {
             "ok": False,
             "index": pool_index,
@@ -615,6 +718,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
 
     layout = get_or_prepare_layout()
     ws = layout.workspace
+    run_log = layout.logs / f"tts_batch_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    handle = _BatchRunLogHandle(handle, run_log)
 
     # voice_config is optional here — a character missing from it becomes a clear
     # per-segment error (the run continues), not a crash.
@@ -736,11 +841,8 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
 
     handle.log(f"引擎：.venv（一次性子进程，模型只加载一次）· "
                f"{'自动' if auto_concurrency else '手动'}批内上限 {workers} 段")
-    # A persistent per-run transcript: selected events persist in task history; the raw child output is also mirrored here (one per run, appended per
-    # restart attempt) — a run that dies mid-batch leaves its exact batch / watchdog / error
-    # trail on disk for diagnosis.
-    run_log = layout.logs / f"tts_batch_{time.strftime('%Y%m%d_%H%M%S')}.log"
-    handle.log(f"运行日志（排障用，含每次重启的完整引擎输出）：{run_log}")
+    # Batch summaries and transitions persist in both task history and the run log.
+    handle.log(f"运行日志（批次摘要与异常）：{run_log}")
     handle.progress(0.02, "启动引擎")
 
     seg_results: dict = {}  # index -> {ok, path, reason} (this run)
@@ -768,6 +870,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             if i in done_set or (seg_results.get(i) or {}).get("ok"):
                 done += 1
                 chars += len(all_by_index[i]["text"])
+        _flush_audio(handle)
         handle.segment_stats(done, seg_total, chars, chars_total)
 
     _report_stats(force=True)  # the baseline (a resume run shows its pre-run progress at once)
@@ -786,6 +889,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
         now = time.monotonic()
         if not force and now - last_flush[0] < MANIFEST_FLUSH_INTERVAL:
             return
+        _flush_audio(handle)
         write_manifest_file(manifest_path, build_manifest(
             all_segments, old_entries, seg_results, root=ws,
             expected_voice_signatures=voice_signatures,
@@ -806,11 +910,11 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
             segment_log.add(outcome)
             _write_manifest()
             _report_stats()
+            _flush_audio(handle, force=False)
         elif line.startswith("[perf] "):
             performance = _format_batch_performance(line)
             if performance is not None:
-                segment_log.flush()
-                handle.log(performance)
+                segment_log.flush(performance)
         elif line.startswith("[watchdog]"):
             # The child names the batch that hung before it exits 124: remember the in-flight
             # indices so a strike at workers==1 targets the right segment(s).
@@ -842,7 +946,9 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 workers = cap
                 handle.log(f"子批总字数低于降档阈值 → 批内上限恢复为 {workers} 段")
         else:
-            handle.log(line)
+            message = _format_batch_log_line(line)
+            if message is not None:
+                handle.log(message)
 
     # -- the watchdog / restart loop ----------------------------------------------
     # A hung or OOM-killed child (exit 124) is not a fatal task failure: shrink the batch and
@@ -884,7 +990,7 @@ def _synthesize_one(handle, indices=None, script=None, concurrency=None, seed=No
                 require_quota("TTS", "tts.batch")
                 run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
-                           log_line=_format_batch_log_line, interrupt_on_pause=True, private_errors=True)
+                           log_line=segment_log.mirror, interrupt_on_pause=True, private_errors=True)
                 segment_log.flush()
                 break  # a clean exit (0)
             except WorkerOutOfMemory as exc:
@@ -1247,6 +1353,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     n = len(scripts)
     layout = get_or_prepare_layout()
     ws = layout.workspace
+    run_log = layout.logs / f"tts_batch_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    handle = _BatchRunLogHandle(handle, run_log)
 
     # voice_config is optional here — a character missing from it becomes a clear
     # per-segment error (the run continues), not a crash. Read + lazily migrated ONCE for
@@ -1270,7 +1378,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         handle.check()  # cancel / pause point before any work on file i
         f = _PooledFile(name=name)
         files.append(f)
-        handle.log(f"文件 {i + 1}/{n}：{name}")
+        if get_config().log.level.upper() == "DEBUG":
+            handle.log(f"文件 {i + 1}/{n}：{name}")
         try:
             src = resolve_parsed_json(name)
             script = _load_script(src)
@@ -1318,20 +1427,22 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 for output in merged_output_paths(layout, f.pkg):
                     defer_or_delete(handle, output)
             f.pending = sorted(plan_to_synthesize(all_indices, done_set))
+            f.dirty = bool(f.pending) and not f.manifest_path.exists()
             allocate_directory = getattr(handle, "allocate_workspace_directory", None)
             if f.pending and callable(allocate_directory):
                 f.stage_out_dir = allocate_directory(f.out_dir)
             f.all_count = len(f.all_segments)
+            f.all_chars = sum(len(seg["text"]) for seg in f.all_segments)
             # Pre-run completion snapshot (进度指标 baseline: this file's done 段/字).
             f.done_set = done_set
             f.done_count = len(done_set)
             f.done_chars = sum(len(f.by_index[i]["text"]) for i in done_set)
-            if f.pending:
+            if f.pending and get_config().log.level.upper() == "DEBUG":
                 if done_set:
                     handle.log(f"续合：已完成 {len(done_set)} 段，待合成 {len(f.pending)} 段（共 {f.all_count} 段）")
                 else:
                     handle.log(f"待合成 {len(f.pending)} 段（共 {f.all_count} 段）")
-            else:
+            elif not f.pending:
                 # Nothing left (all done, or an empty script) — rewrite the engine-owned
                 # manifest and contribute no rows to the pool (no wasted model work).
                 f.out_dir.mkdir(parents=True, exist_ok=True)
@@ -1341,7 +1452,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                                          expected_voice_signatures=f.voice_signatures,
                                          expected_voice_params=f.voice_params,
                                      ), handle)
-                handle.log("无待合成段，跳过" if not f.all_count else f"已全部完成，跳过（0/{f.all_count} 段待合成）")
+                if get_config().log.level.upper() == "DEBUG":
+                    handle.log("无待合成段，跳过" if not f.all_count else f"已全部完成，跳过（0/{f.all_count} 段待合成）")
         except TaskCancelled:
             raise  # cancel is a task-level outcome — never "file failed, keep going"
         except Exception as e:  # noqa: BLE001 — one bad file is isolated, the pool continues
@@ -1369,11 +1481,14 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
             f.error = f"额度不足：本章需要 {required_chars} 字，当前可用额度不足"
             handle.log(f"{f.name}：{f.error}，跳过本章及后续章节", "ERROR")
         else:
-            handle.log(f"{f.name}：已预留本章 TTS 输入 {required_chars} 字")
+            if get_config().log.level.upper() == "DEBUG":
+                handle.log(f"{f.name}：已预留本章 TTS 输入 {required_chars} 字")
 
     # -- build the unified pool ----------------------------------------------------------
     pool_rows, pool_owners = _build_pool_rows(files)
     pool_total = len(pool_rows)
+    handle.expected_audio = pool_total
+    handle.stage_dirs = [f.stage_out_dir for f in files if f.stage_out_dir is not None]
     # The single source mapping pool-global index -> (chapter file, chapter-local index).
     pool_map = {row["index"]: (f, row["file_index"]) for row, f in zip(pool_rows, pool_owners)}
 
@@ -1402,22 +1517,26 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     last_flush = [0.0]
 
     def flush_file(f):
-        if f.error or not f.pending:
+        if f.error or not f.pending or not f.dirty:
             return
-        f.dirty = False
+        _flush_audio(handle)
+        started = time.monotonic()
         write_manifest_file(f.manifest_path,
                             build_manifest(f.all_segments, f.old_entries, f.seg_results, root=ws,
                                            expected_voice_signatures=f.voice_signatures,
                                            expected_voice_params=f.voice_params), handle)
+        handle.manifest_seconds += time.monotonic() - started
+        f.dirty = False
 
     def flush_manifests(force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - last_flush[0] < MANIFEST_FLUSH_INTERVAL:
             return
+        _flush_audio(handle)
         for f in files:
-            if force or f.dirty:
+            if f.dirty:
                 flush_file(f)
-        last_flush[0] = now
+        last_flush[0] = time.monotonic()
 
     notified = set()
     chapter_settled = getattr(handle, "chapter_settled", None)
@@ -1426,17 +1545,14 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     def report_chapter(f):
         if not callable(chapter_progress) or f.error or f.cancelled:
             return
-        finished = [seg for i, seg in f.by_index.items()
-                    if i in f.done_set or (f.seg_results.get(i) or {}).get("ok")]
-        chapter_progress(f.name, len(finished), f.all_count,
-                         sum(len(seg["text"]) for seg in finished),
-                         sum(len(seg["text"]) for seg in f.all_segments))
+        chapter_progress(f.name, f.done_count, f.all_count, f.done_chars, f.all_chars)
 
     def settle_chapter(f, force=False):
         if not callable(chapter_settled) or f.name in notified or f.cancelled:
             return
         if not force and not f.error and len(f.seg_results) < len(f.pending):
             return
+        _flush_audio(handle)
         flush_file(f)
         report_chapter(f)
         result = _settle_pool(handle, [f], allow_failure=True)
@@ -1454,23 +1570,23 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         if line.startswith("[segment]"):
             outcome = _handle_segment_pool(line, pool_map, pool_total, handle)
             if outcome and outcome.get("ok"):
-                from ..platform.quota import consume_tts_input
                 file, local_index = pool_map[outcome["index"]]
-                consume_tts_input(
+                handle.queue_tts_input(
                     len(file.by_index[local_index]["text"]), file.quota_operation,
                     f"{file.name}:{local_index}",
                 )
             if outcome:
                 file, _local = pool_map[outcome["index"]]
+                stats_dirty.add(file.name)
                 settle_chapter(file)
             segment_log.add(outcome)
             flush_manifests()
             _report_stats()  # resolved at call time (defined before the loop below)
+            _flush_audio(handle, force=False)
         elif line.startswith("[perf] "):
             performance = _format_batch_performance(line)
             if performance is not None:
-                segment_log.flush()
-                handle.log(performance)
+                segment_log.flush(performance)
         elif line.startswith("[watchdog]"):
             in_flight.update(_parse_watchdog_indices(line))
             handle.log(line, "WARNING")
@@ -1500,9 +1616,9 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 workers = cap
                 handle.log(f"子批总字数低于降档阈值 → 批内上限恢复为 {workers} 段")
         else:
-            handle.log(line)
-
-    run_log = layout.logs / f"tts_batch_{time.strftime('%Y%m%d_%H%M%S')}.log"
+            message = _format_batch_log_line(line)
+            if message is not None:
+                handle.log(message)
 
     # No pool (everything done / empty, or every file a prep fatal): settle without the
     # engine — all-fatals raise inside _settle_pool (nothing was synthesized).
@@ -1513,8 +1629,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         if quota_exhausted:
             raise QuotaInsufficientError("TTS 输入字数额度不足，未合成任何章节")
         handle.log(f"无待合成段（{n} 个文件），不启动引擎")
+        handle.report_publication(force=True)
         return _settle_pool(handle, [f for f in files if not f.cancelled])
-
 
     # Resolve the external TTS environment only after validation has produced
     # actual work.  Corrupt or empty inputs should report their per-file errors
@@ -1527,9 +1643,10 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
         if f.pending and not f.error:
             f.out_dir.mkdir(parents=True, exist_ok=True)  # the manifest flush needs the dir
     out_dir_fallback = next(f.out_dir for f in files if f.pending and not f.error)
+    handle.log(f"开始音频合成：{n} 章，{pool_total} 段待合成")
     handle.log(f"引擎：.venv（一次性子进程，全池统一调度，模型只加载一次）· "
                f"{'自动' if auto_concurrency else '手动'}批内上限 {workers} 段")
-    handle.log(f"运行日志（排障用，含每次重启的完整引擎输出）：{run_log}")
+    handle.log(f"运行日志（批次摘要与异常）：{run_log}")
 
     # 进度指标（合成页「开始音频合成」按钮下方）：全池累计已合成 = 各文件运行前已完成
     # ∪ 本次运行 ok 的段（union 口径），对全池总数（prep fatal 的文件不进总数——
@@ -1542,24 +1659,23 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
     # run). Full counts (not pending) keep it stable across watchdog restarts, so a pool
     # filled over several runs never mixes 000x / 0000x names.
     width = filename_width(max((f.all_count for f in files if not f.error), default=0))
-    last_stats = [0.0]  # time.monotonic() of the last stats push
+    last_stats = [0.0]
+    stats_dirty = {f.name for f in files}
 
     def _report_stats(force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - last_stats[0] < STATS_FLUSH_INTERVAL:
             return
-        last_stats[0] = now
-        done = chars = 0
+        _flush_audio(handle)
+        started = time.monotonic()
         for f in files:
-            if f.error:
-                continue
-            for i, seg in f.by_index.items():
-                if i in f.done_set or (f.seg_results.get(i) or {}).get("ok"):
-                    done += 1
-                    chars += len(seg["text"])
-        for f in files:
-            report_chapter(f)
-        handle.segment_stats(done, seg_total, chars, chars_total)
+            if force or f.name in stats_dirty:
+                report_chapter(f)
+        stats_dirty.clear()
+        handle.segment_stats(sum(f.done_count for f in files if not f.error), seg_total,
+                             sum(f.done_chars for f in files if not f.error), chars_total)
+        handle.events_seconds += time.monotonic() - started
+        last_stats[0] = time.monotonic()
 
     _report_stats(force=True)  # the baseline (resume runs show their pre-run progress at once)
 
@@ -1607,7 +1723,7 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 require_quota("TTS", "tts.batch")
                 run_tts_subprocess(cmd, handle, on_line, temp_files=(seg_file,),
                            fail_prefix="音频合成引擎", watchdog_code=124, log_file=run_log,
-                           log_line=_format_batch_log_line, interrupt_on_pause=True, private_errors=True)
+                           log_line=segment_log.mirror, interrupt_on_pause=True, private_errors=True)
                 segment_log.flush()
                 break  # a clean exit (0)
             except WorkerOutOfMemory as exc:
@@ -1649,8 +1765,8 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                         if struck[pi] >= 2:
                             excluded.add(pi)
                             f, local = pool_map[pi]
-                            f.seg_results[local] = {"ok": False, "path": "", "reason": "超时（已隔离）"}
-                            f.dirty = True
+                            _update_pool_result(f, local, {"ok": False, "path": "", "reason": "超时（已隔离）"})
+                            stats_dirty.add(f.name)
                             newly.append((f, local, pi))
                     if newly:
                         names = "、".join(f"{f.name} 第 {local + 1} 段（池内第 {pi + 1}）"
@@ -1684,4 +1800,5 @@ def synthesize_multi(handle, scripts, concurrency=None, seed=None,
                 discard_directory(f.stage_out_dir)
     for f in files:
         settle_chapter(f, force=True)
+    handle.report_publication(force=True)
     return _settle_pool(handle, [f for f in files if not f.cancelled])

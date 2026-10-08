@@ -227,3 +227,130 @@ def test_open_stream_session_revalidation_observes_revocation():
         db.flush()
         assert session_is_valid_for_user(db, token, user.id) is False
     engine.dispose()
+
+
+@pytest.fixture
+def buffered_audio_context(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from backend.platform.artifact_publication import PublicationJournal
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    journal = PublicationJournal(tmp_path, attempt / "publication.json")
+    journal.prepare()
+    context = task_context.EngineExecutionContext(SimpleNamespace(
+        owner_id="user", project_id="project", task_id="task", attempt_id="attempt",
+    ))
+    context.mark_workspace_checkpoint_directory(tmp_path / "audio")
+    context._publication_journal = journal
+    @contextmanager
+    def session():
+        yield SimpleNamespace(get=lambda *args: SimpleNamespace(username="user"))
+    monkeypatch.setattr(task_context, "SessionLocal", session)
+    monkeypatch.setattr(task_context, "task_attempt_path", lambda *args: attempt / args[-1])
+    monkeypatch.setattr(task_context, "time", SimpleNamespace(monotonic=lambda: 10.0))
+    return context, journal, attempt
+
+
+def test_completed_audio_batch_registers_before_moves_and_uses_one_sync(buffered_audio_context, tmp_path, monkeypatch):
+    context, journal, attempt = buffered_audio_context
+    syncs = []
+    monkeypatch.setattr("backend.platform.artifact_publication.os.fsync", lambda fd: syncs.append(fd))
+    for i in range(128):
+        staged = attempt / f"staged-{i}.mp3"
+        staged.write_bytes(b"audio")
+        context.queue_workspace_stage(tmp_path / "audio" / f"{i}.mp3", staged)
+        if i < 127:
+            assert staged.exists()
+    assert len(syncs) == 1
+    assert len(journal.entries) == 128
+    assert not context._pending_audio_stages
+    assert all((tmp_path / "audio" / f"{i}.mp3").read_bytes() == b"audio" for i in range(128))
+    journal.rollback()
+    assert len(list((tmp_path / "audio").glob("*.mp3"))) == 128
+
+
+def test_audio_flush_deadline_and_force_flush(buffered_audio_context, tmp_path):
+    context, journal, attempt = buffered_audio_context
+    for i in range(2):
+        staged = attempt / f"staged-{i}.mp3"
+        staged.write_bytes(b"audio")
+        context.queue_workspace_stage(tmp_path / "audio" / f"{i}.mp3", staged)
+    context._audio_stage_started -= 0.25
+    context.flush_workspace_stages()
+    assert len(journal.entries) == 2
+    staged = attempt / "last.mp3"
+    staged.write_bytes(b"last")
+    context.queue_workspace_stage(tmp_path / "audio" / "last.mp3", staged)
+    context.flush_workspace_stages(force=True)
+    assert len(journal.entries) == 3
+    journal.rollback()
+    assert (tmp_path / "audio" / "last.mp3").read_bytes() == b"last"
+
+
+def test_audio_batch_rejects_foreign_attempt_before_registering(buffered_audio_context, tmp_path):
+    context, journal, _attempt = buffered_audio_context
+    foreign = tmp_path / "foreign.mp3"
+    foreign.write_bytes(b"audio")
+    with pytest.raises(ValueError):
+        context.publish_workspace_stages([(tmp_path / "audio" / "final.mp3", foreign)])
+    assert not journal.entries
+    assert foreign.exists()
+
+
+def test_audio_partial_move_crash_keeps_completed_checkpoints(buffered_audio_context, tmp_path, monkeypatch):
+    context, journal, attempt = buffered_audio_context
+    stages = []
+    for i in range(3):
+        staged = attempt / f"staged-{i}.mp3"
+        staged.write_bytes(b"new")
+        final = tmp_path / "audio" / f"{i}.mp3"
+        final.parent.mkdir(exist_ok=True)
+        final.write_bytes(b"old")
+        stages.append((final, staged))
+    original = journal.publish
+    def interrupted(index, source):
+        if index == 1:
+            # Crash after moving the original but before installing new bytes.
+            journal.entries[index][0].replace(journal.entries[index][1])
+            raise OSError("interrupted move")
+        original(index, source)
+    monkeypatch.setattr(journal, "publish", interrupted)
+    with pytest.raises(OSError):
+        context.publish_workspace_stages(stages)
+    from backend.platform.artifact_publication import PublicationJournal
+    PublicationJournal.reconcile(tmp_path, journal.path, committed=False)
+    assert [final.read_bytes() for final, _ in stages] == [b"new", b"old", b"old"]
+
+
+def test_cancel_rollback_flushes_buffered_audio_before_removing_staging(buffered_audio_context, tmp_path):
+    context, _journal, attempt = buffered_audio_context
+    staged = attempt / "staged" / "last.mp3"
+    staged.parent.mkdir()
+    staged.write_bytes(b"completed")
+    context._staged_workspace_directories.add(staged.parent)
+    context.queue_workspace_stage(tmp_path / "audio" / "last.mp3", staged)
+    context.rollback_publications()
+    assert (tmp_path / "audio" / "last.mp3").read_bytes() == b"completed"
+    assert not staged.parent.exists()
+
+
+def test_saving_phase_replays_changed_chapter_counters(monkeypatch):
+    from backend.platform.tts_batch_execution import TTSBatchContext
+    events = []
+    progress = []
+    monkeypatch.setattr(task_context, "_append_claim_event",
+                        lambda claim, kind, payload: events.append((claim.task_id, kind, payload)))
+    def snapshot(claim, done, total, chars, chars_total, label):
+        progress.append((claim.task_id, label))
+        return True
+    monkeypatch.setattr(task_context, "update_chapter_snapshot", snapshot)
+    claims = [SimpleNamespace(task_id=f"task-{i}", payload={"scripts": [f"{i}.json"]}) for i in range(2)]
+    handle = TTSBatchContext(claims, lambda *a: True, lambda *a: True)
+    handle.chapter_progress("0.json", 2, 10, 20, 100)
+    handle.chapter_progress("0.json", 2, 10, 20, 100)
+    assert len(progress) == 1
+    handle.phase("正在保存合成结果")
+    handle.chapter_progress("0.json", 2, 10, 20, 100)
+    assert len(progress) == 2
+    assert "已保存 2/10 段" in progress[-1][1] and "待保存 8 段" in progress[-1][1]
+    assert {task for task, kind, payload in events if kind == "phase"} == {"task-0", "task-1"}

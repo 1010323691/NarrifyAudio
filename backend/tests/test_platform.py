@@ -2086,9 +2086,14 @@ def test_tts_partial_progress_survives_failure_and_worker_recovery(client, monke
             engine_task_executor._run_tts_batch(handle, claim, claim.payload, [], [])
         if recover == "legacy":
             journal = handle.publication_journal
-            data = json.loads(journal.path.read_text("utf-8"))
-            for entry in data["files"]:
-                entry.pop("checkpoint", None)
+            # Construct a pre-checkpoint v1 snapshot from the registered files;
+            # new attempts use the append-only v2 format.
+            data = {"version": 1, "files": [
+                {"final": str(final.relative_to(journal.root)),
+                 "backup": str(backup.relative_to(journal.root)),
+                 "had_original": had_original}
+                for final, backup, had_original, _guard in journal.entries
+            ]}
             journal.path.write_text(json.dumps(data), encoding="utf-8")
         with SessionLocal.begin() as db:
             db.get(TaskAttempt, claim.attempt_id).lease_expires_at = utcnow() - timedelta(seconds=1)

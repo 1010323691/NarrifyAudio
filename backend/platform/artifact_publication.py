@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
@@ -22,6 +23,9 @@ class PublicationJournal:
         self._published_hashes: dict[int, str] = {}
         self._checkpoints: set[int] = set()
         self._closed = False
+        self._append_failed = False
+        self.metrics = {"journal_seconds": 0.0, "journal_bytes": 0,
+                        "journal_flushes": 0, "move_seconds": 0.0, "published_audio": 0}
 
     def _under_root(self, relative: str) -> Path:
         candidate = (self.root / relative).resolve()
@@ -33,67 +37,75 @@ class PublicationJournal:
         if self.path.exists():
             raise RuntimeError(f"Publication journal already exists: {self.path}")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._write([])
+        with self.path.open("x", encoding="utf-8") as stream:
+            stream.write('{"version":2}\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _append(self, record: dict) -> None:
+        # A complete newline-terminated record is the recovery boundary. Never
+        # move outputs until this append has been flushed durably.
+        if self._closed or self._append_failed:
+            raise RuntimeError("Publication journal is closed or has a failed append")
+        started = time.monotonic()
+        try:
+            encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.metrics["journal_bytes"] += len(encoded.encode("utf-8"))
+            self.metrics["journal_flushes"] += 1
+        except BaseException:
+            self._append_failed = True
+            raise
+        finally:
+            self.metrics["journal_seconds"] += time.monotonic() - started
 
     def add(self, final: Path, *, guard: bool = False, checkpoint: bool = False) -> int:
-        resolved_final = final.resolve()
-        if not resolved_final.is_relative_to(self.root):
-            raise ValueError("Publication target is outside the storage root")
-        index = len(self.entries)
-        backup = self.path.parent / f"publication-backup-{index}.bin"
-        if backup.exists():
-            raise RuntimeError(f"Publication backup already exists: {backup}")
-        entries = [*self.entries, (resolved_final, backup, resolved_final.exists(), guard)]
-        if checkpoint:
-            self._checkpoints.add(index)
-        self._write(entries)
-        self.entries = entries
-        return index
+        return self.add_many([final], guards=[guard], checkpoints=[checkpoint])[0]
 
     def _write(self, entries: list[tuple[Path, Path, bool, bool]]) -> None:
+        """Append only newly registered files; history is never serialized again."""
+        start = len(self.entries)
         files = []
-        for index, (final, backup, had_original, guard) in enumerate(entries):
-            item = {
-                "final": str(final.relative_to(self.root)),
-                "backup": str(backup.relative_to(self.root)),
-                "had_original": had_original,
-            }
+        for index, (final, backup, had_original, guard) in enumerate(entries, start):
+            item = {"final": str(final.relative_to(self.root)),
+                    "backup": backup.name, "had_original": had_original}
             if guard:
                 item["guard"] = True
-                item["published_sha256"] = self._published_hashes.get(index, "")
             if index in self._checkpoints:
                 item["checkpoint"] = True
             files.append(item)
-        data = {"version": 1, "files": files}
-        pending = self.path.with_suffix(".tmp")
-        with pending.open("w", encoding="utf-8") as stream:
-            json.dump(data, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(pending, self.path)
+        self._append({"files": files})
 
-    def add_many(self, finals: list[Path]) -> list[int]:
-        """Durably register a batch before moving any files (one fsync).
-
-        Unstarted entries are safe to reconcile: existing originals have no
-        backup yet, and new targets do not exist yet. Guarded/checkpoint writes
-        continue to use add(), since their metadata changes after publication.
-        """
-        entries = list(self.entries)
-        indices = []
-        for final in finals:
+    def add_many(self, finals: list[Path], *, guards: list[bool] | None = None,
+                 checkpoints: list[bool] | None = None) -> list[int]:
+        """Register a batch, including checkpoint outputs, with one fsync."""
+        guards = [False] * len(finals) if guards is None else guards
+        checkpoints = [False] * len(finals) if checkpoints is None else checkpoints
+        if len(guards) != len(finals) or len(checkpoints) != len(finals):
+            raise ValueError("Publication flags must match the file count")
+        entries = []
+        for offset, final in enumerate(finals):
             resolved = final.resolve()
             if not resolved.is_relative_to(self.root):
                 raise ValueError("Publication target is outside the storage root")
-            index = len(entries)
+            index = len(self.entries) + offset
             backup = self.path.parent / f"publication-backup-{index}.bin"
             if backup.exists():
                 raise RuntimeError(f"Publication backup already exists: {backup}")
-            entries.append((resolved, backup, resolved.exists(), False))
-            indices.append(index)
-        if indices:
-            self._write(entries)
-            self.entries = entries
+            entries.append((resolved, backup, resolved.exists(), guards[offset]))
+        indices = list(range(len(self.entries), len(self.entries) + len(entries)))
+        marked = {index for index, checkpoint in zip(indices, checkpoints) if checkpoint}
+        self._checkpoints.update(marked)
+        try:
+            if entries:
+                self._write(entries)
+        except BaseException:
+            self._checkpoints.difference_update(marked)
+            raise
+        self.entries.extend(entries)
         return indices
 
     def remove_many(self, finals: list[Path]) -> None:
@@ -103,17 +115,21 @@ class PublicationJournal:
                 os.replace(final, backup)
 
     def publish(self, index: int, source: Path) -> None:
+        started = time.monotonic()
         final, backup, had_original, guard = self.entries[index]
         final.parent.mkdir(parents=True, exist_ok=True)
         if had_original:
             os.replace(final, backup)
         os.replace(source, final)
+        self.metrics["move_seconds"] += time.monotonic() - started
+        if index in self._checkpoints and final.suffix.lower() == ".mp3":
+            self.metrics["published_audio"] += 1
         if guard:
             # Fingerprint the PUBLISHED bytes now: at rollback time this is
             # the only copy left, and the compare decides whether a
             # concurrent writer touched the file after this task.
             self._published_hashes[index] = hashlib.sha256(final.read_bytes()).hexdigest()
-            self._write(self.entries)
+            self._append({"index": index, "sha256": self._published_hashes[index]})
 
     def remove(self, final: Path) -> int:
         """Move an existing file or directory aside until the DB commit is durable."""
@@ -223,24 +239,64 @@ class PublicationJournal:
         checkpoint_root = checkpoint_directory.resolve() if checkpoint_directory is not None else None
         if checkpoint_root is not None and not checkpoint_root.is_relative_to(journal.root):
             raise ValueError("Checkpoint directory is outside the storage root")
-        data = json.loads(path.read_text("utf-8"))
-        if data.get("version") != 1 or not isinstance(data.get("files"), list):
-            raise ValueError("Invalid publication journal")
-        for index, item in enumerate(data["files"]):
-            final = journal._under_root(str(item["final"]))
-            backup = journal._under_root(str(item["backup"]))
-            if not backup.is_relative_to(journal.path.parent):
-                raise ValueError("Publication backup is outside the attempt directory")
-            guard = item.get("guard") is True
-            journal.entries.append((final, backup, item["had_original"] is True, guard))
-            # Older TTS attempts did not mark their incremental outputs. The
-            # worker supplies their managed audio directory during recovery.
-            if item.get("checkpoint") is True or (
-                checkpoint_root is not None and final.is_relative_to(checkpoint_root)
-            ):
-                journal._checkpoints.add(index)
-            if guard:
-                journal._published_hashes[index] = str(item.get("published_sha256", ""))
+        with path.open("rb") as stream:
+            first = stream.readline()
+            try:
+                header = json.loads(first)
+            except ValueError:
+                stream.seek(0)
+                header = json.load(stream)
+            if not isinstance(header, dict):
+                raise ValueError("Invalid publication journal")
+            if header.get("version") == 1:
+                # Existing attempts retain their original snapshot format.
+                stream.seek(0)
+                data = json.load(stream)
+                if not isinstance(data.get("files"), list):
+                    raise ValueError("Invalid publication journal")
+                records = [{"files": data["files"]}]
+                legacy = True
+            elif header == {"version": 2} and first.endswith(b"\n"):
+                records = []
+                legacy = False
+                for line in stream:
+                    if not line.endswith(b"\n"):
+                        break  # crash while appending the final record
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        raise ValueError("Invalid publication journal record")
+                    records.append(record)
+            else:
+                raise ValueError("Invalid publication journal")
+        for record in records:
+            if "files" not in record:
+                index = record.get("index")
+                digest = record.get("sha256")
+                if (type(index) is not int or not 0 <= index < len(journal.entries)
+                        or not journal.entries[index][3] or not isinstance(digest, str)
+                        or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+                    raise ValueError("Invalid publication fingerprint record")
+                journal._published_hashes[index] = digest
+                continue
+            if not isinstance(record["files"], list):
+                raise ValueError("Invalid publication journal files")
+            for item in record["files"]:
+                index = len(journal.entries)
+                final = journal._under_root(str(item["final"]))
+                backup = (journal._under_root(str(item["backup"])) if legacy else
+                          (journal.path.parent / str(item["backup"])).resolve())
+                if not backup.is_relative_to(journal.path.parent) or backup == journal.path:
+                    raise ValueError("Publication backup is outside the attempt directory")
+                if not legacy and backup != journal.path.parent / f"publication-backup-{index}.bin":
+                    raise ValueError("Invalid publication backup identity")
+                guard = item.get("guard") is True
+                journal.entries.append((final, backup, item["had_original"] is True, guard))
+                if item.get("checkpoint") is True or (
+                    checkpoint_root is not None and final.is_relative_to(checkpoint_root)
+                ):
+                    journal._checkpoints.add(index)
+                if guard and legacy:
+                    journal._published_hashes[index] = str(item.get("published_sha256", ""))
         if committed:
             journal.finish()
         else:

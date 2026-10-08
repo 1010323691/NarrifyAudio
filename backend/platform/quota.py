@@ -104,43 +104,75 @@ def reserve_tts_quota(char_count: int, operation_type: str) -> bool:
 
 
 def consume_tts_input(char_count: int, operation_type: str, idempotency_key: str) -> bool:
+    return consume_tts_inputs([(char_count, operation_type, idempotency_key)])
+
+
+def consume_tts_inputs(inputs: list[tuple[int, str, str]]) -> bool:
+    """Charge a bounded publication batch in one transaction, retaining per-segment keys.
+
+    Lock holds in operation order before the account, matching release/reserve lock
+    order. Recheck keys under these locks so concurrent retries cannot double charge.
+    Validation covers the entire batch before any balance is changed.
+    """
     context = _context.get()
     if context is None:
         return True
-    count = max(0, int(char_count))
-    if count == 0:
+    charges = {}
+    for count, operation, identifier in inputs:
+        count = max(0, int(count))
+        if not count:
+            continue
+        key = f"{context.task_id}:tts:{identifier}"
+        value = (count, operation)
+        if key in charges and charges[key] != value:
+            raise ValueError("同一 TTS 幂等键的字数或操作不一致")
+        charges[key] = value
+    if not charges:
         return True
-    key = f"{context.task_id}:tts:{idempotency_key}"
     with SessionLocal() as db:
-        prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))
-        if prior is not None:
+        def existing_keys():
+            return set(db.scalars(select(QuotaTransaction.idempotency_key).where(
+                QuotaTransaction.idempotency_key.in_(charges),
+            )))
+        prior = existing_keys()
+        if len(prior) == len(charges):
             return True
-        hold = db.scalar(select(QuotaHold).where(
+        operations = sorted({op for key, (_count, op) in charges.items() if key not in prior})
+        holds = {hold.operation_type: hold for hold in db.scalars(select(QuotaHold).where(
             QuotaHold.attempt_id == context.attempt_id,
-            QuotaHold.operation_type == operation_type,
+            QuotaHold.user_id == context.user_id,
+            QuotaHold.operation_type.in_(operations),
+        ).order_by(QuotaHold.operation_type).with_for_update())}
+        account = db.scalar(select(UserQuotaAccount).where(
+            UserQuotaAccount.user_id == context.user_id,
         ).with_for_update())
-        account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == context.user_id).with_for_update())
-        prior = db.scalar(select(QuotaTransaction).where(QuotaTransaction.idempotency_key == key))
-        if prior is not None:
-            db.rollback()
-            return True
-        if hold is None or hold.status != "held" or hold.units < count or account is None or account.reserved_units < count:
-            db.rollback()
-            raise RuntimeError(f"TTS 字数预留不足：{operation_type} 需要 {count} 字")
-        before_consumed = account.consumed_units
-        hold.units -= count
-        account.reserved_units -= count
-        account.consumed_units += count
-        db.add(QuotaTransaction(
-            user_id=context.user_id, task_id=context.task_id, amount=count, kind="consume",
-            idempotency_key=key, note=f"{operation_type}（TTS 输入字数）",
-            resource_type="TTS", operation_type=operation_type, char_count=count,
-            available_before=account.available_units, available_after=account.available_units,
-            reserved_before=account.reserved_units + count, reserved_after=account.reserved_units,
-            consumed_before=before_consumed, consumed_after=account.consumed_units,
-        ))
-        if hold.units == 0:
-            hold.status = "consumed"
+        prior = existing_keys()
+        pending = [(key, count, op) for key, (count, op) in charges.items() if key not in prior]
+        required = {}
+        for _key, count, op in pending:
+            required[op] = required.get(op, 0) + count
+        if account is None or account.reserved_units < sum(required.values()):
+            raise RuntimeError("TTS 字数预留不足，批次未结算")
+        for op, count in required.items():
+            hold = holds.get(op)
+            if hold is None or hold.status != "held" or hold.units < count:
+                raise RuntimeError(f"TTS 字数预留不足：{op} 需要 {count} 字")
+        for key, count, op in pending:
+            hold = holds[op]
+            before_consumed = account.consumed_units
+            hold.units -= count
+            account.reserved_units -= count
+            account.consumed_units += count
+            db.add(QuotaTransaction(
+                user_id=context.user_id, task_id=context.task_id, amount=count, kind="consume",
+                idempotency_key=key, note=f"{op}（TTS 输入字数）",
+                resource_type="TTS", operation_type=op, char_count=count,
+                available_before=account.available_units, available_after=account.available_units,
+                reserved_before=account.reserved_units + count, reserved_after=account.reserved_units,
+                consumed_before=before_consumed, consumed_after=account.consumed_units,
+            ))
+            if hold.units == 0:
+                hold.status = "consumed"
         db.commit()
     return True
 
@@ -148,7 +180,7 @@ def consume_tts_input(char_count: int, operation_type: str, idempotency_key: str
 def release_attempt_holds(task_id: str, attempt_id: str, *, db: Session) -> None:
     statement = select(QuotaHold).where(
         QuotaHold.task_id == task_id, QuotaHold.attempt_id == attempt_id, QuotaHold.status == "held",
-    )
+    ).order_by(QuotaHold.operation_type)
     for hold in db.scalars(statement.with_for_update()).all():
         account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == hold.user_id).with_for_update())
         if account is None:
