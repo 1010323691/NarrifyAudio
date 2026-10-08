@@ -19,6 +19,6 @@ export function taskCenterCategoryOf(taskType: string): TaskCenterCategoryId | u
   if (taskType === 'tts.preview_render') return 'preview'
   if (taskType === 'tts.merge') return 'merge'
   if (['bgm.analysis', 'bgm.segment', 'bgm.match', 'bgm.mix', 'bgm.package'].includes(taskType)) return 'bgm'
-  if (taskType.startsWith('resources.')) return 'resources'
+  if (taskType.startsWith('resources.') || taskType === 'project.progress') return 'resources'
   return undefined
 }

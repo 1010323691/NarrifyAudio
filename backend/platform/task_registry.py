@@ -43,6 +43,7 @@ class TaskTypeSpec:
 
 
 _SPECS: tuple[TaskTypeSpec, ...] = (
+    TaskTypeSpec("project.progress", "_execute_project_progress"),
     # 平台直连（6）：task_worker.DIRECT_EXECUTORS
     TaskTypeSpec("text.format", "_execute_text_format"),
     TaskTypeSpec("book.analyze", "_execute_book_analyze"),

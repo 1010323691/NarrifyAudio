@@ -4,6 +4,7 @@ import { getSubmission, runBatch, submitBatchReset, type BatchTaskSubmission } f
 import { getDurableTask } from '@/api/durableTasks'
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
+import { randomUuid } from '@/utils/uuid'
 
 type Phase = 'submitting' | 'confirming' | 'resetting' | 'queued'
 interface Operation {
@@ -148,7 +149,7 @@ export function useTtsSubmission() {
     if (saved) save(scope.value, saved)
     if (locked.value || !auth.user?.id || !project.activeProjectId) return null
     failure.value = ''; receipt.value = null; attempts = 0
-    const op: Operation = { key: crypto.randomUUID(), scope: scope.value, projectId: project.activeProjectId,
+    const op: Operation = { key: randomUuid(), scope: scope.value, projectId: project.activeProjectId,
       names: [...names], mode, phase: 'submitting', resetDone: mode === 'resume', taskIds: [], started: Date.now() }
     save(op.scope, op)
     if (feedbackTimer) clearTimeout(feedbackTimer)

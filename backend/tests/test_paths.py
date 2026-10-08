@@ -334,6 +334,24 @@ def test_parsed_json_orphan_only_directory_is_inert(sandbox, set_pointer):
 
 # -- resolve_parsed_json_all (whole-book "all files" aggregate) -----------------
 
+def test_script_resolution_excludes_reports_and_refreshes_identity(sandbox, set_pointer):
+    ws = sandbox / "ws"
+    set_pointer(str(ws))
+    d = ws / "03_parsed_json"
+    d.mkdir(parents=True, exist_ok=True)
+    chapter = d / "chapter.json"
+    chapter.write_text('[{"text":"hello"}]', encoding="utf-8")
+    report = d / "book_analysis.json"
+    report.write_text('{"chapters": []}', encoding="utf-8")
+    (d / "corrupt.json").write_text('broken', encoding="utf-8")
+    assert core_paths.resolve_parsed_json_all() == [chapter]
+    assert core_paths.resolve_parsed_json() == chapter
+    # A chapter named like a report is valid; overwriting it invalidates the cache.
+    report.write_text('[]', encoding="utf-8")
+    assert report in core_paths.resolve_parsed_json_all()
+    report.write_text('{"chapters": []}', encoding="utf-8")
+    assert core_paths.resolve_parsed_json_all() == [chapter]
+
 def test_resolve_parsed_json_all_order_is_mtime_then_name(sandbox, set_pointer):
     ws = sandbox / "ws"
     set_pointer(str(ws))

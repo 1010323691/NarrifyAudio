@@ -7,5 +7,5 @@ TASK_CATEGORIES = {
     "preview": ("tts.preview_render",),
     "merge": ("tts.merge",),
     "bgm": ("bgm.analysis", "bgm.segment", "bgm.match", "bgm.mix", "bgm.package"),
-    "resources": ("resources.scan", "resources.package", "resources.cleanup"),
+    "resources": ("resources.scan", "resources.package", "resources.cleanup", "project.progress"),
 }

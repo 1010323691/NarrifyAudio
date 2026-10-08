@@ -127,7 +127,7 @@ def test_corrupt_script_and_checked_duplicate_do_not_inflate_coverage(tmp_path):
 
 
 def test_overview_sections_match_full_completion_without_audio_tree_walk(tmp_path, monkeypatch):
-    import backend.services.project_completion as service
+    import backend.engines.project_completion as service
     chapter(tmp_path, 'a', 3)
     chapter(tmp_path, 'b', 1)
     write(tmp_path, '06_audio_merge/a.mp3', b'merged')
@@ -146,21 +146,6 @@ def test_overview_sections_match_full_completion_without_audio_tree_walk(tmp_pat
     catalog = project_completion(tmp_path, section='catalog')
     assert walked == ['01_input', '02_split_text', '03_parsed_json']
     assert {**text, **catalog, **project_completion(tmp_path, section='production')} == expected
-
-
-def test_overview_summary_cache_is_bounded_and_expires(tmp_path, monkeypatch):
-    import backend.services.project_completion as service
-    service._completion_window.cache_clear()
-    now = [100.0]
-    monkeypatch.setattr(service.time, 'monotonic', lambda: now[0])
-    chapter(tmp_path, 'a', 0)
-    first = service.overview_completion(tmp_path, 'text')
-    write(tmp_path, '02_split_text/b.txt', 'new chapter')
-    assert service.overview_completion(tmp_path, 'text') == first
-    now[0] += 5
-    assert service.overview_completion(tmp_path, 'text')['02_split_text']['completed'] == 2
-    assert service._completion_window.cache_info().maxsize == 64
-    service._completion_window.cache_clear()
 
 
 def test_symlink_manifest_and_audio_are_not_counted(tmp_path):

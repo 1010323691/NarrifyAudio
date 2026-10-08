@@ -58,6 +58,7 @@ def owned_project(db: Session, user_id: str, project_id: str) -> Project | None:
 
 # Fine-grained display label per task type for the user task list.
 _MODULE_LABELS = {
+    "project.progress": "project-progress",
     "voices.foundation": "voices-foundation",
     "voices.clone": "voices-clone",
     "tts.batch": "tts-batch",

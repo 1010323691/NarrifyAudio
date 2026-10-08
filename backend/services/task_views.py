@@ -65,6 +65,8 @@ def task_display_label(task_type: str, payload: dict | None) -> str:
     if payload.get("label"):
         return str(payload["label"])
     source = str(payload.get("source_name") or payload.get("output_name") or "")
+    if task_type == 'project.progress':
+        return '更新制作进度'
     if task_type == "script.parse":
         return f"文本解析（{source or '文件'}）"
     if task_type == "audio.silences":

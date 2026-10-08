@@ -38,7 +38,7 @@ def overview_tasks(db: Session, user_id: str, project_id: str, *, root: Path | N
     if owned_project(db, user_id, project_id) is None:
         raise ValueError("项目不存在")
     filters = (Task.owner_id == user_id, Task.project_id == project_id,
-               Task.id.in_(current_entry_ids(user_id, SUPPORTED_TASK_TYPES, project_id)))
+               Task.id.in_(current_entry_ids(user_id, SUPPORTED_TASK_TYPES - {'project.progress'}, project_id)))
     # Old releases submitted book-analysis objects as chapter synthesis tasks.
     # These have no production entry to retry; retain history but omit them from
     # current project health. Never infer this from a name, progress, or error text.

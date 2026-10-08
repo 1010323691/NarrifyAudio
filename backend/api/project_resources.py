@@ -15,7 +15,8 @@ from ..platform.models import Project, Task, User
 from ..platform.storage import safe_project_workspace_path
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from ..services.project_filesystem import iter_regular_project_files
-from ..services.project_completion import project_completion, overview_completion, COMPLETION_SECTIONS
+from ..services.project_completion import COMPLETION_SECTIONS
+from ..services.project_progress import progress_summary
 from ..services.task_operations import owned_project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -178,8 +179,8 @@ def get_project_summary(project_id: str, progress: bool = False, section: str | 
             "project_id": item.id,
             "name": item.name,
             "updated_at": item.updated_at.isoformat(),
-            **(_project_progress(root) if section is None else {"stage_keys": [], "split_volume_count": 0}),
-            "stage_completion": project_completion(root) if section is None else overview_completion(root, section),
+            "stage_keys": [], "split_volume_count": 0,
+            "stage_completion": progress_summary(db, user, item.id, root, section),
         }
     active = db.scalar(select(Task.id).where(
         Task.owner_id == user.id, Task.project_id == item.id, Task.status.in_(ACTIVE_TASK_STATUSES)

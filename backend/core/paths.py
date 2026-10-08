@@ -256,8 +256,9 @@ def resolve_parsed_json(script: str | None = None) -> Path:
         return d / script
     if d.exists():
         # The most recent base file; _checked orphans are excluded (see docstring).
+        from .bounded_json import is_script_file
         base = [p for p in d.glob("*.json")
-                if p.is_file() and not p.name.endswith("_checked.json")]
+                if p.is_file() and not p.name.endswith("_checked.json") and is_script_file(p)]
         if base:
             return max(base, key=lambda p: p.stat().st_mtime)
     return d / "annotated_script.json"
@@ -266,8 +267,9 @@ def resolve_parsed_json(script: str | None = None) -> Path:
 def resolve_parsed_json_all() -> list[Path]:
     """Every parsed script a 角色配音 "all files" request should read (whole-book aggregate).
 
-    Returns the base ``*.json`` files in ``03_parsed_json/`` (orphan ``_checked`` files are
-    excluded — inert leftovers, never read) in reading order. Order is by ``(mtime, name)``:
+    Returns script arrays among base ``*.json`` files in ``03_parsed_json/``; legacy
+    analysis reports and unreadable files are excluded. Orphan ``_checked`` files are
+    excluded — inert leftovers, never read. Reading order is by ``(mtime, name)``:
     mtime ≈ the order the volumes were generated (≈ reading order), which is robust to
     Chinese-numeral stems that ``name`` alone would scramble, with name as a deterministic
     tiebreaker — the same mtime semantic the single-file "most recent" fallback uses. With
@@ -277,6 +279,8 @@ def resolve_parsed_json_all() -> list[Path]:
     d = layout.parsed_json
     if d is None or not d.exists():
         return []
-    base = [p for p in d.glob("*.json") if p.is_file() and not p.name.endswith("_checked.json")]
+    from .bounded_json import is_script_file
+    base = [p for p in d.glob("*.json")
+            if p.is_file() and not p.name.endswith("_checked.json") and is_script_file(p)]
     base.sort(key=lambda p: (p.stat().st_mtime, p.name))
     return base
