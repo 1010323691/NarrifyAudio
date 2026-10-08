@@ -53,11 +53,16 @@ def _install_durable_mocks(monkeypatch, active=None):
     monkeypatch.setattr(api_bgm, "active_durable_payloads", lambda **kw: [])
     monkeypatch.setattr(api_bgm, "submit_legacy_engine_task", lambda **kw: created.append(kw) or {"id": f"task-{len(created)}"})
     def submit_batch(**kwargs):
+        entries, config = kwargs["prepare"]()
         ids = []
-        for entry in kwargs["entries"]:
-            ids.append(api_bgm.submit_legacy_engine_task(task_type=kwargs["task_type"], **entry)["id"])
-        return {"task_ids": ids, **({"task_id": ids[0]} if len(ids) == 1 else {})}
-    monkeypatch.setattr(api_bgm, "submit_legacy_engine_tasks", submit_batch)
+        for entry in entries:
+            ids.append(api_bgm.submit_legacy_engine_task(task_type=kwargs["task_type"], label=entry["label"],
+                payload={**entry["payload"], "config": config})["id"])
+        result = {"task_ids": ids, **({"task_id": ids[0]} if len(ids) == 1 else {})}
+        if kwargs.get("receipt_field"):
+            result[kwargs["receipt_field"]] = [{**entry.get("receipt", {}), "task_id": tid} for entry, tid in zip(entries, ids)]
+        return result
+    monkeypatch.setattr(api_bgm, "submit_engine_batch", submit_batch)
     return created
 
 

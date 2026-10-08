@@ -21,6 +21,30 @@ from .models import Task
 from .task_lifecycle import ACTIVE_TASK_STATUSES
 
 
+def submit_engine_batch(*, task_type, request, prepare, ctx, db,
+                        idempotency_key=None, project_id=None, receipt_field=None):
+    from .batch_submission import submit_task_batch
+    from .models import Project
+    project = (db.scalar(select(Project).where(Project.id == project_id,
+        Project.owner_id == ctx.user.id, Project.deleted_at.is_(None)))
+        if project_id else active_project(db, ctx.user, ctx.session))
+    if project is None:
+        raise HTTPException(409, "尚未设置工作空间")
+    from ..core.request_context import bind_workspace, reset_workspace
+    from .storage import project_workspace_path
+    def prepare_in_project():
+        token = bind_workspace(project_workspace_path(db, ctx.user.username, project.id))
+        try:
+            return prepare()
+        finally:
+            reset_workspace(token)
+    try:
+        return submit_task_batch(db=db, user=ctx.user, project_id=project.id, task_type=task_type,
+            request=request, prepare=prepare_in_project, idempotency_key=idempotency_key, receipt_field=receipt_field)
+    except TaskSubmissionError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+
+
 def submit_legacy_engine_task(
     *,
     task_type: str,
@@ -118,6 +142,15 @@ def submit_legacy_engine_tasks(
         from .tts_submission import submit_tts_tasks
         return submit_tts_tasks(task_type=task_type, entries=entries, ctx=ctx, db=db,
                                 idempotency_key=idempotency_key, project_id=project_id)
+    from .batch_submission import BATCH_TYPES
+    if task_type in BATCH_TYPES:
+        snapshots = [entry["payload"].get("config", {}) for entry in entries]
+        if any(snapshot != snapshots[0] for snapshot in snapshots):
+            raise HTTPException(422, "同一批次的配置必须一致")
+        return submit_engine_batch(task_type=task_type,
+            request=[{k: v for k, v in entry["payload"].items() if k != "config"} for entry in entries],
+            prepare=lambda: (entries, snapshots[0]), ctx=ctx, db=db,
+            idempotency_key=idempotency_key, project_id=project_id)
     created = []
     execution_batch = uuid.uuid4().hex if task_type in {"voices.clone", "tts.batch"} else None
     try:

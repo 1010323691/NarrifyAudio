@@ -480,7 +480,9 @@ def test_script_generate_files_checks_merge_into_task_payload(client: TestClient
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         assert task is not None
-        gen = task.payload["config"]["generation"]
+        from backend.platform.models import TaskBatch
+        assert "config" not in task.payload
+        gen = db.get(TaskBatch, task.batch_id).config["generation"]
     assert gen["check_chunk_alignment"] is False
     assert gen["check_boundary_speakers"] is False
     assert gen["validate_instructs"] is False
@@ -492,6 +494,9 @@ def test_script_generate_files_checks_merge_into_task_payload(client: TestClient
     assert gen["spot_check_rate"] == 0.05
 
     # 不带 checks（旧客户端兼容）：6 键取当前生效配置值（默认全 True）
+    # A second intent may only start after the previous input task terminates.
+    with SessionLocal.begin() as db:
+        db.get(Task, task_id).status = "cancelled"
     plain = client.post(
         "/api/script/generate-files",
         headers={"X-CSRF-Token": csrf},
@@ -502,7 +507,7 @@ def test_script_generate_files_checks_merge_into_task_payload(client: TestClient
     with SessionLocal() as db:
         plain_task = db.get(Task, plain_id)
         assert plain_task is not None
-        plain_gen = plain_task.payload["config"]["generation"]
+        plain_gen = db.get(TaskBatch, plain_task.batch_id).config["generation"]
     for key in (
         "check_chunk_alignment", "check_boundary_speakers", "validate_instructs",
         "revalidate_splits", "check_long_paragraphs", "spot_check_enabled",

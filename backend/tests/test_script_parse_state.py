@@ -439,7 +439,97 @@ def test_run_submits_version_bound_tasks_with_checks(client: TestClient):
         assert task.payload["input_file_id"] == item_id
         assert task.payload["source_name"] == "0001_章节.txt"
         # 检查开关随快照固化（与 legacy 端点同语义）。
-        assert task.payload["config"]["generation"]["check_chunk_alignment"] is True
+        from backend.platform.models import TaskBatch
+        assert "config" not in task.payload
+        assert db.get(TaskBatch, task.batch_id).config["generation"]["check_chunk_alignment"] is True
+        assert task.payload["input_sha256"] == _sha("s")
+
+
+def test_run_replays_receipt_after_input_changes_and_rejects_changed_intent(client):
+    email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    with SessionLocal.begin() as db:
+        user = db.get(User, user_id)
+        item = _add_split_file(db, user_id, project_id, user.username, "chapter.txt", _sha("old"))
+        file_id = item.id
+    url = f"/api/v1/projects/{project_id}/script-parse/run"
+    headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "parse-" + uuid.uuid4().hex}
+    body = {"files": [{"name": "chapter.txt", "sha256": _sha("old")}], "checks": {"spot_check_enabled": False}}
+    first = client.post(url, headers=headers, json=body)
+    assert first.status_code == 200, first.text
+    with SessionLocal.begin() as db:
+        db.get(ProjectFile, file_id).sha256 = _sha("changed")
+        db.get(UserQuotaAccount, user_id).available_units = 0
+    replay = client.post(url, headers=headers, json=body)
+    assert replay.status_code == 200 and replay.json() == first.json()
+    changed = client.post(url, headers=headers, json={**body, "checks": {"spot_check_enabled": True}})
+    assert changed.status_code == 409 and "幂等键" in changed.text
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_1000_parse_http_admission_is_atomic_and_bounded(client, legacy):
+    from sqlalchemy import event, func
+    from backend.platform.models import TaskBatch, OutboxEvent
+    _email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    names = [f"chapter-{i}.txt" for i in range(1000)]
+    with SessionLocal.begin() as db:
+        project = db.get(Project, project_id)
+        if legacy:
+            directory = configured_storage_root(db) / project.directory_key / "02_split_text"
+            directory.mkdir(parents=True, exist_ok=True)
+            for name in names:
+                (directory / name).write_text(name, encoding="utf-8")
+        else:
+            db.add_all([ProjectFile(owner_id=user_id, project_id=project_id, original_name=name,
+                object_key=f"{project.directory_key}/02_split_text/{name}", content_type="text/plain",
+                kind="output", size_bytes=len(name), sha256=_sha(name)) for name in names])
+    engine = SessionLocal.kw["bind"]
+    statements, commits = [], []
+    listener = lambda c, cur, statement, *args: statements.append(statement)
+    committed = lambda db: commits.append(True)
+    event.listen(engine, "before_cursor_execute", listener)
+    event.listen(SessionLocal.class_, "after_commit", committed)
+    try:
+        response = client.post(f"/api/v1/projects/{project_id}/script-parse/run",
+            headers={"X-CSRF-Token": csrf, "Idempotency-Key": "bulk-" + uuid.uuid4().hex},
+            json={"files": [{"name": name, "sha256": _sha(name)} for name in names]})
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+        event.remove(SessionLocal.class_, "after_commit", committed)
+    assert response.status_code == 200, response.text
+    assert len(response.json()["task_ids"]) == 1000
+    assert len(statements) <= 80, len(statements)
+    print(f"script.parse HTTP: legacy={legacy}, tasks=1000, statements={len(statements)}, commits={len(commits)}")
+    assert len(commits) == 1
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(TaskBatch).where(TaskBatch.owner_id == user_id)) == 1
+        assert db.scalar(select(func.count()).select_from(OutboxEvent).where(
+            OutboxEvent.payload["batch_id"].as_string() == response.json()["batch_id"])) == 1
+
+
+def test_legacy_parse_does_not_catalog_files_linked_outside_owned_workspace(client, tmp_path):
+    from sqlalchemy import func
+    _email, csrf, user_id, project_id = _register(client)
+    _grant_quota(user_id)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "chapter.txt").write_text("outside project", encoding="utf-8")
+    with SessionLocal() as db:
+        directory = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    if directory.is_dir():
+        directory.rmdir()  # empty module created by the isolated project's bootstrap
+    try:
+        directory.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    response = client.post(f"/api/v1/projects/{project_id}/script-parse/run",
+        headers={"X-CSRF-Token": csrf}, json={"files": [{"name": "chapter.txt"}]})
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Task).where(Task.owner_id == user_id)) == 0
+        assert db.scalar(select(func.count()).select_from(ProjectFile).where(ProjectFile.owner_id == user_id)) == 0
 
 
 def test_run_catalogs_legacy_disk_file_without_table_row(client: TestClient):

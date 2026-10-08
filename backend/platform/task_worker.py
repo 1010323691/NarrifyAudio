@@ -89,7 +89,7 @@ from .task_context import (
     cancellation_requested,
     update_progress,
 )
-from .task_engine_support import write_task_outcome
+from .task_engine_support import task_config_snapshot, write_task_outcome
 from .task_contracts import (
     TaskCancelledError,
     TaskClaim,
@@ -518,6 +518,9 @@ def _input_file(db, claim: TaskClaim, file_id: str | None = None) -> tuple[User,
     path = object_path(item.object_key, configured_storage_root(db))
     if not path.is_file():
         raise TaskExecutionError("input_missing", "任务输入文件内容已丢失")
+    expected = claim.payload.get("input_sha256")
+    if expected and (item.sha256 != expected or sha256_file(path) != expected):
+        raise TaskExecutionError("input_changed", "任务输入已变更，请刷新后重新提交")
     return user, project, item, path
 
 
@@ -596,7 +599,7 @@ def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
             db, user.username, claim.project_id, claim.task_id, claim.attempt_id, output_name
         )
 
-    snapshot = claim.payload.get("config")
+    snapshot = task_config_snapshot(claim.payload, claim.owner_id, claim.project_id)
     if isinstance(snapshot, dict):
         llm = LLMConfig.model_validate(snapshot.get("llm") or {})
         prompts = PromptsConfig.model_validate(snapshot.get("prompts") or {})
@@ -635,9 +638,13 @@ def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
     metadata.pop("output_path", None)
     metadata["engine"] = "script.parse"
     metadata["source_file_id"] = item.id
-    # 输入内容指纹：解析页据此判断「同名文件被重新分册覆盖后，旧解析结果已过期」。
-    # 取引擎实际读到的字节（source_path），而不是 DB 行快照。
-    metadata["source_sha256"] = sha256_file(source_path)
+    # Never label an old parse with the digest of a file replaced during LLM work.
+    current_sha = sha256_file(source_path)
+    expected = claim.payload.get("input_sha256")
+    if expected and current_sha != expected:
+        output_path.unlink(missing_ok=True)
+        raise TaskExecutionError("input_changed", "任务输入在解析期间已变更，请重新提交")
+    metadata["source_sha256"] = expected or current_sha
     metadata["output_name"] = output_name
     return TaskOutcome(
         temp_path=output_path,
@@ -1827,7 +1834,7 @@ def recover_database_tasks(limit: int = 100) -> int:
 LLM_RECOVERY_MAX_CYCLES = 30
 
 
-def _resume_llm_config(row: Any, workspace_llm: dict | None) -> dict | None:
+def _resume_llm_config(row: Any, workspace_llm: dict | None, batch_configs: dict | None = None) -> dict | None:
     """暂停任务重派后实际执行的 LLM 配置：优先取提交时写进 payload 的配置
     快照（script.parse 执行器回放的就是该快照），缺省回退活动工作区配置。
 
@@ -1837,6 +1844,11 @@ def _resume_llm_config(row: Any, workspace_llm: dict | None) -> dict | None:
     payload = row.payload
     if isinstance(payload, dict):
         snapshot = payload.get("config")
+        if not isinstance(snapshot, dict) and payload.get("_batch_config_id"):
+            record = (batch_configs or {}).get(payload["_batch_config_id"])
+            if record is None or record.owner_id != row.owner_id or record.project_id != row.project_id:
+                return None
+            snapshot = record.config
         if isinstance(snapshot, dict):
             llm = snapshot.get("llm")
             if isinstance(llm, dict) and str(llm.get("base_url") or "").strip():
@@ -1860,6 +1872,9 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
             .order_by(Task.updated_at.asc())
             .limit(limit)
         ).all()
+        from .models import TaskBatch
+        batch_ids = {row.payload.get("_batch_config_id") for row in rows if isinstance(row.payload, dict)} - {None}
+        batch_configs = {batch.id: batch for batch in db.scalars(select(TaskBatch).where(TaskBatch.id.in_(batch_ids)))}
         owner_ids = {row.owner_id for row in rows}
         users = {user.id: user for user in db.scalars(select(User).where(User.id.in_(owner_ids))).all()}
         workspaces = {}
@@ -1891,7 +1906,7 @@ def resume_llm_unavailable_tasks(limit: int = 500) -> int:
 
     candidates: list[tuple[str, str, str, str]] = []
     for row in rows:
-        llm_config = platform_llm().model_dump() if managed_gpu else _resume_llm_config(row, configs.get((row.owner_id, row.project_id)))
+        llm_config = platform_llm().model_dump() if managed_gpu else _resume_llm_config(row, configs.get((row.owner_id, row.project_id)), batch_configs)
         if not llm_config:
             continue
         base_url = str(llm_config.get("base_url") or "").strip()

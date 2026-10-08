@@ -56,6 +56,7 @@ from ..platform.engine_task_submission import (
     has_active_durable_tasks,
     submit_legacy_engine_task,
     submit_legacy_engine_tasks,
+    submit_engine_batch,
 )
 from ..platform.file_response import file_response
 from . import _common
@@ -89,7 +90,7 @@ def status() -> dict:
 
 class PrepareFoundationsRequest(BaseModel):
     # Phase 1 (LLM only): None -> every character; a list -> only those (single-char regen).
-    speakers: list[str] | None = None
+    speakers: list[str] | None = Field(default=None, max_length=1000)
     # True -> regenerate only characters without a foundation yet.
     new_only: bool = False
     # speaker -> user-supplied voice description (skips the LLM for that character).
@@ -100,7 +101,7 @@ class PrepareFoundationsRequest(BaseModel):
 
 class MakeClonesRequest(BaseModel):
     # Phase 2 (TTS only): None -> every foundation-bearing character; a list -> only those.
-    speakers: list[str] | None = None
+    speakers: list[str] | None = Field(default=None, max_length=1000)
     # True -> limit to characters not yet holding a usable clone (also retries failed ones).
     new_only: bool = False
     # 批内行数（上限，1..64，不是并发进程数）：单个长驻 design-batch 子进程内的 GPU 张量批
@@ -149,21 +150,24 @@ def prepare_foundations(
     req: PrepareFoundationsRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one foundation task per selected character."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="voices.foundation", request=req.model_dump(),
+        prepare=lambda: _prepare_voice_foundations(req), ctx=ctx, db=db, idempotency_key=idempotency_key)
+
+
+def _prepare_voice_foundations(req):
     script = req.script or resolve_parsed_json(None).name
     targets = _voice_task_speakers(script, req.speakers, req.new_only)
     config = get_config().model_dump(mode="json")
-    return submit_legacy_engine_tasks(
-        task_type="voices.foundation",
-        entries=[{
+    return ([{
             "label": f"语音推理基础 · {speaker}",
             "payload": {"speakers": [speaker], "new_only": req.new_only,
-                        "overrides": req.overrides or {}, "script": script, "config": config},
-        } for speaker in targets],
-        ctx=ctx, db=db, idempotency_prefix="voices-foundation",
-    )
+                        "overrides": {speaker: req.overrides[speaker]} if req.overrides and speaker in req.overrides else {},
+                        "script": script},
+        } for speaker in targets], config)
 
 
 @router.post("/make-clones")
@@ -171,23 +175,25 @@ def make_clones(
     req: MakeClonesRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one clone task per selected foundation-bearing character."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="voices.clone", request=req.model_dump(),
+        prepare=lambda: _prepare_voice_clones(req), ctx=ctx, db=db, idempotency_key=idempotency_key)
+
+
+def _prepare_voice_clones(req):
     script = req.script or resolve_parsed_json(None).name
     targets = _voice_task_speakers(script, req.speakers, req.new_only,
                                    clone=True, candidate_count=req.candidate_count)
     config = get_config().model_dump(mode="json")
-    return submit_legacy_engine_tasks(
-        task_type="voices.clone",
-        entries=[{
+    return ([{
             "label": f"克隆音频 · {speaker}",
             "payload": {"speakers": [speaker], "new_only": req.new_only,
                         "concurrency": req.concurrency, "script": script,
-                        "candidate_count": req.candidate_count, "config": config},
-        } for speaker in targets],
-        ctx=ctx, db=db, idempotency_prefix="voices-clone",
-    )
+                        "candidate_count": req.candidate_count},
+        } for speaker in targets], config)
 
 
 def _voice_usable(entry: dict) -> bool:

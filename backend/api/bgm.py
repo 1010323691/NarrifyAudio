@@ -9,9 +9,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from typing import Annotated
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
@@ -22,7 +22,7 @@ from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_legacy_engine_tasks
+from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_engine_batch
 from ..platform.task_validation import is_safe_bgm_stem
 from ..services.list_paging import entry_states, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name
@@ -244,7 +244,7 @@ class PackageRequest(BaseModel):
 
 
 class SegmentAnalyzeRequest(BaseModel):
-    chapters: list[str]
+    chapters: list[str] = Field(max_length=1000)
 
 
 @router.post("/analyze-segment")
@@ -252,9 +252,16 @@ def run_analyze_segment(
     req: SegmentAnalyzeRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one durable paragraph-analysis task per selected chapter."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="bgm.segment", request=req.model_dump(),
+        prepare=lambda: _prepare_analyze_segment(req, ctx, db), ctx=ctx, db=db,
+        idempotency_key=idempotency_key, receipt_field="chapters")
+
+
+def _prepare_analyze_segment(req, ctx, db):
     layout = get_or_prepare_layout()
     stems = _segment_validated_stems(layout, req.chapters or [])
     if not stems:
@@ -279,18 +286,8 @@ def run_analyze_segment(
         raise HTTPException(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
-    created = []
-    for stem in stems:
-        task = submit_legacy_engine_task(
-            task_type="bgm.segment",
-            label=f"{SEGMENT_LABEL}：{stem}",
-            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-segment:{stem}",
-        )
-        created.append({"stem": stem, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
+    return ([{"label": f"{SEGMENT_LABEL}：{stem}", "payload": {"stem": stem},
+              "receipt": {"stem": stem}} for stem in stems], cfg.model_dump(mode="json"))
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +295,7 @@ def run_analyze_segment(
 # --------------------------------------------------------------------------- #
 
 class MatchRequest(BaseModel):
-    chapters: list[str] | None = None  # None = all existing 02 chapters
+    chapters: list[str] | None = Field(default=None, max_length=1000)
     mode: str = "random"  # "random" | "segment"（段落级时间轴重算，零 LLM）
 
 
@@ -307,9 +304,15 @@ def run_match(
     req: MatchRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit durable chapter-level matching or paragraph timeline tasks."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="bgm.match", request=req.model_dump(),
+        prepare=lambda: _prepare_match(req, ctx, db), ctx=ctx, db=db, idempotency_key=idempotency_key)
+
+
+def _prepare_match(req, ctx, db):
     layout = get_or_prepare_layout()
     if req.mode == "segment":
         stems = (
@@ -351,14 +354,10 @@ def run_match(
             raise HTTPException(409, "以下章节匹配任务在途：" + "、".join(conflicts))
 
     config = get_config().model_dump(mode="json")
-    return submit_legacy_engine_tasks(
-        task_type="bgm.match",
-        entries=[{
+    return ([{
             "label": f"BGM 匹配（{req.mode}） · {stem}",
-            "payload": {"chapters": [stem], "mode": req.mode, "config": config},
-        } for stem in stems],
-        ctx=ctx, db=db, idempotency_prefix=f"bgm-match:{req.mode}",
-    )
+            "payload": {"chapters": [stem], "mode": req.mode},
+        } for stem in stems], config)
 
 
 class ChapterUpdateRequest(BaseModel):
@@ -421,7 +420,7 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
 # --------------------------------------------------------------------------- #
 
 class MixRequest(BaseModel):
-    chapters: list[str]
+    chapters: list[str] = Field(max_length=1000)
 
 
 @router.post("/mix")
@@ -429,9 +428,16 @@ def run_mix(
     req: MixRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Validate selected assignments and submit one durable mix task per chapter."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="bgm.mix", request=req.model_dump(),
+        prepare=lambda: _prepare_mix(req, ctx, db), ctx=ctx, db=db,
+        idempotency_key=idempotency_key, receipt_field="chapters")
+
+
+def _prepare_mix(req, ctx, db):
     layout = get_or_prepare_layout()
     stems = _validated_stems(layout, req.chapters or [])
     if not stems:
@@ -463,18 +469,8 @@ def run_mix(
     ]
     if conflicts:
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))
-    created = []
-    for stem in stems:
-        task = submit_legacy_engine_task(
-            task_type="bgm.mix",
-            label=f"{MIX_LABEL}：{stem}",
-            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-mix:{stem}",
-        )
-        created.append({"stem": stem, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
+    return ([{"label": f"{MIX_LABEL}：{stem}", "payload": {"stem": stem},
+              "receipt": {"stem": stem}} for stem in stems], cfg.model_dump(mode="json"))
 
 
 @router.post("/package")
