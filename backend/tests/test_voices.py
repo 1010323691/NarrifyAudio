@@ -209,15 +209,19 @@ def test_hint_cycle_does_not_block_voice_candidates(clone_ws, monkeypatch):
     assert (clone_ws / repaired["NARRATOR"]["ref_audio"]).is_file()
 
 
-def test_similar_names_get_independent_foundations(clone_ws):
+def test_similar_names_get_independent_foundations(clone_ws, monkeypatch):
     names = ["Alice", "Ａｌｉｃｅ", "alice", "熊猫A", "aＫ"]
     _seed_script(clone_ws, dict.fromkeys(names, 1))
     _seed_foundations(clone_ws, ["Alice"])
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("Worker foundation tasks must not run all-pairs hints")
+    monkeypatch.setattr(V, "suggest_role_hints", unexpected)
 
     result = V.prepare_foundations(_Handle(), overrides=dict.fromkeys(names, "独立角色声音描述"))
 
     assert result["count"] == len(names)
-    assert result["aliases"] > 0
+    assert result["hints_deferred"] is True
+    assert any(row["alias_of"] for row in list_voices()["speakers"])
     config = _load_vc(clone_ws)
     assert set(config) == set(names)
     assert all(entry["foundation_status"] == "done" and not entry.get("alias_of")
@@ -242,17 +246,19 @@ def test_name_and_profile_hint_is_visible_without_blocking_clone_submission(clon
 def test_foundation_checkpoint_does_not_restore_removed_alias(clone_ws, monkeypatch):
     _seed_script(clone_ws, {"Alice": 1, "Bob": 1})
     _seed_foundations(clone_ws, ["Alice"], extra={"Bob": {"alias_of": "Alice"}})
-    original_fold = V._fold_aliases
+    original_load = V._load_voice_config
+    loads = 0
 
     def remove_link_after_snapshot(*args):
-        result = original_fold(*args)
-        config = _load_vc(clone_ws)
-        config["Bob"].pop("alias_of")
-        (clone_ws / "04_voice_profiles" / "voice_config.json").write_text(
-            json.dumps(config), encoding="utf-8")
-        return result
+        nonlocal loads
+        loads += 1
+        if loads == 2:
+            config = _load_vc(clone_ws)
+            config["Bob"].pop("alias_of")
+            (clone_ws / "04_voice_profiles" / "voice_config.json").write_text(json.dumps(config), encoding="utf-8")
+        return original_load(*args)
 
-    monkeypatch.setattr(V, "_fold_aliases", remove_link_after_snapshot)
+    monkeypatch.setattr(V, "_load_voice_config", remove_link_after_snapshot)
     V.prepare_foundations(_Handle(), overrides={"Alice": "独立角色声音描述"})
     assert "alias_of" not in _load_vc(clone_ws)["Bob"]
 

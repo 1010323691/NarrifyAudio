@@ -176,6 +176,8 @@ def _select_target_bands(pairs, per=SAMPLES_PER_BAND):
     lines to fill three bands, all of them are returned as ``front`` (none dropped), so a
     small cast still gets every line with its context. Returns three lists of indices.
     """
+    if hasattr(pairs, "bands"):
+        return pairs.bands(per)
     n = len(pairs)
     if n == 0:
         return [], [], []
@@ -204,11 +206,11 @@ def _window_block(script, idx, window=CONTEXT_WINDOW):
     lo = max(0, idx - window)
     hi = min(total, idx + window + 1)
     lines = []
-    for j in range(lo, hi):
-        txt = _entry_text(script[j])
+    for j, entry in enumerate(script[lo:hi], lo):
+        txt = _entry_text(entry)
         if not txt:
             continue
-        spk = _entry_speaker(script[j]) or "(?)"
+        spk = _entry_speaker(entry) or "(?)"
         marker = "★ " if j == idx else "   "
         lines.append(f"{marker}{spk}: {txt}")
     return "\n".join(lines)
@@ -334,42 +336,14 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
 # Shared preparation helpers (used by both phase workers)
 # ---------------------------------------------------------------------------
 
-def _load_script(handle, script_name):
-    """Load the parsed script: the chosen file, the most recent one, or ALL of them."""
-    if script_name == ALL_PARSED_JSON:
-        # Whole-book aggregate: concatenate every 分册's base JSON (orphan _checked
-        # leftovers are excluded by the resolver) in reading order. An unreadable/empty
-        # file is skipped — the run continues.
-        script_paths = resolve_parsed_json_all()
-        if not script_paths:
-            raise RuntimeError("未找到脚本 JSON（03_parsed_json/）——请先在「文本解析」生成脚本。")
-        script = []
-        for sp in script_paths:
-            if not sp.exists():
-                continue
-            try:
-                data = json.loads(sp.read_text("utf-8"))
-            except Exception as e:  # noqa: BLE001 — skip an unreadable file, keep going
-                handle.log(f"{sp.name} 无法解析（{e}），已跳过。", "WARNING")
-                continue
-            if isinstance(data, list):
-                script.extend(data)
-                handle.log(f"读入 {sp.name}：{len(data)} 条")
-        if not script:
-            raise RuntimeError("所有脚本 JSON 均为空——请先生成脚本。")
-        handle.log(f"读入全部 {len(script_paths)} 个脚本：共 {len(script)} 条")
-    else:
-        script_path = resolve_parsed_json(script_name)
-        if not script_path.exists():
-            raise RuntimeError("未找到脚本 JSON（03_parsed_json/）——请先在「文本解析」生成脚本。")
-        try:
-            script = json.loads(script_path.read_text("utf-8"))
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"{script_path.name} 无法解析：{e}")
-        if not isinstance(script, list) or not script:
-            raise RuntimeError(f"{script_path.name} 为空——请先生成脚本。")
-        handle.log(f"读入脚本 {script_path.name}：{len(script)} 条")
-    return script
+def _load_script(handle, script_name, speakers=None):
+    """Lazily construct one immutable chapter-wise snapshot shared by role tasks."""
+    from ..core.script_snapshot import open_snapshot
+    paths = resolve_parsed_json_all() if script_name == ALL_PARSED_JSON else [resolve_parsed_json(script_name)]
+    layout = get_or_prepare_layout()
+    return open_snapshot(paths, layout.temp / "script-snapshots", check=handle.check,
+                         log=handle.log, skip_invalid=script_name == ALL_PARSED_JSON, speakers=speakers,
+                         cancelled=lambda: getattr(handle, "cancelled", False))
 
 
 def _collect_samples(script):
@@ -378,6 +352,8 @@ def _collect_samples(script):
     The index lets the persona prompt attach each sampled line's ±window local context
     (surrounding narration and other characters). Returns ``(samples, order)``.
     """
+    if hasattr(script, "samples"):
+        return script.samples, list(script.counts)
     samples: dict = {}
     order: list = []
     for i, entry in enumerate(script):
@@ -521,7 +497,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     """
     overrides = overrides or {}
 
-    script = _load_script(handle, script_name)
+    script = _load_script(handle, script_name, speakers)
     samples, order = _collect_samples(script)
     handle.log(f"检测到 {len(order)} 个角色：{'、'.join(order)}")
 
@@ -551,7 +527,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
 
     handle.log(f"本次为 {len(selected)} 个角色生成语音推理基础（仅 LLM，不启动 TTS）。")
 
-    unique_speakers, resolved_aliases = _fold_aliases(handle, selected, voice_config)
+    unique_speakers = list(selected)
 
     n = len(unique_speakers)
     max_workers = max(1, int(cfg.generation.max_concurrency or 1))
@@ -564,7 +540,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         # alone updates the shared voice_config, so worker results cannot race on it.
         handle.log(f"[{sp}] 开始生成语音推理基础（LLM 推理）…")
         pairs = samples.get(sp, [])
-        lines = [t for _i, t in pairs]  # texts only, for ref-text selection / fallback
+        lines = pairs.texts() if hasattr(pairs, "texts") else [t for _i, t in pairs]  # texts only, for ref-text selection / fallback
         bands = _select_target_bands(pairs)
         # Description + ref text: an override wins, else the LLM, else a fallback.
         # ``gender`` (male/female/"") is a PRE-FILL only — the user's badge pick is the
@@ -685,11 +661,11 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     handle.log(f"voice_config 已保存：{vc_path}")
 
     handle.progress(1.0, "完成")
-    resolved_aliases = suggest_role_hints(order, voice_config, {sp: len(samples[sp]) for sp in order})
-    handle.log(f"语音推理基础生成完成：{len(unique_speakers)} 个角色，{len(resolved_aliases)} 条角色关联提示（仅供参考）。")
+    handle.log(f"语音推理基础生成完成：{len(unique_speakers)} 个角色。角色关联提示可在角色列表查看。")
     return {
         "count": len(unique_speakers),
-        "aliases": len(resolved_aliases),
+        "aliases": 0,
+        "hints_deferred": True,
         "speakers": order,
         "voice_config_path": str(vc_path),
         "results": results,
@@ -725,7 +701,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
     it as a recorded failure. On cancel the worker's process tree is killed so GPU
     memory frees at once. **No LLM is used.**
     """
-    script = _load_script(handle, script_name)
+    script = _load_script(handle, script_name, speakers)
     samples, order = _collect_samples(script)
     handle.log(f"检测到 {len(order)} 个角色：{'、'.join(order)}")
 
@@ -793,7 +769,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         description = (entry.get("description") or "").strip()
         ref_text = (entry.get("ref_text") or "").strip()
         if not ref_text:
-            ref_text = pick_ref_text([t for _i, t in samples.get(sp, [])]) \
+            ref_text = pick_ref_text(t for _i, t in samples.get(sp, [])) \
                 or f"{sp} speaks in a clear, natural voice."
         for k in range(1, _target(sp) + 1):
             final_out = layout.voice_profiles / "designed_voices" / safe_filename(f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav")

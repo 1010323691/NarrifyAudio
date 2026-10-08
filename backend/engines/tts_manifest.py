@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 from ..core import pathio
@@ -252,7 +253,14 @@ def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
     if not names:
         return 0
     changed = 0
-    for manifest_path in layout.audio_chunk.glob("*/manifest.json"):
+    from ..core.manifest_speakers import candidate_manifests
+    try:
+        manifests = candidate_manifests(layout.audio_chunk, names)
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        # This is a derived lookup; unavailable/corrupt cache must not omit any
+        # stale audio or prevent the voice checkpoint from preserving history.
+        manifests = layout.audio_chunk.glob("*/manifest.json")
+    for manifest_path in manifests:
         try:
             data = json.loads(manifest_path.read_text("utf-8"))
         except (OSError, json.JSONDecodeError):

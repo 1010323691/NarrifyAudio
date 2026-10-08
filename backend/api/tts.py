@@ -42,7 +42,7 @@ from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
-from ..core.role_hints import suggest_role_hints
+from ..core.role_hint_cache import cached_role_hints
 from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
@@ -375,7 +375,7 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     # ties keep first-appearance (or voice_config) order.
     names = sorted(order if has_script else list(voice_config.keys()),
                    key=lambda sp: -counts.get(sp, 0))
-    hints = suggest_role_hints(names, voice_config, counts)
+    hints = cached_role_hints(names, voice_config, counts, layout.temp / "role-hints")
 
     ready_names = {n for n in names if _voice_ready(n, voice_config)}
     counts_out = {"all": len(names), "ready": len(ready_names), "pending": len(names) - len(ready_names),
