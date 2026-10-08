@@ -8,7 +8,7 @@ from backend.platform import database
 
 def test_database_pools_have_separate_bounded_budgets(monkeypatch):
     for role, size, overflow, lock_size, lock_overflow in [
-        ("api", 16, 0, 8, 0), ("worker", 3, 0, 1, 0),
+        ("api", 16, 0, 8, 0), ("worker", 6, 0, 1, 0),
     ]:
         with monkeypatch.context() as monkeypatch:
             monkeypatch.setenv("NARRIFY_DB_ROLE", role)
@@ -17,6 +17,8 @@ def test_database_pools_have_separate_bounded_budgets(monkeypatch):
                 monkeypatch.delenv(f"NARRIFY_{role.upper()}_DB_LOCK_POOL_{key}", raising=False)
             pool = database._pool_kwargs()
             lock = database._pool_kwargs(lock=True)
+            assert pool["pool_timeout"] == (30 if role == "worker" else 3)
+            assert lock["pool_timeout"] == 3
             assert (pool["pool_size"], pool["max_overflow"]) == (size, overflow), (role, size, overflow, lock_size, lock_overflow,)
             assert (lock["pool_size"], lock["max_overflow"]) == (lock_size, lock_overflow), (role, size, overflow, lock_size, lock_overflow,)
 

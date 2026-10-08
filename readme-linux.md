@@ -241,18 +241,21 @@ PATH=/opt/narrify-audio/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
 
 ### 数据库连接预算与故障恢复
 
-连接池按进程分别配置，默认 API 业务池与迁移锁池均为 `16+8`，每个 Worker
-业务池为 `3+1`、锁池为 `1+0`（未使用时不创建连接）。一个 API 进程加八个
-Worker（4 个机械任务 + 4 个模型任务）的连接上限为 `48 + 8×5 = 88`；PostgreSQL 保持 `max_connections=100`
-时，剩余 12 个连接供迁移、运维及其他客户端使用。增加 API/Worker 进程或
-解析并发之前，须重新计算所有进程的池上限，而非只增大单个连接池。
+连接池按进程分别配置，默认 API 业务池为 `16+0`、迁移锁池为 `8+0`，
+每个 Worker 业务池为 `6+0`、锁池为 `1+0`（未使用时不创建连接）。一个 API
+进程加八个 Worker（4 个机械任务 + 4 个模型任务）的连接上限为
+`24 + 8×7 = 80`；PostgreSQL 保持 `max_connections=100` 时，剩余 20 个连接
+供迁移、运维及其他客户端使用。增加进程或解析并发之前，须重新计算所有
+进程的池上限，而非只增大单个连接池。
 
 `.env.example` 列出 `NARRIFY_API_DB_*` 和 `NARRIFY_WORKER_DB_*` 配置；
 `POOL_SIZE` 必须大于零，`POOL_MAX_OVERFLOW` 可为零，禁止无限溢出。
-同一组的 `POOL_TIMEOUT` 可指定等待秒数：API 业务池默认 60、锁池 30，
-Worker 两个池均为 10。修改后重启相应进程生效。标准
-`python -m backend.worker` 自动选择 Worker 配置；自定义嵌入式启动器可设置
-`NARRIFY_DB_ROLE=worker`，API 则使用 `api`，不要在共享环境文件中固定此角色。
+同一组的 `POOL_TIMEOUT` 可指定等待秒数：Worker 业务池默认 30，API 及锁池
+默认 3。Worker 内多个合并线程、租约续期和调度共享业务池，旧的 `3+0`、
+三秒等待在并发发布时容易耗尽。成果写入及进度回调已移到数据库会话之外。
+已有 `.env` 中的显式配置优先于默认值，升级时应对照示例调整并重启相应
+进程。标准 `python -m backend.worker` 自动选择 Worker 配置；自定义嵌入式
+启动器可设置 `NARRIFY_DB_ROLE=worker`，不要在共享环境文件中固定此角色。
 
 持续运行的 Worker 在启动心跳、心跳更新、取任务或调度遇到数据库连接中断、
 连接耗尽或连接池超时时，以 1、2、4 秒递增退避，最长间隔 30 秒，数据库恢复
