@@ -222,7 +222,10 @@ def defer_or_delete(handle, path: Path) -> None:
         defer_delete(path)
     else:
         try:
-            path.unlink()
+            from ..core.workspace_epochs import managed_mutation
+            if path.exists():
+                with managed_mutation(path):
+                    path.unlink()
         except FileNotFoundError:
             pass
 
@@ -236,7 +239,7 @@ def migrate_voice_config(handle, path: Path, workspace, voice_config: dict) -> N
     if callable(stage_file):
         stage_file(path, encoded)
     else:
-        path.write_bytes(encoded)
+        pathio.rewrite_json_file(path, voice_config)
 
 
 def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
@@ -294,7 +297,7 @@ def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
                     defer_workspace_delete(output)
                     continue
                 try:
-                    output.unlink()
+                    defer_or_delete(None, output)
                 except FileNotFoundError:
                     pass
                 except OSError:
@@ -418,7 +421,7 @@ def _load_manifest(out_dir, *, persist_migration: bool, handle=None, voice_confi
         if callable(stage_file):
             stage_file(p, encoded)
         else:
-            p.write_bytes(encoded)
+            pathio.rewrite_json_file(p, data)
     return by_index
 
 
@@ -650,4 +653,6 @@ def write_manifest_file(manifest_path, manifest, handle=None) -> None:
     if callable(stage_file):
         stage_file(manifest_path, encoded)
     else:
-        manifest_path.write_bytes(encoded)
+        from ..core.workspace_epochs import managed_mutation
+        with managed_mutation(manifest_path):
+            manifest_path.write_bytes(encoded)

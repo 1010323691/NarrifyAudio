@@ -618,7 +618,9 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             pending = vc_path.with_name(f".{vc_path.name}.{uuid.uuid4().hex}.tmp")
             try:
                 pending.write_bytes(json.dumps(latest, indent=2, ensure_ascii=False).encode("utf-8"))
-                os.replace(pending, vc_path)
+                from ..core.workspace_epochs import managed_mutation
+                with managed_mutation(vc_path):
+                    os.replace(pending, vc_path)
             finally:
                 pending.unlink(missing_ok=True)
             voice_config.clear()

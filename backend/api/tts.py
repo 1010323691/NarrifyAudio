@@ -527,7 +527,7 @@ def select_voice(
     entry["selected_audio_id"] = aid
     # Keep the active reference in sync so downstream synthesis uses the picked take.
     entry["ref_audio"] = active["ref_audio"]
-    vc_path.write_bytes(json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8"))
+    pathio.rewrite_json_file(vc_path, voice_config)
     Batch.invalidate_speaker_outputs([req.speaker], layout)
     return {"ok": True, "speaker": req.speaker, "selected_audio_id": aid,
             "ref_audio": active["ref_audio"]}
@@ -1722,17 +1722,19 @@ def _preview_apply_commit(layout, src, lines, edits_by_index, pkg) -> tuple[bool
 
     # 2. 05 替换
     def _step_replace() -> None:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for index, item in plan.items():
-            staged_file, dst, old_abs = item["staged_file"], item["dst"], item["old_abs"]
-            if not staged_file.is_file():
-                raise RuntimeError(f"暂存产物缺失：{item['staged_file'].name}")
-            shutil.copy2(staged_file, dst)
-            if old_abs is not None and old_abs.resolve() != dst.resolve():
-                try:
-                    old_abs.unlink()
-                except OSError as e:
-                    raise RuntimeError(f"旧音频删除失败：{old_abs.name}（{e}）")
+        from ..core.workspace_epochs import managed_mutation
+        with managed_mutation(out_dir):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for index, item in plan.items():
+                staged_file, dst, old_abs = item["staged_file"], item["dst"], item["old_abs"]
+                if not staged_file.is_file():
+                    raise RuntimeError(f"暂存产物缺失：{item['staged_file'].name}")
+                shutil.copy2(staged_file, dst)
+                if old_abs is not None and old_abs.resolve() != dst.resolve():
+                    try:
+                        old_abs.unlink()
+                    except OSError as e:
+                        raise RuntimeError(f"旧音频删除失败：{old_abs.name}（{e}）")
 
     # 3. manifest 更新（只动被改行；voice_versions / pause_after 等未变字段保留）
     def _step_manifest() -> None:
@@ -1796,13 +1798,16 @@ def _preview_apply_commit(layout, src, lines, edits_by_index, pkg) -> tuple[bool
         except Exception as e:  # noqa: BLE001 — 任一步失败 → 字节级还原 → 500
             _restore = []
             try:
-                shutil.rmtree(out_dir, ignore_errors=True)
-                if (backup_root / "audio_chunk_pkg").exists():
-                    shutil.copytree(backup_root / "audio_chunk_pkg", out_dir)
+                from ..core.workspace_epochs import managed_mutation
+                with managed_mutation(out_dir):
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    if (backup_root / "audio_chunk_pkg").exists():
+                        shutil.copytree(backup_root / "audio_chunk_pkg", out_dir)
             except Exception as re_:  # noqa: BLE001
                 _restore.append(f"05 包还原失败：{re_}")
             try:
-                src.write_bytes((backup_root / "script.json").read_bytes())
+                with managed_mutation(src):
+                    src.write_bytes((backup_root / "script.json").read_bytes())
             except Exception as re_:  # noqa: BLE001
                 _restore.append(f"剧本还原失败：{re_}")
             shutil.rmtree(backup_root, ignore_errors=True)

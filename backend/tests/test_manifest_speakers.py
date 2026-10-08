@@ -48,3 +48,40 @@ def test_corrupt_manifest_index_is_rebuilt_without_losing_candidates(tmp_path):
     (root / ".speaker-index.sqlite").write_bytes(b"broken index")
     assert candidate_manifests(root, ["A"]) == [path]
     assert list(root.glob(".speaker-index.corrupt-*.sqlite"))
+
+
+def test_lookup_skips_directory_scan_until_epoch_or_fallback(tmp_path, monkeypatch):
+    from backend.core import manifest_speakers
+    from backend.core.workspace_epochs import managed_mutation
+    workspace = tmp_path / "workspace"
+    (workspace / "00_temp").mkdir(parents=True)
+    root = workspace / "05_audio_chunk"
+    chapter = root / "1"
+    chapter.mkdir(parents=True)
+    (chapter / "manifest.json").write_text(json.dumps([{"speaker": "A"}]), encoding="utf-8")
+    monkeypatch.setattr(manifest_speakers.time, "time", lambda: 1000.0)
+    assert candidate_manifests(root, ["A"]) == [chapter / "manifest.json"]
+    scans = []
+    original_glob = Path.glob
+    def glob(self, pattern, *args, **kwargs):
+        if self == root:
+            scans.append(pattern)
+        return original_glob(self, pattern, *args, **kwargs)
+    monkeypatch.setattr(Path, "glob", glob)
+    # Managed epoch unchanged and the fallback window open: pure index lookup.
+    assert candidate_manifests(root, ["A"]) == [chapter / "manifest.json"]
+    monkeypatch.setattr(manifest_speakers.time, "time", lambda: 1299.0)
+    assert candidate_manifests(root, ["A"]) == [chapter / "manifest.json"]
+    assert not scans
+    # A managed write bumps the epoch: the scan runs immediately.
+    with managed_mutation(chapter / "manifest.json"):
+        (chapter / "manifest.json").write_text(json.dumps([{"speaker": "B"}]), encoding="utf-8")
+    assert candidate_manifests(root, ["B"]) == [chapter / "manifest.json"]
+    assert len(scans) == 1
+    # An external edit is invisible until the bounded fallback expires.
+    monkeypatch.setattr(manifest_speakers.time, "time", lambda: 1299.0)
+    (chapter / "manifest.json").write_text(json.dumps([{"speaker": "C"}]), encoding="utf-8")
+    assert candidate_manifests(root, ["C"]) == []
+    monkeypatch.setattr(manifest_speakers.time, "time", lambda: 1599.0)
+    assert candidate_manifests(root, ["C"]) == [chapter / "manifest.json"]
+    assert len(scans) == 2

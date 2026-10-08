@@ -1,13 +1,15 @@
 """Immutable, indexed script preparation shared by independent role tasks."""
 from __future__ import annotations
 
+import os
+import re
+import time
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from contextvars import ContextVar
 import hashlib
 import json
 from pathlib import Path
-import os
 import sqlite3
 import uuid
 
@@ -17,6 +19,16 @@ from .task_control import TaskCancelled
 from .safe_filesystem import safe_regular_path
 
 _reference = ContextVar("narrify_script_reference", default=None)
+
+# Bounded retention for the immutable snapshot cache. The input-change check
+# itself never trusts elapsed time: an external edit must invalidate the task
+# immediately, so the version is re-derived from the source identities on
+# every open (one stat per file, no content reads).
+PRUNE_KEEP = 4
+PRUNE_MAX_AGE_SECONDS = 7 * 86400
+PRUNE_LIMIT = 10
+PRUNE_INTERVAL_SECONDS = 3600
+_SNAPSHOT_NAME_RE = re.compile(r"^[0-9a-f]{64}\.sqlite$")
 
 
 def bind_reference(reference):
@@ -63,15 +75,76 @@ def _connect(path):
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
 
 
+def prune_snapshots(directory, *, keep=PRUNE_KEEP, max_age=PRUNE_MAX_AGE_SECONDS,
+                    limit=PRUNE_LIMIT, interval=PRUNE_INTERVAL_SECONDS) -> int:
+    """Bounded retention: at most once per interval, at most ``limit`` removals.
+
+    Snapshots are immutable and rebuildable, so only stale versions beyond the
+    recent window are removable; crash leftovers (staged builds) follow the
+    same age gate. Failures never propagate to role preparation."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return 0
+    now = time.time()
+    stamp = directory / ".prune-at"
+    try:
+        if float(stamp.read_text()) > now - interval:
+            return 0
+    except (OSError, ValueError):
+        pass
+    deleted = 0
+    try:
+        cutoff = now - max_age
+        rows = []
+        for path in directory.glob("*.sqlite"):
+            if not _SNAPSHOT_NAME_RE.match(path.name):
+                continue
+            try:
+                rows.append((path, path.stat().st_mtime))
+            except OSError:
+                continue
+        rows.sort(key=lambda item: item[1], reverse=True)
+        for index, (path, mtime) in enumerate(rows):
+            if deleted >= limit or mtime > cutoff or index < keep:
+                continue
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError:
+                continue
+        for path in directory.glob(".*.sqlite"):
+            if deleted >= limit:
+                break
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    deleted += 1
+            except OSError:
+                continue
+    finally:
+        try:
+            stamp.write_text(str(now))
+        except OSError:
+            pass
+    return deleted
+
+
 def open_snapshot(paths, directory, *, check=lambda: None, log=lambda *_: None, skip_invalid=False, speakers=None, cancelled=lambda: False, expected_version=None):
     check()  # never park a paused role while holding the shared build lock
     paths = tuple(Path(path) for path in paths)
     if not paths:
         raise RuntimeError("未找到脚本 JSON（03_parsed_json/）——请先在「文本解析」生成脚本。")
+    directory = Path(directory)
+    # The version must always be re-derived: a submitted task may only run
+    # against the exact input it captured, and external edits carry no epoch
+    # signal — only the source identities prove the input is unchanged.
     version, sources = source_version(paths)
     if expected_version is not None and version != expected_version:
         raise RuntimeError("剧本输入已变更，请刷新后重新提交任务。")
-    directory = Path(directory)
+    try:
+        prune_snapshots(directory)
+    except Exception:
+        pass  # retention must never break role preparation
     if directory.is_symlink():
         raise ValueError("Script snapshot cache must not follow directory symlinks")
     directory.mkdir(parents=True, exist_ok=True)

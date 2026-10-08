@@ -280,7 +280,9 @@ def migrate_entries(entries, root, fields: tuple[str, ...] = ("path",)) -> int:
 def rewrite_json_file(file, data) -> None:
     """Rewrite a JSON file with the (migrated) data — UTF-8 bytes, pretty-printed
     (the project's no-CRLF convention)."""
-    Path(file).write_bytes(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
+    from .workspace_epochs import managed_mutation
+    with managed_mutation(file):
+        Path(file).write_bytes(json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
 
 
 def migrate_entries_in(file, root, kind: str, fields: tuple[str, ...] = ("path",)) -> tuple[int, object]:

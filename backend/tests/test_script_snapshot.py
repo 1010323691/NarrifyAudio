@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -69,3 +71,73 @@ def test_source_change_during_build_does_not_publish_snapshot(tmp_path):
     with pytest.raises(RuntimeError, match="发生变化"):
         open_snapshot([path], directory, cancelled=mutate)
     assert not list(directory.glob("*.sqlite"))
+
+
+def test_expected_version_rejects_any_source_change_immediately(tmp_path):
+    """The input-change check is a completeness contract, not a cache:
+    external edits carry no epoch signal, so no time window may mask them."""
+    from backend.core.script_snapshot import open_snapshot, source_version
+    from backend.core.workspace_epochs import managed_mutation
+    workspace = tmp_path / "workspace"
+    (workspace / "00_temp" / "script-snapshots").mkdir(parents=True)
+    (workspace / "03_parsed_json").mkdir()
+    paths = []
+    for chapter in range(4):
+        path = workspace / "03_parsed_json" / f"{chapter:02d}.json"
+        path.write_text(json.dumps([{"speaker": "A", "text": f"第{chapter}章台词"}]), encoding="utf-8")
+        paths.append(path)
+    version, _ = source_version(paths)
+    directory = workspace / "00_temp" / "script-snapshots"
+    first = open_snapshot(paths, directory, expected_version=version)
+    # External (unmanaged) edit, no epoch bump: the very next open must reject.
+    paths[1].write_text(json.dumps([{"speaker": "A", "text": "外部编辑"}]), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="剧本输入已变更"):
+        open_snapshot(paths, directory, expected_version=version)
+    second_version, _ = source_version(paths)
+    rebuilt = open_snapshot(paths, directory, expected_version=second_version)
+    assert rebuilt.path != first.path
+    # Managed write bumps the module epoch and is rejected the same way.
+    with managed_mutation(paths[2]):
+        paths[2].write_text(json.dumps([{"speaker": "A", "text": "受管改动"}]), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="剧本输入已变更"):
+        open_snapshot(paths, directory, expected_version=second_version)
+
+
+def test_snapshot_prune_is_budgeted_per_round_and_interval(tmp_path):
+    from backend.core.script_snapshot import prune_snapshots
+    directory = tmp_path / "snapshots"
+    directory.mkdir()
+    names = []
+    now = time.time()
+    for index in range(8):
+        path = directory / (f"{'%064x' % (index + 1)}.sqlite")
+        path.write_bytes(b"")
+        age = (8 * index + 8) * 86400
+        os.utime(path, (now - age, now - age))
+        names.append(path.name)
+    assert prune_snapshots(directory, limit=1) == 1
+    assert prune_snapshots(directory, limit=1) == 0  # interval budget
+    (directory / ".prune-at").unlink()
+    assert prune_snapshots(directory, limit=1) == 1
+    (directory / ".prune-at").unlink()
+    # With the budget restored the two remaining stale versions are removed;
+    # the recent four survive regardless of age.
+    assert prune_snapshots(directory, limit=10) == 2
+    assert {path.name for path in directory.glob("*.sqlite")} == set(names[:4])
+
+
+def test_snapshot_prune_ignores_foreign_files_and_stale_stages(tmp_path):
+    from backend.core.script_snapshot import prune_snapshots
+    directory = tmp_path / "snapshots"
+    directory.mkdir()
+    foreign = directory / "not-a-snapshot.sqlite"
+    foreign.write_bytes(b"")
+    staged = directory / ("." + "a" * 64 + ".b" * 32 + ".sqlite")
+    staged.write_bytes(b"")
+    os.utime(staged, (time.time() - 10, time.time() - 10))
+    stray = directory / "readme.json"
+    stray.write_bytes(b"{}")
+    pruned = prune_snapshots(directory, max_age=0, limit=10)
+    assert pruned == 1
+    assert foreign.exists()
+    assert stray.exists()

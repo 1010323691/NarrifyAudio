@@ -108,7 +108,9 @@ def _atomic_write_json(p: Path, data: dict, handle=None) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(payload)
-        os.replace(tmp, p)
+        from ..core.workspace_epochs import managed_mutation
+        with managed_mutation(p):
+            os.replace(tmp, p)
     except BaseException:
         try:
             os.unlink(tmp)
