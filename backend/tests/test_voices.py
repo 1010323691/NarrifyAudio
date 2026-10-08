@@ -1222,14 +1222,21 @@ def test_make_clones_disabled_checks_in_cmd(clone_ws, monkeypatch):
 
 def test_make_clones_disabled_checks_survive_fake_worker(clone_ws, monkeypatch):
     # One check closed in the config: the REAL run_worker spawns the fake design worker
-    # with the paired --disabled-checks flag — the run settles fully ok, and the on-disk
-    # run log proves the flag reached the child's command line. (Worker cmds must stay
+    # with paired flags — inspect the spawn arguments directly because logs
+    # intentionally omit full command lines. (Worker cmds must stay
     # strictly `--flag value` pairs: the fake worker's generic pair parser would swallow
     # the next token if a flag ever arrived value-less.)
     _seed_script(clone_ws, {"A": 3, "B": 2})
     _seed_foundations(clone_ws, ["A", "B"])
     core_config.update_config({"tts": {"planner_vram": False}})
     _stub_design_engine(monkeypatch, clone_ws)
+    from backend.engines import tts
+    commands = []
+    spawn = tts.GPUServiceManager.spawn_tts
+    def capture(cmd, *args, **kwargs):
+        commands.append(cmd)
+        return spawn(cmd, *args, **kwargs)
+    monkeypatch.setattr(tts.GPUServiceManager, "spawn_tts", capture)
     h = _Handle()
     res = V.generate_voice_candidates(h, concurrency=2, candidate_count=2)
     assert res["ok"] == 2 and res["failed"] == 0
@@ -1237,7 +1244,9 @@ def test_make_clones_disabled_checks_survive_fake_worker(clone_ws, monkeypatch):
     assert logs  # the run mirrored its transcript to disk
     transcript = "\n".join(p.read_text("utf-8") for p in logs)
     assert "--disabled-checks" not in transcript
-    assert "--vocoder-batch-size 8" in transcript
+    assert commands
+    assert all(cmd[cmd.index("--vocoder-batch-size") + 1] == "8" for cmd in commands)
+    assert "cmd:" not in transcript
 
 
 # --------------------------------------------------------------------------- #

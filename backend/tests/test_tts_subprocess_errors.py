@@ -37,7 +37,7 @@ def test_oom_is_detected_even_when_stderr_tail_loses_error(tmp_path, monkeypatch
     handle = Handle()
     with pytest.raises(tts.WorkerOutOfMemory) as caught:
         tts._run_tts_subprocess_once(["python"], handle, lambda line: None,
-                                     private_errors=True, log_file=log)
+                                     private_errors=True, log_file=log, log_line=lambda line: None)
     assert caught.value.rows == 224
     assert handle.logs == []
     assert "diagnostic stack frame" in log.read_text("utf-8")
@@ -58,3 +58,15 @@ def test_non_oom_failure_also_hides_stderr(tmp_path, monkeypatch):
     assert "private traceback" not in str(caught.value)
     assert "private traceback" in log.read_text("utf-8")
     assert handle.logs == []
+
+
+def test_structured_failure_is_retained_when_stderr_is_empty(tmp_path, monkeypatch):
+    output = b'[perf] {"stage":"batch","event":"error","oom":true,"error":"CUDA allocation failed"}\n'
+    proc = SimpleNamespace(stdout=io.BytesIO(output), stderr=io.BytesIO(), returncode=1, poll=lambda: 1)
+    monkeypatch.setattr(tts.GPUServiceManager, "spawn_tts", lambda *a, **kw: proc)
+    monkeypatch.setattr(tts.GPUServiceManager, "finish_tts", lambda *a: None)
+    log = tmp_path / "run.log"
+    with pytest.raises(tts.WorkerOutOfMemory):
+        tts._run_tts_subprocess_once(["python"], Handle(), lambda line: None,
+                                     private_errors=True, log_file=log, log_line=lambda line: None)
+    assert "CUDA allocation failed" in log.read_text("utf-8")

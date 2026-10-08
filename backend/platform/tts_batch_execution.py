@@ -14,6 +14,7 @@ class TTSBatchContext(PooledTaskContext):
         super().__init__(claims, finish, cancel,
                          lambda claim: (claim.payload.get("scripts") or [claim.payload["script"]])[0])
         self.progress_snapshots = {}
+        self.saving_results = False
 
     def chapter_cancelled(self, name):
         return self.entry_cancelled(name)
@@ -24,10 +25,18 @@ class TTSBatchContext(PooledTaskContext):
         snapshot = (done, total, chars, chars_total)
         if self.progress_snapshots.get(name) == snapshot:
             return
-        self.progress_snapshots[name] = snapshot
         ctx = self.contexts[name]
-        ctx.segment_stats(done, total, chars, chars_total)
-        ctx.progress(done / max(1, total), f"已合成 {done}/{total} 段")
+        label = (f"正在保存合成结果 · 已保存 {done}/{total} 段 · 待保存 {max(0, total - done)} 段"
+                 if self.saving_results else f"已合成 {done}/{total} 段")
+        if ctx.chapter_snapshot(done, total, chars, chars_total, label):
+            self.progress_snapshots[name] = snapshot
+
+    def phase(self, name):
+        self.saving_results = name == "正在保存合成结果"
+        self.progress_snapshots.clear()
+        for entry, ctx in self.contexts.items():
+            if entry not in self.completed and entry not in self.results:
+                ctx.phase(name)
 
     def progress(self, fraction, current=""):
         # The subprocess reports whole-pool progress; each visible task owns
