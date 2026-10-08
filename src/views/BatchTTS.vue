@@ -253,6 +253,7 @@ const noSynthesizable = computed(
 // Run state
 // ---------------------------------------------------------------------------
 const busy = ref(false)
+let operationVersion = 0
 const error = ref('')
 const taskId = ref<string | null>(null)
 
@@ -351,14 +352,24 @@ onMounted(async () => {
 // Rows refresh whenever the page (re)appears, and the live poll resumes only if the
 // tracked run is still going. onActivated also fires on first mount (initial load);
 // on first mount, onMounted performs the initial file refresh.
-onActivated(() => {
+onActivated(async () => {
+  const isCurrent = captureScope()
+  const version = operationVersion
   void refreshRows()
-  if (task.value && ['failed', 'succeeded', 'cancelled'].includes(task.value.status))
-    taskId.value = null
-  if (!taskId.value) busy.value = false
-  reattachTask()
-  const st = task.value?.status
-  if (task.value && (st === 'pending' || st === 'running')) startStatusPolling()
+  try {
+    await withinScope(taskStore.refresh(), isCurrent)
+    if (version !== operationVersion) return // 新操作已经接管 busy，旧恢复不得清锁。
+    // 实时快照包含全部在途任务；旧的终态任务可能已移出回放窗口。
+    const activeIds = new Set(taskStore.activeTasks('tts-batch').map(row => row.id))
+    if (!taskBatch.rows.value.some(row => activeIds.has(row.id))) taskId.value = null
+    if (!taskId.value) busy.value = false
+    reattachTask()
+    const st = task.value?.status
+    if (st && ACTIVE.has(st)) startStatusPolling()
+    else stopStatusPolling()
+  } catch (e: any) {
+    if (isCurrent()) error.value = e?.message || '读取合成任务状态失败'
+  }
 })
 onDeactivated(() => stopStatusPolling(false)) // hidden: no timer, no requests
 onUnmounted(() => stopStatusPolling(false)) // last resort (keep-alive usually prevents this)
@@ -377,6 +388,7 @@ async function doRun() {
   const names = selectedNames.value
   if (!names.length) return
   busy.value = true
+  operationVersion++
   error.value = ''
   try {
     // Default (resume): synthesize only the not-yet-done segments, skipping existing audio
@@ -414,6 +426,7 @@ async function doRunAll() {
   const names = selectedNames.value
   if (!names.length) return
   busy.value = true
+  operationVersion++
   try {
     if (
       !(await withinScope(
@@ -537,6 +550,7 @@ async function retryBatch() {
   if (!failedTask.value || busy.value) return
   const id = failedTask.value.id
   busy.value = true
+  operationVersion++
   try {
     await withinScope(taskStore.control(id, 'retry'), isCurrent)
     taskId.value = id

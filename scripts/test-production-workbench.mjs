@@ -85,7 +85,9 @@ function harness(view, api = {}) {
   const project = vue.reactive({ activeProjectId: 'project-a' })
   const taskStore = vue.reactive({
     projectTasks: [],
-    activeTasks: () => [],
+    activeTasks: module => taskStore.projectTasks.filter(row =>
+      ['pending', 'queued', 'retrying', 'running', 'paused', 'cancelling'].includes(row.status)
+      && (!module || row.module === module)),
     refresh: async () => {},
     control: async () => {},
   })
@@ -515,6 +517,63 @@ test('switching project discards a cached chapter batch', async () => {
   h.project.activeProjectId = 'project-b'
   assert.equal(h.taskId.value, null)
   assert.equal(h.task.value, null)
+})
+
+const synthesisTask = (id, status = 'running') => ({
+  id, status, module: 'tts-batch', task_type: 'tts.batch', project_id: 'project-a',
+  label: id, progress: 0, logs: [], current: '', result: {},
+})
+
+test('returning to synthesis preserves an active batch and unlocks after task-centre cancellation', async () => {
+  const h = harness('BatchTTS')
+  h.taskStore.projectTasks = [synthesisTask('one'), synthesisTask('two', 'pending')]
+  await vue.nextTick()
+  assert.equal(h.busy.value, true)
+  h.hooks.deactivate.forEach(fn => fn())
+  await Promise.all(h.hooks.activate.map(fn => fn()))
+  assert.equal(h.busy.value, true)
+  h.hooks.deactivate.forEach(fn => fn())
+  h.taskStore.projectTasks = [synthesisTask('one', 'cancelled'), synthesisTask('two', 'cancelled')]
+  await vue.nextTick()
+  await Promise.all(h.hooks.activate.map(fn => fn()))
+  assert.equal(h.busy.value, false)
+  assert.equal(h.taskId.value, null)
+})
+
+test('returning after cancellation unlocks even when old tasks leave the replay window', async () => {
+  const h = harness('BatchTTS')
+  h.taskStore.projectTasks = [synthesisTask('old'), synthesisTask('recent', 'pending')]
+  await vue.nextTick()
+  h.hooks.deactivate.forEach(fn => fn())
+  h.taskStore.projectTasks = [synthesisTask('recent', 'cancelled')]
+  await vue.nextTick()
+  assert.equal(h.busy.value, true)
+  await Promise.all(h.hooks.activate.map(fn => fn()))
+  assert.equal(h.busy.value, false)
+  assert.equal(h.taskId.value, null)
+  h.status.value = { ready: true, implemented: true }
+  h.selected['chapter.json'] = true
+  await h.doRun()
+  assert.equal(h.calls.length, 1)
+})
+
+test('late activation replay cannot unlock a synthesis submission already in flight', async () => {
+  const replay = deferred(), submission = deferred()
+  const h = harness('BatchTTS', { runBatch: () => submission.promise })
+  h.status.value = { ready: true, implemented: true }
+  h.taskStore.refresh = () => replay.promise
+  const activation = Promise.all(h.hooks.activate.map(fn => fn()))
+  await h.refreshRows()
+  h.selected['chapter.json'] = true
+  const running = h.doRun()
+  assert.equal(h.busy.value, true)
+  assert.equal(h.taskId.value, null)
+  replay.resolve()
+  await activation
+  assert.equal(h.busy.value, true)
+  submission.resolve({ task_ids: ['new-task'] })
+  await running
+  assert.equal(h.taskId.value, 'new-task')
 })
 
 test('batch snapshot retention does not traverse unrelated stream buffers', async () => {
