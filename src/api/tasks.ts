@@ -93,8 +93,8 @@ export function streamAllTasks(
   onConnection?: (state: 'connected' | 'reconnecting') => void,
 ): () => void {
   const url = projectId
-    ? `${API_BASE}/api/v1/tasks/stream?project_id=${encodeURIComponent(projectId)}`
-    : `${API_BASE}/api/v1/tasks/stream`
+    ? `${API_BASE}/api/v1/tasks/stream?compact=true&project_id=${encodeURIComponent(projectId)}`
+    : `${API_BASE}/api/v1/tasks/stream?compact=true`
   return openSse(url, onEvent, onDone, onConnection)
 }
 
@@ -145,4 +145,15 @@ export interface ProjectOverviewTasks {
 }
 export function getProjectOverviewTasks(projectId: string, signal: AbortSignal): Promise<ProjectOverviewTasks> {
   return http.get(`/api/v1/tasks/overview?project_id=${encodeURIComponent(projectId)}`, { signal })
+}
+
+export interface TaskLogPage {
+  logs: Array<{ sequence: number; t: number; level: string; msg: string }>
+  next_before: number | null
+}
+export function getTaskLogs(id: string, options: { after?: number; before?: number } = {}, signal?: AbortSignal): Promise<TaskLogPage> {
+  const query = new URLSearchParams({ limit: '100' })
+  if (options.after !== undefined) query.set('after', String(options.after))
+  if (options.before !== undefined) query.set('before', String(options.before))
+  return http.get(`/api/v1/tasks/${encodeURIComponent(id)}/logs?${query}`, { signal })
 }

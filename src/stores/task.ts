@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { controlTask, controlTaskCategory, streamAllTasks } from '@/api/tasks'
 import type { TaskControl, TaskSnapshot, TaskStatus } from '@/types'
 import type { TaskCenterCategoryId } from '@/utils/taskCenter'
@@ -47,6 +47,7 @@ export const useTaskStore = defineStore('task', () => {
   let boundProjectId: string | null = null
   let taskCenterOpen = false
   let snapshotReceived = false
+  let snapshotChunks: TaskSnapshot[] = []
   // refresh() callers wait here for the stream's snapshot_all replay to land.
   let snapshotWaiters: Array<() => void> = []
 
@@ -101,13 +102,39 @@ export const useTaskStore = defineStore('task', () => {
     return projectTasks.value.filter((t) => isActive(t.status) && (!module || t.module === module))
   }
 
+  let taskIndex = new Map<string, number>()
+  function rebuildTaskIndex() { taskIndex = new Map(tasks.value.map((task, index) => [task.id, index])) }
+  watch(tasks, rebuildTaskIndex, { flush: 'sync' })
   function upsert(t: TaskSnapshot) {
-    const i = tasks.value.findIndex((x) => x.id === t.id)
-    if (i === -1) tasks.value.unshift(t)
+    const i = taskIndex.get(t.id) ?? -1
+    if (i === -1) { tasks.value.unshift(t); rebuildTaskIndex() }
     else tasks.value[i] = t
   }
 
   function applyEvent(id: string, e: { type: string; [k: string]: any }) {
+    if (e.type === 'snapshot_add_chunk') {
+      const next = [...tasks.value]
+      const index = new Map(next.map((task, offset) => [task.id, offset]))
+      const added: TaskSnapshot[] = []
+      for (const task of e.tasks as TaskSnapshot[]) {
+        const offset = index.get(task.id)
+        if (offset === undefined) added.push(task)
+        else next[offset] = task
+      }
+      tasks.value = [...added, ...next]
+      return
+    }
+    if (e.type === 'snapshot_chunk') {
+      if (e.first) snapshotChunks = []
+      snapshotChunks.push(...e.tasks)
+      return
+    }
+    if (e.type === 'snapshot_end') {
+      const incoming = snapshotChunks
+      snapshotChunks = []
+      applyEvent('', { type: 'snapshot_all', tasks: incoming })
+      return
+    }
     if (e.type === 'snapshot_all') {
       // The replay is the server's visible view for this stream's scope: upsert
       // its rows and drop the store rows it no longer lists — a terminal row
@@ -117,11 +144,7 @@ export const useTaskStore = defineStore('task', () => {
       // are unaffected: they live in the view's own merge, which re-adds them
       // only while the server still lists them there.
       const incoming = Array.isArray(e.tasks) ? e.tasks : []
-      const visible = new Set(incoming.map((task) => task.id))
-      for (const task of incoming) upsert(task)
-      if (tasks.value.some((task) => !visible.has(task.id))) {
-        tasks.value = tasks.value.filter((task) => visible.has(task.id))
-      }
+      tasks.value = incoming
       snapshotReceived = true
       connectionStatus.value = 'connected'
       snapshotVersion.value += 1
@@ -133,13 +156,14 @@ export const useTaskStore = defineStore('task', () => {
       // A re-run of the same entry replaced this terminal row: drop it from the
       // live state (the 完成/失败 row must not sit next to the new 进行中 row)
       // and remember the id so the task centre's history merge can drop it too.
-      const index = tasks.value.findIndex((task) => task.id === id)
-      if (index !== -1) tasks.value.splice(index, 1)
+      const index = (taskIndex.get(id) ?? -1)
+      if (index !== -1) { tasks.value.splice(index, 1); rebuildTaskIndex() }
       supersededIds.value.add(id)
       if (allStream && !shouldKeepStream()) closeStream()
       return
     }
-    const t = tasks.value.find((x) => x.id === id)
+    const position = taskIndex.get(id)
+    const t = position === undefined ? undefined : tasks.value[position]
     if (!t) {
       // A late snapshot/final carries the full task — add it if unknown.
       if ((e.type === 'snapshot' || e.type === 'final' || e.type === 'status') && e.task) upsert(e.task)
@@ -148,7 +172,7 @@ export const useTaskStore = defineStore('task', () => {
     }
     switch (e.type) {
       case 'snapshot':
-        if (e.task) tasks.value[tasks.value.indexOf(t)] = e.task
+        if (e.task) tasks.value[position!] = e.task
         break
       case 'progress':
         t.progress = e.progress
@@ -156,6 +180,7 @@ export const useTaskStore = defineStore('task', () => {
         break
       case 'phase':
         t.phase = typeof e.phase === 'string' ? e.phase : ''
+        if (typeof e.current === 'string' && e.current) t.current = e.current
         break
       case 'log':
         // Append chronologically (oldest first) so the UI shows the newest line at the
@@ -185,7 +210,7 @@ export const useTaskStore = defineStore('task', () => {
       case 'status':
         // A terminal status arrives with the full snapshot (result / error); apply it
         // atomically so the completion handler never reads a stale, empty result.
-        if (e.task) tasks.value[tasks.value.indexOf(t)] = e.task
+        if (e.task) tasks.value[position!] = e.task
         else t.status = e.status
         break
       case 'paused':
@@ -203,7 +228,7 @@ export const useTaskStore = defineStore('task', () => {
         t.current = '等待启动'
         break
       case 'final':
-        if (e.task) tasks.value[tasks.value.indexOf(t)] = e.task
+        if (e.task) tasks.value[position!] = e.task
         break
     }
     // The stream is only worth holding while some task is live: the last task's
@@ -220,7 +245,9 @@ export const useTaskStore = defineStore('task', () => {
     connectionStatus.value = 'connecting'
     allStream = streamAllTasks(
       (e) => {
-        if (streamGeneration === generation && streamEpoch === connectionEpoch) applyEvent(String(e.task_id ?? ''), e)
+        if (streamGeneration === generation && streamEpoch === connectionEpoch) {
+          applyEvent(String(e.task_id ?? ''), e)
+        }
       },
       () => {
         if (streamGeneration !== generation || streamEpoch !== connectionEpoch) return
@@ -240,6 +267,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function closeStream() {
+    snapshotChunks = []
     connectionEpoch += 1
     if (allStream) {
       allStream()
@@ -363,6 +391,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function reset() {
+    snapshotChunks = []
     generation += 1
     boundProjectId = null
     taskCenterOpen = false

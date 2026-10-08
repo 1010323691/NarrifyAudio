@@ -338,8 +338,11 @@ def test_saving_phase_replays_changed_chapter_counters(monkeypatch):
     from backend.platform.tts_batch_execution import TTSBatchContext
     events = []
     progress = []
-    monkeypatch.setattr(task_context, "_append_claim_event",
-                        lambda claim, kind, payload: events.append((claim.task_id, kind, payload)))
+    def collection(entries):
+        for claim, updates in entries:
+            events.extend((claim.task_id, kind, payload) for kind, payload in updates)
+        return {claim.task_id for claim, _ in entries}
+    monkeypatch.setattr(task_context, "write_claim_events", collection)
     def snapshot(claim, done, total, chars, chars_total, label):
         progress.append((claim.task_id, label))
         return True

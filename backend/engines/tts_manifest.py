@@ -69,16 +69,26 @@ def voice_signature(speaker: str, voice_config: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def segment_voice_params(segments, voice_config: dict) -> dict[int, dict]:
-    """Map each segment index to the exact effective voice JSON for that segment."""
-    return {s["index"]: voice_params(s.get("speaker", ""), voice_config)
-            for s in segments}
+def segment_voice_params(segments, voice_config: dict, cache=None) -> dict[int, dict]:
+    cache = {} if cache is None else cache
+    result = {}
+    for segment in segments:
+        speaker = segment.get("speaker", "")
+        if speaker not in cache:
+            cache[speaker] = voice_params(speaker, voice_config)
+        result[segment["index"]] = cache[speaker]
+    return result
 
 
-def segment_voice_signatures(segments, voice_config: dict) -> dict[int, str]:
-    """Map each segment index to the effective voice signature for that segment."""
-    return {s["index"]: voice_signature(s.get("speaker", ""), voice_config)
-            for s in segments}
+def segment_voice_signatures(segments, voice_config: dict, cache=None) -> dict[int, str]:
+    cache = {} if cache is None else cache
+    result = {}
+    for segment in segments:
+        speaker = segment.get("speaker", "")
+        if speaker not in cache:
+            cache[speaker] = voice_signature(speaker, voice_config)
+        result[segment["index"]] = cache[speaker]
+    return result
 
 
 def _voice_signature_matches(entry: dict, expected: str | None) -> bool:
@@ -298,7 +308,7 @@ def package_for(src: Path) -> str:
     return stem or "batch"
 
 
-def _migrate_legacy_voice_used(data: list, layout) -> int:
+def _migrate_legacy_voice_used(data: list, layout, voice_config=None) -> int:
     """Recover ``voice_used`` for manifests written before the per-segment JSON field.
 
     A legacy entry is safe to migrate only when its stored signature exactly matches the
@@ -306,22 +316,26 @@ def _migrate_legacy_voice_used(data: list, layout) -> int:
     be synthesized again.
     """
     vc_path = layout.voice_profiles / "voice_config.json"
-    if not vc_path.exists():
-        return 0
-    try:
-        voice_config = json.loads(vc_path.read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return 0
+    if voice_config is None:
+        try:
+            from ..core.bounded_json import read_json
+            voice_config = read_json(vc_path)
+        except (OSError, ValueError):
+            return 0
     if not isinstance(voice_config, dict):
         return 0
     migrated = 0
+    params_cache, signature_cache = {}, {}
     for entry in data:
         if not isinstance(entry, dict) or not entry.get("ok") or "voice_used" in entry:
             continue
         speaker = entry.get("speaker", "")
-        expected = voice_signature(speaker, voice_config)
+        if speaker not in signature_cache:
+            signature_cache[speaker] = voice_signature(speaker, voice_config)
+            params_cache[speaker] = voice_params(speaker, voice_config)
+        expected = signature_cache[speaker]
         if entry.get("voice_signature") == expected:
-            entry["voice_used"] = voice_params(speaker, voice_config)
+            entry["voice_used"] = params_cache[speaker]
             migrated += 1
     return migrated
 
@@ -331,15 +345,16 @@ def read_manifest(out_dir) -> dict:
     return _load_manifest(out_dir, persist_migration=False)
 
 
-def migrate_manifest(out_dir, handle=None) -> dict:
+def migrate_manifest(out_dir, handle=None, *, voice_config=None, expected_params=None, expected_signatures=None) -> dict:
     """Read and persist legacy manifest migrations for a write operation."""
-    return _load_manifest(out_dir, persist_migration=True, handle=handle)
+    return _load_manifest(out_dir, persist_migration=True, handle=handle, voice_config=voice_config,
+                          expected_params=expected_params, expected_signatures=expected_signatures)
 
 
 load_manifest = migrate_manifest  # compatibility for existing Python callers
 
 
-def _load_manifest(out_dir, *, persist_migration: bool, handle=None) -> dict:
+def _load_manifest(out_dir, *, persist_migration: bool, handle=None, voice_config=None, expected_params=None, expected_signatures=None) -> dict:
     """The package's cumulative manifest as ``{index: entry}`` (``{}`` if absent / unreadable).
 
     One entry per segment the batch has ever reported — the source of truth for what is already
@@ -349,7 +364,8 @@ def _load_manifest(out_dir, *, persist_migration: bool, handle=None) -> dict:
     if not p.exists():
         return {}
     try:
-        data = json.loads(p.read_text("utf-8"))
+        from ..core.bounded_json import read_json
+        data = read_json(p)
     except Exception:  # noqa: BLE001 — a corrupt manifest just means "start fresh"
         return {}
     if not isinstance(data, list):
@@ -361,7 +377,12 @@ def _load_manifest(out_dir, *, persist_migration: bool, handle=None) -> dict:
     # in-memory form of ``migrate_entries_in`` (which would re-read the same file).
     layout = get_or_prepare_layout() if persist_migration else resolve_layout()
     n = pathio.migrate_entries(data, layout.workspace, ("path",))
-    voice_migrated = _migrate_legacy_voice_used(data, layout)
+    if voice_config is None:
+        try:
+            voice_config = read_json(layout.voice_profiles / 'voice_config.json')
+        except (OSError, ValueError):
+            voice_config = {}
+    voice_migrated = _migrate_legacy_voice_used(data, layout, voice_config)
     by_index = {}
     for e in data:
         if isinstance(e, dict) and "index" in e:
@@ -369,20 +390,17 @@ def _load_manifest(out_dir, *, persist_migration: bool, handle=None) -> dict:
                 by_index[int(e["index"])] = e
             except (TypeError, ValueError):
                 pass
-    expected_params = {}
-    expected_signatures = {}
-    vc_path = layout.voice_profiles / "voice_config.json"
-    if vc_path.exists():
-        try:
-            voice_config = json.loads(vc_path.read_text("utf-8"))
-        except (OSError, json.JSONDecodeError):
-            voice_config = None
+    if expected_params is None or expected_signatures is None:
+        expected_params, expected_signatures = {}, {}
+        params_cache, signature_cache = {}, {}
         if isinstance(voice_config, dict):
             for index, entry in by_index.items():
-                if isinstance(entry, dict):
-                    speaker = entry.get("speaker", "")
-                    expected_params[index] = voice_params(speaker, voice_config)
-                    expected_signatures[index] = voice_signature(speaker, voice_config)
+                speaker = entry.get('speaker', '')
+                if speaker not in params_cache:
+                    params_cache[speaker] = voice_params(speaker, voice_config)
+                    signature_cache[speaker] = voice_signature(speaker, voice_config)
+                expected_params[index] = params_cache[speaker]
+                expected_signatures[index] = signature_cache[speaker]
     restored = restore_cached_voice_versions(
         by_index, expected_params or None, expected_signatures or None, layout.workspace,
     )

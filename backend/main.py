@@ -14,6 +14,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from sqlalchemy.exc import TimeoutError as DatabasePoolTimeout
 from starlette.concurrency import run_in_threadpool
 
 from .api import audio as api_audio
@@ -91,6 +92,11 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="NarrifyAudio API", version="0.2.0", lifespan=lifespan)
 
 
+@app.exception_handler(DatabasePoolTimeout)
+async def database_busy(_request, _error):
+    return JSONResponse({'detail': '数据库繁忙，请稍后重试'}, status_code=503, headers={'Retry-After': '3'})
+
+
 @app.middleware("http")
 async def collect_api_metrics(request, call_next):
     if not request.url.path.startswith("/api/"):
@@ -117,6 +123,10 @@ async def bind_authenticated_workspace(request, call_next):
     context in the parent task, while the dependency still repeats ownership
     validation as defense in depth.
     """
+    if request.url.path == '/api/health' or request.url.path.startswith("/api/v1/tasks") and (
+        request.method == "GET" or request.url.path.endswith(("/cancel", "/pause", "/resume"))
+    ):
+        return await call_next(request)
     token = None
     session_token = request.cookies.get(settings.session_cookie)
     if session_token:
@@ -131,7 +141,10 @@ async def bind_authenticated_workspace(request, call_next):
                 workspace = project_workspace_path(db, session.user.username, project.id) if project else None
                 return True, workspace
 
-        authenticated, workspace = await run_in_threadpool(resolve_workspace)
+        try:
+            authenticated, workspace = await run_in_threadpool(resolve_workspace)
+        except DatabasePoolTimeout:
+            return await database_busy(request, None)
         if authenticated:
             # Bind in the request context, not the threadpool's copied context.
             token = bind_workspace(workspace)
@@ -147,6 +160,8 @@ async def protect_storage_during_migration(request, call_next):
     # the lock could bind a request to the old root after a migration finishes.
     # Legacy GET handlers may prepare directories, so protect reads as well.
     if not request.url.path.startswith("/api/"):
+        return await call_next(request)
+    if request.url.path.startswith("/api/v1/tasks") and (request.method == "GET" or request.url.path.endswith(("/cancel", "/pause", "/resume"))):
         return await call_next(request)
     if request.url.path in {"/api/health", "/api/v1/admin/settings/storage", "/api/auth/login", "/api/auth/logout"}:
         return await call_next(request)
@@ -173,7 +188,10 @@ async def protect_storage_during_migration(request, call_next):
         db.close()
         return None
 
-    db = await run_in_threadpool(enter_storage)
+    try:
+        db = await run_in_threadpool(enter_storage)
+    except DatabasePoolTimeout:
+        return await database_busy(request, None)
     if db is None:
         return JSONResponse(status_code=409, content={"detail": "存储根目录正在迁移，工作空间暂时不可用"})
     try:
@@ -182,7 +200,12 @@ async def protect_storage_during_migration(request, call_next):
         await run_in_threadpool(db.close)
 
 
+# DB-only task observers/controllers do not access workspace files.
+# Keep migration guards on all routes that read/write actual user files.
+
 # Local client on this machine; origins are loopback addresses.
+from .platform.tts_admission import TTSAdmissionMiddleware
+app.add_middleware(TTSAdmissionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),

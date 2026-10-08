@@ -273,3 +273,52 @@ def require_quota(resource_type: str, operation_type: str) -> None:
             return
     if context and not check_quota_available(context.user_id):
         raise QuotaInsufficientError(f"字数额度不足，无法执行{operation_type}（{resource_type}）")
+
+
+def reserve_tts_quotas(requests: list[tuple[int, str]]) -> dict[str, bool]:
+    """Reserve chapter inputs in request order with one account lock/commit."""
+    context = _context.get()
+    if context is None:
+        return {operation: True for _, operation in requests}
+    from sqlalchemy import insert
+    from .models import utcnow
+    result = {}
+    with SessionLocal() as db:
+        operations = [operation for _, operation in requests]
+        holds = {hold.operation_type: hold for hold in db.scalars(select(QuotaHold).where(
+            QuotaHold.attempt_id == context.attempt_id, QuotaHold.operation_type.in_(operations)
+        ).order_by(QuotaHold.operation_type).with_for_update())}
+        account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == context.user_id).with_for_update())
+        # Recheck after locking the account, as in the single-reservation path.
+        holds.update({hold.operation_type: hold for hold in db.scalars(select(QuotaHold).where(
+            QuotaHold.attempt_id == context.attempt_id, QuotaHold.operation_type.in_(operations)))})
+        exhausted = False
+        new_holds, transactions = [], []
+        for chars, operation in requests:
+            count = max(0, int(chars))
+            if operation in holds:
+                result[operation] = holds[operation].status == 'held'
+                exhausted |= not result[operation]
+                continue
+            if not count:
+                result[operation] = True
+                continue
+            if exhausted or account is None or account.available_units < count:
+                exhausted = True; result[operation] = False
+                continue
+            before, reserved = account.available_units, account.reserved_units
+            account.available_units -= count; account.reserved_units += count
+            result[operation] = True
+            new_holds.append(dict(id=new_id(), user_id=context.user_id, task_id=context.task_id,
+                                  attempt_id=context.attempt_id, operation_type=operation, units=count, status='held'))
+            transactions.append(dict(id=new_id(), user_id=context.user_id, task_id=context.task_id,
+                                     amount=-count, kind='reserve', idempotency_key=f'hold:{context.attempt_id}:{operation}',
+                                     note=f'{operation} TTS 输入字数预留', resource_type='TTS', operation_type=operation,
+                                     char_count=count, available_before=before, available_after=account.available_units,
+                                     reserved_before=reserved, reserved_after=account.reserved_units,
+                                     consumed_before=account.consumed_units, consumed_after=account.consumed_units))
+        for offset in range(0, len(new_holds), 100):
+            db.execute(insert(QuotaHold), new_holds[offset:offset + 100])
+            db.execute(insert(QuotaTransaction), transactions[offset:offset + 100])
+        db.commit()
+    return result

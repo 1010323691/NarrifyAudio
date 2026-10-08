@@ -29,9 +29,17 @@ def status_client():
 def test_large_status_lists_keep_order_and_get_compatibility(status_client, endpoint, key, result_key, suffix):
     client, headers = status_client
     names = [f"第{i:04d}章 中文标题 音频合成与合并测试{suffix}" for i in range(2000)]
-    response = client.post(f"/api/tts/{endpoint}", headers=headers, json={key: names})
-    assert response.status_code == 200, response.text
-    rows = response.json()[result_key]
+    if endpoint == 'batch-status':
+        assert client.post(f"/api/tts/{endpoint}", headers=headers, json={key: names}).status_code == 422
+        rows = []
+        for offset in range(0, len(names), 100):
+            response = client.post(f"/api/tts/{endpoint}", headers=headers, json={key: names[offset:offset + 100]})
+            assert response.status_code == 200, response.text
+            rows.extend(response.json()[result_key])
+    else:
+        response = client.post(f"/api/tts/{endpoint}", headers=headers, json={key: names})
+        assert response.status_code == 200, response.text
+        rows = response.json()[result_key]
     assert [row["name"] for row in rows] == names
     assert all(row["total"] == row["completed"] == 0 for row in rows)
     assert client.post(f"/api/tts/{endpoint}", headers=headers, json={key: []}).json() == {result_key: []}

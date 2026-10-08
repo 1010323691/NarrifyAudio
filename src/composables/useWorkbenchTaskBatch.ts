@@ -85,6 +85,7 @@ export function summarizeTaskBatch(rows: TaskSnapshot[], expected: number, detai
   const terminal = rows.filter(row => !ACTIVE.has(row.status)).length
   return {
     ...representative,
+    batch_task_count: expected,
     status: rows.length < expected ? 'pending' : active?.status ?? failed?.status ?? cancelled?.status ?? 'succeeded',
     progress: rows.reduce((sum, row) => sum + row.progress, 0) / expected,
     current: `${terminal}/${expected} 条任务完成 · ${representative.current || representative.label}`,

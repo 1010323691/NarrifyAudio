@@ -19,17 +19,21 @@ import os
 import re
 import shutil
 import threading
+import time
+from functools import wraps
 import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, field_validator
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ..core import pathio
 from ..core.config import get_config
+from ..core.bounded_json import read_json
+from ..core.bounded_cache import BoundedCache
 from ..core.file_lock import exclusive_file_lock
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all, merged_audio_filename
 from ..engines.book import parse_chapter_number
@@ -247,7 +251,7 @@ def _fold_script(order: list[str], counts: dict[str, int], data) -> bool:
     return True
 
 
-_SPEAKER_CACHE: OrderedDict = OrderedDict()
+_SPEAKER_CACHE = BoundedCache(64 * 1024 * 1024, 2048)
 _SPEAKER_CACHE_LOCK = threading.Lock()
 
 
@@ -263,7 +267,7 @@ def _script_speakers(path):
             return _SPEAKER_CACHE[key]
     order, counts = [], {}
     try:
-        has_script = _fold_script(order, counts, json.loads(path.read_text("utf-8")))
+        has_script = _fold_script(order, counts, read_json(path))
     except (OSError, ValueError, UnicodeError):
         return False, [], {}
     value = (has_script, order, counts)
@@ -273,7 +277,46 @@ def _script_speakers(path):
     return value
 
 
+_SUMMARY_CACHE = BoundedCache(8 * 1024 * 1024, 32)
+_SUMMARY_LOCK = threading.Lock()
+
+
+def _cache_voice_summary(function):
+    @wraps(function)
+    def cached(*args, **kwargs):
+        if not kwargs.get("summary_only"):
+            return function(*args, **kwargs)
+        layout = resolve_layout()
+        if layout.parsed_json is None:
+            return function(*args, **kwargs)
+        script = kwargs.get("script", args[0] if args else None)
+        paths = resolve_parsed_json_all() if script == ALL_PARSED_JSON else [resolve_parsed_json(script)]
+        paths = [*paths, layout.voice_profiles / "voice_config.json"]
+        fingerprints = []
+        for path in paths:
+            try:
+                stat = path.stat()
+                fingerprints.append((str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                fingerprints.append((str(path), None, None))
+        key = (str(layout.workspace), tuple(fingerprints), repr(args), repr(sorted(kwargs.items())))
+        # Coalesce simultaneous summary polling. The cache contains counts only,
+        # never script text, config credentials or complete role inventories.
+        with _SUMMARY_LOCK:
+            hit = _SUMMARY_CACHE.get(key)
+            if hit and time.monotonic() - hit[0] < 30:
+                _SUMMARY_CACHE.move_to_end(key)
+                return hit[1]
+            value = function(*args, **kwargs)
+            _SUMMARY_CACHE[key] = (time.monotonic(), value)
+            while len(_SUMMARY_CACHE) > 32:
+                _SUMMARY_CACHE.popitem(last=False)
+            return value
+    return cached
+
+
 @router.get("/voices")
+@_cache_voice_summary
 def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=1)] = None,
                 page_size: Annotated[int, Query(ge=1, le=100)] = 10,
                 q: str = "", filter: str = "all", summary_only: bool = False, keys_only: bool = False) -> dict:
@@ -656,6 +699,7 @@ def merge_speakers(
 # ---------------------------------------------------------------------------
 
 class BatchRequest(BaseModel):
+    project_id: str | None = None
     # None -> every script line; a list of line indices -> only those (single file only).
     indices: list[int] | None = None
     # Which parsed JSON (in 03_parsed_json/) to synthesize; None -> most recent.
@@ -663,7 +707,7 @@ class BatchRequest(BaseModel):
     # Multi-file run (the 待合成 card's selection): parsed-JSON file names, synthesized
     # as independent durable tasks (each file = its own package).
     # Takes precedence over ``script``; an empty list falls back to ``script`` / most recent.
-    scripts: list[str] | None = None
+    scripts: list[str] | None = Field(default=None, max_length=500)
 
 
 @router.post("/batch")
@@ -671,6 +715,7 @@ def run_batch(
     req: BatchRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(max_length=180)] = None,
 ) -> dict:
     _common.require_workspace()
     if req.script == ALL_PARSED_JSON or any(s == ALL_PARSED_JSON for s in (req.scripts or [])):
@@ -690,15 +735,16 @@ def run_batch(
             "payload": {"indices": req.indices, "script": script,
                         "scripts": [script], "config": config},
         } for script in scripts],
-        ctx=ctx, db=db, idempotency_prefix="tts-batch",
+        ctx=ctx, db=db, idempotency_prefix="tts-batch", idempotency_key=idempotency_key, project_id=req.project_id,
     )
 
 
 class ResetBatchRequest(BaseModel):
+    project_id: str | None = None
     # Parsed-JSON file names (03_parsed_json/). Each one's synthesis package — the folder
     # ``05_audio_chunk/<包名>/`` with its mp3s and manifest.json — is deleted, so the
     # following ordinary run (default resume) re-synthesizes every segment.
-    scripts: list[str]
+    scripts: list[str] = Field(max_length=500)
 
 
 
@@ -708,6 +754,7 @@ def reset_batch(
     req: ResetBatchRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(max_length=180)] = None,
 ) -> dict:
     """Queue package removal before the ordinary synthesis task recreates each segment.
 
@@ -726,8 +773,6 @@ def reset_batch(
         raise HTTPException(status_code=400, detail="“全部文件”只用于「角色配音」——请逐个列出解析 JSON。")
     if not req.scripts:
         raise HTTPException(status_code=400, detail="没有要重置的文件。")
-    if has_active_durable_tasks(task_type="tts.batch", ctx=ctx, db=db):
-        raise HTTPException(409, "合成任务进行中，请待其结束后再重置。")
     task = submit_legacy_engine_task(
         task_type="tts.reset",
         label=f"重新合成：{len(req.scripts)} 个文件",
@@ -735,6 +780,8 @@ def reset_batch(
         ctx=ctx,
         db=db,
         idempotency_prefix="tts-reset",
+        idempotency_key=idempotency_key,
+        project_id=req.project_id,
     )
     return {"task_id": task["id"]}
 
@@ -774,7 +821,7 @@ def _expected_voice_params(layout, segments, voice_config: dict):
 # workspace string in the key keeps two workspaces with identical package names/stats from
 # sharing entries. A hit returns a copy (the fresh-dict contract); a miss computes the row
 # exactly as before (the state judgment is unchanged) and pays it only once per real change.
-_STATUS_CACHE: dict = {}
+_STATUS_CACHE = BoundedCache(32 * 1024 * 1024, 512)
 _STATUS_CACHE_LOCK = threading.Lock()
 _STATUS_CACHE_MAX = 512
 
@@ -828,7 +875,7 @@ def _file_batch_status(name: str, layout, voice_config: dict, out_dir: Path | No
     if not src.exists():
         return out
     try:
-        data = json.loads(src.read_text("utf-8"))
+        data = read_json(src)
     except Exception:  # noqa: BLE001 — a corrupt / empty script just reports zeros
         return out
     # Legacy book-analysis reports share this directory with scripts. Identify
@@ -896,7 +943,7 @@ def _cached_file_batch_status(name: str, layout, voice_config: dict) -> dict:
 
 
 class BatchStatusRequest(BaseModel):
-    scripts: list[str]
+    scripts: list[str] = Field(max_length=100)
 
 
 @router.post("/batch-status")
@@ -963,7 +1010,7 @@ def merge_list(page: Annotated[int, Query(ge=1)] = 1,
 
 @router.get("/batch-status")
 def batch_status(script: str | None = None,
-                 scripts: Annotated[list[str] | None, Query()] = None) -> dict:
+    scripts: Annotated[list[str] | None, Query(max_length=100)] = None) -> dict:
     """Synthesis progress of the chosen script(s).
 
     Single file (``?script=``; neither param -> the most recent one):

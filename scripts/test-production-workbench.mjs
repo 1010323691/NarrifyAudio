@@ -26,10 +26,11 @@ test('large synthesis and merge status selections use bounded URLs and JSON bodi
   const names = Array.from({ length: 2000 }, (_, i) => `第${i}章 中文标题 音频合成条目.json`)
   await module.exports.batchStatusFiles(names)
   await module.exports.mergeStatusPackages(names)
-  assert.equal(calls[0].url, '/api/tts/batch-status')
-  assert.equal(calls[1].url, '/api/tts/merge-status')
-  assert.equal(calls[0].body.scripts, names)
-  assert.equal(calls[1].body.packages, names)
+  assert.equal(calls.length, 21)
+  assert.ok(calls.slice(0, 20).every(call => call.url === '/api/tts/batch-status' && call.body.scripts.length <= 100))
+  assert.deepEqual(Array.from(calls.slice(0, 20).flatMap(call => call.body.scripts)), names)
+  assert.equal(calls[20].url, '/api/tts/merge-status')
+  assert.equal(calls[20].body.packages, names)
 })
 
 test('production templates compile with the actual Vue template compiler', () => {
@@ -119,6 +120,14 @@ function harness(view, api = {}) {
       usePipelineStateStore: () => vue.reactive({ activeScript: '', recordMerge() {} }),
     },
     '@/composables/useProjectGate': { useProjectGate: () => ({ projectSet: vue.ref(true) }) },
+    '@/composables/useTtsSubmission': {
+      useTtsSubmission: () => ({ locked: vue.ref(false), label: vue.ref(''), receipt: vue.ref(null), failure: vue.ref(''), settled() {},
+        submit: async (names, mode) => {
+          if (mode === 'reset') await (api.submitBatchReset ?? (async () => ({ task_id: 'reset' })))(names)
+          return (api.runBatch ?? (async value => { calls.push(value); return { task_ids: ['new-task'] } }))({ scripts: names })
+        },
+      }),
+    },
     '@/composables/useDurableTaskWait': {
       useDurableTaskWait: () => ({ wait: async () => ({ status: 'succeeded' }) }),
     },
@@ -636,7 +645,7 @@ test('hidden live log panel does not evaluate a batch log getter', async () => {
     const module = { exports: {} }
     const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
     runInNewContext(code, { module, exports: module.exports, defineProps: () => props,
-      require: dependencies, requestAnimationFrame() {} })
+      require: dependencies, AbortController, setTimeout, clearTimeout, requestAnimationFrame() {} })
     return module.exports
   }
   const follow = evaluate(readFileSync(new URL('../src/utils/logFollow.ts', import.meta.url), 'utf8'), () => vue)
@@ -883,3 +892,6 @@ test('BGM bulk target reads are explicit and are never restricted to the current
   await h.doMix()
   assert.equal(h.calls.find(Array.isArray)?.length, 87)
 })
+
+// Run submission recovery alongside the existing production-workbench CI gate.
+await import('./test-tts-submission.mjs')

@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..platform.database import SessionLocal, get_db
 from ..platform.platform_settings import settings
-from ..platform.deps import require_csrf, require_authenticated_user
-from ..platform.models import Project, Task, TaskEvent, User
+from ..platform.deps import require_csrf, require_authenticated_user, require_stream_user
+from ..platform.models import Project, Task, TaskBatch, TaskEvent, TaskResult, User
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_identity import one_row_per_entry
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
@@ -35,11 +35,22 @@ router = APIRouter(prefix="/api/v1/tasks", tags=["persistent-tasks"])
 TASK_HISTORY_PAGE_SIZE = 50
 
 
+@router.get("/submissions/{key}")
+def submission_receipt(key: str, user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
+    from ..platform.tts_submission import batch_receipt
+    batch = db.scalar(select(TaskBatch).where(TaskBatch.owner_id == user.id, TaskBatch.idempotency_key == key))
+    if batch is None:
+        raise HTTPException(404, "尚未查到提交记录，请使用原幂等键确认")
+    rows = db.execute(select(Task.id, Task.status).where(Task.batch_id == batch.id)).all()
+    return {**batch_receipt(batch), "project_id": batch.project_id, "task_type": batch.task_type,
+            "statuses": dict(rows)}
+
+
 def _task_json(task: Task) -> dict:
     return task_dict(task)
 
 
-def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> list[Task]:
+def _user_tasks(db: Session, user_id: str, project_id: str | None = None, *, compact=False) -> list[Task]:
     """Return every active task plus the newest 200 records for live UI state,
     with terminal rows superseded by a newer run of the same entry hidden."""
     trashed_project = select(Project.id).where(
@@ -51,7 +62,8 @@ def _user_tasks(db: Session, user_id: str, project_id: str | None = None) -> lis
     if project_id:
         filters.append(Task.project_id == project_id)
     recent_ids = select(Task.id).where(*filters).order_by(Task.created_at.desc(), Task.id.desc()).limit(200)
-    stmt = select(Task).where(
+    results = Task.result.and_(TaskResult.task_id.in_(select(Task.id).where(Task.task_type != 'tts.batch'))) if compact else Task.result
+    stmt = select(Task).options(selectinload(Task.project), selectinload(results)).where(
         *filters,
         or_(Task.status.in_(ACTIVE_TASK_STATUSES), Task.id.in_(recent_ids)),
         one_row_per_entry(),
@@ -172,8 +184,9 @@ def list_task_history(
 @router.get("/stream")
 def stream_user_tasks(
     request: Request,
-    user: User = Depends(require_authenticated_user),
+    user: User = Depends(require_stream_user),
     project_id: str | None = None,
+    compact: bool = False,
 ) -> StreamingResponse:
     """Aggregate task event stream: ONE connection carries the snapshots +
     lifecycle events of the user's tasks (all projects, or one when
@@ -183,10 +196,11 @@ def stream_user_tasks(
     500 ms polling should move here."""
     return StreamingResponse(
         task_views.aggregate_stream(
-            lambda db: _user_tasks(db, user.id, project_id),
+            lambda db: _user_tasks(db, user.id, project_id, compact=compact),
             request.cookies.get(settings.session_cookie),
             user.id,
             request.is_disconnected,
+            compact=compact,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -224,6 +238,25 @@ def get_task(task_id: str, user: User = Depends(require_authenticated_user), db:
     return _task_json(task)
 
 
+@router.get("/{task_id}/logs")
+def task_logs(task_id: str, after: int | None = None, before: int | None = None,
+              limit: int = Query(100, ge=1, le=100), user: User = Depends(require_authenticated_user),
+              db: Session = Depends(get_db)) -> dict:
+    if db.scalar(select(Task.id).where(Task.id == task_id, Task.owner_id == user.id)) is None:
+        raise HTTPException(404, "任务不存在")
+    stmt = select(TaskEvent).where(TaskEvent.task_id == task_id, TaskEvent.event_type == "log")
+    if after is not None:
+        stmt = stmt.where(TaskEvent.sequence > after)
+    if before is not None:
+        stmt = stmt.where(TaskEvent.sequence < before)
+    rows = db.scalars(stmt.order_by(TaskEvent.sequence.asc() if after is not None else TaskEvent.sequence.desc()).limit(limit)).all()
+    if after is None:
+        rows.reverse()
+    return {"logs": [{"sequence": row.sequence, "t": task_views.epoch(row.created_at),
+                      "level": row.payload.get("level", "INFO"), "msg": row.payload.get("msg", "")} for row in rows],
+            "next_before": rows[0].sequence if len(rows) == limit else None}
+
+
 def _stream_session_valid(cookie: str | None, user_id: str) -> bool:
     with SessionLocal() as db:
         return session_is_valid_for_user(db, cookie, user_id)
@@ -250,7 +283,7 @@ def _stream_poll(task_id: str, user_id: str, after: int) -> tuple[Task | None, l
 def stream_task_events(
     task_id: str,
     request: Request,
-    user: User = Depends(require_authenticated_user),
+    user: User = Depends(require_stream_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     try:

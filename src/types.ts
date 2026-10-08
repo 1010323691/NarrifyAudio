@@ -295,6 +295,8 @@ export interface BatchResult {
   completed: number
   /** Failed segments (a multi-file run tags each entry with its file name in `script`). */
   failed: { index: number; speaker: string; reason: string; script?: string }[]
+  /** Compact SSE snapshots carry the count; full results retain the detailed array. */
+  failed_count?: number
   output_dir: string
   manifest_path: string
   /** Cumulative (after this run) number of segments already synthesized — 「累计已合成 X」. */
@@ -472,6 +474,8 @@ export interface TaskCenterItem {
   created_at: string
 }
 export interface TaskSnapshot extends TaskCenterItem {
+  /** Aggregated workbench log tails contain several independent task sequences. */
+  batch_task_count?: number
   module: string
   /** Current engine stage, e.g. parse/check. */
   phase?: string

@@ -229,8 +229,8 @@ def control_task_category(
         resume_error_code = task.error_code
         if attempt is not None and lease_expires is not None and lease_expires > now:
             # The parked execution thread reacquires host-wide task capacity before
-            # continuing. API transactions must never promote LLM tasks directly.
-            waits_for_capacity = task.task_type in LLM_TASK_TYPES
+            # continuing. API transactions must never promote LLM/TTS tasks directly.
+            waits_for_capacity = task.task_type in LLM_TASK_TYPES or task.task_type == "tts.batch"
             task.status = "queued" if waits_for_capacity else "running"
             task.error_code = "resume_waiting" if waits_for_capacity else ""
             task.error_message = ""

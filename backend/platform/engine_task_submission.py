@@ -30,8 +30,15 @@ def submit_legacy_engine_task(
     db: Session,
     idempotency_prefix: str,
     commit: bool = True,
+    idempotency_key: str | None = None,
+    project_id: str | None = None,
 ) -> dict:
     """Create one durable task owned by the caller's active workspace."""
+    if task_type == "tts.reset":
+        from .tts_submission import submit_tts_tasks
+        receipt = submit_tts_tasks(task_type=task_type, entries=[{"label": label, "payload": payload}],
+                                   ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=project_id)
+        return {"id": receipt["task_id"], **receipt}
     project = active_project(db, ctx.user, ctx.session)
     if project is None:
         raise HTTPException(409, "尚未设置工作空间")
@@ -101,10 +108,16 @@ def has_active_durable_tasks(*, task_type: str, ctx: AuthContext, db: Session) -
 def submit_legacy_engine_tasks(
     *, task_type: str, entries: list[dict], ctx: AuthContext, db: Session,
     idempotency_prefix: str,
+    idempotency_key: str | None = None,
+    project_id: str | None = None,
 ) -> dict:
     """Submit independent records atomically; clone and TTS records share a GPU execution batch."""
     if not entries:
         return {"task_ids": []}
+    if task_type == "tts.batch":
+        from .tts_submission import submit_tts_tasks
+        return submit_tts_tasks(task_type=task_type, entries=entries, ctx=ctx, db=db,
+                                idempotency_key=idempotency_key, project_id=project_id)
     created = []
     execution_batch = uuid.uuid4().hex if task_type in {"voices.clone", "tts.batch"} else None
     try:

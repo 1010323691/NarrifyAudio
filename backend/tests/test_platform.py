@@ -358,14 +358,13 @@ def test_workspace_engine_lock_serializes_project_writers(client: TestClient):
         "/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Serialized writers"},
     ).json()
     claims = []
+    from backend.platform.task_submission import submit_task_record, task_dict
     for suffix in ("one", "two"):
-        task = client.post(
-            "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-            json={
-                "project_id": project["id"], "task_type": "tts.reset", "payload": {"scripts": []},
-                "idempotency_key": f"writer-lock-{suffix}-{uuid.uuid4().hex}",
-            },
-        ).json()
+        # Historic/manual competing writers still need the execution fence.
+        with SessionLocal() as db:
+            task = task_dict(submit_task_record(db, db.get(User, first['user']['id']),
+                project_id=project['id'], task_type='tts.reset', payload={'scripts': []},
+                idempotency_key=f'writer-lock-{suffix}-{uuid.uuid4().hex}'))
         claim = claim_task(task["id"], f"lock-test-{suffix}", defer_workspace_conflicts=False)
         assert claim is not None
         claims.append(claim)
@@ -2056,7 +2055,7 @@ def test_tts_partial_progress_survives_failure_and_worker_recovery(client, monke
     with SessionLocal.begin() as db:
         db.add(Task(id=task_id, owner_id=first["user"]["id"], project_id=project["id"],
                     task_type="tts.batch", status="pending", payload={"scripts": scripts}))
-    claim = claim_task(task_id, "tts-checkpoint-worker")
+    claim = claim_task(task_id, "tts-checkpoint-worker", defer_workspace_conflicts=False)
     assert claim is not None
 
     def interrupted_synthesis(handle, *_args):
@@ -2682,6 +2681,9 @@ def test_workspace_rollback_guard_uses_task_lock_and_fingerprint(client: TestCli
     # 2) untouched entry is restored to its pre-publication bytes.
     final.write_text('{"fresh": true}', encoding="utf-8")
     first_claim = claim
+    with SessionLocal.begin() as db:
+        db.get(Task, claim.task_id).status = 'cancelled'
+        db.get(TaskAttempt, claim.attempt_id).status = 'cancelled'
     claim = claim_task(_submit()["id"], "guard-wiring-worker-2", defer_workspace_conflicts=False)
     assert claim is not None
     handle = PersistentTaskHandle(claim)
@@ -2779,9 +2781,15 @@ def test_workspace_busy_tasks_stay_queued_while_other_work_is_claimed(client, mo
         assert response.status_code==201,response.text
         return response.json()['id']
     running=submit('tts.batch',{'scripts':['chapter.json']})
-    assert claim_task(running,'model-worker')
+    assert claim_task(running,'model-worker',defer_workspace_conflicts=False)
     merge=submit('tts.merge',{'package':'chapter'})
-    mutation=submit('tts.reset',{'scripts':['chapter.json']})
+    conflict=client.post('/api/v1/tasks',headers={'X-CSRF-Token':csrf},json={
+        'project_id':project['id'],'task_type':'tts.reset','payload':{'scripts':['chapter.json']},'idempotency_key':uuid.uuid4().hex})
+    assert conflict.status_code == 409
+    # A historic queued mutation must still be deferred by workspace admission.
+    with SessionLocal.begin() as db:
+        queued = Task(owner_id=first['user']['id'], project_id=project['id'], task_type='tts.reset', payload={'scripts':['chapter.json']})
+        db.add(queued); db.flush(); mutation=queued.id
     independent=submit('tts.reset',{'scripts':[]},other)
     assert claim_task(merge,'redis-delivery-worker') is None
     claim=claim_fair_task('mechanical-worker',task_types=('tts.merge','tts.reset'))

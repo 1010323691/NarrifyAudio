@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hmac
+import threading
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from .platform_settings import settings
-from .database import get_db
+from .database import get_db, SessionLocal
 from .models import User, UserSession
 from .project_context import active_project
 from .security import load_session, token_digest
@@ -25,6 +26,8 @@ def get_auth_context(request: Request, db: Session = Depends(get_db)) -> AuthCon
     session = load_session(db, request.cookies.get(settings.session_cookie))
     if session is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="需要登录")
+    if request.url.path.startswith('/api/v1/tasks'):
+        return AuthContext(user=session.user, session=session)
     project = active_project(db, session.user, session)
     bind_workspace(
         project_workspace_path(db, session.user.username, project.id)
@@ -36,6 +39,33 @@ def get_auth_context(request: Request, db: Session = Depends(get_db)) -> AuthCon
 
 def require_authenticated_user(ctx: AuthContext = Depends(get_auth_context)) -> User:
     return ctx.user
+
+
+_stream_lock = threading.Lock()
+_streams: dict[str, int] = {}
+
+
+def require_stream_user(request: Request):
+    """Authenticate without pinning a database connection for the stream lifetime."""
+    with SessionLocal() as db:
+        session = load_session(db, request.cookies.get(settings.session_cookie), touch=False)
+        if session is None:
+            raise HTTPException(401, "需要登录")
+        user = session.user
+        db.expunge(user)
+    with _stream_lock:
+        if _streams.get(user.id, 0) >= 3:
+            raise HTTPException(429, "任务观察连接过多", headers={"Retry-After": "10"})
+        _streams[user.id] = _streams.get(user.id, 0) + 1
+    try:
+        yield user
+    finally:
+        with _stream_lock:
+            count = _streams.get(user.id, 1) - 1
+            if count:
+                _streams[user.id] = count
+            else:
+                _streams.pop(user.id, None)
 
 
 def require_admin(user: User = Depends(require_authenticated_user)) -> User:

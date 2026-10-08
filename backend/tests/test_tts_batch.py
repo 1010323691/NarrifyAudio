@@ -1818,7 +1818,18 @@ def test_synthesize_multi_admits_chapters_until_character_quota_is_exhausted(
         reservations.append((char_count, operation_type))
         return len(reservations) <= affordable_chapters
 
-    monkeypatch.setattr("backend.platform.quota.reserve_tts_quota", reserve_chapter)
+    def reserve_many(requests):
+        result = {}
+        exhausted = False
+        for count, operation in requests:
+            if not exhausted:
+                accepted = reserve_chapter(count, operation)
+                exhausted = not accepted
+            else:
+                accepted = False
+            result[operation] = accepted
+        return result
+    monkeypatch.setattr("backend.platform.quota.reserve_tts_quotas", reserve_many)
     calls = []
     _stub_engine_pool(monkeypatch, calls)
     handle = _Handle()
@@ -2395,7 +2406,10 @@ def test_reset_batch_submits_durable_task_and_blocks_active_synthesis(workspace,
     assert submitted[0]["task_type"] == "tts.reset"
     assert submitted[0]["payload"]["scripts"] == ["s.json", "t_checked.json"]
 
-    monkeypatch.setattr(tts_api, "has_active_durable_tasks", lambda **_kwargs: True)
+    # Conflict rejection now belongs to the atomic submission transaction.
+    def reject_conflict(**kwargs):
+        raise HTTPException(409, "合成任务进行中")
+    monkeypatch.setattr(tts_api, "submit_legacy_engine_task", reject_conflict)
     with pytest.raises(HTTPException) as exc:
         reset_batch(ResetBatchRequest(scripts=["s.json"]), ctx=_durable_ctx(), db=object())
     assert exc.value.status_code == 409

@@ -39,13 +39,15 @@ def audio_project():
         claims = []
 
         def submit(task_type, payload):
-            response = client.post("/api/v1/tasks", headers=headers, json={
-                "project_id": project_id, "task_type": task_type, "payload": payload,
-                "idempotency_key": uuid.uuid4().hex,
-            })
-            assert response.status_code == 201, response.text
-            # Exercise the filesystem fence with intentionally conflicting manual claims.
-            claim = claim_task(response.json()["id"], f"audio-test-{len(claims)}", defer_workspace_conflicts=False)
+            # Deliberately conflicting manual claims exercise the filesystem fence;
+            # public TTS submission now rejects overlapping chapter operations.
+            from backend.platform.task_submission import submit_task_record
+            with SessionLocal() as db:
+                user = db.scalar(select(User).where(User.username == username))
+                task = submit_task_record(db, user, project_id=project_id, task_type=task_type,
+                                          payload=payload, idempotency_key=uuid.uuid4().hex)
+                task_id = task.id
+            claim = claim_task(task_id, f"audio-test-{len(claims)}", defer_workspace_conflicts=False)
             assert claim is not None
             claims.append(claim)
             return claim

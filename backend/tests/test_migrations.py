@@ -184,3 +184,43 @@ def test_drop_quota_reservations_downgrade_roundtrip_on_postgres():
             _reset_public_schema(engine)
         finally:
             engine.dispose()
+
+
+def test_batch_submission_migration_backfills_and_preserves_config_on_downgrade(tmp_path):
+    database = tmp_path / 'batch-roundtrip.db'
+    env = {**os.environ, 'NARRIFY_DATABASE_URL': f'sqlite:///{database.as_posix()}', 'NARRIFY_AUTO_CREATE_SCHEMA': 'false'}
+    _run(env, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', '0022_task_center_indexes')
+    engine = sa.create_engine(env['NARRIFY_DATABASE_URL'])
+    now = datetime.now(timezone.utc)
+    metadata = sa.MetaData()
+    users = sa.Table('users', metadata, autoload_with=engine)
+    projects = sa.Table('projects', metadata, autoload_with=engine)
+    tasks = sa.Table('tasks', metadata, autoload_with=engine)
+    events = sa.Table('task_events', metadata, autoload_with=engine)
+    with engine.begin() as db:
+        db.execute(users.insert().values(id='batch-user', username='batchuser', email='batch@example.test', display_name='Batch',
+                                        password_hash='unused', role='user', is_active=True, created_at=now, updated_at=now))
+        db.execute(projects.insert().values(id='batch-project', owner_id='batch-user', name='Batch', description='', directory_key='batchuser/Batch', created_at=now, updated_at=now))
+        db.execute(tasks.insert().values(id='batch-task', owner_id='batch-user', project_id='batch-project', task_type='tts.batch',
+                                        status='succeeded', payload={'scripts': ['one.json', 'two.json']}, progress=100, error_code='', error_message='', created_at=now, updated_at=now))
+        db.execute(events.insert().values(id='batch-event', task_id='batch-task', sequence=7, event_type='succeeded', payload={}, created_at=now))
+    engine.dispose()
+    _run(env, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', 'head')
+    metadata = sa.MetaData()
+    tasks = sa.Table('tasks', metadata, autoload_with=engine)
+    batches = sa.Table('task_batches', metadata, autoload_with=engine)
+    with engine.begin() as db:
+        row = db.execute(sa.select(tasks).where(tasks.c.id == 'batch-task')).one()
+        assert row.event_sequence == 7 and row.admission_units == 2 and row.ui_state is None
+        db.execute(batches.insert().values(id='batch-receipt', owner_id='batch-user', project_id='batch-project', task_type='tts.batch',
+                                          idempotency_key='batch-key', request_hash='a' * 64, config={'tts': {'batch_concurrency': 4}}, task_ids=['batch-task'], created_at=now))
+        db.execute(tasks.update().where(tasks.c.id == 'batch-task').values(batch_id='batch-receipt', payload={'scripts': ['one.json'], '_batch_config_id': 'batch-receipt'}))
+    engine.dispose()
+    _run(env, '-m', 'alembic', '-c', 'alembic.ini', 'downgrade', '0022_task_center_indexes')
+    tasks = sa.Table('tasks', sa.MetaData(), autoload_with=engine)
+    with engine.connect() as db:
+        payload = db.scalar(sa.select(tasks.c.payload).where(tasks.c.id == 'batch-task'))
+        assert payload['config']['tts']['batch_concurrency'] == 4 and '_batch_config_id' not in payload
+    assert 'task_batches' not in sa.inspect(engine).get_table_names()
+    engine.dispose()
+    _run(env, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', 'head')

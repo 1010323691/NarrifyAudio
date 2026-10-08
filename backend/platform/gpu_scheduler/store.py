@@ -89,7 +89,7 @@ class QueueMonitor:
         now = stamp()
         waiting = {"LLM": {}, "TTS": {}}
         running = {"LLM": set(), "TTS": set()}
-        tasks = {task.id: task for task in db.scalars(select(Task).where(Task.status.in_(
+        tasks = {task.id: task for task in db.execute(select(Task.id, Task.task_type, Task.status, Task.error_code, Task.next_attempt_at, Task.created_at).where(Task.status.in_(
             ["pending", "queued", "retrying", "running", "cancelling", "paused"]))).all()}
         represented = set()
         for request in db.scalars(select(GPURequest)).all():

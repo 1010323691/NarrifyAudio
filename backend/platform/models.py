@@ -127,6 +127,21 @@ class ProjectFile(Base):
     )
 
 
+class TaskBatch(Base):
+    """Immutable submission receipt; configuration is stored once per batch."""
+    __tablename__ = "task_batches"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(180), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    task_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    __table_args__ = (UniqueConstraint("owner_id", "idempotency_key", name="uq_task_batches_owner_key"),)
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
@@ -145,6 +160,10 @@ class Task(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    batch_id: Mapped[str | None] = mapped_column(ForeignKey("task_batches.id"), index=True)
+    event_sequence: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    admission_units: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    ui_state: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
     project: Mapped[Project] = relationship(back_populates="tasks")
     attempts: Mapped[list["TaskAttempt"]] = relationship(back_populates="task")

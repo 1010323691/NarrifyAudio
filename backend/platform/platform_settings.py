@@ -54,6 +54,8 @@ class PlatformSettings:
     )
     task_lease_seconds: int = int(os.getenv("NARRIFY_TASK_LEASE_SECONDS", "120"))
     task_max_attempts: int = int(os.getenv("NARRIFY_TASK_MAX_ATTEMPTS", "3"))
+    tts_submissions_enabled: bool = _bool_env('NARRIFY_TTS_SUBMISSIONS_ENABLED', True)
+    tts_preparation_enabled: bool = _bool_env('NARRIFY_TTS_PREPARATION_ENABLED', True)
     bootstrap_admin_email: str = os.getenv("NARRIFY_BOOTSTRAP_ADMIN_EMAIL", "")
     bootstrap_admin_password: str = os.getenv("NARRIFY_BOOTSTRAP_ADMIN_PASSWORD", "")
     initial_quota_units: int = int(os.getenv("NARRIFY_INITIAL_QUOTA_UNITS", "0"))

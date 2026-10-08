@@ -209,7 +209,7 @@ def event_frame(db: Session, task: DurableTask, event: TaskEvent) -> dict | None
             "current": payload.get("current") or "",
         }
     if event.event_type == "phase":
-        return {"type": "phase", "task_id": task.id, "phase": payload.get("phase") or ""}
+        return {"type": "phase", "task_id": task.id, "phase": payload.get("phase") or "", "current": payload.get("current") or ""}
     if event.event_type == "log":
         return {
             "type": "log",
@@ -337,7 +337,7 @@ def session_still_valid(auth_token: str, user_id: str) -> bool:
         return session_is_valid_for_user(db, auth_token, user_id)
 
 
-async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnected):
+async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnected, compact=False):
     """The shared aggregate SSE body: replay ``snapshot_all`` for every row
     ``rows_fn(db)`` returns (the caller scopes it — current project for the
     legacy surface, the whole user for v1), then stream each row's new events
@@ -351,8 +351,14 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
     cannot freeze the event loop for every other connection on it.
     """
     next_auth_check = 0.0
-    snapshots, seen, hidden, delivered = await anyio.to_thread.run_sync(snapshot_payload, rows_fn)
-    yield sse({"type": "snapshot_all", "tasks": snapshots})
+    idle_delay = 1.0
+    snapshots, seen, hidden, delivered = await anyio.to_thread.run_sync(compact_snapshot_payload if compact else snapshot_payload, rows_fn)
+    if compact:
+        for offset in range(0, len(snapshots), 100):
+            yield sse({"type": "snapshot_chunk", "tasks": snapshots[offset:offset + 100], "first": offset == 0})
+        yield sse({"type": "snapshot_end"})
+    else:
+        yield sse({"type": "snapshot_all", "tasks": snapshots})
     for task_id in sorted(hidden):
         yield sse({"type": "superseded", "task_id": task_id})
     while True:
@@ -363,9 +369,147 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
             if not await anyio.to_thread.run_sync(session_still_valid, auth_token, user_id):
                 return
             next_auth_check = now + 5.0
-        frames = await anyio.to_thread.run_sync(_new_frames, rows_fn, seen, delivered)
+        frames = await anyio.to_thread.run_sync(compact_new_frames if compact else _new_frames, rows_fn, seen, delivered)
         for frame in frames:
             yield sse(frame)
         if not frames:
             yield sse({"type": "ping"})
-        await asyncio.sleep(0.5)
+        idle_delay = 1.0 if frames else min(3.0, idle_delay + 0.5)
+        await asyncio.sleep(idle_delay if compact else 0.5)
+
+
+def compact_snapshots(db, rows):
+    """Build snapshots with bounded collection queries, never per-task history reads."""
+    from sqlalchemy import func
+    states = {row.id: dict(row.ui_state or {}) for row in rows}
+    old_ids = [row.id for row in rows if row.ui_state is None]
+    for offset in range(0, len(old_ids), 500):
+        ids = old_ids[offset:offset + 500]
+        latest = select(TaskEvent.task_id, TaskEvent.event_type, TaskEvent.payload,
+                        func.row_number().over(partition_by=(TaskEvent.task_id, TaskEvent.event_type),
+                                               order_by=TaskEvent.sequence.desc()).label('rn')).where(
+                            TaskEvent.task_id.in_(ids), TaskEvent.event_type.in_(['phase', 'progress', 'segments'])).subquery()
+        for tid, kind, payload in db.execute(select(latest.c.task_id, latest.c.event_type, latest.c.payload).where(latest.c.rn == 1)):
+            from ..platform.task_lifecycle import _update_ui_state
+            _update_ui_state(states[tid], kind, payload)
+    old_tts = [row.id for row in rows if row.ui_state is None and row.task_type == 'tts.batch']
+    from ..platform.models import TaskResult
+    from ..platform.task_lifecycle import compact_result
+    for offset in range(0, len(old_tts), 500):
+        for task_id, result in db.execute(select(TaskResult.task_id, TaskResult.result).where(TaskResult.task_id.in_(old_tts[offset:offset + 500]))):
+            states[task_id]['result'] = compact_result(result)
+    snapshots = []
+    for task in rows:
+        state = states[task.id]
+        segments = state.get('segments', {})
+        snapshot = {
+            'id': task.id, 'project_id': task.project_id, 'project_name': task.project.name if task.project else '已删除项目',
+            'task_type': task.task_type, 'module': task_module(task.task_type), 'label': durable_label(task),
+            'seq': int(epoch(task.created_at) * 1000), 'status': legacy_status(task.status),
+            'phase': state.get('phase', ''), 'current': state.get('current', ''), 'progress': task.progress / 100,
+            'logs': [], 'llm_stream': '', 'result': state.get('result', {}),
+            'seg_done': segments.get('done', 0), 'seg_total': segments.get('total', 0),
+            'seg_chars_done': segments.get('chars_done', 0), 'seg_chars_total': segments.get('chars_total', 0),
+            'error': task.error_message, 'error_code': task.error_code,
+            'created': epoch(task.created_at), 'created_at': task.created_at.isoformat(),
+            'updated_at': task.updated_at.isoformat(), 'started': epoch(task.started_at), 'finished': epoch(task.finished_at),
+        }
+        # Other workbenches still consume their existing small structured results.
+        if task.task_type != 'tts.batch' and task.result is not None:
+            snapshot['result'] = task.result.result
+        snapshots.append(snapshot)
+    return snapshots
+
+
+def compact_snapshot_payload(rows_fn):
+    with SessionLocal() as db:
+        rows = rows_fn(db)
+        snapshots = compact_snapshots(db, rows)
+        return (snapshots, {row.id: row.event_sequence for row in rows},
+                superseded_ids_hidden_by(db, [row.id for row in rows]) if rows else set(),
+                {snapshot['id']: snapshot['status'] for snapshot in snapshots})
+
+
+def compact_new_frames(rows_fn, seen, delivered):
+    from sqlalchemy import and_, or_
+    from sqlalchemy.orm import selectinload
+    from ..platform.models import TaskResult
+    frames = []
+    with SessionLocal() as db:
+        rows = rows_fn(db)
+        by_id = {row.id: row for row in rows}
+        fresh_ids = [row.id for row in rows if row.id not in seen]
+        changed = [row for row in rows if row.event_sequence > seen.get(row.id, 0)]
+        budget = 1000
+        for offset in range(0, len(changed), 500):
+            if budget <= 0:
+                break
+            chunk = changed[offset:offset + 500]
+            events = db.scalars(select(TaskEvent).where(or_(*[
+                and_(TaskEvent.task_id == row.id, TaskEvent.sequence > seen.get(row.id, 0),
+                     TaskEvent.sequence <= row.event_sequence) for row in chunk
+            ])).order_by(TaskEvent.created_at, TaskEvent.task_id, TaskEvent.sequence).limit(budget)).all()
+            budget -= len(events)
+            # A poll emits one latest ordinary progress per task, but retains logs.
+            latest = {}
+            for event in events:
+                seen[event.task_id] = max(seen.get(event.task_id, 0), event.sequence)
+                if event.event_type in {'progress', 'phase', 'segments'}:
+                    latest[(event.task_id, event.event_type)] = event
+                elif event.event_type == 'log':
+                    frame = event_frame(db, by_id[event.task_id], event)
+                    if frame:
+                        frames.append(frame)
+                elif event.event_type in {
+                    'submitted', 'attempt_started', 'attempt_expired', 'dispatch_recovered',
+                    'succeeded', 'failed', 'cancelled', 'cancel_requested', 'admin_cancel_requested',
+                    'retry_requested', 'admin_retry_requested', 'retry_scheduled', 'llm_unavailable',
+                    'paused', 'pause_requested', 'resume_requested', 'resumed',
+                }:
+                    # Preserve the audit transition even when several transitions
+                    # happened before this poll. Status snapshots stay authoritative.
+                    frames.append({'type': 'lifecycle', 'task_id': event.task_id, 'event_type': event.event_type,
+                                   'sequence': event.sequence, 'payload': event.payload, 't': epoch(event.created_at)})
+            for event in latest.values():
+                task = by_id[event.task_id]
+                state = task.ui_state
+                if state is not None and event.event_type == 'progress':
+                    frame = {'type': 'progress', 'task_id': task.id, 'progress': task.progress / 100,
+                             'current': state.get('current', '')}
+                elif state is not None and event.event_type == 'phase':
+                    frame = {'type': 'phase', 'task_id': task.id, 'phase': state.get('phase', ''), 'current': state.get('current', '')}
+                elif state is not None and event.event_type == 'segments':
+                    frame = {'type': 'segments', 'task_id': task.id, **state.get('segments', {})}
+                else:
+                    frame = event_frame(db, task, event)
+                if frame:
+                    frames.append(frame)
+        snapshots_needed = [row for row in rows if row.id not in delivered or delivered[row.id] != legacy_status(row.status)]
+        fresh_snapshots = []
+        for snapshot in compact_snapshots(db, snapshots_needed):
+            tid = snapshot['id']; delivered[tid] = snapshot['status']
+            if tid in fresh_ids:
+                fresh_snapshots.append(snapshot)
+            else:
+                frames.append({'type': 'status', 'status': snapshot['status'], 'task_id': tid, 'task': snapshot})
+        for offset in range(0, len(fresh_snapshots), 100):
+            frames.append({'type': 'snapshot_add_chunk', 'tasks': fresh_snapshots[offset:offset + 100]})
+        for tid in fresh_ids:
+            seen.setdefault(tid, 0)
+        pruned = [tid for tid in seen if tid not in by_id]
+        for offset in range(0, len(pruned), 500):
+            gone = db.scalars(select(DurableTask).options(selectinload(DurableTask.project), selectinload(DurableTask.result.and_(TaskResult.task_id.in_(select(DurableTask.id).where(DurableTask.task_type != 'tts.batch'))))).where(
+                DurableTask.id.in_(pruned[offset:offset + 500]), DurableTask.status.in_(TERMINAL_TASK_STATUSES))).all()
+            for snapshot in compact_snapshots(db, gone):
+                tid = snapshot['id']
+                if delivered.get(tid) != snapshot['status']:
+                    frames.append({'type': 'status', 'task_id': tid, 'status': snapshot['status'], 'task': snapshot})
+        for tid in pruned:
+            seen.pop(tid, None); delivered.pop(tid, None)
+        hidden = set()
+        if pruned:
+            hidden |= superseded_task_ids(db, pruned)
+        if fresh_ids:
+            hidden |= superseded_ids_hidden_by(db, fresh_ids)
+        frames.extend({'type': 'superseded', 'task_id': tid} for tid in sorted(hidden))
+    return frames
