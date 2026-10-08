@@ -15,7 +15,7 @@ from typing import Any, Callable
 from uuid import NAMESPACE_URL, uuid5
 
 import redis
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.orm import aliased
 
 from ..core.config import TextConfig
@@ -1199,7 +1199,12 @@ def _cleanup_outcome(outcome: TaskOutcome) -> None:
 
 
 def _same_artifact_source(db, task: Task, previous: ProjectFile) -> bool:
-    """A legacy cleaned name needs source evidence before it can be overwritten."""
+    """A legacy cleaned name needs source evidence before it can be overwritten.
+
+    The SQL pre-filter keeps only results that mention this exact file id
+    (top-level output or a files[] entry); the Python pass re-verifies
+    precisely, so the over-matching LIKE can only cost a comparison, never
+    accept a wrong source."""
     source_ids = task.payload.get("input_file_ids") or [task.payload.get("input_file_id")]
     source_ids = set(source_ids) - {None, ""}
     if not source_ids:
@@ -1209,6 +1214,10 @@ def _same_artifact_source(db, task: Task, previous: ProjectFile) -> bool:
             Task.project_id == task.project_id,
             Task.task_type == task.task_type,
             Task.status == "succeeded",
+            or_(
+                TaskResult.result["file_id"].as_string() == previous.id,
+                cast(TaskResult.result, String).like(f"%{previous.id}%"),
+            ),
         )
     ):
         old_sources = old_task.payload.get("input_file_ids") or [old_task.payload.get("input_file_id")]

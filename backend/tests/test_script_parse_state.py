@@ -855,3 +855,27 @@ def test_results_endpoint_reports_missing_artifact_content(client: TestClient):
     response = client.get(f"/api/v1/projects/{project_id}/script-parse/results/{artifact_id}")
     assert response.status_code == 409, response.text
     assert "已丢失" in response.json()["detail"]["message"]
+
+
+def test_parse_history_window_materializes_only_nearest_tasks_per_chapter(client: TestClient):
+    """100 章 × 20 轮历史：状态读取不得物化整段历史——每章至多最新任务
+    与最新成功任务到达进程（SQL 窗口聚合）。"""
+    from backend.services import script_parse_state as state
+    email, csrf, user_id, project_id = _register(client)
+    chapters = [f"{index:04d}_章.txt" for index in range(100)]
+    with SessionLocal.begin() as db:
+        for chapter in chapters:
+            for round_index in range(20):
+                # Latest round fails; the newest success sits one odd round back.
+                status = "failed" if round_index >= 19 else ("succeeded" if round_index % 2 else "failed")
+                _add_parse_task(db, user_id, project_id, chapter, status=status,
+                                source_sha=_sha(chapter),
+                                result_name=f"{chapter}.json" if status == "succeeded" else None,
+                                offset_seconds=round_index)
+    with SessionLocal() as db:
+        tasks = state._parse_tasks(db, user_id, project_id, chapters, [])
+    assert len(tasks) == 200
+    per_chapter = {}
+    for task in tasks:
+        per_chapter.setdefault(task.payload["source_name"], set()).add(task.status)
+    assert per_chapter == {chapter: {"failed", "succeeded"} for chapter in chapters}

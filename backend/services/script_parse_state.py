@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import Select, func, insert, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
@@ -94,18 +94,20 @@ def _file_row(db: Session, user: User, project_id: str, file_id: str) -> Project
 def _split_files(db: Session, user: User, project_id: str) -> dict[str, ProjectFile]:
     """The project's current split files, keyed by file name. The file table is
     the source of truth (its sha256 is the CURRENT content digest — republish
-    upserts the row); a name maps to at most one live row."""
+    upserts the row); a name maps to at most one live row. The split module is
+    filtered in SQL so other modules' rows never materialize."""
     rows = db.scalars(
         select(ProjectFile).where(
             ProjectFile.project_id == project_id,
             ProjectFile.owner_id == user.id,
             ProjectFile.deleted_at.is_(None),
+            ProjectFile.object_key.like(f"%/{_SPLIT_MODULE}/%"),
         )
     ).all()
     return {
         item.original_name: item
         for item in rows
-        if _module_of(item.object_key) == _SPLIT_MODULE and item.original_name
+        if item.original_name
     }
 
 
@@ -255,16 +257,47 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
 
 
 def _parse_tasks(db: Session, owner_id: str, project_id: str, names: list[str] | None = None, input_ids: list[str] | None = None) -> list[SimpleNamespace]:
-    """Read only task scalars/identity: no config payload, result or events."""
-    rows = db.execute(select(Task.id, Task.status, Task.progress, Task.error_message,
-        Task.created_at, Task.finished_at, Task.payload["source_name"].as_string().label("source_name"),
-        Task.payload["input_file_id"].as_string().label("input_file_id"))
-        .where(Task.owner_id == owner_id, Task.project_id == project_id, Task.task_type == _PARSE_TASK_TYPE,
-            or_(Task.payload["source_name"].as_string().in_([alias for name in names for alias in filename_aliases(name)]),
-                Task.payload["input_file_id"].as_string().in_(input_ids or [])) if names is not None else True)
-        .order_by(Task.created_at.desc(), Task.id.desc())).mappings().all()
-    return [SimpleNamespace(**{k: v for k, v in row.items() if k not in {"source_name", "input_file_id"}},
-        payload={"source_name": row["source_name"], "input_file_id": row["input_file_id"]}) for row in rows]
+    """Materialize only the tasks state actually needs: per normalized input
+    identity, the latest parse task and the latest succeeded task (SQL
+    windowing). Twenty rounds of history per chapter no longer reach this
+    process; results are still loaded only for the surviving task ids.
+
+    Identity prefers the recorded file row and falls back to the raw name
+    spelling, so legacy alias spellings keep working — they merge per resolved
+    row in ``_build_file_states``."""
+    payload_name = Task.payload["source_name"].as_string()
+    payload_input = Task.payload["input_file_id"].as_string()
+    identity = func.coalesce(func.nullif(payload_input, ""), payload_name, "").label("identity")
+    where = [Task.owner_id == owner_id, Task.project_id == project_id, Task.task_type == _PARSE_TASK_TYPE]
+    if names is not None:
+        where.append(or_(payload_name.in_([alias for name in names for alias in filename_aliases(name)]),
+                         payload_input.in_(input_ids or [])))
+    base = select(Task.id, Task.status, Task.progress, Task.error_message,
+                  Task.created_at, Task.finished_at,
+                  payload_name.label("source_name"), payload_input.label("input_file_id"),
+                  identity).where(*where).subquery()
+
+    def ranked(extra: list) -> Select:
+        source = select(base.c).where(*extra).subquery()
+        window = select(source.c,
+            func.row_number().over(partition_by=[source.c.identity],
+                                   order_by=[source.c.created_at.desc(), source.c.id.desc()]).label("rn")
+        ).subquery()
+        return select(window.c).where(window.c.rn == 1)
+
+    rows = db.execute(ranked([]).union_all(ranked([base.c.status == "succeeded"]))).all()
+    tasks = [SimpleNamespace(
+        id=row.id, status=row.status, progress=row.progress,
+        error_message=row.error_message, created_at=row.created_at, finished_at=row.finished_at,
+        payload={"source_name": row.source_name, "input_file_id": row.input_file_id})
+        for row in rows]
+    # A task can be both latest and latest-succeeded; restore the historical
+    # "newest wins" order across identities before the dedupe pass.
+    ordered = sorted(tasks, key=lambda task: (task.created_at, task.id), reverse=True)
+    deduped: dict[str, SimpleNamespace] = {}
+    for task in ordered:
+        deduped.setdefault(task.id, task)
+    return list(deduped.values())
 
 
 def _active_parse_names(db: Session, owner_id: str, project_id: str) -> set[str]:
