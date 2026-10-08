@@ -97,3 +97,18 @@ npm run build:all
 ## 许可证
 
 仓库采用 [GNU AGPL 第 3 版](LICENSE)。模型、原文和音乐分别遵循各自许可证，使用或分发前核对其条款。
+
+### Qwen3-TTS 署名与第三方许可
+
+NarrifyAudio 提供 [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) 的安装与调用支持。Qwen3-TTS 由 Alibaba Cloud Qwen 团队开发；安装脚本安装 `qwen-tts==0.1.1`，运行时加载所选模型。本源码仓库不包含该依赖包或模型权重。
+
+Qwen3-TTS 代码采用 [Apache License 2.0](https://github.com/QwenLM/Qwen3-TTS/blob/main/LICENSE)。默认使用的模型与 Tokenizer 也以 Apache-2.0 发布：
+
+| 组件 | 官方模型仓库 |
+| --- | --- |
+| CustomVoice | [Qwen3-TTS-12Hz-1.7B-CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) |
+| Base | [Qwen3-TTS-12Hz-1.7B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) |
+| VoiceDesign | [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) |
+| Tokenizer | [Qwen3-TTS-Tokenizer-12Hz](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) |
+
+第三方组件继续遵循其原始许可证，NarrifyAudio 的 AGPL-3.0 不替代这些许可证。再分发 Qwen3-TTS 代码或模型权重（包括安装包、容器镜像或离线包）时，应附带 Apache-2.0 许可证副本，保留适用的版权与署名声明；修改上游文件须注明修改，上游提供 `NOTICE` 时须保留其中适用内容，具体遵循 [Apache-2.0 第 4 条](https://www.apache.org/licenses/LICENSE-2.0#redistribution)。README 中的署名不能替代再分发时所需的许可证文件。其他依赖、替换模型及原始素材的条款应分别核对。

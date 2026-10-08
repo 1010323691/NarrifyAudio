@@ -97,3 +97,18 @@ Back up the database, actual workspace files and local configuration together be
 ## License
 
 The repository is licensed under [GNU AGPL version 3](LICENSE). Models, source texts and music retain their respective licenses; check their terms before use or distribution.
+
+### Qwen3-TTS attribution and third-party licensing
+
+NarrifyAudio provides installation and integration support for [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS), developed by the Alibaba Cloud Qwen team. The installation script installs `qwen-tts==0.1.1`; the runtime loads the selected models. The dependency package and model weights are not included in this source repository.
+
+Qwen3-TTS code is licensed under [Apache License 2.0](https://github.com/QwenLM/Qwen3-TTS/blob/main/LICENSE). The default models and tokenizer are also published under Apache-2.0:
+
+| Component | Official model repository |
+| --- | --- |
+| CustomVoice | [Qwen3-TTS-12Hz-1.7B-CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) |
+| Base | [Qwen3-TTS-12Hz-1.7B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) |
+| VoiceDesign | [Qwen3-TTS-12Hz-1.7B-VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) |
+| Tokenizer | [Qwen3-TTS-Tokenizer-12Hz](https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz) |
+
+Third-party components retain their original licenses; NarrifyAudio's AGPL-3.0 does not replace them. If you redistribute Qwen3-TTS code or model weights, including in an installer, container image or offline bundle, provide a copy of Apache-2.0 and retain applicable copyright and attribution notices. Mark changes to upstream files and preserve applicable upstream `NOTICE` content when supplied, as required by [Apache-2.0 section 4](https://www.apache.org/licenses/LICENSE-2.0#redistribution). This README attribution does not replace the license files required for redistribution. Check the original terms separately for other dependencies, replacement models and source materials.
