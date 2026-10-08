@@ -282,6 +282,8 @@ def claim_task(
     """Atomically create one fenced attempt for a submitted task."""
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
+    from . import mechanical_audio
+    audio_capacity = mechanical_audio.capacity_available()
     with SessionLocal() as db:
         if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
             db.rollback()
@@ -291,6 +293,8 @@ def claim_task(
             task_stmt = task_stmt.where(Task.task_type.not_in(excluded_task_types))
         task = db.scalar(task_stmt.with_for_update())
         if task is None or task.status in TERMINAL_TASK_STATUSES or task.status == "paused":
+            return None
+        if task.task_type in mechanical_audio.AUDIO_TASK_TYPES and not audio_capacity:
             return None
         if task.task_type == "tts.batch" and defer_workspace_conflicts:
             from .tts_resource_budget import tts_capacity_available
@@ -379,8 +383,7 @@ def claim_task(
         )
         if task.task_type == "tts.batch":
             task.ui_state = {**(task.ui_state or {}), "tts_slot": attempt.id, "tts_parked": False}
-        db.commit()
-        return TaskClaim(
+        claim = TaskClaim(
             task_id=task.id,
             attempt_id=attempt.id,
             attempt_no=attempt.attempt_no,
@@ -391,6 +394,11 @@ def claim_task(
             task_type=task.task_type,
             payload=dict(task.payload),
         )
+        if not mechanical_audio.reserve(db, claim):
+            db.rollback()
+            return None
+        db.commit()
+        return claim
 
 
 def claim_fair_task(
@@ -409,12 +417,16 @@ def claim_fair_task(
     """
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
+    from . import mechanical_audio
+    audio_capacity = mechanical_audio.capacity_available()
     with SessionLocal() as db:
         retry_ready = or_(Task.next_attempt_at.is_(None), Task.next_attempt_at <= now)
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
         eligible_tasks = eligible_tasks & _foundation_claim_eligibility()
+        if not audio_capacity:
+            eligible_tasks = eligible_tasks & Task.task_type.not_in(mechanical_audio.AUDIO_TASK_TYPES)
         from .tts_resource_budget import tts_capacity_available
         if not tts_capacity_available(db):
             eligible_tasks = eligible_tasks & (Task.task_type != "tts.batch")
@@ -1513,6 +1525,8 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
 
     quota_token = set_quota_context(claim.owner_id, claim.task_id, claim.attempt_id)
     gpu_token = bind_claim(claim)
+    from . import mechanical_audio
+    audio_token = mechanical_audio.bind_claim(claim)
     stop = threading.Event()
     batch_claims = [claim]
     batch_finished = set()
@@ -1684,6 +1698,8 @@ def _run_claim_fenced(claim: TaskClaim) -> str:
         report_worker("idle", None)
         reset_quota_context(quota_token)
         reset_claim(gpu_token)
+        mechanical_audio.release_safely(claim)
+        mechanical_audio.reset_claim(audio_token)
 
 
 def process_task_message(

@@ -17,6 +17,7 @@ from ...core.managed_process import identity_alive
 from .policy import QueueStats
 
 _lock = threading.RLock()
+_held = threading.local()
 
 
 def stamp(value=None) -> float:
@@ -34,8 +35,16 @@ def initial_state() -> dict:
 @contextmanager
 def host_lock():
     # A file lock also makes SQLite tests obey exactly the production atomicity.
-    with _lock, exclusive_file_lock(PROJECT_ROOT / ".narrify" / "gpu-state.lock"):
-        yield
+    with _lock:
+        if getattr(_held, "active", False):
+            yield
+        else:
+            with exclusive_file_lock(PROJECT_ROOT / ".narrify" / "gpu-state.lock"):
+                _held.active = True
+                try:
+                    yield
+                finally:
+                    _held.active = False
 
 
 @contextmanager

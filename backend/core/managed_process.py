@@ -5,6 +5,7 @@ import ctypes
 import os
 import signal
 import subprocess
+import uuid
 from pathlib import Path
 
 import psutil
@@ -27,6 +28,36 @@ def identity_alive(identity: dict) -> bool:
     except psutil.NoSuchProcess:
         return False
     # AccessDenied is deliberately propagated: unknown is not proof of exit.
+
+
+def windows_job_alive(name: str) -> bool:
+    """Inspect a named owned Job after its original Worker has exited."""
+    from ctypes import wintypes as w
+    if not name.startswith("Local\\NarrifyAudio-"):
+        raise ValueError("Unknown owned Job identity")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenJobObjectW.argtypes = [w.DWORD, w.BOOL, w.LPCWSTR]
+    kernel.OpenJobObjectW.restype = w.HANDLE
+    kernel.QueryInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.c_void_p]
+    kernel.QueryInformationJobObject.restype = w.BOOL
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.CloseHandle.restype = w.BOOL
+    handle = kernel.OpenJobObjectW(0x4, False, name)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 2:
+            return False
+        raise ctypes.WinError(error)
+    try:
+        class Accounting(ctypes.Structure):
+            _fields_ = [(key, ctypes.c_int64) for key in ("user", "kernel", "period_user", "period_kernel")] + [
+                (key, w.DWORD) for key in ("faults", "total", "active", "terminated")]
+        info = Accounting()
+        if not kernel.QueryInformationJobObject(handle, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info.active > 0
+    finally:
+        kernel.CloseHandle(handle)
 
 
 class WindowsJob:
@@ -54,7 +85,8 @@ class WindowsJob:
             _fields_ = [("limits", Limits), ("io", IO), ("process_memory", ctypes.c_size_t),
                         ("job_memory", ctypes.c_size_t), ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
 
-        self.handle = self.kernel.CreateJobObjectW(None, None)
+        self.name = "Local\\NarrifyAudio-" + uuid.uuid4().hex
+        self.handle = self.kernel.CreateJobObjectW(None, self.name)
         if not self.handle:
             raise ctypes.WinError(ctypes.get_last_error())
         info = Extended()

@@ -842,6 +842,8 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
     metrics = task_metrics(_, db)
     queue = _queue_status()
     gpu = _gpu_status()
+    from ..platform.mechanical_audio import status as audio_status
+    audio_admission = audio_status(db)
     workers = _list_workers(db)
     live = [worker for worker in workers if worker["status"] != "offline"]
     def has_worker(prefix: str) -> bool:
@@ -860,6 +862,10 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
         {"key": "tts", "name": "TTS Worker", "status": "healthy" if tts_installed and has_worker("tts.") else "warning", "detail": "引擎与 Worker 可用" if tts_installed and has_worker("tts.") else "引擎或 Worker 未就绪"},
         {"key": "audio", "name": "FFmpeg", "status": "healthy" if shutil.which("ffmpeg") else "warning", "detail": "命令可用" if shutil.which("ffmpeg") else "未在 PATH 中找到"},
         {"key": "gpu", "name": "GPU", "status": "healthy" if gpu else "unknown", "detail": "已检测到 GPU" if gpu else "未采集到 GPU 数据"},
+        {"key": "audio_admission", "name": "音频任务调度",
+         "status": "error" if audio_admission["error"] else "warning" if audio_admission["memory_paused"] else "healthy",
+         "detail": audio_admission["error"] or ("可用内存不足，等待恢复" if audio_admission["memory_paused"] else
+                    f"全机执行 {audio_admission['active']}/{audio_admission['limit']} 个合并/混音任务")},
     ]
     recent_failures = db.scalars(select(Task).where(Task.status.in_(("failed", "timeout"))).order_by(Task.updated_at.desc()).limit(5)).all()
     api_metrics = api_snapshot()
@@ -900,7 +906,7 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
             "failed": metrics["status_counts"].get("failed", 0) + metrics["status_counts"].get("timeout", 0),
         },
         "workers": metrics["worker_pool"], "queue": queue, "api": api_metrics, "system": system_metrics,
-        "gpu": gpu, "user_count": int(db.scalar(select(func.count()).select_from(User)) or 0),
+        "gpu": gpu, "audio_admission": audio_admission, "user_count": int(db.scalar(select(func.count()).select_from(User)) or 0),
         "recent_errors": sorted(recent_errors, key=lambda item: item["time"], reverse=True)[:5],
     }
 

@@ -29,6 +29,21 @@ class GPUSchedulerState(Base):
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
+class MechanicalAudioState(Base):
+    __tablename__ = "mechanical_audio_state"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="local")
+    memory_paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class MechanicalAudioPermit(Base):
+    __tablename__ = "mechanical_audio_permits"
+    attempt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    process: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class GPURequest(Base):
     __tablename__ = "gpu_requests"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

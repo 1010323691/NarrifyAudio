@@ -1711,7 +1711,19 @@ def _find_narration(layout, stem: str) -> Path | None:
     return None
 
 
+class _MixPaused(Exception):
+    pass
+
+
 def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
+    while True:
+        try:
+            return _mix_chapter_once(handle, stem, bgm_cfg, ffmpeg_cfg)
+        except _MixPaused:
+            continue
+
+
+def _mix_chapter_once(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
     """Task worker: mix ONE chapter (06 narration + the matched music →
     ``08_bgm/<stem>.mp3``).
 
@@ -1847,6 +1859,7 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
         raise TaskCancelled()  # 排队中被取消——未取闸，下面 finally 不得 release
     acquired = True
     proc = None
+    pause_requested = False
     stderr_tail_box: list[bytes] = [b""]
     try:
         # Revalidate after waiting for merge_gate: files, manifest, pauses,
@@ -1915,7 +1928,8 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
                 dur, bgm_cfg, m_dur, threads=thread_budget(),
             )
         handle.progress(0.05, "混音中")
-        proc = subprocess.Popen(
+        from ..platform.mechanical_audio import spawn_registered, cancel_registered, finish_registered
+        proc = spawn_registered(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             cwd=str(core_paths.PROJECT_ROOT),
         )
@@ -1942,9 +1956,22 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
         pump.start()
         start = time.monotonic()
         last_size = 0.0
+        def stop_for_pause():
+            nonlocal pause_requested
+            pause_requested = True
+            cancel_registered(proc)
+            proc.wait(timeout=10)
+            finish_registered(proc)
+
         # 0.2 s 轮询：取消响应 + 进度粗估（输出文件增长 0.05→0.95）。
         while proc.poll() is None:
-            handle.check()  # TaskCancelled → finally kill
+            check_interruptible = getattr(handle, "check_interruptible", None)
+            if callable(check_interruptible):
+                check_interruptible(stop_for_pause)
+                if pause_requested:
+                    raise _MixPaused()
+            else:
+                handle.check()
             elapsed = time.monotonic() - start
             if out.exists():
                 size = out.stat().st_size
@@ -1968,12 +1995,18 @@ def mix_chapter(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
         return {"stem": stem, "file": published.name, "path": str(published),
                 "duration": round(dur, 3), "music": music_name}
     finally:
-        if proc is not None:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=10)
-        if acquired:
-            merge_gate().release()
+        try:
+            if proc is not None:
+                from ..platform.mechanical_audio import cancel_registered, finish_registered
+                if proc.poll() is None:
+                    cancel_registered(proc)
+                proc.wait(timeout=10)
+                finish_registered(proc)
+            if pause_requested:
+                out.unlink(missing_ok=True)
+        finally:
+            if acquired:
+                merge_gate().release()
 
 
 # --------------------------------------------------------------------------- #
