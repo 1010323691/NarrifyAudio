@@ -60,8 +60,13 @@ class MaintenanceSchedule:
         if self.retention is not None and now >= self.next_retention:
             self.next_retention = now + 60 if self.retention_startup else now + 86400
             try:
-                purged = self.retention()
-                if purged or not self.retention_startup:
+                result = self.retention()
+                purged, incomplete = result if isinstance(result, tuple) else (result, False)
+                # A bounded round that hit its work budget continues next pass
+                # so a large backlog cannot stall dispatch for a whole day.
+                if incomplete:
+                    self.next_retention = now + 60
+                elif purged or not self.retention_startup:
                     self.next_retention = now + 86400
             except Exception:
                 logger.exception("Retention maintenance failed; will retry")

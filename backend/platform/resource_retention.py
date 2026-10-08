@@ -17,8 +17,15 @@ from .task_lifecycle import ACTIVE_TASK_STATUSES
 logger = logging.getLogger(__name__)
 
 
-def purge_resource_artifacts() -> int:
-    """Remove only known platform files; retry failures on the next Worker pass."""
+def purge_resource_artifacts(limit: int = 200) -> int:
+    """Remove at most ``limit`` known platform files; retry the rest next pass.
+
+    The bound is the maintenance coordinator's single-round work budget so a
+    large export/snapshot backlog cannot delay task dispatch. Every removal
+    is idempotent (expired + still present), so the next round simply
+    resumes from its own fresh query."""
+    if not 1 <= limit <= 1000:
+        raise ValueError("purge budget must contain 1..1000 files")
     deleted = 0
     now = time.time()
     with SessionLocal() as db:
@@ -28,6 +35,8 @@ def purge_resource_artifacts() -> int:
             Task.task_type == "resources.package", Task.status == "succeeded",
         )).all()
         for task, record in rows:
+            if deleted >= limit:
+                return deleted
             from datetime import datetime
 
             try:
@@ -41,6 +50,8 @@ def purge_resource_artifacts() -> int:
             except (ResourceError, OSError, ValueError, KeyError):
                 logger.warning("Could not purge resource export task=%s", task.id)
         for user in db.scalars(select(User)).all():
+            if deleted >= limit:
+                return deleted
             try:
                 protected = set()
                 for active in db.scalars(select(Task).where(Task.owner_id == user.id, Task.status.in_(ACTIVE_TASK_STATUSES), Task.task_type.in_(["resources.package", "resources.cleanup"]))).all():
@@ -60,6 +71,8 @@ def purge_resource_artifacts() -> int:
                         continue
                     current = json.loads(pointer.read_text(encoding="utf-8")).get("snapshot_id") if pointer.is_file() else None
                     for snapshot in directory.glob("*.sqlite"):
+                        if deleted >= limit:
+                            return deleted
                         if is_link_or_junction(snapshot) or snapshot.stem == current or (directory.name, snapshot.stem) in protected:
                             continue
                         # Old snapshots remain available for frozen exports.

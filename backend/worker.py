@@ -206,9 +206,12 @@ def _project_retention_loop(stop: threading.Event) -> None:
 
 
 def _retention_pass():
-    purged = purge_expired_projects()
-    purge_resource_artifacts()
-    return purged
+    # Single-round work budget per cleanup kind: a large backlog continues on
+    # the coordinator's next pass (60s) instead of blocking the dispatch loop.
+    projects = purge_expired_projects(limit=20)
+    resources = purge_resource_artifacts(limit=200)
+    incomplete = projects >= 20 or resources >= 200
+    return projects + resources, incomplete
 
 
 def _host_maintenance_loop(stop):

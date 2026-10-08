@@ -44,6 +44,43 @@ class EmptyDatabase:
     def commit(self): pass
 
 
+def test_schedule_continues_incomplete_retention_rounds_on_next_pass(monkeypatch):
+    clock = [100.]
+    monkeypatch.setattr(maintenance.time, 'monotonic', lambda: clock[0])
+    rounds = []
+    def retention():
+        rounds.append(round(clock[0], 1))
+        return (20, True) if len(rounds) <= 2 else (5, False)
+    schedule = maintenance.MaintenanceSchedule(retention=retention)
+    schedule.tick()
+    clock[0] += 59.9
+    schedule.tick()
+    assert len(rounds) == 1
+    clock[0] += 0.1
+    schedule.tick()
+    assert len(rounds) == 2
+    clock[0] += 60
+    schedule.tick()
+    assert len(rounds) == 3
+    clock[0] += 3600
+    schedule.tick()
+    assert len(rounds) == 3
+
+
+def test_schedule_keeps_legacy_int_retention_contract(monkeypatch):
+    clock = [100.]
+    monkeypatch.setattr(maintenance.time, 'monotonic', lambda: clock[0])
+    purged = []
+    def retention():
+        purged.append(0)
+        return 0
+    schedule = maintenance.MaintenanceSchedule(retention=retention)
+    schedule.tick()
+    clock[0] += 60
+    schedule.tick()
+    assert len(purged) == 2
+
+
 def _coordinate(root, index, stopped, messages):
     maintenance.PROJECT_ROOT = Path(root)
     maintenance.SessionLocal = EmptyDatabase

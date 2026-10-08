@@ -15,8 +15,15 @@ logger = logging.getLogger(__name__)
 _RETENTION_LOCK_ID = 7526202610
 
 
-def purge_expired_projects() -> int:
-    """Purge every safely accessible project whose calendar-month retention expired."""
+def purge_expired_projects(limit: int = 20) -> int:
+    """Purge up to ``limit`` safely accessible projects whose retention expired.
+
+    The bound is the maintenance coordinator's single-round work budget: a
+    large trash cannot delay task dispatch for hours, and a round that hits
+    the budget continues on the coordinator's next pass (rows that fail to
+    purge stay in place and keep their ordering)."""
+    if not 1 <= limit <= 100:
+        raise ValueError("purge budget must contain 1..100 projects")
     with SessionLocal() as db:
         if db.get_bind().dialect.name == "postgresql":
             with LockSessionLocal() as lock_db:
@@ -24,14 +31,14 @@ def purge_expired_projects() -> int:
                     return 0
                 if not lock_db.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _RETENTION_LOCK_ID}):
                     return 0
-                return _purge_expired_with_session(db)
+                return _purge_expired_with_session(db, limit)
 
         if storage_migration(db) is not None:
             return 0
-        return _purge_expired_with_session(db)
+        return _purge_expired_with_session(db, limit)
 
 
-def _purge_expired_with_session(db: Session) -> int:
+def _purge_expired_with_session(db: Session, limit: int) -> int:
     purged = 0
     now = utcnow()
     rows = db.execute(
@@ -39,8 +46,9 @@ def _purge_expired_with_session(db: Session) -> int:
         .join(User, User.id == Project.owner_id)
         .where(Project.deleted_at.is_not(None))
         .order_by(Project.deleted_at.asc())
+        .limit(limit + 1)
     ).all()
-    for project_id, username in rows:
+    for project_id, username in rows[:limit]:
         project = db.scalar(select(Project).where(
             Project.id == project_id, Project.deleted_at.is_not(None),
         ).with_for_update(skip_locked=True))

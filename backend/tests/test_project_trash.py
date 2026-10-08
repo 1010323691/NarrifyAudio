@@ -322,3 +322,25 @@ def test_restore_casefold_conflict_returns_success_instead_of_expired_status(cli
     assert restored.status_code == 200, restored.text
     assert restored.json()["name"] == "Book（恢复 2）"
     assert restored.json()["directory_key"].endswith("/Book（恢复 2）")
+
+
+def test_purge_budget_bounds_each_round_and_continues(client: TestClient):
+    _user_id, _username, csrf = _account(client)
+    first = _project(client, csrf, "预算第一轮")
+    second = _project(client, csrf, "预算第二轮")
+    for project_id in (first["id"], second["id"]):
+        _trash(client, csrf, project_id)
+        _expire(project_id)
+    assert purge_expired_projects(limit=1) == 1
+    assert purge_expired_projects(limit=1) == 1
+    assert purge_expired_projects(limit=1) == 0
+    with SessionLocal() as db:
+        assert db.get(Project, first["id"]) is None
+        assert db.get(Project, second["id"]) is None
+
+
+def test_purge_budget_rejects_out_of_range(client: TestClient):
+    with pytest.raises(ValueError):
+        purge_expired_projects(limit=0)
+    with pytest.raises(ValueError):
+        purge_expired_projects(limit=101)
