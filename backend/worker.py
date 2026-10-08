@@ -215,7 +215,9 @@ def _host_maintenance_loop(stop):
     # Entry-point injection preserves platform -> core layering: the platform
     # coordinator must not import service-level project retention.
     from .platform.delivery_maintenance import run
-    run(stop, recover=recover_database_task_page, publish=publish_pending, retention=_retention_pass)
+    from .services.project_progress import refresh_due_progress
+    run(stop, recover=recover_database_task_page, publish=publish_pending,
+        retention=_retention_pass, refresh=refresh_due_progress)
 
 
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:

@@ -332,6 +332,16 @@ def claim_task(
             db.commit()
             return None
 
+        if task.task_type == 'project.progress':
+            from .models import ProjectProgressRefresh
+            from .progress_refresh import earliest_start
+            state = db.scalar(select(ProjectProgressRefresh).where(
+                ProjectProgressRefresh.project_id == task.project_id).with_for_update())
+            if state is not None and earliest_start(state, now) > now:
+                task.status = 'retrying'
+                task.next_attempt_at = earliest_start(state, now)
+                db.commit()
+                return None
         # guarded_claim serializes competing admissions across processes. Recheck
         # here because fair selection releases its DB session before claiming,
         # and Redis delivery enters this path without the fair-selection filter.
@@ -1132,9 +1142,15 @@ def _execute_project_progress(claim: TaskClaim) -> TaskOutcome:
         if user is None:
             raise TaskExecutionError('owner_not_found', '任务所属用户不存在')
         root = project_workspace_path(db, user.username, claim.project_id)
+        task, attempt = _attempt_is_current(db, claim)
+        if task is None or attempt is None or task.status != 'running':
+            raise TaskExecutionError('progress_stale_attempt', '进度刷新任务执行许可已失效')
+        from .progress_refresh import execution_started
+        signature = execution_started(db, claim, user, root)
+        db.commit()
     stages = project_completion(root)
     outcome = write_task_outcome(claim, 'progress.json', 'application/json', b'{}',
-                                 {'signature': claim.payload['signature'], 'stages': stages})
+                                 {'signature': signature, 'stages': stages})
     return replace(outcome, result_only=True)
 
 
@@ -1404,13 +1420,9 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                 **outcome.metadata,
             }
             if task.task_type == 'project.progress':
-                snapshot = db.get(ProjectProgress, task.project_id)
-                if snapshot is None:
-                    snapshot = ProjectProgress(project_id=task.project_id)
-                    db.add(snapshot)
-                snapshot.signature = outcome.metadata['signature']
-                snapshot.stages = outcome.metadata['stages']
-                snapshot.updated_at = utcnow()
+                from .progress_refresh import publish_snapshot
+                publish_snapshot(db, task, outcome.metadata, user,
+                                 project_workspace_path(db, user.username, task.project_id))
             if outcome.publish_module:
                 result_payload["path"] = published[0]["path"]
             if len(published) > 1 or isinstance(outcome.metadata.get("files"), list):

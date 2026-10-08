@@ -129,6 +129,17 @@ class ProjectProgress(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class ProjectProgressRefresh(Base):
+    __tablename__ = "project_progress_refresh"
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    requested_signature: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    dirty: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    task_id: Mapped[str | None] = mapped_column(String(36))
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    __table_args__ = (Index("ix_progress_refresh_due", "dirty", "next_due_at", "project_id"),)
+
+
 class ProjectFile(Base):
     __tablename__ = "project_files"
 

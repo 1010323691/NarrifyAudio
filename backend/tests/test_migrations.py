@@ -36,6 +36,8 @@ def test_upgrade_from_empty_database_to_head(tmp_path, preexisting_hold_table):
     engine = sa.create_engine(env["NARRIFY_DATABASE_URL"])
     try:
         inspector = sa.inspect(engine)
+        assert "project_progress_refresh" in inspector.get_table_names()
+        assert "ix_progress_refresh_due" in {index["name"] for index in inspector.get_indexes("project_progress_refresh")}
         assert "quota_holds" in inspector.get_table_names()
         assert "workspaces" not in inspector.get_table_names()
         assert "next_attempt_at" in {column["name"] for column in inspector.get_columns("tasks")}

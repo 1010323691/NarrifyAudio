@@ -28,15 +28,23 @@ def run_dispatch_once(*, recover, publish):
 class MaintenanceSchedule:
     """Schedules bounded callbacks without holding a session across waits or calls."""
 
-    def __init__(self, *, recover=None, publish=None, retention=None):
+    def __init__(self, *, recover=None, publish=None, retention=None, refresh=None):
         self.recover, self.publish, self.retention = recover, publish, retention
         self.cursor = ""
         self.next_recovery = self.next_publish = self.next_retention = 0.
         self.retention_startup = True
+        self.refresh = refresh
+        self.next_refresh = 0.
 
     def tick(self):
         logger = logging.getLogger("audiobook.worker")
         now = time.monotonic()
+        if self.refresh is not None and now >= self.next_refresh:
+            self.next_refresh = now + 1
+            try:
+                self.refresh(limit=100)
+            except Exception:
+                logger.exception("Progress refresh maintenance failed; dirty state retained")
         if self.recover is not None and now >= self.next_recovery:
             self.next_recovery = now + 10
             try:
@@ -61,12 +69,12 @@ class MaintenanceSchedule:
             self.retention_startup = False
 
 
-def run(stop, *, recover=None, publish=None, retention=None):
+def run(stop, *, recover=None, publish=None, retention=None, refresh=None):
     logger = logging.getLogger("audiobook.worker")
     while not stop.is_set():
         try:
             with exclusive_file_lock(PROJECT_ROOT / ".narrify" / "host-maintenance.lock", timeout=0):
-                schedule = MaintenanceSchedule(recover=recover, publish=publish, retention=retention)
+                schedule = MaintenanceSchedule(recover=recover, publish=publish, retention=retention, refresh=refresh)
                 cursor = ""
                 scanned = False
                 last_prune = time.monotonic()
