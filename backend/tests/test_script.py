@@ -1460,6 +1460,16 @@ def test_strip_leading_saying_tag():
     assert _strip_leading_saying_tag("林某冷笑道：走") == "林某冷笑道：走"
 
 
+def test_japanese_corner_brackets_are_outer_wrap_for_split_check():
+    # 日文「」『』外层括号与提示词「去外层引号」一致，也应被断句失败校验识别
+    assert is_suspicious_entry_text("「姜维道：走吧。」") is True
+    assert is_suspicious_entry_text("『姜维说道：走吧。』") is True
+    assert is_suspicious_entry_text("「难道是这样。」") is False
+    assert is_suspicious_entry_text("「别出声，我在这里。」") is False
+    # 带标签的「」条目：标签被剥离后正文保留，外层括号仍在
+    assert _strip_leading_saying_tag("「林某冷笑道：二哥还没出来吗？」", ROSTER) == "「二哥还没出来吗？」"
+
+
 def _run_revalidate(monkeypatch, payloads, handle=None):
     """Serve ``payloads`` in order (one non-stream body per call); over-call = error."""
     calls = {"n": 0}
