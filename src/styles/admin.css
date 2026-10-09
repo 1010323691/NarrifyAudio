@@ -313,6 +313,8 @@
 .admin-shell .settings-nav button { padding: var(--space-3) 0; white-space: nowrap; border-bottom: 2px solid transparent; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .admin-shell .settings-nav button.active { color: hsl(var(--primary)); border-bottom-color: hsl(var(--primary)); font-weight: 600; }
 .admin-shell .admin-settings { max-width: 1040px; }
+/* 网格子项默认 min-width:auto = 内容最小宽；卡片里的 overflow-x 表格会把整列撑过窄屏，须允许收缩。 */
+.admin-shell .admin-config > * { min-width: 0; }
 .admin-shell .admin-settings .settings-actions { position: sticky; top: 0; z-index: 5; padding: var(--space-3) 0; background: hsl(var(--background)); }
 .admin-shell .admin-config { display: grid; gap: var(--space-4); max-width: 1040px; }
 .admin-shell .admin-config input[type=number] { max-width: 180px; }
