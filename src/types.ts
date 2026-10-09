@@ -274,6 +274,7 @@ export interface BatchRunOptions {
 }
 
 export interface PrepareFoundationsResult {
+  hints_deferred?: boolean
   count: number
   aliases: number
   speakers: string[]

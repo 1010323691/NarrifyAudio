@@ -36,7 +36,17 @@ def publish_pending(redis_url: str | None = None, limit: int = 100) -> int:
     event id is stable and consumers must deduplicate it before applying a
     business effect.  This is the intentional at-least-once boundary.
     """
-    client = redis.Redis.from_url(redis_url or os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+    if not 1 <= limit <= 100:
+        raise ValueError("outbox batch must contain 1..100 events")
+    client = redis.Redis.from_url(redis_url or os.getenv("NARRIFY_REDIS_URL", "redis://localhost:6379/0"),
+                                 decode_responses=True, socket_timeout=5, socket_connect_timeout=5)
+    try:
+        return _publish_batch(client, limit)
+    finally:
+        client.close()
+
+
+def _publish_batch(client, limit):
     published = 0
     with SessionLocal() as db:
         rows = db.scalars(
@@ -46,15 +56,25 @@ def publish_pending(redis_url: str | None = None, limit: int = 100) -> int:
             .limit(limit)
             .with_for_update(skip_locked=True)
         ).all()
-        for event in rows:
+        if not rows:
+            return 0
+        responses = []
+        with client.pipeline(transaction=False) as pipeline:
+            for event in rows:
+                pipeline.xadd(STREAM_NAME, {"event": _payload(event)}, maxlen=100_000, approximate=True)
             try:
-                client.xadd(STREAM_NAME, {"event": _payload(event)}, maxlen=100_000, approximate=True)
+                responses = pipeline.execute(raise_on_error=False)
             except redis.RedisError:
-                event.attempts += 1
-                db.commit()
-                continue
+                # Some XADDs may have arrived before the connection failed.
+                # Keep every unknown row pending and replay its stable event id.
+                pass
+        if len(responses) != len(rows):
+            responses = [None] * len(rows)
+        now = utcnow()
+        for event, response in zip(rows, responses):
             event.attempts += 1
-            event.published_at = utcnow()
-            db.commit()
-            published += 1
+            if isinstance(response, (str, bytes)) and response:
+                event.published_at = now
+                published += 1
+        db.commit()
     return published

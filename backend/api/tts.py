@@ -42,7 +42,8 @@ from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
-from ..core.role_hints import suggest_role_hints
+from ..core.role_hint_cache import cached_role_hints
+from ..core.script_snapshot import capture_reference, source_version
 from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
 from ..engines.audio import probe_duration
@@ -56,6 +57,7 @@ from ..platform.engine_task_submission import (
     has_active_durable_tasks,
     submit_legacy_engine_task,
     submit_legacy_engine_tasks,
+    submit_engine_batch,
 )
 from ..platform.file_response import file_response
 from . import _common
@@ -88,8 +90,9 @@ def status() -> dict:
 # ---------------------------------------------------------------------------
 
 class PrepareFoundationsRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     # Phase 1 (LLM only): None -> every character; a list -> only those (single-char regen).
-    speakers: list[str] | None = None
+    speakers: list[str] | None = Field(default=None, max_length=1000)
     # True -> regenerate only characters without a foundation yet.
     new_only: bool = False
     # speaker -> user-supplied voice description (skips the LLM for that character).
@@ -99,8 +102,9 @@ class PrepareFoundationsRequest(BaseModel):
 
 
 class MakeClonesRequest(BaseModel):
+    project_id: str | None = Field(default=None, max_length=36)
     # Phase 2 (TTS only): None -> every foundation-bearing character; a list -> only those.
-    speakers: list[str] | None = None
+    speakers: list[str] | None = Field(default=None, max_length=1000)
     # True -> limit to characters not yet holding a usable clone (also retries failed ones).
     new_only: bool = False
     # 批内行数（上限，1..64，不是并发进程数）：单个长驻 design-batch 子进程内的 GPU 张量批
@@ -149,21 +153,29 @@ def prepare_foundations(
     req: PrepareFoundationsRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one foundation task per selected character."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="voices.foundation", request=req.model_dump(),
+        prepare=lambda: _prepare_voice_foundations(req), ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=req.project_id)
+
+
+def _prepare_voice_foundations(req):
     script = req.script or resolve_parsed_json(None).name
+    paths = resolve_parsed_json_all() if script == ALL_PARSED_JSON else [resolve_parsed_json(script)]
+    reference = capture_reference(paths, get_or_prepare_layout().workspace, script)
     targets = _voice_task_speakers(script, req.speakers, req.new_only)
+    if source_version(paths)[0] != reference["version"]:
+        raise HTTPException(409, "剧本在提交期间发生变化，请重新选择角色。")
     config = get_config().model_dump(mode="json")
-    return submit_legacy_engine_tasks(
-        task_type="voices.foundation",
-        entries=[{
+    config["_script_inputs"] = reference
+    return ([{
             "label": f"语音推理基础 · {speaker}",
             "payload": {"speakers": [speaker], "new_only": req.new_only,
-                        "overrides": req.overrides or {}, "script": script, "config": config},
-        } for speaker in targets],
-        ctx=ctx, db=db, idempotency_prefix="voices-foundation",
-    )
+                        "overrides": {speaker: req.overrides[speaker]} if req.overrides and speaker in req.overrides else {},
+                        "script": script},
+        } for speaker in targets], config)
 
 
 @router.post("/make-clones")
@@ -171,23 +183,30 @@ def make_clones(
     req: MakeClonesRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one clone task per selected foundation-bearing character."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="voices.clone", request=req.model_dump(),
+        prepare=lambda: _prepare_voice_clones(req), ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=req.project_id)
+
+
+def _prepare_voice_clones(req):
     script = req.script or resolve_parsed_json(None).name
+    paths = resolve_parsed_json_all() if script == ALL_PARSED_JSON else [resolve_parsed_json(script)]
+    reference = capture_reference(paths, get_or_prepare_layout().workspace, script)
     targets = _voice_task_speakers(script, req.speakers, req.new_only,
                                    clone=True, candidate_count=req.candidate_count)
+    if source_version(paths)[0] != reference["version"]:
+        raise HTTPException(409, "剧本在提交期间发生变化，请重新选择角色。")
     config = get_config().model_dump(mode="json")
-    return submit_legacy_engine_tasks(
-        task_type="voices.clone",
-        entries=[{
+    config["_script_inputs"] = reference
+    return ([{
             "label": f"克隆音频 · {speaker}",
             "payload": {"speakers": [speaker], "new_only": req.new_only,
                         "concurrency": req.concurrency, "script": script,
-                        "candidate_count": req.candidate_count, "config": config},
-        } for speaker in targets],
-        ctx=ctx, db=db, idempotency_prefix="voices-clone",
-    )
+                        "candidate_count": req.candidate_count},
+        } for speaker in targets], config)
 
 
 def _voice_usable(entry: dict) -> bool:
@@ -375,7 +394,7 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     # ties keep first-appearance (or voice_config) order.
     names = sorted(order if has_script else list(voice_config.keys()),
                    key=lambda sp: -counts.get(sp, 0))
-    hints = suggest_role_hints(names, voice_config, counts)
+    hints = cached_role_hints(names, voice_config, counts, layout.temp / "role-hints")
 
     ready_names = {n for n in names if _voice_ready(n, voice_config)}
     counts_out = {"all": len(names), "ready": len(ready_names), "pending": len(names) - len(ready_names),
@@ -508,7 +527,7 @@ def select_voice(
     entry["selected_audio_id"] = aid
     # Keep the active reference in sync so downstream synthesis uses the picked take.
     entry["ref_audio"] = active["ref_audio"]
-    vc_path.write_bytes(json.dumps(voice_config, indent=2, ensure_ascii=False).encode("utf-8"))
+    pathio.rewrite_json_file(vc_path, voice_config)
     Batch.invalidate_speaker_outputs([req.speaker], layout)
     return {"ok": True, "speaker": req.speaker, "selected_audio_id": aid,
             "ref_audio": active["ref_audio"]}
@@ -1323,10 +1342,8 @@ def _preview_inflight_conflicts(script: str, pkg: str, ctx: AuthContext, db: Ses
 
 # 单句/章节音频时长的进程级 LRU 缓存：detail 是事件驱动（打开/保存/刷新/任务终态），
 # 批量重渲染会随任务逐个终态多次重拉——文件未变即命中，避免重复起 ffprobe 子进程。
-# key 含 mtime_ns 以支持同路径覆盖；失败值（None）也缓存（字节身份决定时长，修好 mtime 必变；
-# 边界：装好 ffprobe 后对未动过的文件需重启 API 才生效）。放本模块而非包装
-# engines/audio.probe_duration：后者被 music/bgm/task_worker 各命名空间引用且被大量测试
-# monkeypatch，全局包装会污染它们；_cached_probe 以**裸名**调 probe_duration 以保测试可 patch。
+# key 包含完整文件身份、工具身份和参数；只缓存成功值。
+# probe_duration 的持久化缓存供其它进程和 BGM 共享；本层仅保留小型预览 memo。
 _DURATION_CACHE: OrderedDict = OrderedDict()
 _DURATION_CACHE_LOCK = threading.Lock()
 _DURATION_CACHE_MAX = 512
@@ -1335,20 +1352,23 @@ _DURATION_MISSING = object()
 
 def _cached_probe(path: Path, ffprobe_path: str, mtime_ns: int | None,
                   timeout: float = 120.0) -> float | None:
-    """ffprobe 时长（秒，round 3；失败/缺失 → None）。线程安全 + cache-aside：
-
-    单个锁包住所有 dict 操作（查/挪位/写/超限弹出是复合操作，不能只靠 GIL）；
-    ffprobe 子进程在**锁外**执行，临界区仅微秒级 dict 操作；两线程同时 miss 同一文件
-    会重复 probe 一次，结果相同、无害。``timeout`` 透传给 probe_duration 子进程上限。
-    """
-    key = (str(path), mtime_ns)
+    """Small preview memo above the shared persistent probe cache; successes only."""
+    from ..core.audio_probe_cache import input_identity, tool_identity, PARAMETERS
+    source, tool = input_identity(path), tool_identity(ffprobe_path)
+    if source is None:
+        return None
+    key = (source, tool or ("unresolved", ffprobe_path), PARAMETERS)
     with _DURATION_CACHE_LOCK:
         hit = _DURATION_CACHE.get(key, _DURATION_MISSING)
         if hit is not _DURATION_MISSING:
             _DURATION_CACHE.move_to_end(key)
-            return hit
+            if source == input_identity(path) and tool == tool_identity(ffprobe_path):
+                return hit
+            return None
     duration, _err = probe_duration(path, ffprobe_path, timeout=timeout)  # 锁外：起子进程
-    value: float | None = None if math.isnan(duration) else round(duration, 3)
+    if source != input_identity(path) or tool != tool_identity(ffprobe_path) or _err or not math.isfinite(duration) or duration <= 0:
+        return None
+    value = round(duration, 3)
     with _DURATION_CACHE_LOCK:
         _DURATION_CACHE[key] = value
         _DURATION_CACHE.move_to_end(key)
@@ -1473,7 +1493,7 @@ def preview_chapter(name: str) -> dict:
     from ..core.filenames import package_aliases
     stems = package_aliases(pkg)
     timeline_exists = bool(layout.bgm and any((layout.bgm / "timelines" / f"{stem}.json").is_file() for stem in stems))
-    seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
+    seg_data = Bgm.load_segment_analysis(layout, [pkg]).get("chapters") or {}
     sa = seg_data.get(pkg)
     segment_stale = False
     if isinstance(sa, dict) and (sa.get("blocks") or sa.get("entries")):
@@ -1702,17 +1722,19 @@ def _preview_apply_commit(layout, src, lines, edits_by_index, pkg) -> tuple[bool
 
     # 2. 05 替换
     def _step_replace() -> None:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for index, item in plan.items():
-            staged_file, dst, old_abs = item["staged_file"], item["dst"], item["old_abs"]
-            if not staged_file.is_file():
-                raise RuntimeError(f"暂存产物缺失：{item['staged_file'].name}")
-            shutil.copy2(staged_file, dst)
-            if old_abs is not None and old_abs.resolve() != dst.resolve():
-                try:
-                    old_abs.unlink()
-                except OSError as e:
-                    raise RuntimeError(f"旧音频删除失败：{old_abs.name}（{e}）")
+        from ..core.workspace_epochs import managed_mutation
+        with managed_mutation(out_dir):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for index, item in plan.items():
+                staged_file, dst, old_abs = item["staged_file"], item["dst"], item["old_abs"]
+                if not staged_file.is_file():
+                    raise RuntimeError(f"暂存产物缺失：{item['staged_file'].name}")
+                shutil.copy2(staged_file, dst)
+                if old_abs is not None and old_abs.resolve() != dst.resolve():
+                    try:
+                        old_abs.unlink()
+                    except OSError as e:
+                        raise RuntimeError(f"旧音频删除失败：{old_abs.name}（{e}）")
 
     # 3. manifest 更新（只动被改行；voice_versions / pause_after 等未变字段保留）
     def _step_manifest() -> None:
@@ -1776,13 +1798,16 @@ def _preview_apply_commit(layout, src, lines, edits_by_index, pkg) -> tuple[bool
         except Exception as e:  # noqa: BLE001 — 任一步失败 → 字节级还原 → 500
             _restore = []
             try:
-                shutil.rmtree(out_dir, ignore_errors=True)
-                if (backup_root / "audio_chunk_pkg").exists():
-                    shutil.copytree(backup_root / "audio_chunk_pkg", out_dir)
+                from ..core.workspace_epochs import managed_mutation
+                with managed_mutation(out_dir):
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    if (backup_root / "audio_chunk_pkg").exists():
+                        shutil.copytree(backup_root / "audio_chunk_pkg", out_dir)
             except Exception as re_:  # noqa: BLE001
                 _restore.append(f"05 包还原失败：{re_}")
             try:
-                src.write_bytes((backup_root / "script.json").read_bytes())
+                with managed_mutation(src):
+                    src.write_bytes((backup_root / "script.json").read_bytes())
             except Exception as re_:  # noqa: BLE001
                 _restore.append(f"剧本还原失败：{re_}")
             shutil.rmtree(backup_root, ignore_errors=True)

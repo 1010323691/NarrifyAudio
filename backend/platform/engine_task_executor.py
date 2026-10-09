@@ -1,7 +1,7 @@
 """Adapters that execute legacy engines behind the durable task boundary."""
 from __future__ import annotations
 
-import io
+import os
 import shutil
 import zipfile
 from dataclasses import replace
@@ -27,8 +27,11 @@ from .task_contracts import (
     TaskSideEffectOutput,
 )
 from .task_context import EngineExecutionContext, cancellation_requested, update_progress
-from .task_engine_support import engine_execution_context, engine_result_outcome, write_task_outcome
+from .task_engine_support import (engine_execution_context, engine_result_outcome,
+                                  write_task_outcome, task_outcome_file, file_task_outcome)
 from .resource_delivery import POLICY_VERSION
+from ..core.input_versions import validating_inputs
+from .task_input_validation import validate_task_inputs
 
 
 def _validate_deliveries(claim, payload):
@@ -48,6 +51,13 @@ def _check_delivery_identity(path, record):
         unchanged = False
     if not unchanged:
         raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化，请重新制作或选择成品。")
+
+
+def _revalidate_deliveries(claim, payload, expected):
+    current = _validate_deliveries(claim, payload)
+    if any(name not in current or current[name].get("task_id") != record.get("task_id")
+           or current[name].get("identity") != record.get("identity") for name, record in expected.items()):
+        raise TaskExecutionError("delivery_changed", "成品资格或版本在导出期间已变化，请重新选择。")
 
 def _voice_entry_result(payload: dict, result: dict) -> dict:
     """Single-role records must not repeat the whole book's character list."""
@@ -137,8 +147,13 @@ def _run_bgm_mix(handle, claim: TaskClaim, payload: dict, side_effect_outputs, s
     cfg = core_config.get_config()
     with SessionLocal() as db:
         user = db.get(User, claim.owner_id)
-        source_complete = f"06_audio_merge/{payload['stem']}.mp3" in delivery_records(db, user, claim.project_id)
+        relative = f"06_audio_merge/{payload['stem']}.mp3"
+        source_complete = relative in delivery_records(db, user, claim.project_id, [relative])
     result = bgm_engine.mix_chapter(handle, str(payload["stem"]), cfg.bgm, cfg.ffmpeg)
+    if source_complete:
+        with SessionLocal() as db:
+            user = db.get(User, claim.owner_id)
+            source_complete = relative in delivery_records(db, user, claim.project_id, [relative])
     result["complete"] = source_complete
     return result
 
@@ -193,47 +208,70 @@ def _run_bgm_match(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     return result
 
 
+def _archive_source(output, source, name, record, claim):
+    """Copy a delivery in bounded chunks, with cancellation and open-file checks."""
+    def check():
+        if cancellation_requested(claim):
+            raise TaskCancelledError()
+    check()
+    _check_delivery_identity(source, record)
+    info = zipfile.ZipInfo.from_file(source, arcname=name)
+    info.compress_type = zipfile.ZIP_STORED
+    with source.open("rb") as reader, output.open(info, "w", force_zip64=True) as writer:
+        if list(file_identity(os.fstat(reader.fileno()))) != record["identity"]:
+            raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化")
+        while chunk := reader.read(1024 * 1024):
+            check()
+            writer.write(chunk)
+        if list(file_identity(os.fstat(reader.fileno()))) != record["identity"]:
+            raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化")
+    _check_delivery_identity(source, record)
+    check()
+
+
+def _package_check(claim):
+    if cancellation_requested(claim):
+        raise TaskCancelledError()
+
+
 def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     deliveries = _validate_deliveries(claim, payload)
     layout = get_or_prepare_layout()
     stems = [str(value) for value in (payload.get("chapters") or [])]
     base = safe_display_name(str(payload.get("base") or "bgm"))
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
-        for index, stem in enumerate(stems, 1):
-            if cancellation_requested(claim):
-                raise TaskCancelledError()
-            if (
-                not stem
-                or stem in {".", ".."}
-                or "/" in stem
-                or "\\" in stem
-                or "\x00" in stem
-            ):
-                raise TaskExecutionError("invalid_payload", "BGM 章节参数无效")
-            source = layout.bgm / f"{stem}.mp3"
-            try:
-                resolved_source = source.resolve(strict=True)
-                resolved_bgm = layout.bgm.resolve(strict=True)
-                inside_bgm = resolved_source.is_relative_to(resolved_bgm)
-            except (OSError, RuntimeError):
-                inside_bgm = False
-            if not inside_bgm or not resolved_source.is_file():
-                raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
-            record = deliveries[f"08_bgm/{stem}.mp3"]
-            _check_delivery_identity(resolved_source, record)
-            output.write(resolved_source, arcname=f"{base}/{stem}.mp3")
-            _check_delivery_identity(resolved_source, record)
-            update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
-    result = write_task_outcome(
-        claim,
-        f"{base}.zip",
-        "application/zip",
-        archive.getvalue(),
-        {"engine": "bgm.package", "base": base, "file_count": len(stems), "delivery_policy": POLICY_VERSION},
-        publish_module="08_bgm",
-    )
-    handle.progress_percent(100, "完成")
+    with task_outcome_file(claim, f"{base}.zip") as archive:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED, allowZip64=True) as output:
+            for index, stem in enumerate(stems, 1):
+                if cancellation_requested(claim):
+                    raise TaskCancelledError()
+                if (
+                    not stem
+                    or stem in {".", ".."}
+                    or "/" in stem
+                    or "\\" in stem
+                    or "\x00" in stem
+                ):
+                    raise TaskExecutionError("invalid_payload", "BGM 章节参数无效")
+                source = layout.bgm / f"{stem}.mp3"
+                try:
+                    resolved_source = source.resolve(strict=True)
+                    resolved_bgm = layout.bgm.resolve(strict=True)
+                    inside_bgm = resolved_source.is_relative_to(resolved_bgm)
+                except (OSError, RuntimeError):
+                    inside_bgm = False
+                if not inside_bgm or not resolved_source.is_file():
+                    raise TaskExecutionError("input_missing", f"BGM 文件不存在：{stem}")
+                record = deliveries[f"08_bgm/{stem}.mp3"]
+                _revalidate_deliveries(claim, {**payload, "chapters": [stem]}, {f"08_bgm/{stem}.mp3": record})
+                _archive_source(output, resolved_source, f"{base}/{stem}.mp3", record, claim)
+                update_progress(claim, int(index * 90 / max(1, len(stems))), f"打包 {index}/{len(stems)}")
+        _revalidate_deliveries(claim, payload, deliveries)
+        result = file_task_outcome(
+            archive, f"{base}.zip", "application/zip",
+            {"engine": "bgm.package", "base": base, "file_count": len(stems), "delivery_policy": POLICY_VERSION},
+            publish_module="08_bgm", check=lambda: _package_check(claim),
+        )
+        handle.progress_percent(100, "完成")
     return result
 
 
@@ -243,36 +281,33 @@ def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     if workspace is None:
         raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
     base = safe_display_name(str(payload.get("base") or "audio"))
-    archive = io.BytesIO()
     files = payload.get("files") or []
     reserved_names: set[str] = set()
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as output:
-        for index, item in enumerate(files, 1):
-            if cancellation_requested(claim):
-                raise TaskCancelledError()
-            if not isinstance(item, dict):
-                raise TaskExecutionError("invalid_payload", "打包文件参数无效")
-            relative = Path(str(item.get("relative_path") or ""))
-            source = (workspace / relative).resolve()
-            if not source.is_relative_to(workspace.resolve()) or not source.is_file():
-                raise TaskExecutionError("input_missing", "待打包文件不存在")
-            name = unique_filename(str(item.get("name") or source.name), reserved_names)
-            reserved_names.add(name)
-            record = deliveries[relative.as_posix()]
-            _check_delivery_identity(source, record)
-            output.write(source, arcname=name)
-            _check_delivery_identity(source, record)
-            update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
-    # Closing the archive writes its central directory before publication.
-    result = write_task_outcome(
-        claim,
-        f"{base}.zip",
-        "application/zip",
-        archive.getvalue(),
-        {"engine": "audio.zip", "file_count": len(files), "delivery_policy": POLICY_VERSION},
-        publish_module="07_output",
-    )
-    handle.progress_percent(100, "完成")
+    with task_outcome_file(claim, f"{base}.zip") as archive:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED, allowZip64=True) as output:
+            for index, item in enumerate(files, 1):
+                if cancellation_requested(claim):
+                    raise TaskCancelledError()
+                if not isinstance(item, dict):
+                    raise TaskExecutionError("invalid_payload", "打包文件参数无效")
+                relative = Path(str(item.get("relative_path") or ""))
+                source = (workspace / relative).resolve()
+                if not source.is_relative_to(workspace.resolve()) or not source.is_file():
+                    raise TaskExecutionError("input_missing", "待打包文件不存在")
+                name = unique_filename(str(item.get("name") or source.name), reserved_names)
+                reserved_names.add(name)
+                record = deliveries[relative.as_posix()]
+                _revalidate_deliveries(claim, {**payload, "files": [item]}, {relative.as_posix(): record})
+                _archive_source(output, source, name, record, claim)
+                update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
+        # Closing the archive writes its central directory before publication.
+        _revalidate_deliveries(claim, payload, deliveries)
+        result = file_task_outcome(
+            archive, f"{base}.zip", "application/zip",
+            {"engine": "audio.zip", "file_count": len(files), "delivery_policy": POLICY_VERSION},
+            publish_module="07_output", check=lambda: _package_check(claim),
+        )
+        handle.progress_percent(100, "完成")
     return result
 
 
@@ -319,6 +354,7 @@ def _run_audio_export(handle, claim: TaskClaim, payload: dict, side_effect_outpu
         side_effect_outputs.append(TaskSideEffectOutput(staged, target))
         written.append({"name": name, "path": str(target)})
         update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
+    _revalidate_deliveries(claim, payload, deliveries)
     return {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
 
 
@@ -375,7 +411,8 @@ def execute_engine_task(claim: TaskClaim) -> TaskOutcome:
             if spec is None or not spec.legacy_engine:
                 raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
             runner = ENGINE_BRANCHES[claim.task_type]
-            result = runner(handle, claim, payload, side_effect_outputs, side_effect_deletes)
+            with validating_inputs(lambda: validate_task_inputs(payload)):
+                result = runner(handle, claim, payload, side_effect_outputs, side_effect_deletes)
             if isinstance(result, TaskOutcome):
                 return result
         except TaskCancelled as exc:

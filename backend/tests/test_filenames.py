@@ -4,6 +4,7 @@ import io
 import hashlib
 import zipfile
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -107,14 +108,15 @@ def test_zip_deduplicates_final_names_and_preserves_both_contents(tmp_path, monk
         path.write_bytes(bytes([index]))
     payload = {"files": [{"relative_path": path.name, "name": name} for path, name in zip(
         sources, ['A?.mp3', 'A*.mp3', 'a_.mp3'])]}
-    monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {p.name: {} for p in sources})
+    from backend.core.safe_filesystem import file_identity
+    monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {p.name: {"identity": list(file_identity(p.stat()))} for p in sources})
     monkeypatch.setattr(executor, "get_or_prepare_layout", lambda: SimpleNamespace(workspace=tmp_path))
     monkeypatch.setattr(executor, "_check_delivery_identity", lambda *_: None)
     monkeypatch.setattr(executor, "cancellation_requested", lambda *_: False)
     monkeypatch.setattr(executor, "update_progress", lambda *_: None)
-    monkeypatch.setattr(executor, "write_task_outcome", lambda *args, **kwargs: args[3])
-    data = executor._run_audio_zip(SimpleNamespace(progress_percent=lambda *_: None), None, payload, [], [])
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+    monkeypatch.setattr(executor, "task_outcome_file", lambda *_: nullcontext(tmp_path / "archive.zip"))
+    result = executor._run_audio_zip(SimpleNamespace(progress_percent=lambda *_: None), None, payload, [], [])
+    with zipfile.ZipFile(result.temp_path) as archive:
         names = archive.namelist()
         assert names == ['A_.mp3', 'A_ (2).mp3', 'a_ (3).mp3']
         assert [archive.read(name) for name in names] == [b'\x00', b'\x01', b'\x02']
@@ -326,3 +328,37 @@ def test_deleted_target_case_change_reuses_row_only_without_disk_conflict(filena
         assert path.read_bytes() == b"again"
         with SessionLocal() as db:
             assert db.get(ProjectFile, file_id).deleted_at is None
+
+
+def test_completion_queries_only_targets_and_never_scans_unique_artifact_directory(filename_client, monkeypatch):
+    from sqlalchemy import event, insert
+    from backend.platform.database import SessionLocal
+    from backend.platform.models import Project, ProjectFile
+    from backend.platform.task_worker import claim_task, complete_claim
+    from backend.platform.task_engine_support import write_task_outcome
+    from backend.platform import task_worker
+    account, project = _register(filename_client)
+    with SessionLocal.begin() as db:
+        prefix = db.get(Project, project).directory_key
+        db.execute(insert(ProjectFile), [dict(owner_id=account["user"]["id"], project_id=project,
+            original_name=f"old-{i}.json", object_key=f"{prefix}/03_parsed_json/old-{i}.json",
+            size_bytes=1, sha256="a" * 64, kind="artifact") for i in range(5000)])
+    statements = []
+    engine = SessionLocal.kw["bind"]
+    capture = lambda c, cur, statement, *args: statements.append(statement)
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        for module in ("03_parsed_json", None):
+            response = filename_client.post("/api/v1/tasks", headers={"X-CSRF-Token": account["csrf_token"]}, json={
+                "project_id": project, "task_type": "tts.merge", "payload": {"package": "chapter"},
+                "idempotency_key": uuid.uuid4().hex})
+            assert response.status_code == 201
+            claim = claim_task(response.json()["id"], "indexed-publication")
+            outcome = write_task_outcome(claim, "new.json", "application/json", b"{}", {}, publish_module=module)
+            monkeypatch.setattr(Path, "iterdir", lambda *_: pytest.fail("completion must not enumerate output directories"))
+            assert complete_claim(claim, outcome)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    catalog_selects = [statement for statement in statements if statement.lstrip().startswith("SELECT") and "FROM project_files" in statement]
+    assert catalog_selects
+    assert all("object_key_normalized" in statement.split("WHERE", 1)[-1] for statement in catalog_selects)

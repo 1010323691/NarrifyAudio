@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Query, APIRouter, Depends, HTTPException, Request
+from fastapi import Query, APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -37,7 +37,7 @@ class RunFile(BaseModel):
 
 
 class RunRequest(BaseModel):
-    files: list[RunFile] = Field(min_length=1)
+    files: list[RunFile] = Field(min_length=1, max_length=1000)
     checks: ParseChecks | None = None
 
 
@@ -90,6 +90,7 @@ def post_script_parse_run(
     body: RunRequest,
     user: User = Depends(require_csrf),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Version-bound batch submit: one parse task per file, each carrying the
     digest the page saw (or a server-computed one for legacy files). 409 with
@@ -98,7 +99,7 @@ def post_script_parse_run(
     item = _owned(db, user, project_id)
     try:
         checks = body.checks.model_dump(exclude_none=True) if body.checks is not None else None
-        return submit_run(db, user, item.id, [f.model_dump() for f in body.files], checks or None)
+        return submit_run(db, user, item.id, [f.model_dump() for f in body.files], checks or None, idempotency_key)
     except ScriptParseError as error:
         _raise(error)
         raise

@@ -9,6 +9,7 @@ import shutil
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from ..core.workspace_epochs import managed_mutation
 
 log = logging.getLogger("audiobook.platform.artifact_publication")
 
@@ -112,15 +113,17 @@ class PublicationJournal:
         for index in self.add_many(finals):
             final, backup, had_original, _guard = self.entries[index]
             if had_original:
-                os.replace(final, backup)
+                with managed_mutation(final):
+                    os.replace(final, backup)
 
     def publish(self, index: int, source: Path) -> None:
         started = time.monotonic()
         final, backup, had_original, guard = self.entries[index]
         final.parent.mkdir(parents=True, exist_ok=True)
-        if had_original:
-            os.replace(final, backup)
-        os.replace(source, final)
+        with managed_mutation(final):
+            if had_original:
+                os.replace(final, backup)
+            os.replace(source, final)
         self.metrics["move_seconds"] += time.monotonic() - started
         if index in self._checkpoints and final.suffix.lower() == ".mp3":
             self.metrics["published_audio"] += 1
@@ -136,7 +139,8 @@ class PublicationJournal:
         index = self.add(final)
         resolved_final, backup, had_original, _guard = self.entries[index]
         if had_original:
-            os.replace(resolved_final, backup)
+            with managed_mutation(resolved_final):
+                os.replace(resolved_final, backup)
         return index
 
     @staticmethod
@@ -167,16 +171,19 @@ class PublicationJournal:
                 # If killed between moving the original aside and publishing,
                 # restore that original rather than losing the last checkpoint.
                 if not final.exists() and backup.exists():
-                    os.replace(backup, final)
+                    with managed_mutation(final):
+                        os.replace(backup, final)
                 else:
                     self._remove_backup(backup)
                 continue
             if guard:
                 continue
             if backup.exists():
-                os.replace(backup, final)
+                with managed_mutation(final):
+                    os.replace(backup, final)
             elif not had_original:
-                final.unlink(missing_ok=True)
+                with managed_mutation(final):
+                    final.unlink(missing_ok=True)
         guarded = [(index, self.entries[index]) for index in reversed(range(len(self.entries)))
                    if self.entries[index][3] and index not in self._checkpoints]
         if guarded:
@@ -210,9 +217,11 @@ class PublicationJournal:
         matches = final.exists() and hashlib.sha256(final.read_bytes()).hexdigest() == recorded
         if matches:
             if backup.exists():
-                os.replace(backup, final)
+                with managed_mutation(final):
+                    os.replace(backup, final)
             elif not had_original:
-                final.unlink(missing_ok=True)
+                with managed_mutation(final):
+                    final.unlink(missing_ok=True)
             else:
                 log.warning("Guarded backup missing at rollback — keeping published version: %s", final)
             return

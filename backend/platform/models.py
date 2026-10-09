@@ -4,10 +4,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint, text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from ..core.object_keys import object_key_lookup_key, object_key_default
 
 
 def new_id() -> str:
@@ -27,6 +28,21 @@ class GPUSchedulerState(Base):
     __tablename__ = "gpu_scheduler_state"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default="local")
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class MechanicalAudioState(Base):
+    __tablename__ = "mechanical_audio_state"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="local")
+    memory_paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
+class MechanicalAudioPermit(Base):
+    __tablename__ = "mechanical_audio_permits"
+    attempt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    process: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class GPURequest(Base):
@@ -113,6 +129,17 @@ class ProjectProgress(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class ProjectProgressRefresh(Base):
+    __tablename__ = "project_progress_refresh"
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    requested_signature: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    dirty: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    task_id: Mapped[str | None] = mapped_column(String(36))
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    __table_args__ = (Index("ix_progress_refresh_due", "dirty", "next_due_at", "project_id"),)
+
+
 class ProjectFile(Base):
     __tablename__ = "project_files"
 
@@ -121,6 +148,7 @@ class ProjectFile(Base):
     owner_id: Mapped[str] = mapped_column(index=True, nullable=False)
     original_name: Mapped[str] = mapped_column(String(255), nullable=False)
     object_key: Mapped[str] = mapped_column(String(700), unique=True, nullable=False)
+    object_key_normalized: Mapped[str] = mapped_column(String(64), default=object_key_default, nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), default="application/octet-stream", nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -132,7 +160,13 @@ class ProjectFile(Base):
     __table_args__ = (
         ForeignKeyConstraint(["project_id", "owner_id"], ["projects.id", "projects.owner_id"], name="fk_project_files_project_owner"),
         Index("ix_project_files_scope", "owner_id", "project_id", "deleted_at"),
+        Index("ix_project_files_normalized", "project_id", "object_key_normalized"),
     )
+
+
+@event.listens_for(ProjectFile.object_key, "set")
+def _sync_object_key(target, value, oldvalue, initiator):
+    target.object_key_normalized = object_key_lookup_key(value)
 
 
 class TaskBatch(Base):
@@ -148,6 +182,30 @@ class TaskBatch(Base):
     task_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     __table_args__ = (UniqueConstraint("owner_id", "idempotency_key", name="uq_task_batches_owner_key"),)
+
+
+class CurrentDelivery(Base):
+    """Latest authoritative qualification or revocation for one managed path."""
+    __tablename__ = "current_deliveries"
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    path_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    relative_path: Mapped[str] = mapped_column(String(700), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    identity: Mapped[list | None] = mapped_column(JSON)
+    valid: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    __table_args__ = (Index("ix_current_deliveries_owner_project", "owner_id", "project_id"),)
+
+
+class DeliveryIndexState(Base):
+    """A Worker-owned resumable cursor; API reads switch only after completion."""
+    __tablename__ = "delivery_index_state"
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+    cursor: Mapped[str] = mapped_column(String(36), default="", nullable=False)
+    complete: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class Task(Base):
@@ -183,6 +241,7 @@ class Task(Base):
         Index("ix_tasks_scope_status", "owner_id", "project_id", "status"),
         Index("ix_tasks_owner_created", "owner_id", "created_at", "id"),
         Index("ix_tasks_entry_created", "owner_id", "project_id", "task_type", "created_at", "id"),
+        Index("ix_tasks_recovery_page", "status", "id"),
         UniqueConstraint("owner_id", "idempotency_key", name="uq_tasks_owner_idempotency"),
         CheckConstraint("progress >= 0 and progress <= 100", name="ck_tasks_progress"),
         CheckConstraint("status in ('pending','queued','running','paused','cancelling','cancelled','succeeded','failed','retrying','timeout')", name="ck_tasks_status"),
@@ -204,7 +263,10 @@ class TaskAttempt(Base):
     error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
     task: Mapped[Task] = relationship(back_populates="attempts")
-    __table_args__ = (UniqueConstraint("task_id", "attempt_no", name="uq_task_attempt_number"),)
+    __table_args__ = (
+        UniqueConstraint("task_id", "attempt_no", name="uq_task_attempt_number"),
+        Index("ix_task_attempts_live_lease", "task_id", "status", "lease_expires_at"),
+    )
 
 
 class TaskEvent(Base):

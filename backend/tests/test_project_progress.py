@@ -116,9 +116,20 @@ def test_cold_reads_coalesce_worker_persists_and_warm_reads_do_not_scan(monkeypa
         # Delete an output: immediately return the old snapshot while one rebuild queues.
         (root / '03_parsed_json/a.json').unlink()
         assert progress_summary(db, user, project_id, root, 'catalog')['03_parsed_json']['percent'] == 100
-        jobs = db.scalars(select(Task).where(Task.project_id == project_id, Task.status == 'pending')).all()
+        jobs = db.scalars(select(Task).where(Task.project_id == project_id, Task.status.in_(['pending', 'retrying']))).all()
         assert len(jobs) == 1
         next_id = jobs[0].id
+    assert claim_task(next_id, 'progress-test-worker', lease_seconds=600) is None
+    # The rebuild waits for the minimum actual-start interval.
+    from backend.platform.models import ProjectProgressRefresh
+    from datetime import timedelta
+    with SessionLocal() as db:
+        due = db.get(ProjectProgressRefresh, project_id).next_due_at
+        if due.tzinfo is None:
+            from datetime import timezone
+            due = due.replace(tzinfo=timezone.utc)
+    monkeypatch.setattr('backend.platform.task_worker.utcnow', lambda: due + timedelta(milliseconds=1))
+    monkeypatch.setattr('backend.platform.progress_refresh.utcnow', lambda: due + timedelta(milliseconds=1))
     next_claim = claim_task(next_id, 'progress-test-worker', lease_seconds=600)
     assert complete_claim(next_claim, execute_claim(next_claim))
     with SessionLocal() as db:

@@ -6,25 +6,24 @@ labels retain their legacy names for the existing task UI.
 from __future__ import annotations
 
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from typing import Annotated
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..core import paths as core_paths
 from ..core.config import get_config
 from ..core.paths import get_or_prepare_layout, resolve_layout
+from ..core.input_versions import capture_files, value_version
 from ..engines import bgm as Bgm
 from ..engines import music as music_engine
 from ..engines import tts_batch as TtsBatch
-from ..engines.audio import probe_duration
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_legacy_engine_tasks
+from ..platform.engine_task_submission import active_durable_payloads, active_durable_targets, submit_legacy_engine_task, submit_engine_batch
 from ..platform.task_validation import is_safe_bgm_stem
 from ..services.list_paging import entry_states, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name
@@ -37,6 +36,39 @@ MIX_MODULE = "bgm-mix"
 SEGMENT_MODULE = "bgm-segment"
 MIX_LABEL = "背景音乐混音"
 SEGMENT_LABEL = "段落分析"
+
+
+def _versioned_payload(layout, stem, payload, *, segment=False, assignment=None, analysis=None, analysis_bound=False):
+    names = [f"02_split_text/{stem}.txt"]
+    if segment or assignment is not None:
+        package = TtsBatch.package_for(Path(f"{stem}.json"))
+        names += [f"03_parsed_json/{stem}.json", f"05_audio_chunk/{package}/manifest.json",
+                  f"06_audio_merge/{stem}.mp3", f"06_audio_merge/{stem}.wav"]
+    if assignment is not None:
+        names.append(Bgm._timeline_path(layout, stem).relative_to(layout.workspace).as_posix())
+    try:
+        result = {**payload, "_input_files": capture_files(layout.workspace, names)}
+        if assignment is not None:
+            result["_assignment_version"] = value_version(assignment)
+            music_names = [assignment["music"]] if assignment.get("music") else []
+            if assignment.get("segment"):
+                timeline = Bgm.load_timeline(layout, stem) or {}
+                music_names = [span["music_id"] for span in timeline.get("timeline", [])
+                               if isinstance(span, dict) and span.get("music_id")]
+            result["_music_files"] = capture_files(music_engine._library_dir(), music_names)
+        if analysis_bound:
+            result["_segment_analysis_version"] = value_version(analysis)
+        if segment and not analysis_bound:
+            current = Bgm.load_analysis(layout, [stem]).get("chapters", {}).get(stem)
+            result["_chapter_analysis_version"] = value_version(current)
+        return result
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, "章节输入无法安全访问，请检查文件后重新提交。") from exc
+
+
+def _library_reference(config):
+    config["_music_inputs"] = capture_files(music_engine._library_dir(), ["music_index.json"])
+    return config
 
 
 # --------------------------------------------------------------------------- #
@@ -118,14 +150,14 @@ def list_chapters(page: Annotated[int | None, Query(ge=1)] = None,
     if layout.split_text is None:
         return {"chapters": [], "mode": "random"}
     lib_dir = core_paths.MUSIC_LIBRARY_DIR
-    seg_data = Bgm.load_segment_analysis(layout).get("chapters") or {}
-    data = Bgm.load_assignments(layout)
-    chapters = data.get("chapters") or {}
     rows = []
     stems = [stem for stem in Bgm.list_chapter_stems(layout) if q.strip().casefold() in stem.casefold()]
     total = len(stems)
     if page is not None and filter == "all" and not keys_only:
         stems = page_slice(stems, page, page_size)
+    seg_data = Bgm.load_segment_summaries(layout, stems).get("chapters") or {}
+    data = Bgm.load_assignments(layout, stems)
+    chapters = data.get("chapters") or {}
     for stem in stems:
         e = chapters.get(stem)
         e_out = None
@@ -152,23 +184,13 @@ def list_chapters(page: Annotated[int | None, Query(ge=1)] = None,
         # stale = 分析指纹 vs 当前 03 条目（03 缺失/损坏 → 指纹必不匹配 → True）。
         sa = seg_data.get(stem)
         segment_analysis = None
-        if isinstance(sa, dict) and (sa.get("blocks") or sa.get("entries")):
+        if isinstance(sa, dict) and sa.get("has_analysis"):
             try:
                 stale = (sa.get("fingerprint")
                          != Bgm.segment_fingerprint(Bgm._load_parsed_entries(layout, stem)))
             except Exception:  # noqa: BLE001 — 03 缺失/损坏 = 分析已不可用
                 stale = True
-            segment_tags = {c: [] for c in music_engine.TAG_CATEGORIES}
-            for block in sa.get("blocks") or sa.get("entries") or []:
-                if not isinstance(block, dict) or block.get("extend"):
-                    continue
-                tags = block.get("music_tags") or block.get("tags") or {}
-                if not isinstance(tags, dict):
-                    continue
-                for category in music_engine.TAG_CATEGORIES:
-                    for tag in tags.get(category) or []:
-                        if isinstance(tag, str) and tag not in segment_tags[category]:
-                            segment_tags[category].append(tag)
+            segment_tags = {c: list((sa.get("tags") or {}).get(c) or []) for c in music_engine.TAG_CATEGORIES}
             segment_analysis = {
                 "analyzed_at": sa.get("analyzed_at", ""),
                 "entry_count": sa.get("entry_count", 0),
@@ -256,7 +278,8 @@ class PackageRequest(BaseModel):
 
 
 class SegmentAnalyzeRequest(BaseModel):
-    chapters: list[str]
+    project_id: str | None = Field(default=None, max_length=36)
+    chapters: list[str] = Field(max_length=1000)
 
 
 @router.post("/analyze-segment")
@@ -264,9 +287,16 @@ def run_analyze_segment(
     req: SegmentAnalyzeRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one durable paragraph-analysis task per selected chapter."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="bgm.segment", request=req.model_dump(),
+        prepare=lambda: _prepare_analyze_segment(req, ctx, db), ctx=ctx, db=db,
+        idempotency_key=idempotency_key, receipt_field="chapters", project_id=req.project_id)
+
+
+def _prepare_analyze_segment(req, ctx, db):
     layout = get_or_prepare_layout()
     stems = _segment_validated_stems(layout, req.chapters or [])
     if not stems:
@@ -291,18 +321,9 @@ def run_analyze_segment(
         raise HTTPException(
             409, "以下章节音频合成或合并任务在途：" + "、".join(audio_conflicts)
         )
-    created = []
-    for stem in stems:
-        task = submit_legacy_engine_task(
-            task_type="bgm.segment",
-            label=f"{SEGMENT_LABEL}：{stem}",
-            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-segment:{stem}",
-        )
-        created.append({"stem": stem, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
+    return ([{"label": f"{SEGMENT_LABEL}：{stem}",
+              "payload": _versioned_payload(layout, stem, {"stem": stem}, segment=True),
+              "receipt": {"stem": stem}} for stem in stems], _library_reference(cfg.model_dump(mode="json")))
 
 
 # --------------------------------------------------------------------------- #
@@ -310,7 +331,8 @@ def run_analyze_segment(
 # --------------------------------------------------------------------------- #
 
 class MatchRequest(BaseModel):
-    chapters: list[str] | None = None  # None = all existing 02 chapters
+    project_id: str | None = Field(default=None, max_length=36)
+    chapters: list[str] | None = Field(default=None, max_length=1000)
     mode: str = "random"  # "random" | "segment"（段落级时间轴重算，零 LLM）
 
 
@@ -319,9 +341,15 @@ def run_match(
     req: MatchRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit durable chapter-level matching or paragraph timeline tasks."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="bgm.match", request=req.model_dump(),
+        prepare=lambda: _prepare_match(req, ctx, db), ctx=ctx, db=db, idempotency_key=idempotency_key, project_id=req.project_id)
+
+
+def _prepare_match(req, ctx, db):
     layout = get_or_prepare_layout()
     if req.mode == "segment":
         stems = (
@@ -363,14 +391,12 @@ def run_match(
             raise HTTPException(409, "以下章节匹配任务在途：" + "、".join(conflicts))
 
     config = get_config().model_dump(mode="json")
-    return submit_legacy_engine_tasks(
-        task_type="bgm.match",
-        entries=[{
+    analysis = Bgm.load_segment_analysis(layout, stems).get("chapters", {}) if req.mode == "segment" else {}
+    return ([{
             "label": f"BGM 匹配（{req.mode}） · {stem}",
-            "payload": {"chapters": [stem], "mode": req.mode, "config": config},
-        } for stem in stems],
-        ctx=ctx, db=db, idempotency_prefix=f"bgm-match:{req.mode}",
-    )
+            "payload": _versioned_payload(layout, stem, {"chapters": [stem], "mode": req.mode},
+                segment=req.mode == "segment", analysis=analysis.get(stem), analysis_bound=req.mode == "segment"),
+        } for stem in stems], _library_reference(config))
 
 
 class ChapterUpdateRequest(BaseModel):
@@ -424,7 +450,7 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
             e["locked"] = bool(req.locked)
         chapters[stem] = e
 
-    data = Bgm.update_assignments(layout, _mutate_d)
+    data = Bgm.update_assignments(layout, _mutate_d, stems=[stem])
     return data["chapters"][stem]
 
 
@@ -433,43 +459,8 @@ def update_chapter(stem: str, req: ChapterUpdateRequest) -> dict:
 # --------------------------------------------------------------------------- #
 
 class MixRequest(BaseModel):
-    chapters: list[str]
-
-
-def _validate_mix_chapter(layout, stem: str, entry: dict, lib_dir: Path, ffprobe_path: str) -> None:
-    """One chapter's pre-submission guard (raises HTTPException on a doomed mix).
-
-    Runs concurrently across chapters (Q20): the per-chapter ffprobe used to
-    serialize, so submitting N chapters cost N sequential probes of latency.
-    The engine-side guards are unchanged — this only fails the request early.
-    """
-    narration = Bgm._find_narration(layout, stem)
-    if narration is None:
-        raise HTTPException(400,
-            f"未找到旁白音频（06_audio_merge/{stem}.mp3），请先完成音频合并。")
-    m = entry.get("music")
-    if m and not (lib_dir / m).is_file():
-        raise HTTPException(400,
-            f"音乐库中找不到 {m}，请先到「音乐库」页检查或重新匹配（{stem}）。")
-    # 段落级时间轴的前置守卫——不让「⚠ 行」发起必败任务：时间轴缺失/过期
-    #（旁白时长变化）/ span 曲目出库 → 400（引擎侧同守卫）。章节级匹配
-    # 若只重置了 assignment.segment，但段落分析和时间轴仍有效，也继续认这份结果。
-    tl = Bgm.load_segment_timeline(layout, stem, entry)
-    if entry.get("segment") or tl is not None:
-        if tl is None:
-            raise HTTPException(
-                400, f"该章没有时间轴，请重新进行段落分析（{stem}）。")
-        d, _perr = probe_duration(narration, ffprobe_path)
-        if (d > 0
-                and abs(d - float(tl.get("duration") or 0.0)) > Bgm._STALE_TOLERANCE_S):
-            raise HTTPException(
-                400, f"时间轴已过期（旁白时长变化），请重新进行段落分析（{stem}）。")
-        for sp in tl.get("timeline") or []:
-            mid = sp.get("music_id") or ""
-            if not (lib_dir / mid).is_file():
-                raise HTTPException(
-                    400,
-                    f"音乐库中找不到 {mid}，请先到「音乐库」页检查或重新匹配（{stem}）。")
+    project_id: str | None = Field(default=None, max_length=36)
+    chapters: list[str] = Field(max_length=1000)
 
 
 @router.post("/mix")
@@ -477,43 +468,29 @@ def run_mix(
     req: MixRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Validate selected assignments and submit one durable mix task per chapter."""
     _common.require_workspace()
+    return submit_engine_batch(task_type="bgm.mix", request=req.model_dump(),
+        prepare=lambda: _prepare_mix(req, ctx, db), ctx=ctx, db=db,
+        idempotency_key=idempotency_key, receipt_field="chapters", project_id=req.project_id)
+
+
+def _prepare_mix(req, ctx, db):
     layout = get_or_prepare_layout()
     stems = _validated_stems(layout, req.chapters or [])
     if not stems:
         raise HTTPException(400, "请选择要混音的章节。")
-    data = Bgm.load_assignments(layout)
+    data = Bgm.load_assignments(layout, stems)
     chapters = data.get("chapters") or {}
-    entries: dict[str, dict] = {}
     for s in stems:
         e = chapters.get(s)
         if not isinstance(e, dict):
             raise HTTPException(400, f"该章从未匹配，请先匹配（{s}）。")
-        entries[s] = e
-    # Q20: the per-chapter ffprobe prechecks ran in parallel — a multi-chapter
-    # mix submission no longer blocks on N sequential probe spawns. The first
-    # failure in selection order keeps the 400 semantics.
-    failures: dict[str, HTTPException] = {}
-    lib_dir = core_paths.MUSIC_LIBRARY_DIR
+    # The Worker validates timelines, audio durations and library tracks against
+    # current inputs. Submission performs bounded reference/conflict checks only.
     cfg = get_config()
-    ffprobe_path = cfg.ffmpeg.ffprobe_path
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {
-            pool.submit(_validate_mix_chapter, layout, s, entries[s], lib_dir, ffprobe_path): s
-            for s in stems
-        }
-        for future in as_completed(futures):
-            exc = future.exception()
-            if exc is None:
-                continue
-            if isinstance(exc, HTTPException):
-                failures[futures[future]] = exc
-            else:
-                raise exc
-    if failures:
-        raise failures[min(failures, key=lambda s: stems.index(s))]
     audio_conflicts = _durable_audio_conflicts(stems, ctx, db)
     if audio_conflicts:
         raise HTTPException(
@@ -532,18 +509,9 @@ def run_mix(
     ]
     if conflicts:
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))
-    created = []
-    for stem in stems:
-        task = submit_legacy_engine_task(
-            task_type="bgm.mix",
-            label=f"{MIX_LABEL}：{stem}",
-            payload={"stem": stem, "config": cfg.model_dump(mode="json")},
-            ctx=ctx,
-            db=db,
-            idempotency_prefix=f"bgm-mix:{stem}",
-        )
-        created.append({"stem": stem, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "chapters": created}
+    return ([{"label": f"{MIX_LABEL}：{stem}",
+              "payload": _versioned_payload(layout, stem, {"stem": stem}, assignment=chapters[stem]),
+              "receipt": {"stem": stem}} for stem in stems], _library_reference(cfg.model_dump(mode="json")))
 
 
 @router.post("/package")

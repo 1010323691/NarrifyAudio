@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import Pager from '@/views/textformat/Pager.vue'
+import BatchSubmissionRecovery from '@/components/BatchSubmissionRecovery.vue'
 import { useListPage } from '@/composables/useListPage'
 import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
@@ -608,7 +609,7 @@ watch(
     if (st === 'succeeded') {
       foundationResult.value = t.result as PrepareFoundationsResult
       foundationBusy.value = false
-      toast({ title: '语音推理基础生成完成', variant: 'success', description: `已为 ${foundationResult.value?.count ?? 0} 个角色生成基础（保留 ${foundationResult.value?.aliases ?? 0} 条角色关联提示）` })
+      toast({ title: '语音推理基础生成完成', variant: 'success', description: `已为 ${foundationResult.value?.count ?? 0} 个角色生成基础${foundationResult.value?.hints_deferred ? '，角色关联提示可在列表查看' : `（保留 ${foundationResult.value?.aliases ?? 0} 条角色关联提示）`}` })
       // Keep foundationTaskId set so the log panel stays visible with the final logs; the next
       // run simply overwrites it.
       loadVoices()
@@ -685,6 +686,7 @@ watch(
     </header>
 
     <ProjectGateAlert />
+    <BatchSubmissionRecovery :routes="['/api/tts/prepare-foundations', '/api/tts/make-clones']" @committed="loadVoices(); reattachTasks()" />
 
     <Alert v-if="status && !(status.ready ?? status.implemented)" variant="destructive">
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
@@ -728,7 +730,7 @@ watch(
               class="flex items-center gap-2 rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-400"
             >
               <CheckCircle2 class="h-4 w-4 shrink-0" />
-              完成：为 {{ foundationResult.count }} 个角色生成语音推理基础，保留 {{ foundationResult.aliases }} 条角色关联提示（未启动 TTS）。
+              完成：为 {{ foundationResult.count }} 个角色生成语音推理基础。<template v-if="foundationResult.hints_deferred">角色关联提示可在列表查看。</template><template v-else>保留 {{ foundationResult.aliases }} 条角色关联提示。</template>（未启动 TTS）
             </div>
           </CardContent>
         </section>

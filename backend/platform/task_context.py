@@ -365,6 +365,8 @@ class EngineExecutionContext:
         permits = [(resource, resource.suspend_current_thread()) for resource in (gate(), merge_gate())]
         if on_pause is not None:
             on_pause()
+        from . import mechanical_audio
+        audio_parked = getattr(self.claim, "task_type", None) in mechanical_audio.AUDIO_TASK_TYPES and mechanical_audio.release(self.claim)
         if getattr(self.claim, "task_type", None) == "tts.batch":
             from .tts_resource_budget import set_tts_parked
             with host_lock(), SessionLocal.begin() as db:
@@ -377,6 +379,8 @@ class EngineExecutionContext:
             delay = min(delay * 2, 5.0)
         if self.cancelled:
             raise TaskCancelled()
+        if audio_parked:
+            mechanical_audio.resume(self.claim, lambda: self.cancelled)
         restored = []
         for resource, count in permits:
             if not resource.restore_current_thread(count, stop_check=lambda: self.cancelled):

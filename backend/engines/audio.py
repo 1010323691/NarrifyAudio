@@ -247,15 +247,23 @@ def parse_silence_log(lines, total_duration: float) -> list:
 # ============================ Native FFmpeg ops ============================
 
 def probe_duration(path, ffprobe_path: str = "", timeout: float = 120.0):
+    """Stable successful ffprobe durations, persisted across API/Worker processes."""
+    from ..core.audio_probe_cache import cached_duration
+    return cached_duration(path, ffprobe_path,
+        lambda: _probe_duration_uncached(path, ffprobe_path, timeout), timeout=timeout)
+
+
+def _probe_duration_uncached(path, ffprobe_path: str = "", timeout: float = 120.0):
     """Duration in seconds via ``ffprobe`` (replaces the browser <audio>/Web-Audio path).
     Returns ``(duration, error)`` — ``nan`` on failure. ``timeout`` bounds the ffprobe
     subprocess (default 120s); callers on a hot synchronous path may pass a shorter cap."""
     ffprobe = ffprobe_path or "ffprobe"
-    cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=noprint_wrappers=1:nokey=1", str(path)]
+    from ..core.audio_probe_cache import PARAMETERS
+    cmd = [ffprobe, *PARAMETERS, str(path)]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              timeout=timeout)
+        from ..platform.mechanical_audio import has_bound_claim, run_registered
+        runner = run_registered if has_bound_claim() else subprocess.run
+        proc = runner(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     except FileNotFoundError:
         return float("nan"), f"找不到 ffprobe（{ffprobe}）。请安装 FFmpeg 或在设置中指定路径。"
     except subprocess.TimeoutExpired:

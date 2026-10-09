@@ -3,6 +3,7 @@ import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging
 // 瘦客户端：只做 HTTP 封装，无处理逻辑。
 
 import { API_BASE, http } from './client'
+import { submitTaskBatches } from './batchSubmission'
 import type {
   BgmChaptersResult,
   BgmMatchResult,
@@ -25,12 +26,13 @@ export function bgmPreviewUrl(stem: string): string {
 
 /** (Re-)match the selected chapters (empty/omitted = all) through the durable Worker. */
 export function matchChapters(chapters: string[] | null, mode: string): Promise<BgmMatchResult | { task_ids: string[]; task_id?: string }> {
-  return http.post<BgmMatchResult | { task_ids: string[]; task_id?: string }>('/api/bgm/match', { chapters, mode })
+  return submitTaskBatches('/api/bgm/match', { chapters, mode }, 'chapters', undefined,
+    async () => (await getChapters(undefined, undefined, true)).chapters.map(row => row.stem))
 }
 
 /** Start one paragraph-analysis Task per selected chapter (段落分析). */
 export function analyzeSegmentChapters(chapters: string[]): Promise<BgmBatchResult> {
-  return http.post<BgmBatchResult>('/api/bgm/analyze-segment', { chapters })
+  return submitTaskBatches('/api/bgm/analyze-segment', { chapters }, 'chapters')
 }
 
 /** The chapter's full timeline file (the 时间轴 dialog's data source; 404 when
@@ -54,7 +56,7 @@ export function updateChapter(
 
 /** Start one mix Task per selected chapter (the no-BGM copy2 path is allowed). */
 export function mixChapters(chapters: string[]): Promise<BgmBatchResult> {
-  return http.post<BgmBatchResult>('/api/bgm/mix', { chapters })
+  return submitTaskBatches('/api/bgm/mix', { chapters }, 'chapters')
 }
 
 /** Package selected finished BGM mixes into a source-named ZIP through the durable Worker. */

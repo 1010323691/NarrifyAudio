@@ -182,12 +182,12 @@ def test_legacy_zip_rechecks_source_identity_during_archive_creation(client, wor
     _delivery(workspace, "07_output/ready.wav")
     task_id = _submit(client, workspace, "audio.zip", {"base": "book", "files": [{"name": "ready.wav", "relative_path": "07_output/ready.wav"}]})
     claim = claim_task(task_id, "delivery-zip-worker", lease_seconds=600)
-    original = zipfile.ZipFile.write
-    def replaced(archive, *args, **kwargs):
-        result = original(archive, *args, **kwargs)
+    original = zipfile._ZipWriteFile.write
+    def replaced(writer, *args, **kwargs):
+        result = original(writer, *args, **kwargs)
         source.write_bytes(b"replaced incomplete audio")
         return result
-    monkeypatch.setattr(zipfile.ZipFile, "write", replaced)
+    monkeypatch.setattr(zipfile._ZipWriteFile, "write", replaced)
     with pytest.raises(TaskExecutionError, match="成品在导出期间发生变化"):
         execute_claim(claim)
     with SessionLocal() as db:
@@ -621,3 +621,77 @@ def test_junction_substitution_is_blocked_at_read_and_cleanup(client, workspace,
         assert target.read_bytes() == b"must remain"
     finally:
         cache.rmdir()
+
+
+@pytest.mark.parametrize("revoked_index", [0, 1])
+def test_indexed_package_rechecks_revocation_between_files(client, workspace, monkeypatch, revoked_index):
+    from backend.platform.delivery_index import backfill_project, write_authorities
+    from backend.platform.models import User
+    for name in ("a.mp3", "b.mp3"):
+        path = _write(workspace["root"], f"07_output/{name}", b"ready audio")
+        _delivery(workspace, f"07_output/{name}")
+    with SessionLocal.begin() as db:
+        assert backfill_project(db, db.get(User, workspace["owner"]), workspace["project"])
+    _scan(client, workspace)
+    items = client.get("/api/v1/resources/entries", params={"category": "deliverables"}).json()["items"]
+    assert len(items) == 2
+    task_id = _submit(client, workspace, "resources.package", {"files": [
+        {"resource_id": item["id"], "snapshot_id": item["snapshot_id"]} for item in items]})
+    original = zipfile._ZipWriteFile.write
+    revoked = False
+    def revoke_after_first_write(writer, data):
+        nonlocal revoked
+        value = original(writer, data)
+        if not revoked:
+            revoked = True
+            relative = items[revoked_index]["relative_path"]
+            with SessionLocal.begin() as db:
+                task = Task(owner_id=workspace["owner"], project_id=workspace["project"], task_type="audio.cut",
+                    status="succeeded", finished_at=utcnow())
+                db.add(task); db.flush()
+                result = {"complete": False, "path": str(workspace["root"] / relative)}
+                db.add(TaskResult(task_id=task.id, result=result))
+                write_authorities(db, db.get(User, workspace["owner"]), task, result)
+        return value
+    monkeypatch.setattr(zipfile._ZipWriteFile, "write", revoke_after_first_write)
+    claim = claim_task(task_id, "indexed-revocation-package", lease_seconds=600)
+    with pytest.raises(TaskExecutionError, match="成品"):
+        execute_claim(claim)
+    assert revoked
+    with SessionLocal() as db:
+        assert not internal_path(db, workspace["owner"], "exports", task_id, "files.zip").exists()
+
+
+@pytest.mark.parametrize("task_type,relative,producer,payload", [
+    ("audio.zip", "07_output/book.mp3", "audio.cut", {"base": "book", "files": [{"name": "book.mp3", "relative_path": "07_output/book.mp3"}]}),
+    ("bgm.package", "08_bgm/book.mp3", "bgm.mix", {"base": "book", "chapters": ["book"]}),
+])
+def test_legacy_archive_rechecks_qualification_after_copy(client, workspace, monkeypatch, task_type, relative, producer, payload):
+    from backend.platform.delivery_index import backfill_project, write_authorities
+    from backend.platform.models import User
+    path = _write(workspace["root"], relative, b"finished audio")
+    _delivery(workspace, relative, producer)
+    with SessionLocal.begin() as db:
+        assert backfill_project(db, db.get(User, workspace["owner"]), workspace["project"])
+    task_id = _submit(client, workspace, task_type, payload)
+    original = zipfile._ZipWriteFile.write
+    revoked = False
+    def revoke(writer, data):
+        nonlocal revoked
+        count = original(writer, data)
+        if not revoked:
+            revoked = True
+            with SessionLocal.begin() as db:
+                task = Task(owner_id=workspace["owner"], project_id=workspace["project"], task_type=producer,
+                    status="succeeded", finished_at=utcnow())
+                db.add(task); db.flush()
+                result = {"complete": False, "path": str(path)}
+                db.add(TaskResult(task_id=task.id, result=result))
+                write_authorities(db, db.get(User, workspace["owner"]), task, result)
+        return count
+    monkeypatch.setattr(zipfile._ZipWriteFile, "write", revoke)
+    claim = claim_task(task_id, "archive-revocation", lease_seconds=600)
+    with pytest.raises(TaskExecutionError, match="成品"):
+        execute_claim(claim)
+    assert revoked
+    assert not (path.parent / "book.zip").exists()

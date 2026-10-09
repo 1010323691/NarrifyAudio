@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import InterfaceError, OperationalError, TimeoutError as PoolTimeoutError
 
 from .platform.outbox import publish_pending
-from .platform.task_worker import recover_database_tasks, resume_llm_unavailable_tasks, run_once
+from .platform.task_worker import recover_database_tasks, recover_database_task_page, resume_llm_unavailable_tasks, run_once
 from .platform.worker_registry import heartbeat, mark_offline
 from .platform.database import SessionLocal
 from .platform.models import Task, TaskAttempt
@@ -83,8 +83,9 @@ def _mark_offline_safely(worker_id: str) -> None:
 def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once, lane="mechanical"):
     def dispatch():
         heartbeat(worker_id, status="idle", capabilities=capabilities)
-        recover_database_tasks()
-        publish_pending()
+        if once:
+            from .platform.delivery_maintenance import run_dispatch_once
+            run_dispatch_once(recover=recover_database_tasks, publish=publish_pending)
         result = run_once(
             client,
             worker_id=worker_id,
@@ -204,6 +205,24 @@ def _project_retention_loop(stop: threading.Event) -> None:
         stop.wait(24 * 60 * 60)
 
 
+def _retention_pass():
+    # Single-round work budget per cleanup kind: a large backlog continues on
+    # the coordinator's next pass (60s) instead of blocking the dispatch loop.
+    projects = purge_expired_projects(limit=20)
+    resources = purge_resource_artifacts(limit=200)
+    incomplete = projects >= 20 or resources >= 200
+    return projects + resources, incomplete
+
+
+def _host_maintenance_loop(stop):
+    # Entry-point injection preserves platform -> core layering: the platform
+    # coordinator must not import service-level project retention.
+    from .platform.delivery_maintenance import run
+    from .services.project_progress import refresh_due_progress
+    run(stop, recover=recover_database_task_page, publish=publish_pending,
+        retention=_retention_pass, refresh=refresh_due_progress)
+
+
 def _parse_worker_loop(worker_id: str, slot: int, stop: threading.Event, slot_stop: threading.Event) -> None:
     logger = logging.getLogger("audiobook.worker")
     slot_id = f"{worker_id}-parse-{slot:02d}"
@@ -303,18 +322,17 @@ def main() -> None:
     ):
         return
     parse_workers: list[threading.Thread] = []
-    retention_worker: threading.Thread | None = None
+    delivery_worker: threading.Thread | None = None
     gpu_workers: list[threading.Thread] = []
     merge_workers: list[threading.Thread] = []
     scheduler_thread: threading.Thread | None = None
     if not args.once:
+        # Every lane can take over maintenance; the host lock elects one owner.
+        delivery_worker = threading.Thread(target=_host_maintenance_loop, args=(stop,),
+            name="host-maintenance", daemon=True)
+        delivery_worker.start()
         if args.task_lane == "mechanical":
             merge_workers = _start_merge_workers(args.worker_id, stop)
-            retention_worker = threading.Thread(
-                target=_project_retention_loop, args=(stop,),
-                name="project-retention-cleanup", daemon=True,
-            )
-            retention_worker.start()
         if args.task_lane == "model":
             scheduler_thread = threading.Thread(target=Scheduler(stop).run, name="gpu-scheduler", daemon=False)
             scheduler_thread.start()
@@ -343,8 +361,8 @@ def main() -> None:
         raise
     finally:
         stop.set()
-        if retention_worker is not None:
-            retention_worker.join(timeout=5)
+        if delivery_worker is not None:
+            delivery_worker.join(timeout=5)
         for thread in parse_workers:
             thread.join(timeout=2)
         for thread in gpu_workers:

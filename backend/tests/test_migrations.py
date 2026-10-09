@@ -36,9 +36,13 @@ def test_upgrade_from_empty_database_to_head(tmp_path, preexisting_hold_table):
     engine = sa.create_engine(env["NARRIFY_DATABASE_URL"])
     try:
         inspector = sa.inspect(engine)
+        assert "project_progress_refresh" in inspector.get_table_names()
+        assert "ix_progress_refresh_due" in {index["name"] for index in inspector.get_indexes("project_progress_refresh")}
         assert "quota_holds" in inspector.get_table_names()
         assert "workspaces" not in inspector.get_table_names()
         assert "next_attempt_at" in {column["name"] for column in inspector.get_columns("tasks")}
+        assert "ix_tasks_recovery_page" in {index["name"] for index in inspector.get_indexes("tasks")}
+        assert "ix_task_attempts_live_lease" in {index["name"] for index in inspector.get_indexes("task_attempts")}
         assert {"directory_key", "last_selected_at"} <= {column["name"] for column in inspector.get_columns("projects")}
         assert "uq_quota_hold_attempt_operation" in {index["name"] for index in inspector.get_indexes("quota_holds")}
         assert {"text_format_flows", "chapter_review_marks"} <= set(inspector.get_table_names())
@@ -224,3 +228,40 @@ def test_batch_submission_migration_backfills_and_preserves_config_on_downgrade(
     assert 'task_batches' not in sa.inspect(engine).get_table_names()
     engine.dispose()
     _run(env, '-m', 'alembic', '-c', 'alembic.ini', 'upgrade', 'head')
+
+
+def test_portable_keys_backfill_preserves_collisions_and_roundtrips(tmp_path):
+    database = tmp_path / "portable-keys.db"
+    env = {**os.environ, "NARRIFY_DATABASE_URL": f"sqlite:///{database.as_posix()}", "NARRIFY_AUTO_CREATE_SCHEMA": "false"}
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "0025_mechanical_audio_permits")
+    engine = sa.create_engine(env["NARRIFY_DATABASE_URL"])
+    now = datetime.now(timezone.utc)
+    metadata = sa.MetaData()
+    users, projects, files = [sa.Table(name, metadata, autoload_with=engine) for name in ("users", "projects", "project_files")]
+    keys = [f"owner/project/03_parsed_json/chapter-{i}.json" for i in range(1000)]
+    keys += ["owner/project/03_parsed_json/Straße.json", "owner/project/03_parsed_json/STRASSE.json",
+             "owner/project/03_parsed_json/é.json", "owner/project/03_parsed_json/e\u0301.json"]
+    keys.append("owner/project/03_parsed_json/" + "ΐ" * 600 + ".json")
+    with engine.begin() as connection:
+        connection.execute(users.insert().values(id="owner", username="owner", email="portable@example.test",
+            display_name="Owner", password_hash="unused", role="user", is_active=True, created_at=now, updated_at=now))
+        connection.execute(projects.insert().values(id="project", owner_id="owner", name="Book", description="",
+            directory_key="owner/project", last_selected_at=now, created_at=now, updated_at=now))
+        connection.execute(files.insert(), [dict(id=f"file-{i:04d}", owner_id="owner", project_id="project",
+            original_name=key.split("/")[-1], object_key=key, content_type="application/json", size_bytes=1,
+            sha256="a" * 64, kind="artifact", created_at=now) for i, key in enumerate(keys)])
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
+    with engine.connect() as connection:
+        table = sa.Table("project_files", sa.MetaData(), autoload_with=connection)
+        rows = connection.execute(sa.select(table.c.object_key, table.c.object_key_normalized)).all()
+        assert len(rows) == len(keys)
+        from backend.core.object_keys import object_key_lookup_key
+        assert all(row.object_key_normalized == object_key_lookup_key(row.object_key) for row in rows)
+        index = next(index for index in sa.inspect(connection).get_indexes("project_files") if index["name"] == "ix_project_files_normalized")
+        assert not index["unique"]
+        assert {"current_deliveries", "delivery_index_state"} <= set(sa.inspect(connection).get_table_names())
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "downgrade", "0025_mechanical_audio_permits")
+    _run(env, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head")
+    with engine.connect() as connection:
+        assert connection.scalar(sa.text("SELECT count(*) FROM project_files")) == len(keys)
+    engine.dispose()

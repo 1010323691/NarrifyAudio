@@ -14,19 +14,18 @@ Layering: ``api/script_parse`` -> this service -> platform.
 from __future__ import annotations
 
 import mimetypes
-import uuid
 from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Select, func, insert, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..core.config import get_config
 from ..engines.book import decode_buffer
 from ..engines.script import fix_mojibake
 from ..engines.script_prompts import load_default_prompts
-from ..platform.models import Project, ProjectFile, Task, TaskResult, TextFormatFlow, User
+from ..platform.models import Project, ProjectFile, Task, TaskResult, TextFormatFlow, User, new_id, utcnow
 from ..platform.storage import (
     configured_storage_root,
     object_path,
@@ -36,7 +35,9 @@ from ..platform.storage import (
 )
 from ..core.filenames import filename_aliases, legacy_storage_name
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
-from ..platform.task_submission import TaskSubmissionError, submit_task_record
+from ..platform.task_submission import TaskSubmissionError
+from ..platform.batch_submission import submit_task_batch
+from ..core.request_context import bind_workspace, reset_workspace
 from .list_paging import page_meta, page_slice
 from .task_operations import owned_project
 from .text_format_workbench import FLOW_TASK_TYPES, _version_from_flow
@@ -93,18 +94,20 @@ def _file_row(db: Session, user: User, project_id: str, file_id: str) -> Project
 def _split_files(db: Session, user: User, project_id: str) -> dict[str, ProjectFile]:
     """The project's current split files, keyed by file name. The file table is
     the source of truth (its sha256 is the CURRENT content digest — republish
-    upserts the row); a name maps to at most one live row."""
+    upserts the row); a name maps to at most one live row. The split module is
+    filtered in SQL so other modules' rows never materialize."""
     rows = db.scalars(
         select(ProjectFile).where(
             ProjectFile.project_id == project_id,
             ProjectFile.owner_id == user.id,
             ProjectFile.deleted_at.is_(None),
+            ProjectFile.object_key.like(f"%/{_SPLIT_MODULE}/%"),
         )
     ).all()
     return {
         item.original_name: item
         for item in rows
-        if _module_of(item.object_key) == _SPLIT_MODULE and item.original_name
+        if item.original_name
     }
 
 
@@ -158,6 +161,33 @@ def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -
             setattr(item, key, value)
         item.deleted_at = None
     return item
+
+
+def _catalog_split_files(db, user, project, paths):
+    """Catalogue legacy selections with bounded SQL inside batch admission."""
+    if not paths:
+        return {}
+    prefix = project_directory_key(db, user.username, project.id) + "/" + _SPLIT_MODULE + "/"
+    candidates = {prefix + path.name: path for path in paths}
+    old = {item.object_key: item for item in db.scalars(select(ProjectFile).where(
+        ProjectFile.project_id == project.id, ProjectFile.owner_id == user.id,
+        ProjectFile.object_key.in_(candidates)))}
+    now, additions, changes = utcnow(), [], []
+    for key, path in candidates.items():
+        values = {"size_bytes": path.stat().st_size, "sha256": sha256_file(path), "deleted_at": None}
+        if key in old:
+            changes.append({"id": old[key].id, **values})
+        else:
+            additions.append({"id": new_id(), "owner_id": user.id, "project_id": project.id,
+                "object_key": key, "original_name": path.name, "kind": "legacy",
+                "content_type": "text/plain", "created_at": now, **values})
+    for offset in range(0, len(additions), 100):
+        db.execute(insert(ProjectFile), additions[offset:offset + 100])
+    for offset in range(0, len(changes), 100):
+        db.execute(update(ProjectFile), changes[offset:offset + 100])
+    rows = db.scalars(select(ProjectFile).where(ProjectFile.project_id == project.id,
+        ProjectFile.owner_id == user.id, ProjectFile.object_key.in_(candidates)).execution_options(populate_existing=True))
+    return {Path(item.object_key).name: item for item in rows}
 
 
 def _source_section(db: Session, user: User, project: Project) -> dict:
@@ -227,16 +257,47 @@ def _source_section(db: Session, user: User, project: Project) -> dict:
 
 
 def _parse_tasks(db: Session, owner_id: str, project_id: str, names: list[str] | None = None, input_ids: list[str] | None = None) -> list[SimpleNamespace]:
-    """Read only task scalars/identity: no config payload, result or events."""
-    rows = db.execute(select(Task.id, Task.status, Task.progress, Task.error_message,
-        Task.created_at, Task.finished_at, Task.payload["source_name"].as_string().label("source_name"),
-        Task.payload["input_file_id"].as_string().label("input_file_id"))
-        .where(Task.owner_id == owner_id, Task.project_id == project_id, Task.task_type == _PARSE_TASK_TYPE,
-            or_(Task.payload["source_name"].as_string().in_([alias for name in names for alias in filename_aliases(name)]),
-                Task.payload["input_file_id"].as_string().in_(input_ids or [])) if names is not None else True)
-        .order_by(Task.created_at.desc(), Task.id.desc())).mappings().all()
-    return [SimpleNamespace(**{k: v for k, v in row.items() if k not in {"source_name", "input_file_id"}},
-        payload={"source_name": row["source_name"], "input_file_id": row["input_file_id"]}) for row in rows]
+    """Materialize only the tasks state actually needs: per normalized input
+    identity, the latest parse task and the latest succeeded task (SQL
+    windowing). Twenty rounds of history per chapter no longer reach this
+    process; results are still loaded only for the surviving task ids.
+
+    Identity prefers the recorded file row and falls back to the raw name
+    spelling, so legacy alias spellings keep working — they merge per resolved
+    row in ``_build_file_states``."""
+    payload_name = Task.payload["source_name"].as_string()
+    payload_input = Task.payload["input_file_id"].as_string()
+    identity = func.coalesce(func.nullif(payload_input, ""), payload_name, "").label("identity")
+    where = [Task.owner_id == owner_id, Task.project_id == project_id, Task.task_type == _PARSE_TASK_TYPE]
+    if names is not None:
+        where.append(or_(payload_name.in_([alias for name in names for alias in filename_aliases(name)]),
+                         payload_input.in_(input_ids or [])))
+    base = select(Task.id, Task.status, Task.progress, Task.error_message,
+                  Task.created_at, Task.finished_at,
+                  payload_name.label("source_name"), payload_input.label("input_file_id"),
+                  identity).where(*where).subquery()
+
+    def ranked(extra: list) -> Select:
+        source = select(base.c).where(*extra).subquery()
+        window = select(source.c,
+            func.row_number().over(partition_by=[source.c.identity],
+                                   order_by=[source.c.created_at.desc(), source.c.id.desc()]).label("rn")
+        ).subquery()
+        return select(window.c).where(window.c.rn == 1)
+
+    rows = db.execute(ranked([]).union_all(ranked([base.c.status == "succeeded"]))).all()
+    tasks = [SimpleNamespace(
+        id=row.id, status=row.status, progress=row.progress,
+        error_message=row.error_message, created_at=row.created_at, finished_at=row.finished_at,
+        payload={"source_name": row.source_name, "input_file_id": row.input_file_id})
+        for row in rows]
+    # A task can be both latest and latest-succeeded; restore the historical
+    # "newest wins" order across identities before the dedupe pass.
+    ordered = sorted(tasks, key=lambda task: (task.created_at, task.id), reverse=True)
+    deduped: dict[str, SimpleNamespace] = {}
+    for task in ordered:
+        deduped.setdefault(task.id, task)
+    return list(deduped.values())
 
 
 def _active_parse_names(db: Session, owner_id: str, project_id: str) -> set[str]:
@@ -538,7 +599,25 @@ def submit_run(
     project_id: str,
     files: list[dict],
     checks: dict | None,
+    idempotency_key: str | None = None,
 ) -> dict:
+    if not 1 <= len(files) <= 1000:
+        raise ScriptParseError(422, "一次请选择 1 至 1000 个章节。")
+    def prepare():
+        token = bind_workspace(project_workspace_path(db, user.username, project_id))
+        try:
+            return _prepare_run(db, user, project_id, files, checks)
+        finally:
+            reset_workspace(token)
+    try:
+        return submit_task_batch(db=db, user=user, project_id=project_id, task_type=_PARSE_TASK_TYPE,
+            request={"files": files, "checks": checks}, prepare=prepare,
+            idempotency_key=idempotency_key, receipt_field="files")
+    except TaskSubmissionError as exc:
+        raise ScriptParseError(exc.status_code, exc.message) from exc
+
+
+def _prepare_run(db, user, project_id, files, checks):
     """Version-bound batch submit: resolve every file against the project's
     file table, verify caller-supplied digests, then submit one parse task per
     file. Digest mismatch / split publishing / an in-flight parse of the same
@@ -547,32 +626,29 @@ def submit_run(
     project = owned_project(db, user.id, project_id)
     if project is None:
         raise ScriptParseError(404, "项目不存在")
-    # 项目行锁：同项目并发 submit_run 的「检查 + 首个提交」阶段串行化——并发方
-    # 须等我们首个 submit_task_record 提交后才能拿到锁，届时它的在途检查（仅做
-    # 一次）能看到我们已提交的活跃任务 → 409，关闭双解析主窗口。入口锁随首个
-    # 提交释放；循环内逐文件 submit_task_record 会重新取项目行锁再提交
-    # （task_submission.with_for_update），迭代间隙并发方仍可能通过检查而对我们
-    # 尚未提交的章节双提交：仅浪费 LLM 成本、无产物损坏（评审 [P4]/[P8]）。
-    # sqlite（测试环境）不支持 FOR UPDATE，跳过。
-    if db.get_bind().dialect.name == "postgresql":
-        db.execute(select(Project.id).where(Project.id == project.id).with_for_update())
+    # The outer batch admission holds the project lock until every row commits.
     if _text_format_busy(db, user.id, project.id):
         raise ScriptParseError(409, "排版与分册任务正在进行，暂不能提交解析")
 
     split_rows = _split_files(db, user, project.id)
     # Legacy disk files without a table row get catalogued on submit — the
     # 历史文件兼容入口: visible in state, submittable, digest computed now.
-    disk_dir = project_workspace_path(db, user.username, project.id) / _SPLIT_MODULE
+    workspace = project_workspace_path(db, user.username, project.id)
+    disk_dir = workspace / _SPLIT_MODULE
+    legacy_paths = []
     if disk_dir.is_dir():
         for name in set(split_rows) | {str(f.get("name") or "") for f in files}:
             if name and name not in split_rows:
                 candidate = (disk_dir / Path(name).name).resolve()
                 try:
                     candidate.relative_to(disk_dir.resolve())
+                    candidate.relative_to(workspace.resolve())
                 except ValueError:
                     continue
                 if candidate.name.endswith(".txt") and candidate.is_file():
-                    split_rows[candidate.name] = _catalog_split_file(db, user, project, candidate)
+                    legacy_paths.append(candidate)
+    split_rows.update(_catalog_split_files(db, user, project, legacy_paths))
+    db.flush()
 
     wanted: list[tuple[str, str | None]] = []
     seen: set[str] = set()
@@ -634,35 +710,14 @@ def submit_run(
         # 用户勾选的检查开关 = 每任务权威值（同 legacy 端点语义）。
         snapshot["generation"].update(checks)
 
-    # 逐文件独立提交（submit_task_record 自提交事务）：批量中途额度耗尽等失败时，
-    # 前序任务已登记并会执行——部分生效语义（与 legacy 单文件提交粒度一致），
-    # 整批不回滚（评审 [P5]：该语义在此明示，PR 已声明）。
-    created: list[dict] = []
+    entries: list[dict] = []
     for name, _sha in wanted:
         item = split_rows[name]
-        try:
-            task = submit_task_record(
-                db,
-                user,
-                project_id=project.id,
-                task_type=_PARSE_TASK_TYPE,
-                payload={
-                    "input_file_id": item.id,
-                    "source_name": item.original_name,
-                    "config": snapshot,
-                },
-                idempotency_key=f"script-parse:{item.id}:{uuid.uuid4()}",
-            )
-        except TaskSubmissionError as exc:
-            raise ScriptParseError(exc.status_code, exc.message) from exc
-        # 回页面提交的名字（状态/清单名）而非表名：前端按它建 submittedTasks
-        # 映射（useScriptParseWorkbench），名字漂移时回表名会断掉该行提交态。
-        created.append({
-            "name": name,
-            "task_id": task.id,
-            "input_sha256": item.sha256,
-        })
-    return {"task_ids": [item["task_id"] for item in created], "files": created}
+        entries.append({"label": f"文本解析 · {name}",
+            "payload": {"input_file_id": item.id, "source_name": item.original_name,
+                        "input_sha256": item.sha256},
+            "receipt": {"name": name, "input_sha256": item.sha256}})
+    return entries, snapshot
 
 
 def result_file(db: Session, user: User, project_id: str, file_id: str) -> tuple[ProjectFile, Path]:

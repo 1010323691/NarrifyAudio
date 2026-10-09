@@ -2,15 +2,55 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from contextlib import contextmanager
 from typing import Any, Callable
 
 from ..core import config as core_config
 from ..core.request_context import bind_workspace, reset_workspace
+from ..core.script_snapshot import bind_reference, reset_reference
+from ..core.input_versions import bind_metadata, reset_metadata
 from .database import SessionLocal
 from .models import User
 from .storage import sha256_file, task_attempt_path, project_workspace_path
 from .task_contracts import TaskClaim, TaskExecutionError, TaskFileOutcome, TaskOutcome
+
+
+@contextmanager
+def task_outcome_file(claim: TaskClaim, output_name: str):
+    """Reserve an attempt-owned disk artifact; remove incomplete writes on error."""
+    with SessionLocal() as db:
+        user = db.get(User, claim.owner_id)
+        if user is None:
+            raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
+        path = task_attempt_path(db, user.username, claim.project_id,
+                                 claim.task_id, claim.attempt_id, output_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        yield path
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def file_task_outcome(path, output_name: str, content_type: str,
+                      metadata: dict[str, Any], *, publish_module=None,
+                      check: Callable[[], None] | None = None) -> TaskOutcome:
+    """Describe a closed attempt artifact without materializing its contents."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            if check:
+                check()
+            size += len(chunk)
+            digest.update(chunk)
+    if check:
+        check()
+    return TaskOutcome(temp_path=path, output_name=output_name,
+                       content_type=content_type, size_bytes=size,
+                       sha256=digest.hexdigest(), metadata=metadata,
+                       publish_module=publish_module)
 
 
 def write_task_outcome(
@@ -100,24 +140,35 @@ def engine_execution_context(claim: TaskClaim):
         if user is None:
             raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
         workspace = project_workspace_path(db, user.username, claim.project_id)
-    snapshot = claim.payload.get("config")
-    if not isinstance(snapshot, dict) and claim.payload.get("_batch_config_id"):
-        from .models import TaskBatch
-        with SessionLocal() as db:
-            batch = db.get(TaskBatch, claim.payload["_batch_config_id"])
-            if batch is None or batch.owner_id != claim.owner_id or batch.project_id != claim.project_id:
-                raise TaskExecutionError("batch_not_found", "提交配置不存在")
-            snapshot = batch.config
+    snapshot = task_config_snapshot(claim.payload, claim.owner_id, claim.project_id)
     config_token = None
     if isinstance(snapshot, dict):
         config_token = core_config.bind_task_config(core_config.AppConfig.model_validate(snapshot))
     token = bind_workspace(workspace)
+    reference_token = bind_reference(snapshot.get("_script_inputs") if isinstance(snapshot, dict) else None)
+    metadata_token = bind_metadata(snapshot if isinstance(snapshot, dict) else {})
     try:
         yield workspace
     finally:
+        reset_metadata(metadata_token)
+        reset_reference(reference_token)
         reset_workspace(token)
         if config_token is not None:
             core_config.reset_task_config(config_token)
+
+
+def task_config_snapshot(payload, owner_id, project_id, *, db=None):
+    snapshot = payload.get("config")
+    if isinstance(snapshot, dict) or not payload.get("_batch_config_id"):
+        return snapshot
+    from .models import TaskBatch
+    if db is None:
+        with SessionLocal() as session:
+            return task_config_snapshot(payload, owner_id, project_id, db=session)
+    batch = db.get(TaskBatch, payload["_batch_config_id"])
+    if batch is None or batch.owner_id != owner_id or batch.project_id != project_id:
+        raise TaskExecutionError("batch_not_found", "提交配置不存在")
+    return batch.config
 
 
 def engine_result_outcome(claim: TaskClaim, result: Any) -> TaskOutcome:

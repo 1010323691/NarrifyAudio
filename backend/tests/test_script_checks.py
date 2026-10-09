@@ -357,3 +357,29 @@ def test_boundary_quote_removal_keeps_review_marker_without_new_reparse_requests
     assert len(calls) == 1 and result["suspicious"] == 0
     assert result["split_review_indices"] == [0]
     assert any("失去引号信号" in text for _, text in handle.logs)
+
+
+def test_alignment_skeleton_equality_fast_path_keeps_decisions(monkeypatch):
+    from backend.engines import script
+    # Same skeleton, different surface text (quotation marks / punctuation):
+    # the fast path returns the exact full-match verdict without difflib.
+    source = "「走吧。」\n\n  走吧"
+    entries = [{"speaker": "他", "text": "走吧。"}, {"speaker": "旁白", "text": "走吧"}]
+    assert script._skeleton(source) == script._skeleton("".join(e["text"] for e in entries))
+    def explode(*args, **kwargs):
+        raise AssertionError("equal skeletons must not reach difflib")
+    monkeypatch.setattr(script.difflib.SequenceMatcher, "__init__", explode)
+    result = script.check_chunk_alignment(source, entries)
+    assert result["ok"] is True
+    assert result["coverage"] == 1.0
+    assert result["missing"] == [] and result["extra"] == [] and result["suspicious"] == []
+    assert result["source"] == script._skeleton(source)
+    monkeypatch.undo()
+    # Non-equal text still goes through the original difflib rules: a large
+    # gap fails, a small one is tolerated.
+    long_source = "用来确保大段缺失仍被完整性校验判定为异常而不是被快速路径放行的长文本。" * 4
+    dropped = script.check_chunk_alignment(long_source, [])
+    assert dropped["ok"] is False and dropped["missing"]
+    unit = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥一二三四五六七八九十"
+    small = script.check_chunk_alignment(unit * 3, [{"speaker": "A", "text": unit * 2 + "甲乙丙丁"}])
+    assert small["ok"] is True and not small["missing"]

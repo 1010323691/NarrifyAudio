@@ -5,6 +5,8 @@ import { useProjectGate } from '@/composables/useProjectGate'
 import { useScriptParseWorkbench } from '@/composables/useScriptParseWorkbench'
 
 import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
+import BatchSubmissionRecovery from '@/components/BatchSubmissionRecovery.vue'
+import { useProjectStore } from '@/stores/project'
 import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
@@ -34,6 +36,7 @@ import Pager from '@/views/textformat/Pager.vue'
 
 const router = useRouter()
 const { projectSet } = useProjectGate()
+const submissionProject = useProjectStore()
 
 const {
   state, stateError, summaryError, controlsReady, loading, submitting,
@@ -163,6 +166,7 @@ onBeforeUnmount(() => {
 
     <div class="workbench-controls" tabindex="0" role="region" aria-label="制作条件与流程">
       <ProjectGateAlert />
+      <BatchSubmissionRecovery :routes="[`/api/v1/projects/${submissionProject.activeProjectId}/script-parse/run`]" @committed="refreshState()" />
 
       <!-- 状态警示 -->
       <Alert v-if="stateError" variant="destructive">

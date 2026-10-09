@@ -551,6 +551,19 @@ def check_chunk_alignment(chunk: str, entries) -> dict:
             "output": output,
         }
 
+    if source == output:
+        # 骨架完全相等（重复文本/逐字还原）：模糊匹配必然全等，直接快速返回，
+        # 长章节不再付出 O(n log n) 的 difflib 成本；非相等文本仍走原判定。
+        return {
+            "ok": True,
+            "coverage": 1.0,
+            "missing": [],
+            "extra": [],
+            "suspicious": [],
+            "source": source,
+            "output": output,
+        }
+
     matcher = difflib.SequenceMatcher(a=source, b=output, autojunk=False)
     missing: list[str] = []
     extra: list[str] = []

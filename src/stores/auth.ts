@@ -10,18 +10,25 @@ export const useAuthStore = defineStore('auth', () => {
   const loaded = ref(false)
   const busy = ref(false)
   const error = ref('')
+  // The router guard runs on EVERY navigation; without coalescing, a stalled
+  // network piles one hung /me fetch per click on top of the previous ones.
+  let loadInflight: Promise<void> | null = null
 
   const isAuthenticated = computed(() => Boolean(user.value))
 
   async function load() {
     if (loaded.value) return
-    try {
-      user.value = (await authApi.currentUser()).user
-    } catch {
-      user.value = null
-    } finally {
-      loaded.value = true
-    }
+    loadInflight ??= (async () => {
+      try {
+        user.value = (await authApi.currentUser()).user
+      } catch {
+        user.value = null
+      } finally {
+        loaded.value = true
+        loadInflight = null
+      }
+    })()
+    await loadInflight
   }
 
   async function signIn(identifier: string, password: string) {

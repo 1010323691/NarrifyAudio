@@ -41,6 +41,8 @@ install_tts_env.log
 !/docs/operations.en.md
 !/docs/development.md
 !/docs/development.en.md
+!/docs/backend-batch-implementation.md
+!/docs/backend-batch-plan.md
 
 # 0015 migration backup dumps (contain user data — never commit)
 .backups/

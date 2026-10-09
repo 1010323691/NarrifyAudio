@@ -22,6 +22,7 @@ transformers==4.57.3
 accelerate==1.12.0
 soundfile>=0.12
 pydub>=0.25
+audioop-lts>=0.2.2; python_version >= "3.13"
 numpy>=2.0
 huggingface_hub>=0.25
 

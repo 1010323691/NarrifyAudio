@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 from pathlib import Path
 
 from ..core import pathio
@@ -221,7 +222,10 @@ def defer_or_delete(handle, path: Path) -> None:
         defer_delete(path)
     else:
         try:
-            path.unlink()
+            from ..core.workspace_epochs import managed_mutation
+            if path.exists():
+                with managed_mutation(path):
+                    path.unlink()
         except FileNotFoundError:
             pass
 
@@ -235,7 +239,7 @@ def migrate_voice_config(handle, path: Path, workspace, voice_config: dict) -> N
     if callable(stage_file):
         stage_file(path, encoded)
     else:
-        path.write_bytes(encoded)
+        pathio.rewrite_json_file(path, voice_config)
 
 
 def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
@@ -252,7 +256,14 @@ def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
     if not names:
         return 0
     changed = 0
-    for manifest_path in layout.audio_chunk.glob("*/manifest.json"):
+    from ..core.manifest_speakers import candidate_manifests
+    try:
+        manifests = candidate_manifests(layout.audio_chunk, names)
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        # This is a derived lookup; unavailable/corrupt cache must not omit any
+        # stale audio or prevent the voice checkpoint from preserving history.
+        manifests = layout.audio_chunk.glob("*/manifest.json")
+    for manifest_path in manifests:
         try:
             data = json.loads(manifest_path.read_text("utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -286,7 +297,7 @@ def invalidate_speaker_outputs(speakers, layout=None, *, handle=None) -> int:
                     defer_workspace_delete(output)
                     continue
                 try:
-                    output.unlink()
+                    defer_or_delete(None, output)
                 except FileNotFoundError:
                     pass
                 except OSError:
@@ -410,7 +421,7 @@ def _load_manifest(out_dir, *, persist_migration: bool, handle=None, voice_confi
         if callable(stage_file):
             stage_file(p, encoded)
         else:
-            p.write_bytes(encoded)
+            pathio.rewrite_json_file(p, data)
     return by_index
 
 
@@ -642,4 +653,6 @@ def write_manifest_file(manifest_path, manifest, handle=None) -> None:
     if callable(stage_file):
         stage_file(manifest_path, encoded)
     else:
-        manifest_path.write_bytes(encoded)
+        from ..core.workspace_epochs import managed_mutation
+        with managed_mutation(manifest_path):
+            manifest_path.write_bytes(encoded)

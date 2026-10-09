@@ -7,6 +7,8 @@ from .pooled_task_execution import PooledTaskContext
 from .task_contracts import TaskExecutionError
 from .task_engine_support import engine_execution_context, engine_result_outcome
 from .task_validation import legacy_task_payload_error
+from ..core.input_versions import validating_inputs
+from .task_input_validation import validate_task_inputs
 
 
 class CloneBatchContext(PooledTaskContext):
@@ -58,10 +60,11 @@ def execute_clone_batch(claims, finish, cancel):
             layout = get_or_prepare_layout()
             handle.output_paths = {"voice_config_path": str(layout.voice_profiles / "voice_config.json"),
                                    "output_dir": str(layout.voice_profiles / "designed_voices")}
-            generate_voice_candidates(
-                handle, list(handle.contexts), bool(payload.get("new_only")),
-                payload.get("concurrency"), payload.get("script"), payload.get("candidate_count"),
-            )
+            with validating_inputs(lambda: validate_task_inputs(payload)):
+                generate_voice_candidates(
+                    handle, list(handle.contexts), bool(payload.get("new_only")),
+                    payload.get("concurrency"), payload.get("script"), payload.get("candidate_count"),
+                )
             for speaker, ctx in handle.contexts.items():
                 if speaker not in handle.completed and ctx.claim.task_id != primary.task_id:
                     if not handle.speaker_cancelled(speaker):

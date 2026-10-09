@@ -597,7 +597,8 @@ def test_rename_tag_propagates_tracks_and_analysis(sandbox):
 
     idx = music_engine.load_index()
     assert idx["tracks"]["a.mp3"]["tags"]["mood"] == ["紧绷"]
-    data = json.loads(analysis.read_bytes().decode("utf-8"))
+    from backend.engines import bgm_storage
+    data = bgm_storage.load_analysis(core_paths.get_or_prepare_layout())
     assert data["chapters"]["第 001 章 夜袭"]["mood"] == ["紧绷"]
     assert data["chapters"]["第 002 章 无关"]["mood"] == ["平静"]
     # assignments snapshots are a HISTORICAL record — NOT rewritten
@@ -627,7 +628,8 @@ def test_delete_tag_propagates_and_keeps_files(sandbox):
     assert "紧张" not in r["tags"]["mood"]
     idx = music_engine.load_index()
     assert idx["tracks"]["a.mp3"]["tags"]["mood"] == []
-    data = json.loads(analysis.read_bytes().decode("utf-8"))
+    from backend.engines import bgm_storage
+    data = bgm_storage.load_analysis(core_paths.get_or_prepare_layout())
     assert data["chapters"]["第 001 章 夜袭"]["mood"] == []
     assert (sandbox["lib"] / "a.mp3").exists()  # 删除标签绝不删音乐文件
 

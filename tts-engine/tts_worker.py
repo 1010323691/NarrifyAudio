@@ -70,6 +70,7 @@ import time
 # module is stdlib-only: importing it never loads API, database or model code.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.core.tts_batch_limits import AUTO_BATCH_MAX, AUTO_BATCH_POINTS
+from backend.core.pcm_stream import StreamingMerge, WaveInput
 
 # transformers reconfigures its root logger on first import: it resets the level to
 # WARNING, attaches its own stderr handler and disables propagation — which stomps any
@@ -1887,20 +1888,42 @@ def _new_windows_kill_job():
         return None, None
 
 
+@contextlib.contextmanager
+def _merge_input(path, tmp_dir):
+    """Read WAV directly; decode other supported media to disk, never a pipe buffer."""
+    try:
+        source = WaveInput(path)
+    except ValueError:
+        import tempfile
+        from pydub import AudioSegment
+        from pydub.utils import mediainfo_json
+        info = mediainfo_json(path)
+        streams = [stream for stream in info.get("streams", []) if stream.get("codec_type") == "audio"]
+        if not streams:
+            raise ValueError("No audio stream")
+        stream = streams[0]
+        bits = stream.get("bits_per_sample", 16)
+        if stream.get("sample_fmt") == "fltp" and stream.get("codec_name") in ("mp3", "mp4", "aac", "webm", "ogg"):
+            bits = 16
+        codec = "pcm_u8" if bits == 8 else f"pcm_s{bits}le"
+        with tempfile.TemporaryDirectory(prefix="decode-", dir=tmp_dir) as decoded:
+            wav = os.path.join(decoded, "input.wav")
+            errors = os.path.join(decoded, "ffmpeg.stderr")
+            with open(errors, "wb") as stderr:
+                completed = subprocess.run([AudioSegment.converter, "-y", "-i", path,
+                                            "-acodec", codec, "-vn", "-f", "wav", wav],
+                                           stdout=subprocess.DEVNULL, stderr=stderr)
+            if completed.returncode:
+                with open(errors, "rb") as stderr:
+                    stderr.seek(max(0, os.path.getsize(errors) - 4096))
+                    raise ValueError(stderr.read().decode(errors="replace"))
+            yield WaveInput(wav)
+    else:
+        yield source
+
+
 def _merge_stage1(segs, tmp_dir, pause_ms, same_ms, batch_size, total, root):
-    """Stage 1: fold the per-segment files into per-batch part WAVs in ``tmp_dir``.
-
-    Reports live progress per batch ("正在合并第 k/M 批") and per ~10 segments.
-    Returns each part's boundary metadata (first/last speaker, the last segment's
-    RAW pause_after, duration, planned batch number) for stage 2, or None after a
-    fatal error. A part ends exactly at its last sample: combine_audio_with_pauses
-    ignores the final override, so the part's last segment's pause_after is carried
-    in the metadata as the input to the stage-2 boundary gap. A batch whose
-    segments are all unreadable produces no part — the boundary then simply falls
-    between the two surviving neighbours, as a single-pass merge would.
-    """
-    from pydub import AudioSegment
-
+    """Stream per-segment PCM into bounded-memory batch WAVs."""
     plan = plan_merge_batches(total, batch_size)
     m = len(plan)
     parts = []
@@ -1909,50 +1932,51 @@ def _merge_stage1(segs, tmp_dir, pause_ms, same_ms, batch_size, total, root):
         label = f"正在合并第 {k}/{m} 批"
         progress(merge_stage1_frac(start, total), label)
         log(f"{label}（段 {start + 1}–{end}，共 {end - start} 段）")
-        chunks, audio = [], []
-        for i in range(start, end):
-            s = segs[i]
-            p = s.get("path") or ""
-            # A relative segment path resolves against the workspace root (--workspace),
-            # never the process cwd (which is the project root).
-            full = p if os.path.isabs(p) else os.path.join(root, p)
-            if not p or not os.path.exists(full):
-                skipped += 1
-                continue
-            try:
-                seg = AudioSegment.from_file(full)
-            except Exception as e:  # noqa: BLE001
-                log(f"跳过无法读取的段 {s.get('index')}（{os.path.basename(full)}）：{e}")
-                skipped += 1
-                continue
-            chunks.append(s)
-            audio.append(seg)
-            if (i + 1) % 10 == 0 or i == end - 1:
-                progress(merge_stage1_frac(i + 1, total), f"{label} · 段 {i + 1}/{total}")
-        if not audio:
-            log(f"第 {k}/{m} 批：整批跳过（无可读音频）")
-            continue
-        overrides = [normalize_pause_ms(c.get("pause_after")) for c in chunks]
-        speakers = [c.get("speaker", "") for c in chunks]
-        part = combine_audio_with_pauses(audio, speakers, pause_ms, same_ms, overrides)
-        if part is None:
-            print("TTS_WORKER_ERROR: 批内合并结果为空", file=sys.stderr, flush=True)
-            return None
         part_path = os.path.join(tmp_dir, f"part_{k:03d}.wav")
-        part.export(part_path, format="wav")
-        parts.append({
-            "k": k,
-            "path": part_path,
-            "first_speaker": speakers[0],
-            "last_speaker": speakers[-1],
-            "last_pause_after": chunks[-1].get("pause_after"),
-            "duration_ms": len(part),
-            "n": len(audio),
-        })
+        merged = StreamingMerge(part_path)
+        first, last, count = None, None, 0
+        try:
+            for i in range(start, end):
+                segment = segs[i]
+                path = segment.get("path") or ""
+                full = path if os.path.isabs(path) else os.path.join(root, path)
+                if not path or not os.path.exists(full):
+                    skipped += 1
+                    continue
+                # Enter separately: decoder failures retain legacy skip behavior;
+                # a failure after append begins is fatal rather than a partial success.
+                context = _merge_input(full, tmp_dir)
+                try:
+                    source = context.__enter__()
+                except Exception as exc:
+                    log(f"跳过无法读取的段 {segment.get('index')}（{os.path.basename(full)}）：{exc}")
+                    skipped += 1
+                    continue
+                try:
+                    gap = None if last is None else boundary_gap_ms(
+                        last.get("pause_after"), last.get("speaker", ""), segment.get("speaker", ""), pause_ms, same_ms)
+                    merged.append(source, gap)
+                finally:
+                    context.__exit__(None, None, None)
+                if first is None:
+                    first = segment
+                last = segment
+                count += 1
+                if (i + 1) % 10 == 0 or i == end - 1:
+                    progress(merge_stage1_frac(i + 1, total), f"{label} · 段 {i + 1}/{total}")
+            if not count:
+                log(f"第 {k}/{m} 批：整批跳过（无可读音频）")
+                continue
+            duration_ms = merged.finish()
+        finally:
+            merged.close()
+        parts.append({"k": k, "path": part_path,
+                      "first_speaker": first.get("speaker", ""),
+                      "last_speaker": last.get("speaker", ""),
+                      "last_pause_after": last.get("pause_after"),
+                      "duration_ms": duration_ms, "n": count})
         progress(merge_stage1_frac(end, total), f"{label} · 段 {end}/{total}")
-        log(f"第 {k}/{m} 批完成 → part_{k:03d}.wav（{len(part) / 60000:.1f} 分钟，{len(audio)} 段）")
-        del part, audio, chunks
-        gc.collect()
+        log(f"第 {k}/{m} 批完成 → part_{k:03d}.wav（{duration_ms / 60000:.1f} 分钟，{count} 段）")
     if skipped:
         log(f"警告：{skipped} 段被跳过（文件缺失或无法读取）")
     if not parts:
@@ -1962,43 +1986,27 @@ def _merge_stage1(segs, tmp_dir, pause_ms, same_ms, batch_size, total, root):
 
 
 def _merge_stage2(parts, tmp_dir, out_path, pause_ms, same_ms, m_plan):
-    """Stage 2: fold the part WAVs into the whole-book WAV (kept in ``tmp_dir``).
-
-    A single part fast-paths to an atomic rename (no re-decode / re-combine).
-    Every inter-part gap is computed explicitly (boundary_gap_ms) and passed as a
-    non-None override, so the speaker list below never influences the result — the
-    combined samples match a single-pass merge exactly.
-
-    Returns ``(wav_path, duration_seconds)``; ``(None, 0.0)`` after a fatal error.
-    """
-    from pydub import AudioSegment
-
-    out_stem = os.path.splitext(os.path.basename(out_path))[0]
-    final_wav = os.path.join(tmp_dir, out_stem + ".wav")
+    """Stream part WAVs, preserving each explicit inter-part boundary gap."""
+    final_wav = os.path.join(tmp_dir, os.path.splitext(os.path.basename(out_path))[0] + ".wav")
     if len(parts) == 1:
         os.replace(parts[0]["path"], final_wav)
         log("单批完成：整书 WAV 已就绪")
         return final_wav, parts[0]["duration_ms"] / 1000.0
-
     log(f"开始最终合并：{len(parts)} 个分片 → 整书（批间停顿按边界段规则）")
-    audio, overrides, speakers = [], [], []
-    for pos, p in enumerate(parts, start=1):
-        audio.append(AudioSegment.from_file(p["path"], format="wav"))
-        speakers.append(p["first_speaker"])
-        if pos < len(parts):
-            overrides.append(boundary_gap_ms(p["last_pause_after"], p["last_speaker"],
-                                            parts[pos]["first_speaker"], pause_ms, same_ms))
-        else:
-            overrides.append(None)  # ignored by combine; keeps the lists aligned
-        progress(merge_stage2_frac(pos, len(parts)), f"最终合并第 {p['k']}/{m_plan} 片")
-        log(f"分片 {p['k']}/{m_plan} 就绪（{p['duration_ms'] / 60000:.1f} 分钟）")
-    final = combine_audio_with_pauses(audio, speakers, pause_ms, same_ms, overrides)
-    if final is None:
-        print("TTS_WORKER_ERROR: 合并结果为空", file=sys.stderr, flush=True)
-        return None, 0.0
-    final.export(final_wav, format="wav")
-    log(f"整书 WAV 已导出（{len(final) / 60000:.1f} 分钟）")
-    return final_wav, len(final) / 1000.0
+    merged = StreamingMerge(final_wav)
+    try:
+        for index, part in enumerate(parts):
+            gap = None if not index else boundary_gap_ms(
+                parts[index - 1]["last_pause_after"], parts[index - 1]["last_speaker"],
+                part["first_speaker"], pause_ms, same_ms)
+            merged.append(WaveInput(part["path"]), gap)
+            progress(merge_stage2_frac(index + 1, len(parts)), f"最终合并第 {part['k']}/{m_plan} 片")
+            log(f"分片 {part['k']}/{m_plan} 就绪（{part['duration_ms'] / 60000:.1f} 分钟）")
+        duration_ms = merged.finish()
+    finally:
+        merged.close()
+    log(f"整书 WAV 已导出（{duration_ms / 60000:.1f} 分钟）")
+    return final_wav, duration_ms / 1000.0
 
 
 def _encode_mp3_streaming(wav_path, mp3_path, duration_s, ffmpeg="", threads=0):

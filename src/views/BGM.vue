@@ -36,6 +36,7 @@ import type {
 } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
+import BatchSubmissionRecovery from '@/components/BatchSubmissionRecovery.vue'
 import Button from '@/components/ui/Button.vue'
 import WorkbenchActionBar from '@/components/WorkbenchActionBar.vue'
 import ProductionWorkbench from '@/components/ProductionWorkbench.vue'
@@ -978,6 +979,7 @@ onBeforeUnmount(() => {
     </header>
     <div class="workbench-controls" tabindex="0" role="region" aria-label="制作条件与流程">
       <ProjectGateAlert />
+      <BatchSubmissionRecovery :routes="['/api/bgm/match', '/api/bgm/analyze-segment', '/api/bgm/mix']" @committed="refreshRows()" />
       <WorkbenchContextBar>
         <template #icon><Music4 /></template>
         <template #title>01 匹配 → 02 核对与分析 → 03 混音与试听</template>

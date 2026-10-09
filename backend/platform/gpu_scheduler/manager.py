@@ -154,6 +154,14 @@ class GPUServiceManager:
 
     @staticmethod
     def spawn_tts(cmd, request_id=None, **kwargs):
+        if request_id is None:
+            from ..mechanical_audio import spawn_registered, has_bound_claim
+            # Mechanical merge children share the owned-tree lifecycle but do
+            # not consume GPU permits.
+            if has_bound_claim():
+                proc = spawn_registered(cmd, **kwargs)
+                proc._gpu_request_id = None
+                return proc
         proc = None
         try:
             with transaction() as (db, _state):
@@ -190,6 +198,8 @@ class GPUServiceManager:
     def finish_tts(proc):
         try:
             GPUServiceManager._finish_tts(proc)
+            from ..mechanical_audio import finish_registered
+            finish_registered(proc)
         except BaseException:
             request_id = getattr(proc, "_gpu_request_id", None)
             if request_id:

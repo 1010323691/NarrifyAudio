@@ -1,5 +1,6 @@
 import { listQuery, type ListQuery, type ListPagination } from '@/api/listPaging'
 import { http } from './client'
+import { submitTaskBatches } from './batchSubmission'
 import type {
   TTSStatus,
   VoicesListResult,
@@ -24,23 +25,23 @@ export function ttsStatus(): Promise<TTSStatus> {
 
 /** 角色配音 · 阶段 1（LLM only）：start the voice-foundation Task (all / new-only / a subset). */
 export function prepareFoundations(opts: PrepareFoundationsOptions = {}): Promise<BatchTaskSubmission> {
-  return http.post<BatchTaskSubmission>('/api/tts/prepare-foundations', {
+  return submitTaskBatches<BatchTaskSubmission>('/api/tts/prepare-foundations', {
     speakers: opts.speakers ?? null,
     new_only: opts.new_only ?? false,
     overrides: opts.overrides ?? null,
     script: opts.script ?? null,
-  })
+  }, 'speakers', undefined, async () => (await listVoices(opts.script, undefined, undefined, false, true)).speakers.map(row => row.name))
 }
 
 /** 角色配音 · 阶段 2（TTS only）：start the clone-seed Task (all / new-only / a subset; N parallel). */
 export function generateVoiceCandidates(opts: GenerateVoiceCandidatesOptions = {}): Promise<BatchTaskSubmission> {
-  return http.post<BatchTaskSubmission>('/api/tts/make-clones', {
+  return submitTaskBatches<BatchTaskSubmission>('/api/tts/make-clones', {
     speakers: opts.speakers ?? null,
     new_only: opts.new_only ?? false,
     concurrency: opts.concurrency ?? null,
     script: opts.script ?? null,
     candidate_count: opts.candidate_count ?? null,
-  })
+  }, 'speakers', undefined, async () => (await listVoices(opts.script, undefined, undefined, false, true)).speakers.map(row => row.name))
 }
 
 /** 角色配音：detected characters + voice-config state + preview paths (for a given script). */

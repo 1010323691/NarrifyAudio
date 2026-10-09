@@ -2703,7 +2703,11 @@ def test_voice_batches_split_selected_characters_and_filter_new_only(workspace, 
         {"name": "别名", "line_count": 3, "foundation_status": "done", "alias_of": "旁白", "candidates": []},
     ]
     monkeypatch.setattr(api, "list_voices", lambda script: {"speakers": rows})
-    monkeypatch.setattr(api, "submit_legacy_engine_tasks", lambda **kwargs: submitted.append(kwargs) or {"task_ids": []})
+    def submit(**kwargs):
+        entries, config = kwargs["prepare"]()
+        submitted.append({**kwargs, "entries": entries, "config": config})
+        return {"task_ids": []}
+    monkeypatch.setattr(api, "submit_engine_batch", submit)
     api.prepare_foundations(api.PrepareFoundationsRequest(script="__all__", new_only=True), _durable_ctx(), object())
     assert [entry["payload"]["speakers"] for entry in submitted[-1]["entries"]] == [["主角"]]
     api.make_clones(api.MakeClonesRequest(script="__all__", candidate_count=2, new_only=True), _durable_ctx(), object())

@@ -5,11 +5,11 @@ Both routes submit / cancel through the v1 durable task surface
 """
 from __future__ import annotations
 
-import uuid
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..core.config import PromptsConfig, get_config
@@ -17,8 +17,9 @@ from ..core.paths import get_or_prepare_layout
 from ..engines.script_prompts import load_default_prompts
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
-from ..platform.file_catalog import catalog_managed_file
-from .task_operations import TaskSubmit, cancel_task as cancel_durable_task, submit_task
+from ..platform.project_context import active_project
+from ..services.script_parse_state import ScriptParseError, submit_run
+from .task_operations import cancel_task as cancel_durable_task
 from . import _common
 
 router = APIRouter(prefix="/api/script", tags=["script"])
@@ -75,7 +76,7 @@ class ParseChecks(BaseModel):
 
 
 class GenerateFilesRequest(BaseModel):
-    files: list[str]  # 02_split_text 下的文件名（不含路径）
+    files: list[str] = Field(max_length=1000)
     # 解析检查开关（用户解析页勾选）：随任务提交、固化进每个任务的配置快照；
     # 缺省 = 沿用当前生效配置（旧客户端兼容）。
     checks: ParseChecks | None = None
@@ -86,6 +87,7 @@ def generate_files(
     req: GenerateFilesRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=180)] = None,
 ) -> dict:
     """Submit one persistent parse task per selected split file.
 
@@ -97,43 +99,17 @@ def generate_files(
     names = list(dict.fromkeys(req.files))
     if not names:
         raise HTTPException(400, "请选择要解析的文件。")
-    cfg = get_config()
-    prompts = _resolved_prompts()
-    snapshot = {
-        "llm": cfg.llm.model_dump(mode="json"),
-        "prompts": prompts.model_dump(mode="json"),
-        "generation": cfg.generation.model_dump(mode="json"),
-    }
-    if req.checks is not None:
-        # 用户勾选的检查开关 = 每任务权威值，压过工作区配置与管理员平台默认
-        # （合并发生在 get_config() 之后）；随 Task.payload 各自入库，重跑
-        # （重新提交）才会带新值。
-        checks = req.checks.model_dump(exclude_none=True)
-        if checks:
-            snapshot["generation"].update(checks)
-    created = []
-    for name in names:
-        path = _resolve_split_file(name)
-        try:
-            item = catalog_managed_file(path, ctx, db)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        task = submit_task(
-            TaskSubmit(
-                project_id=item.project_id,
-                task_type="script.parse",
-                payload={
-                    "input_file_id": item.id,
-                    "source_name": item.original_name,
-                    "config": snapshot,
-                },
-                idempotency_key=f"script-parse:{item.id}:{uuid.uuid4()}",
-            ),
-            user=ctx.user,
-            db=db,
-        )
-        created.append({"file": name, "task_id": task["id"]})
-    return {"task_ids": [item["task_id"] for item in created], "files": created}
+    project = active_project(db, ctx.user, ctx.session)
+    if project is None:
+        raise HTTPException(409, "尚未设置工作空间")
+    try:
+        receipt = submit_run(db, ctx.user, project.id,
+            [{"name": name, "sha256": None} for name in names],
+            req.checks.model_dump(exclude_none=True) or None if req.checks is not None else None,
+            idempotency_key)
+    except ScriptParseError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+    return {**receipt, "files": [{"file": row["name"], "task_id": row["task_id"]} for row in receipt["files"]]}
 
 
 class CancelBatchRequest(BaseModel):

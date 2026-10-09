@@ -151,6 +151,11 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
 
     task_ids = select(Task.id).where(Task.owner_id == project.owner_id, Task.project_id == project.id)
     try:
+        from ..platform.models import CurrentDelivery, DeliveryIndexState, ProjectProgress, ProjectProgressRefresh
+        db.execute(delete(ProjectProgressRefresh).where(ProjectProgressRefresh.project_id == project.id))
+        db.execute(delete(ProjectProgress).where(ProjectProgress.project_id == project.id))
+        db.execute(delete(CurrentDelivery).where(CurrentDelivery.project_id == project.id))
+        db.execute(delete(DeliveryIndexState).where(DeliveryIndexState.project_id == project.id))
         db.execute(delete(QuotaHold).where(QuotaHold.task_id.in_(task_ids)))
         db.execute(delete(QuotaTransaction).where(QuotaTransaction.task_id.in_(task_ids)))
         db.execute(delete(OutboxEvent).where(
