@@ -45,6 +45,13 @@ export function settleHeight(previous: number, target: number): number {
   return Number.isFinite(previous) && Math.abs(previous - target) < 1 ? previous : target
 }
 
+/** 断路器计数（纯函数）：丢弃 1 秒前的记录，记入本次适配；窗口内已达 `limit` 次则判定为振荡、不再记入。 */
+export function tallyBurst(burst: number[], now: number, limit = 8): { burst: number[]; tripped: boolean } {
+  const recent = burst.filter((t) => now - t < 1000)
+  if (recent.length >= limit) return { burst: recent, tripped: true }
+  return { burst: [...recent, now], tripped: false }
+}
+
 /** 视口有剩余空间时，把父容器空闲高度平摊到各行，结果按 STEP 取整并不超过 cap。 */
 export function growHeight(max: number, free: number, rows: number, cap: number): number {
   return Math.min(cap, Math.floor((max + free / rows) * STEP) / STEP)
@@ -120,16 +127,16 @@ interface Bound { frame: number; burst: number[]; frozen: boolean; resize: Resiz
 const bound = new WeakMap<HTMLElement, Bound>()
 
 /**
- * 断路器：1 秒内连续适配超过 8 次视为自激振荡，进入冻结——忽略观察回调，每秒只做一次适配。
- * 若该次适配仍改变行高，继续冻结；行高稳定后解冻。合法的一次性变化（如侧栏过渡）由此在结束后收敛到正确行高，
- * 而振荡期间的适配频率被压在约 1 次/秒，不会再出现持续抖动。
+ * 断路器：1 秒内连续适配超过 8 次视为自激振荡，进入冻结——忽略观察回调，每 250ms 只做一次适配（上限约 4 次/秒）。
+ * 若该次适配仍改变行高，继续冻结；行高稳定后解冻。合法的一次性变化（如侧栏过渡）由此在约 0.25 秒内收敛到正确行高，
+ * 而振荡期间的适配频率仍被限制，不会再出现持续抖动。
  */
 function thaw(el: HTMLElement) {
   const state = bound.get(el)
   if (!state) return
   state.frame = 0
   if (fit(el, state.opts)) {
-    state.frame = window.setTimeout(() => thaw(el), 1000)
+    state.frame = window.setTimeout(() => thaw(el), 250)
   } else {
     state.frozen = false
     state.burst = []
@@ -139,14 +146,13 @@ function thaw(el: HTMLElement) {
 function schedule(el: HTMLElement) {
   const state = bound.get(el)
   if (!state || state.frame || state.frozen) return
-  const now = Date.now()
-  state.burst = state.burst.filter((t) => now - t < 1000)
-  if (state.burst.length >= 8) {
+  const tally = tallyBurst(state.burst, Date.now())
+  state.burst = tally.burst
+  if (tally.tripped) {
     state.frozen = true
-    state.frame = window.setTimeout(() => thaw(el), 1000)
+    state.frame = window.setTimeout(() => thaw(el), 250)
     return
   }
-  state.burst.push(now)
   // setTimeout 而非 rAF：后台/未绘制的标签页 rAF 不触发，行高会停在未适配状态。
   state.frame = window.setTimeout(() => {
     state.frame = 0

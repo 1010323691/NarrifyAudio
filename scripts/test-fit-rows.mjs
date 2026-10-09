@@ -6,7 +6,7 @@ import ts from 'typescript'
 // 真实 fitRows.ts 转译后加载；directive 部分只引用类型，solveRowHeight 不依赖 DOM。
 const source = readFileSync(new URL('../src/directives/fitRows.ts', import.meta.url), 'utf8')
 const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
-const { solveRowHeight, settleHeight, growHeight } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
+const { solveRowHeight, settleHeight, growHeight, tallyBurst } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 
 // 模拟母容器：盒子之外固定占 chrome 像素，盒子本身 = rows × 行高，容器可用高度 = avail。
 const overflowAt = (rows, chrome, avail) => (height) => Math.max(0, chrome + rows * height - avail)
@@ -45,4 +45,17 @@ test('放大：剩余空间平摊到十行并按 64 分之一取整，不超过�
   assert.equal(growHeight(40, 0, 10, 52), 40)
   assert.equal(growHeight(40, 120, 10, 52), 52)
   assert.ok(growHeight(40, 60, 10, 52) > 40 && growHeight(40, 60, 10, 52) < 52)
+})
+
+test('断路器：1 秒窗口内第 9 次适配触发跳闸，窗口外的记录会过期', () => {
+  let burst = []
+  for (let i = 0; i < 8; i++) {
+    const r = tallyBurst(burst, 1000 + i * 10)
+    assert.equal(r.tripped, false)
+    burst = r.burst
+  }
+  assert.equal(tallyBurst(burst, 1100).tripped, true)
+  // 1 秒后旧记录全部过期，计数重新开始
+  assert.equal(tallyBurst(burst, 2100).tripped, false)
+  assert.equal(tallyBurst(burst, 2100).burst.length, 1)
 })
