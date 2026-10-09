@@ -324,6 +324,7 @@ def test_batch_creates_missing_quota_account_under_lock(sessions):
         assert db.get(UserQuotaAccount, "owner") is not None
 
 
+
 def test_lock_owner_account_creates_once_and_returns_existing(sessions):
     # The helper is the batch path's only account lock; a second call must lock
     # the row the first call created rather than insert a duplicate.
@@ -337,3 +338,41 @@ def test_lock_owner_account_creates_once_and_returns_existing(sessions):
         existing = submission._lock_owner_account(db, "owner")
         assert existing.user_id == "owner"
         assert db.scalar(select(func.count()).select_from(UserQuotaAccount).where(UserQuotaAccount.user_id == "owner")) == 1
+
+
+def test_lock_owner_account_conflict_branch_returns_winner_row(sessions, monkeypatch):
+    # Force the race: the first lookup misses, the insert hits the committed row
+    # (IntegrityError), and the re-select returns the winner. The sentinel proves
+    # the except branch produced the result. A real transaction is opened first
+    # so the savepoint nests inside it as on PostgreSQL.
+    winner = object()
+    with sessions() as db:
+        db.add(User(id="txn-opener", username="opener", email="opener@example.test", password_hash="unused"))
+        db.flush()
+        lookups = [None, winner]
+        monkeypatch.setattr(db, "scalar", lambda *a, **k: lookups.pop(0))
+        assert submission._lock_owner_account(db, "owner", use_savepoint=True) is winner
+        assert lookups == []
+        db.rollback()
+
+
+def test_lock_owner_account_raises_when_row_stays_invisible(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(User(id="txn-opener", username="opener", email="opener@example.test", password_hash="unused"))
+        db.flush()
+        monkeypatch.setattr(db, "scalar", lambda *a, **k: None)
+        with pytest.raises(RuntimeError):
+            submission._lock_owner_account(db, "owner", use_savepoint=True)
+        db.rollback()
+
+
+def test_rejected_billable_batch_leaves_no_orphan_account(sessions):
+    # Zero units rejects a billable batch; the account created for it must roll
+    # back with the transaction rather than persist as a committed side effect.
+    with sessions.begin() as db:
+        db.query(UserQuotaAccount).filter(UserQuotaAccount.user_id == "owner").delete()
+    with pytest.raises(TaskSubmissionError) as rejected:
+        submit(sessions, kind="voices.foundation", count=2, key="orphan")
+    assert rejected.value.status_code == 409
+    with sessions() as db:
+        assert db.get(UserQuotaAccount, "owner") is None

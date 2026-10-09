@@ -102,22 +102,35 @@ def _validate_inputs_and_conflicts(db, user, project, kind, entries):
         raise TaskSubmissionError(409, "所选目标已有在途任务，请等待其结束")
 
 
-def _lock_owner_account(db, owner_id):
+def _lock_owner_account(db, owner_id, *, use_savepoint=None):
     """Return the owner's quota account row, locked until the transaction ends.
 
-    A missing row is created in a savepoint: a concurrent first admission that
-    loses the primary-key race is rolled back to the savepoint and then locks
-    the row the winner committed, instead of failing the whole batch.
+    A missing row is created on PostgreSQL inside a savepoint: a concurrent
+    first admission that loses the primary-key race is rolled back to the
+    savepoint and then locks the row the winner committed. SQLite skips the
+    savepoint: pysqlite does not issue BEGIN before SAVEPOINT, so the savepoint
+    would become the outermost transaction and commit on release. Admissions on
+    SQLite are already serialized by ``host_lock``.
     """
+    if use_savepoint is None:
+        use_savepoint = db.get_bind().dialect.name != "sqlite"
     select_account = select(UserQuotaAccount).where(UserQuotaAccount.user_id == owner_id).with_for_update()
     account = db.scalar(select_account)
+    if account is not None:
+        return account
+    if not use_savepoint:
+        account = UserQuotaAccount(user_id=owner_id, available_units=0)
+        db.add(account)
+        db.flush()
+        return account
+    try:
+        with db.begin_nested():
+            account = UserQuotaAccount(user_id=owner_id, available_units=0)
+            db.add(account)
+    except IntegrityError:
+        account = db.scalar(select_account)
     if account is None:
-        try:
-            with db.begin_nested():
-                account = UserQuotaAccount(user_id=owner_id, available_units=0)
-                db.add(account)
-        except IntegrityError:
-            account = db.scalar(select_account)
+        raise RuntimeError("owner quota account is neither creatable nor visible")
     return account
 
 
