@@ -6,12 +6,12 @@ the durable request hash also binds the resolved inputs and configuration.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from datetime import timedelta
+from datetime import timedelta, timezone
 import hashlib
 import json
 import uuid
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from ..core.filenames import filename_aliases, workspace_audio_identity
@@ -102,6 +102,24 @@ def _validate_inputs_and_conflicts(db, user, project, kind, entries):
         raise TaskSubmissionError(409, "所选目标已有在途任务，请等待其结束")
 
 
+def _batch_base_time(db, owner_id):
+    """Start after the owner's newest task so batches never interleave.
+
+    Rows inside one batch get ``base + index`` microseconds. Starting from the
+    wall clock alone would let two batches submitted in the same instant (or
+    within the batch's own span) sort by random ids. The owner's newest
+    ``created_at`` is the previous batch's last row; project locks serialize
+    submissions, so the next batch always begins after it.
+    """
+    now = utcnow()
+    latest = db.scalar(select(func.max(Task.created_at)).where(Task.owner_id == owner_id))
+    if latest is None:
+        return now
+    if latest.tzinfo is None:  # SQLite returns naive datetimes
+        latest = latest.replace(tzinfo=timezone.utc)
+    return max(now, latest + timedelta(microseconds=1))
+
+
 def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
                       idempotency_key=None, receipt_field=None):
     """Run preparation only for new intent, under the same admission transaction.
@@ -156,11 +174,10 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
                 config={**config, "_batch_intent": intent, "_batch_receipt": response}, task_ids=ids)
             db.add(batch)
             db.flush()
-            now, rows, events = utcnow(), [], []
+            now, rows, events = _batch_base_time(db, user.id), [], []
             for index, (tid, entry) in enumerate(zip(ids, entries)):
                 # Claims and lists order by (created_at, id); ids are random UUIDs,
-                # so rows of one batch need distinct, entry-ordered timestamps to
-                # start in the order they were submitted.
+                # so rows need distinct, entry-ordered timestamps (see _batch_base_time).
                 created = now + timedelta(microseconds=index)
                 payload = {k: v for k, v in entry["payload"].items() if k != "config"}
                 payload.update(label=entry["label"], _batch_config_id=batch_id, _request_hash=digest)

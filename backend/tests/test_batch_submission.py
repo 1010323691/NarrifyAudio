@@ -1,5 +1,6 @@
 """Atomic non-TTS batch admission, real statement/transaction budgets and replays."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from threading import Barrier
 
 import pytest
@@ -280,3 +281,33 @@ def test_batch_rows_sort_by_created_at_in_submission_order(sessions):
         ordered = db.scalars(select(Task.id).where(Task.id.in_(receipt["task_ids"]))
                              .order_by(Task.created_at.asc(), Task.id.asc())).all()
     assert list(ordered) == receipt["task_ids"]
+
+
+def test_consecutive_batches_at_same_instant_do_not_interleave(sessions, monkeypatch):
+    frozen = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(submission, "utcnow", lambda: frozen)
+    first = submit(sessions, kind="script.parse", count=5, key="first", request={"batch": 1})
+    second = submit(sessions, kind="script.parse", count=5, key="second", request={"batch": 2},
+                    prepare=lambda: (entries("script.parse", 10)[5:], {"generation": {"max_concurrency": 2}}))
+    with sessions() as db:
+        ordered = db.scalars(select(Task.id).where(Task.id.in_(first["task_ids"] + second["task_ids"]))
+                             .order_by(Task.created_at.asc(), Task.id.asc())).all()
+    assert list(ordered) == first["task_ids"] + second["task_ids"]
+
+
+def test_fair_claim_takes_batch_rows_in_submission_order(sessions, monkeypatch):
+    from backend.platform import task_worker
+    monkeypatch.setattr(task_worker, "SessionLocal", sessions)
+    claimed = []
+
+    def fake_claim(task_id, worker, **kwargs):
+        claimed.append(task_id)
+        with sessions.begin() as db:
+            db.get(Task, task_id).status = "running"
+        return None
+
+    monkeypatch.setattr(task_worker, "claim_task", fake_claim)
+    receipt = submit(sessions, kind="script.parse", count=5, key="claim")
+    for _ in receipt["task_ids"]:
+        task_worker.claim_fair_task("order-worker", task_types=("script.parse",))
+    assert claimed == receipt["task_ids"]
