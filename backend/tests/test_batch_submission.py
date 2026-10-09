@@ -311,3 +311,14 @@ def test_fair_claim_takes_batch_rows_in_submission_order(sessions, monkeypatch):
     for _ in receipt["task_ids"]:
         task_worker.claim_fair_task("order-worker", task_types=("script.parse",))
     assert claimed == receipt["task_ids"]
+
+
+def test_batch_creates_missing_quota_account_under_lock(sessions):
+    # Without an account row there is no lock to serialize on; admission must
+    # create it (as task_submission does) so every batch of the owner takes it.
+    with sessions.begin() as db:
+        db.query(UserQuotaAccount).filter(UserQuotaAccount.user_id == "owner").delete()
+    receipt = submit(sessions, kind="bgm.match", count=2, key="no-account")
+    assert len(receipt["task_ids"]) == 2
+    with sessions() as db:
+        assert db.get(UserQuotaAccount, "owner") is not None

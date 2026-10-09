@@ -162,6 +162,10 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
             # Owner-wide row lock for every batch type: it serializes batch
             # admissions across projects, which _batch_base_time relies on.
             account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
+            if account is None:
+                account = UserQuotaAccount(user_id=user.id, available_units=0)
+                db.add(account)
+                db.flush()
             if task_type in BILLABLE_TASK_TYPES and entries:
                 if account is None or account.available_units <= 0:
                     raise TaskSubmissionError(409, "额度不足")
