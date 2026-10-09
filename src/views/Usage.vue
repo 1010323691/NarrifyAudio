@@ -132,7 +132,7 @@ onBeforeUnmount(() => balanceAbort?.abort())
           </div>
         </div>
         <Card v-if="loading" class="usage-empty">正在读取…</Card>
-        <Card v-else-if="pagedTransactions.length" class="usage-table-card"><div class="usage-table fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', min: 28 }"><table class="workbench-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>额度</th><th>可用余额</th></tr></thead>
+        <Card v-else-if="pagedTransactions.length" class="usage-table-card"><div class="usage-table fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', min: 24 }"><table class="workbench-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>额度</th><th>可用余额</th></tr></thead>
           <tbody><tr v-for="row in pagedTransactions" :key="row.id"><td>{{ formatDate(row.created_at) }}</td><td>{{ row.resource_type ? `${row.operation_type || '模型调用'}（${row.resource_type}）` : transactionLabel(row.kind) }}</td><td>{{ row.resource_type === 'LLM' ? '模型输出' : row.resource_type === 'TTS' ? '合成输入' : row.note || row.task_id || '—' }}</td><td>{{ ['consume', 'settle'].includes(row.kind) ? `-${row.char_count ?? Math.abs(row.amount)}` : `${row.amount > 0 ? '+' : ''}${row.amount}` }}</td><td>{{ row.available_after ?? '—' }}</td></tr></tbody></table></div>
           <Pager class="border-t px-3 py-2" :page="page" :page-count="pageCount" :total="transactionTotal" :page-size="pageSize" unit="条" @update:page="page = $event" @update:page-size="changePageSize" />
         </Card>

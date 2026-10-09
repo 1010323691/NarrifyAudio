@@ -15,6 +15,8 @@ export interface FitRowsOptions {
   /** 行高下限：再矮就让母容器滚动，保证行内容不被压坏 */
   min?: number
   rows?: number
+  /** 行高可放大到的上限：视口高于「默认行高」所需时，把父容器剩余高度平摊到各行，避免列表下方留白 */
+  grow?: number
 }
 
 const STEP = 64
@@ -59,28 +61,56 @@ function declaredMax(el: HTMLElement, prop: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
+/** 父容器（纵向 flex/块）里除本盒子外的空闲高度；父容器高度不确定时返回 0。 */
+function freeSpace(el: HTMLElement): number {
+  const parent = el.parentElement
+  if (!parent) return 0
+  const style = getComputedStyle(parent)
+  const gap = parseFloat(style.rowGap) || 0
+  const kids = Array.from(parent.children).filter((c) => getComputedStyle(c).position !== 'absolute')
+  const used = kids.reduce((sum, c) => sum + c.getBoundingClientRect().height, 0) + gap * Math.max(0, kids.length - 1)
+  const inner = parent.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+  return Math.max(0, inner - used)
+}
+
 function fit(el: HTMLElement, options: FitRowsOptions) {
   if (!el.isConnected || !el.offsetParent) return
   const rows = options.rows ?? 10
-  const min = options.min ?? 32
+  const min = options.min ?? 24
   const max = options.max ?? declaredMax(el, options.prop, 40)
   const ancestors = clippingAncestors(el)
   const apply = (height: number) => el.style.setProperty(options.prop, `${height}px`)
-  apply(solveRowHeight(max, min, rows, (height) => {
+  const previous = parseFloat(el.style.getPropertyValue(options.prop))
+  const next = solveRowHeight(max, min, rows, (height) => {
     apply(height)
     return maxOverflow(ancestors)
-  }))
+  })
+  // 迟滞：Firefox 的亚像素/滚动条取整会让结果在相邻两个值间来回跳，每次变化又触发
+  // ResizeObserver 重新适配，列表就持续抽动。变化不足 1px 时沿用上次行高。
+  let target = next
+  if (options.grow && next >= max) {
+    const grown = Math.min(options.grow, Math.floor((max + freeSpace(el) / rows) * STEP) / STEP)
+    apply(grown)
+    // 放大后若让祖先溢出（测量误差），回退到不放大。
+    target = grown > max && maxOverflow(ancestors) <= 0.5 ? grown : max
+  }
+  apply(Number.isFinite(previous) && Math.abs(previous - target) < 1 ? previous : target)
   // 祖先链可能在挂载之后变化（条件渲染的外层容器）：每次适配后补挂观察，observe 对同一节点幂等。
   const state = bound.get(el)
   if (state) for (const node of ancestors.slice(0, 2)) state.resize.observe(node)
 }
 
-interface Bound { frame: number; resize: ResizeObserver; onWindow: () => void; opts: FitRowsOptions }
+interface Bound { frame: number; burst: number[]; resize: ResizeObserver; onWindow: () => void; opts: FitRowsOptions }
 const bound = new WeakMap<HTMLElement, Bound>()
 
 function schedule(el: HTMLElement) {
   const state = bound.get(el)
   if (!state || state.frame) return
+  // 断路器：1 秒内连续适配超过 8 次说明布局在自激振荡，停止观察触发的重排，待窗口缩放/更新再恢复。
+  const now = Date.now()
+  state.burst = state.burst.filter((t) => now - t < 1000)
+  if (state.burst.length >= 8) return
+  state.burst.push(now)
   // setTimeout 而非 rAF：后台/未绘制的标签页 rAF 不触发，行高会停在未适配状态。
   state.frame = window.setTimeout(() => {
     state.frame = 0
@@ -91,8 +121,12 @@ function schedule(el: HTMLElement) {
 export const vFitRows: Directive<HTMLElement, FitRowsOptions> = {
   mounted(el, binding) {
     const resize = new ResizeObserver(() => schedule(el))
-    const onWindow = () => schedule(el)
-    bound.set(el, { frame: 0, resize, onWindow, opts: binding.value })
+    const onWindow = () => {
+      const state = bound.get(el)
+      if (state) state.burst = []
+      schedule(el)
+    }
+    bound.set(el, { frame: 0, burst: [], resize, onWindow, opts: binding.value })
     for (const node of clippingAncestors(el).slice(0, 2)) resize.observe(node)
     // 盒子自身从隐藏（display:none，尺寸为 0）变为可见时也要重新适配。
     resize.observe(el)

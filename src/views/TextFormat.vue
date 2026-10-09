@@ -68,7 +68,7 @@ async function refreshChapters() {
 type SourceDocument = PickedFile & { file_id: string; available?: boolean }
 const sourceFiles = ref<SourceDocument[]>([])
 const sourcesEdited = ref(false)
-const sourcesOpen = ref(true)
+const sourcesOpen = ref(false)
 const uploading = ref(false)
 const sourceFile = computed(() => {
   if (!sourceFiles.value.length) return null
@@ -82,7 +82,7 @@ const sourcesChanged = computed(() => !!flow.value && JSON.stringify(sourceFiles
 watch([() => project.activeProjectId, () => auth.user?.id], () => {
   sourceFiles.value = []
   sourcesEdited.value = false
-  sourcesOpen.value = true
+  sourcesOpen.value = false
   uploading.value = false
 }, { flush: 'sync' })
 /** 分册方式：处理设置弹窗的两选一（刷新后回填最近一次运行的选择）。 */
@@ -146,7 +146,6 @@ async function choose() {
         if (!isCurrent() || uploaded.project_id !== projectId) return
         sourceFiles.value.push({ ...uploaded, file_id: uploaded.file_id ?? uploaded.id!, available: true })
         sourcesEdited.value = true
-        sourcesOpen.value = true
       } catch (error: any) {
         if (!isCurrent()) return
         toast({ title: `${file.name} 上传失败`, description: error?.message || '请重试', variant: 'destructive' })
@@ -478,7 +477,23 @@ onBeforeUnmount(() => {
         </template>
       </WorkbenchContextBar>
 
-      <section v-if="sourceFiles.length && sourcesOpen" class="rounded-lg border border-border/60 bg-card/40 p-3" aria-label="源文档顺序">
+      <p v-if="sourcesChanged" class="text-xs text-muted-foreground">源文档列表已修改，点击「重新处理」后应用。</p>
+
+      <!-- 版本级事项 -->
+      <template v-if="phase === 'ready' && version">
+        <Alert v-if="version.version_status === 'stale'" variant="destructive">
+          <AlertTriangle class="h-4 w-4 shrink-0" />
+          <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
+        </Alert>
+        <!-- 版本级处理提示（matters）不再在页顶铺全宽 banner：每章的处置说明已由
+             章节表「核对原因」列与详情面板章节级 matter 卡承载，页顶只留版本状态警示。 -->
+      </template>
+    </div>
+
+    <!-- 源文档管理以浮层叠在工作区上方，不占布局高度，避免挤压章节列表与分页栏；-mb-2.5 抵消 flex gap(10px)，打开时列表不位移。 -->
+    <div v-if="sourceFiles.length && sourcesOpen" class="relative z-30 -mb-2.5 h-0">
+      <div class="absolute inset-x-0 top-1">
+      <section class="rounded-lg border border-border bg-popover p-3 shadow-lg" aria-label="源文档顺序">
         <p class="mb-2 text-xs text-muted-foreground">按下列顺序合为一本书，可调整顺序或移除文档。移除仅改变本次列表。</p>
         <ol class="max-h-36 overflow-y-auto">
           <li v-for="(file, index) in sourceFiles" :key="file.file_id" class="flex items-center gap-2 py-1 text-sm">
@@ -491,17 +506,7 @@ onBeforeUnmount(() => {
           </li>
         </ol>
       </section>
-      <p v-if="sourcesChanged" class="text-xs text-muted-foreground">源文档列表已修改，点击「重新处理」后应用。</p>
-
-      <!-- 版本级事项 -->
-      <template v-if="phase === 'ready' && version">
-        <Alert v-if="version.version_status === 'stale'" variant="destructive">
-          <AlertTriangle class="h-4 w-4 shrink-0" />
-          <p>该版本正文已被后续处理覆盖，仅可查看核对记录；正文预览已禁用。</p>
-        </Alert>
-        <!-- 版本级处理提示（matters）不再在页顶铺全宽 banner：每章的处置说明已由
-             章节表「核对原因」列与详情面板章节级 matter 卡承载，页顶只留版本状态警示。 -->
-      </template>
+      </div>
     </div>
 
     <!-- 处理状态使用同一标准工作区，避免底栏随进度卡片上移。 -->
@@ -559,7 +564,7 @@ onBeforeUnmount(() => {
                 </button>
               </template>
             </WorkbenchToolbar>
-            <div ref="tableScrollEl" class="fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height' }">
+            <div ref="tableScrollEl" class="fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', grow: 52 }">
               <ChapterTable
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"

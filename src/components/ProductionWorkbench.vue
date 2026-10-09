@@ -158,7 +158,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
           >重试加载</Button
         >
       </div>
-      <div class="production-scroll fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height' }">
+      <div class="production-scroll fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', grow: 52 }">
         <table class="production-table workbench-table" :aria-label="label + '列表'">
           <colgroup>
             <col style="width: 32px" />

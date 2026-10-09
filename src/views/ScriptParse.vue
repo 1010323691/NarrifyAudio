@@ -241,7 +241,7 @@ onBeforeUnmount(() => {
                 </Button>
               </template>
             </WorkbenchToolbar>
-            <div class="fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height' }">
+            <div class="fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', grow: 52 }">
               <ParseChapterTable
                 :rows="pagedRows"
                 :selected="selected"
