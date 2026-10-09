@@ -512,14 +512,13 @@ def create_user(payload: UserCreate, actor: User = Depends(require_admin_csrf), 
     try:
         user, _project = provision_user(db, email=payload.email, username=payload.username, password=payload.password,
                                         display_name=payload.display_name, role=payload.role)
+        db.add(AuditLog(actor_user_id=actor.id, action="admin.user_created", target_type="user", target_id=user.id,
+                        metadata_json={"username": user.username, "role": user.role}))
+        db.commit()
     except ProvisioningError as exc:
         db.rollback()
         raise HTTPException(exc.status_code, exc.message) from exc
-    db.add(AuditLog(actor_user_id=actor.id, action="admin.user_created", target_type="user", target_id=user.id,
-                    metadata_json={"username": user.username, "role": user.role}))
-    try:
-        db.commit()
-    except IntegrityError as exc:  # a concurrent request took the same email or username
+    except IntegrityError as exc:  # a concurrent request took the same email or username (flush or commit)
         db.rollback()
         raise HTTPException(409, "邮箱或用户名已被占用，请刷新后重试") from exc
     return {"id": user.id, "email": user.email, "username": user.username, "display_name": user.display_name,

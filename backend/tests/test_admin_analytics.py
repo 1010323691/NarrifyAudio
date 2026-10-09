@@ -287,9 +287,9 @@ def test_daily_labels_point_at_local_midnight_in_utc(client: TestClient):
                                 char_count=7, idempotency_key=str(uuid.uuid4()), note="label", created_at=now - timedelta(hours=1),
                                 available_after=1))
     with SessionLocal() as db:
-        rows = user_daily_usage(db, user_id, 3, 480, now=now)
+        rows = user_daily_usage(db, user_id, 3, -480, now=now)  # what the console sends at UTC+8
     today = next(row for row in rows if row["tts_chars"] == 7)
-    # local midnight 2026-10-09 at UTC+8 is 2026-10-08T16:00Z; the old sign put it 16 hours later
+    # local midnight 2026-10-09 at UTC+8 is 2026-10-08T16:00Z
     assert today["time"] == "2026-10-08T16:00:00+00:00"
 
 
@@ -319,3 +319,20 @@ def test_long_range_history_keeps_exact_rates_from_strided_frames():
     assert rated and history["step_seconds"] == 3600
     # each frame adds 300 commits over 30 seconds: 10 per second, however many frames are kept
     assert all(abs(point["db_commit_ps"] - 10.0) < 1e-6 for point in rated)
+
+
+def test_heatmap_counts_local_hour_and_weekday_at_utc_plus_8(client: TestClient):
+    from backend.services.admin_analytics import throughput
+
+    csrf, _, _ = _register(client)
+    now = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        before = throughput(db, "24h", -480, now=now)["heatmap"]
+    task_id = _project_task(client, csrf)
+    with SessionLocal.begin() as db:
+        # 02:30 UTC on Thursday 2026-10-08 is 10:30 local at UTC+8
+        db.get(Task, task_id).created_at = datetime(2026, 10, 8, 2, 30, tzinfo=timezone.utc)
+    with SessionLocal() as db:
+        after = throughput(db, "24h", -480, now=now)["heatmap"]
+    assert after[3][10] == before[3][10] + 1  # Thursday (weekday 3), local hour 10
+    assert after[3][2] == before[3][2]  # not the UTC hour

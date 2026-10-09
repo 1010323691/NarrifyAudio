@@ -176,7 +176,7 @@ def throughput(db: Session, range_name: str, tz_offset_minutes: int = 0, now: da
     start = moment - timedelta(seconds=span)
     previous_start = start - timedelta(seconds=span)
     # JS getTimezoneOffset() is UTC - local; aligning on it puts daily bars on local midnight.
-    offset = -max(-840, min(int(tz_offset_minutes), 840)) * 60
+    offset = max(-840, min(int(tz_offset_minutes), 840)) * 60  # tz_offset_minutes is JS getTimezoneOffset: UTC minus local
     frame = _series_frame(start, moment, step, offset)
     series = {index: {"submitted": 0, "succeeded": 0, "failed": 0, "tts_chars": 0, "llm_chars": 0,
                       **{f"{group}_submitted": 0 for group in WORKER_GROUP_NAMES}} for index in frame}
@@ -306,7 +306,7 @@ def user_counts(db: Session, now: datetime | None = None) -> dict:
 
 def user_daily_usage(db: Session, user_id: str, days: int = 30, tz_offset_minutes: int = 0, now: datetime | None = None) -> list[dict]:
     moment = now or utcnow()
-    offset = -max(-840, min(int(tz_offset_minutes), 840)) * 60
+    offset = max(-840, min(int(tz_offset_minutes), 840)) * 60  # tz_offset_minutes is JS getTimezoneOffset: UTC minus local
     start = moment - timedelta(days=days)
     frame = _series_frame(start, moment, 86400, offset)[1:]
     series = {index: {"tts_chars": 0, "llm_chars": 0, "tasks": 0} for index in frame}
@@ -335,7 +335,7 @@ def event_stats(db: Session, hours: int, recent_errors: list[dict], level: str =
     hours = max(1, min(hours, 24 * 30))
     moment = now or utcnow()
     step = 300 if hours <= 1 else 3600 if hours <= 24 else 6 * 3600
-    offset = -max(-840, min(int(tz_offset_minutes), 840)) * 60
+    offset = max(-840, min(int(tz_offset_minutes), 840)) * 60  # tz_offset_minutes is JS getTimezoneOffset: UTC minus local
     events = filtered_events(event_union(hours, recent_errors), level, module, search).subquery()
     bucket = epoch_bucket(db, events.c.time, step, offset)
     frame = _series_frame(moment - timedelta(hours=hours), moment, step, offset)

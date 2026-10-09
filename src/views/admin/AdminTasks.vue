@@ -136,8 +136,15 @@ async function bulk(action: 'cancel' | 'retry') {
   await loader.runAction(async () => {
     const result = await api.bulkTasks(action, ids)
     const failed = result.results.filter(row => !row.ok)
+    // ok without changed means the task already had the target state: not a new cancellation
+    const unchanged = result.results.filter(row => row.ok && row.changed === false).length
+    const changed = result.results.filter(row => row.ok && row.changed !== false).length
+    const notes = [
+      ...(failed.length ? [`${failed.length} 个跳过：${[...new Set(failed.map(row => row.reason))].join('；')}`] : []),
+      ...(unchanged ? [`${unchanged} 个已是目标状态，未改动`] : []),
+    ]
     selected.value = new Set()
-    toast({ title: `已${verb} ${result.succeeded} 个任务`, description: failed.length ? `${failed.length} 个跳过：${[...new Set(failed.map(row => row.reason))].join('；')}` : undefined, variant: failed.length ? 'default' : 'success' })
+    toast({ title: `已${verb} ${changed} 个任务`, description: notes.length ? notes.join('；') : undefined, variant: failed.length ? 'default' : 'success' })
     await loader.loadData()
   })
 }

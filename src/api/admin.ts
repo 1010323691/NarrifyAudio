@@ -332,7 +332,7 @@ export interface QuotaTransactionRow {
   char_count: number | null; available_after: number | null; consumed_after: number | null; task_id: string | null; note: string
 }
 export interface NewUser { email: string; username: string; password: string; display_name: string; role: 'user' | 'admin' }
-export interface BulkResult { action: 'cancel' | 'retry'; succeeded: number; results: { id: string; ok: boolean; status?: string; reason?: string }[] }
+export interface BulkResult { action: 'cancel' | 'retry'; succeeded: number; results: { id: string; ok: boolean; changed?: boolean; status?: string; reason?: string }[] }
 
 export function getMetricsHistory(range: HistoryRange, signal?: AbortSignal): Promise<MetricsHistory> {
   return http.get(`/api/v1/admin/metrics/history?range=${range}`, { signal })
