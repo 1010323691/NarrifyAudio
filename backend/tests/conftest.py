@@ -32,6 +32,24 @@ os.environ["NARRIFY_STORAGE_ROOT"] = _test_storage.name
 os.environ["NARRIFY_PROBE_CACHE_DIR"] = str(Path(_test_storage.name) / "audio-probes")
 
 
+@pytest.fixture(autouse=True)
+def _stable_memory_snapshot():
+    """Pin the memory guard to a healthy reading for every test.
+
+    CI runs the frontend job (npm) alongside the backend job on a 7 GiB
+    runner: MemAvailable can dip below the 2 GiB guard, which STICKY-sets
+    ``MechanicalAudioState.memory_paused`` in the worker's session DB and
+    blocks every audio claim in that worker for the rest of the run (observed
+    as ``claim is None`` failures across unrelated files). The suite must not
+    depend on the host's free memory; tests that exercise the guard
+    (test_mechanical_audio) override this per test."""
+    from backend.platform import mechanical_audio
+
+    gib = 1024 ** 3
+    mechanical_audio.memory_snapshot = lambda: (16 * gib, 32 * gib)
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _test_schema():
     """Create the schema once per session. The in-memory database is shared by
