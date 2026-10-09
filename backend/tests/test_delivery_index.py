@@ -241,3 +241,23 @@ def test_maintenance_keeps_scan_cursor_when_commit_fails(monkeypatch):
     monkeypatch.setattr(maintenance, "retire_legacy_artifacts", retire)
     maintenance.run(Stop())
     assert cursors == ["", ""]
+
+
+def test_unresolvable_workspace_never_reports_pending_work(setup, tmp_path):
+    from backend.platform.delivery_index import backfill_pending_project
+    factory, workspace = setup
+    target = tmp_path / "elsewhere"
+    workspace.rmdir()
+    workspace.symlink_to(target, target_is_directory=True)
+    target.mkdir()
+    with factory.begin() as db:
+        assert backfill_pending_project(db) is False
+    with factory.begin() as db:
+        state = db.get(DeliveryIndexState, "project")
+        assert state is not None and not state.complete
+    # A resolvable project queued behind it is still served and reported.
+    with factory.begin() as db:
+        db.add(Project(id="good", owner_id="owner", name="Good", directory_key="owner/good"))
+    (workspace.parent / "good").mkdir()
+    with factory.begin() as db:
+        assert backfill_pending_project(db) is True

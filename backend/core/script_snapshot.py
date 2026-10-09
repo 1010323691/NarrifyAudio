@@ -286,13 +286,21 @@ class RolePairs(Sequence):
             yield from db.execute("SELECT position, text FROM entries WHERE speaker=? ORDER BY role_position", (self.name,))
 
     def bands(self, per):
+        per = max(2, int(per))
         count = len(self)
         if count <= 3 * per:
-            return [self[rank][0] for rank in range(count)], [], []
+            return [position for position, _text in self], [], []
         region = count - 2 * per
         middle = list(range(per, count - per)) if region <= per else [per + round(index * (region - 1) / (per - 1)) for index in range(per)]
-        return ([self[rank][0] for rank in range(per)], [self[rank][0] for rank in middle],
-                [self[rank][0] for rank in range(count - per, count)])
+        front, back = list(range(per)), list(range(count - per, count))
+        wanted = sorted(set(front + middle + back))
+        with closing(_connect(self.snapshot.path)) as db:
+            # One query for every sampled rank instead of a connection per rank.
+            positions = dict(db.execute(
+                f"SELECT role_position, position FROM entries WHERE speaker=? AND role_position IN ({','.join('?' for _ in wanted)})",
+                (self.name, *wanted)))
+        return ([positions[rank] for rank in front], [positions[rank] for rank in middle],
+                [positions[rank] for rank in back])
 
     def texts(self):
         return RoleTexts(self)

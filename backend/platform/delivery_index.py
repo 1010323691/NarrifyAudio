@@ -162,22 +162,37 @@ def indexed_records(db, user, project_id, root, relatives=None):
 
 
 def backfill_pending_project(db):
-    """One bounded chunk, fairly rotate unsafe/busy project candidates."""
+    """One bounded chunk, fairly rotate unsafe/busy project candidates.
+
+    Returns True only when a resolvable project was worked on. Projects whose
+    workspace cannot be resolved (symlink/junction, bad key) are permanent
+    conditions: they are rotated to the back by ``updated_at`` but never count
+    as pending, so they cannot pin the maintenance loop to its busy cadence.
+    """
     from sqlalchemy import or_
     from .models import User, utcnow
-    project = db.scalar(select(Project).outerjoin(DeliveryIndexState,
+    candidates = select(Project).outerjoin(DeliveryIndexState,
         DeliveryIndexState.project_id == Project.id).where(Project.deleted_at.is_(None),
-        or_(DeliveryIndexState.project_id.is_(None), DeliveryIndexState.complete.is_(False)))
-        .order_by(DeliveryIndexState.updated_at.asc().nulls_first(), Project.id)
-        .with_for_update(of=Project, skip_locked=True).limit(1))
-    if project is None:
-        return False
-    user = db.get(User, project.owner_id)
-    if user is not None:
-        backfill_project(db, user, project.id)
-    state = db.get(DeliveryIndexState, project.id)
-    if state is None:
-        state = DeliveryIndexState(project_id=project.id, cursor="", complete=False)
-        db.add(state)
-    state.updated_at = utcnow()
-    return True
+        or_(DeliveryIndexState.project_id.is_(None), DeliveryIndexState.complete.is_(False))
+        ).order_by(DeliveryIndexState.updated_at.asc().nulls_first(), Project.id)
+    skipped: list[str] = []
+    for _ in range(16):
+        project = db.scalar(candidates.where(Project.id.not_in(skipped))
+                            .with_for_update(of=Project, skip_locked=True).limit(1))
+        if project is None:
+            return False
+        user = db.get(User, project.owner_id)
+        resolvable = user is not None and safe_project_workspace_path(db, user.username, project.id) is not None
+        if resolvable:
+            backfill_project(db, user, project.id)
+            db.flush()
+        state = db.get(DeliveryIndexState, project.id)
+        if state is None:
+            state = DeliveryIndexState(project_id=project.id, cursor="", complete=False)
+            db.add(state)
+        state.updated_at = utcnow()
+        if resolvable:
+            return True
+        skipped.append(project.id)
+        db.flush()
+    return False

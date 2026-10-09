@@ -104,10 +104,14 @@ def candidate_manifests(root, names):
                     # An in-flight writer prevents a complete index. Fall back to
                     # the normal manifest checks, including unrelated candidates.
                     return list(root.glob("*/manifest.json"))
-            except (OSError, ValueError):
-                db.execute("DELETE FROM manifests WHERE path=?", (relative,))
-                db.execute("DELETE FROM speakers WHERE path=?", (relative,))
+            except FileNotFoundError:
+                # Removed between glob and read: the chapter is really gone.
+                found.discard(relative)
                 continue
+            except (OSError, ValueError):
+                # Unreadable now does not mean irrelevant: keep the old rows
+                # and let the normal manifest checks see every candidate.
+                return list(root.glob("*/manifest.json"))
             db.execute("DELETE FROM speakers WHERE path=?", (relative,))
             roles = {str(entry.get("speaker") or "").strip() for entry in data if isinstance(entry, dict)} if isinstance(data, list) else set()
             db.executemany("INSERT INTO speakers VALUES (?, ?)", [(name, relative) for name in roles if name])

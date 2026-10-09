@@ -141,3 +141,17 @@ def test_snapshot_prune_ignores_foreign_files_and_stale_stages(tmp_path):
     assert pruned == 1
     assert foreign.exists()
     assert stray.exists()
+
+
+def test_bands_tolerate_tiny_per_and_use_a_single_connection(tmp_path, monkeypatch):
+    from backend.core import script_snapshot
+    rows = [{"speaker": "A", "text": f"line {index}"} for index in range(50)]
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    pairs = open_snapshot([path], tmp_path / "snapshots").samples["A"]
+    assert pairs.bands(1) == pairs.bands(2)
+    connects = []
+    original = script_snapshot._connect
+    monkeypatch.setattr(script_snapshot, "_connect", lambda *a, **k: connects.append(1) or original(*a, **k))
+    front, middle, back = pairs.bands(8)
+    assert len(front) == len(middle) == len(back) == 8 and len(connects) <= 2

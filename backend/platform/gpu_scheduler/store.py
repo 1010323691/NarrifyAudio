@@ -110,11 +110,15 @@ def _waiting_request_metrics(db, side: str) -> tuple[int, object]:
 
 
 def _eligible_task_metrics(db, side: str, task_types: list[str]) -> tuple[int, object]:
-    """Eligible tasks no request already represents (earliest-queued wins)."""
+    """Eligible tasks no request already represents (earliest-queued wins).
+
+    Only a running request represents its task: a waiting request counts
+    solely while its task is running, and an eligible task never is, so a
+    stale waiting request left behind by a retry must not hide the task."""
     has_request = exists(
         select(GPURequest.id).where(
             GPURequest.task_id == Task.id,
-            GPURequest.status.in_(["running", "waiting"]),
+            GPURequest.status == "running",
         )
     )
     eligible = or_(
