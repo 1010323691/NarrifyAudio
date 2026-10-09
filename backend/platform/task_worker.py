@@ -14,7 +14,7 @@ from typing import Any, Callable
 from uuid import NAMESPACE_URL, uuid5
 
 import redis
-from sqlalchemy import String, case, cast, func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import aliased
 
 from ..core.config import TextConfig
