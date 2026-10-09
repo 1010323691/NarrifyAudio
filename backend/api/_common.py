@@ -1,12 +1,9 @@
 """Shared helpers for the API routers."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import HTTPException
 
-from ..core import pathio
-from ..core.paths import get_or_prepare_layout, resolve_layout
+from ..core.paths import get_or_prepare_layout
 
 
 def require_workspace() -> None:
@@ -29,32 +26,6 @@ def require_workspace() -> None:
             f"工作目录不存在（{layout.workspace}）——目录可能已被移动或删除，"
             f"请在「开始」页重新选择工作目录。",
         )
-
-
-def resolve_inbound_path(path: str, *, label: str = "文件") -> Path:
-    """Resolve a client-provided file path against the current workspace.
-
-    Accepts workspace-relative and absolute paths alike; a stale absolute path
-    (the workspace folder was moved) is recovered from its original directory
-    structure or by file name when possible. Anything unresolvable raises a
-    clear 400 — never a silent miss. With no workspace set it degrades to the
-    legacy raw behaviour (plain existence check).
-    """
-    v = (path or "").strip()
-    if not v:
-        raise HTTPException(400, "未提供路径。")
-    ws = resolve_layout().workspace
-    if ws is not None:
-        try:
-            return pathio.resolve_path(v, ws, strict=True, label=label)
-        except pathio.PathOutsideWorkspace as e:
-            raise HTTPException(400, str(e))
-        except pathio.PathNotFoundError as e:
-            raise HTTPException(400, str(e))
-    p = Path(v)
-    if not p.exists():
-        raise HTTPException(400, f"文件不存在：{path}")
-    return p
 
 
 def partial_copy(model, overrides: dict):

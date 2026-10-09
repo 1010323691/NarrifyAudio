@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
+import Pager from '@/views/textformat/Pager.vue'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import {
   Activity, AudioLines, Check, ChevronRight, CircleAlert, Clock3, Combine,
@@ -16,12 +18,12 @@ import { TASK_CENTER_CATEGORIES } from '@/utils/taskCenter'
 
 const center = useTaskCenter()
 const {
-  sections, browsingSection, groupPage, selectedGroup, taskFilter, taskPage, selectedCounts,
+  sections, browsingSection, groupPage, groupPageSize, selectedGroup, taskFilter, taskPage, taskPageSize, selectedCounts,
   summary, summaryLoading, summaryError, groups, groupsLoading, groupsError,
   items, itemsLoading, itemsError, controllingCategory, controlError,
 } = center
-const groupPageCount = computed(() => Math.max(1, Math.ceil((groups.value?.total ?? 0) / 5)))
-const taskPageCount = computed(() => Math.max(1, Math.ceil((items.value?.total ?? selectedCounts.value?.task_count ?? 0) / 50)))
+const groupPageCount = computed(() => Math.max(1, Math.ceil((groups.value?.total ?? 0) / groupPageSize.value)))
+const taskPageCount = computed(() => Math.max(1, Math.ceil((items.value?.total ?? selectedCounts.value?.task_count ?? 0) / taskPageSize.value)))
 const selectedCategory = computed(() => TASK_CENTER_CATEGORIES.find(value => value.id === selectedGroup.value?.categoryId))
 const selectedProjectName = computed(() => selectedGroup.value?.initial.project_name || '未知书籍')
 const taskFilters = [
@@ -174,7 +176,7 @@ onDeactivated(() => closeDialog(false))
           <div v-if="!groups" class="task-center__loading" role="status">
             <LoaderCircle v-if="groupsLoading || summaryLoading" class="h-5 w-5 animate-spin" />{{ groupsLoading || summaryLoading ? '正在读取项目摘要…' : '项目摘要尚未加载' }}
           </div>
-          <div v-else-if="groups.items.length" class="task-center__folder-list" :aria-busy="groupsLoading">
+          <div v-else-if="groups.items.length" class="task-center__folder-list" :class="{ 'is-scroll': groupPageSize > 10 }" :aria-busy="groupsLoading" v-fit-rows="{ prop: '--tc-row', max: 90, min: 62 }">
             <button
               v-for="group in groups.items"
               :key="group.project_id"
@@ -199,13 +201,7 @@ onDeactivated(() => closeDialog(false))
             <strong>此阶段还没有任务</strong>
             <span>在项目中提交制作任务后，可在这里跟踪进度。</span>
           </div>
-          <nav v-if="groupPageCount > 1" class="task-center__group-pages" aria-label="阶段项目分页">
-            <span>{{ groups?.total ?? 0 }} 个项目 · {{ groupPage }} / {{ groupPageCount }} 页</span>
-            <div>
-              <Button variant="ghost" size="sm" :disabled="groupPage === 1" @click="groupPage--">上一页</Button>
-              <Button variant="ghost" size="sm" :disabled="groupPage === groupPageCount" @click="groupPage++">下一页</Button>
-            </div>
-          </nav>
+          <Pager class="shrink-0 border-t px-3 py-2" :page="groupPage" :page-count="groupPageCount" :total="groups?.total ?? 0" :page-size="groupPageSize" unit="个项目" @update:page="groupPage = $event" @update:page-size="(s: number) => { groupPageSize = s; groupPage = 1 }" />
         </Card>
       </div>
     </div>
@@ -294,7 +290,7 @@ onDeactivated(() => closeDialog(false))
         <div v-if="!items" class="task-center__loading" role="status">
           <LoaderCircle v-if="itemsLoading" class="h-5 w-5 animate-spin" />{{ itemsLoading ? '正在读取当前页任务…' : '任务列表尚未加载' }}
         </div>
-        <div v-else-if="items.items.length" class="task-center__task-list" :aria-busy="itemsLoading">
+        <div v-else-if="items.items.length" class="task-center__task-list" :class="{ 'is-scroll': taskPageSize > 10 }" :aria-busy="itemsLoading" v-fit-rows="{ prop: '--tk-row', max: 52, min: 44 }">
           <article v-for="task in items.items" :key="task.id" class="task-center__task-row">
             <div class="task-center__task-icon" aria-hidden="true"><component :is="taskIcon(task.task_type)" class="h-4 w-4" /></div>
             <strong class="task-center__task-title" :title="task.label">{{ task.label }}</strong>
@@ -317,30 +313,24 @@ onDeactivated(() => closeDialog(false))
           <ListTodo class="h-8 w-8" aria-hidden="true" />
           <p>{{ selectedCounts?.task_count ? '当前筛选下没有子任务。' : '此书籍在该分区还没有子任务。' }}</p>
         </div>
-        <nav v-if="taskPageCount > 1" class="task-center__group-pages" aria-label="任务分页">
-          <span>{{ items?.total ?? selectedCounts?.task_count ?? 0 }} 项任务 · {{ taskPage }} / {{ taskPageCount }} 页</span>
-          <div>
-            <Button variant="ghost" size="sm" :disabled="taskPage === 1 || itemsLoading" @click="taskPage--">上一页</Button>
-            <Button variant="ghost" size="sm" :disabled="taskPage === taskPageCount || itemsLoading" @click="taskPage++">下一页</Button>
-          </div>
-        </nav>
+        <Pager class="shrink-0 border-t px-3 py-2" :page="taskPage" :page-count="taskPageCount" :total="items?.total ?? selectedCounts?.task_count ?? 0" :page-size="taskPageSize" unit="项任务" @update:page="taskPage = $event" @update:page-size="(s: number) => { taskPageSize = s; taskPage = 1 }" />
       </section>
     </div>
   </div>
 </template>
 
 <style scoped>
-.task-center{display:grid;gap:18px;max-width:1320px;margin:0 auto;padding-bottom:30px}.task-center__header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.task-center__sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-center__section{min-width:0;padding:15px}.task-center__section-head{display:flex;align-items:center;gap:10px}.task-center__section-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border:1px solid hsl(var(--primary)/.12);border-radius:10px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__section-copy{min-width:0;flex:1}.task-center__section-copy h2{font-size:13px;font-weight:750;line-height:1.4}.task-center__section-copy p{margin-top:2px;color:hsl(var(--muted-foreground));font-size:10px}.task-center__section-count{flex:none;color:hsl(var(--muted-foreground));font-size:10px;font-variant-numeric:tabular-nums}.task-center__folder-list{display:grid;gap:6px;margin-top:13px}.task-center__folder{display:flex;align-items:center;gap:10px;width:100%;min-height:60px;border:1px solid hsl(var(--border)/.75);border-radius:11px;background:var(--glass-tint);padding:9px 10px;text-align:left;transition:border-color .15s,background .15s,transform .15s}.task-center__folder:hover{transform:translateY(-1px);border-color:hsl(var(--primary)/.35);background:hsl(var(--primary)/.04)}.task-center__folder:focus-visible,.task-center__close:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:2px}.task-center__folder-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__folder-copy{display:grid;gap:2px;min-width:0;flex:1}.task-center__folder-copy strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.task-center__folder-copy small{color:hsl(var(--muted-foreground));font-size:10px}.task-center__folder-arrow{flex:none;color:hsl(var(--muted-foreground))}.task-center__empty-section{display:grid;place-items:center;min-height:74px;margin-top:11px;border:1px dashed hsl(var(--border));border-radius:10px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:220px;color:hsl(var(--muted-foreground));font-size:13px}.task-center__error{display:flex;align-items:center;gap:9px;border:1px solid hsl(var(--destructive)/.2);border-radius:11px;background:hsl(var(--destructive)/.05);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.task-center__error span{flex:1}.task-center__more{display:flex;justify-content:center}.task-center__overlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;overflow:auto;background:rgba(18,20,37,.48);padding:22px}.task-center__dialog{display:flex;flex-direction:column;height:min(82vh,820px);overflow:hidden;border:1px solid var(--glass-border);border-radius:18px;background:hsl(var(--card)/.95);box-shadow:var(--glass-highlight),var(--glass-shadow-strong);backdrop-filter:none}.task-center__dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;border-bottom:1px solid hsl(var(--border)/.75);padding:20px 22px}.task-center__dialog-head h2{margin-top:3px;font-size:20px;font-weight:760;overflow-wrap:anywhere}.task-center__dialog-head p:last-child{margin-top:3px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__close{display:grid;place-items:center;width:40px;height:40px;flex:none;border:1px solid hsl(var(--border));border-radius:10px;background:hsl(var(--background)/.65);color:hsl(var(--muted-foreground));transition:color .14s,border-color .14s}.task-center__close:hover{border-color:hsl(var(--primary)/.35);color:hsl(var(--foreground))}.task-center__task-list{flex:1;display:grid;align-content:start;gap:0;min-height:0}.task-center__task-row{border-bottom:1px solid hsl(var(--border)/.72)}.task-center__task-row:last-child{border-bottom:0}.task-center__task-icon{display:grid;place-items:center;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__task-progress{display:flex;align-items:center}.task-center__task-progress>div{flex:1}.task-center__task-progress>span{color:hsl(var(--muted-foreground));font-size:10px;text-align:right;font-variant-numeric:tabular-nums}.task-center__dialog-empty{display:grid;place-items:center;align-content:center;gap:8px;flex:1;min-height:0;color:hsl(var(--muted-foreground));font-size:12px}.task-center__dialog-empty svg{color:hsl(var(--primary))}@supports not (backdrop-filter:blur(1px)){.task-center__dialog{background:hsl(var(--background))}}@media(max-width:900px){.task-center__sections{grid-template-columns:1fr}}@media(max-width:520px){.task-center__header{align-items:flex-start}.task-center__header>button{width:100%}.task-center__section{padding:12px}.task-center__section-head{gap:8px}.task-center__section-copy h2{font-size:12px}.task-center__section-count{font-size:9px}.task-center__overlay{padding:10px}.task-center__dialog{height:90vh;border-radius:14px}.task-center__dialog-head{padding:16px}}
+.task-center{display:grid;gap:18px;max-width:1320px;margin:0 auto;padding-bottom:30px}.task-center__header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}.task-center__sections{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.task-center__section{min-width:0;padding:15px}.task-center__section-head{display:flex;align-items:center;gap:10px}.task-center__section-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border:1px solid hsl(var(--primary)/.12);border-radius:10px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__section-copy{min-width:0;flex:1}.task-center__section-copy h2{font-size:13px;font-weight:750;line-height:1.4}.task-center__section-copy p{margin-top:2px;color:hsl(var(--muted-foreground));font-size:10px}.task-center__section-count{flex:none;color:hsl(var(--muted-foreground));font-size:10px;font-variant-numeric:tabular-nums}.task-center__folder-list{display:grid;gap:6px;margin-top:13px}.task-center__folder{display:flex;align-items:center;gap:10px;width:100%;height:60px;overflow:hidden;border:1px solid hsl(var(--border)/.75);border-radius:11px;background:var(--glass-tint);padding:9px 10px;text-align:left;transition:border-color .15s,background .15s,transform .15s}.task-center__folder:hover{transform:translateY(-1px);border-color:hsl(var(--primary)/.35);background:hsl(var(--primary)/.04)}.task-center__folder:focus-visible,.task-center__close:focus-visible{outline:2px solid hsl(var(--ring));outline-offset:2px}.task-center__folder-icon{display:grid;place-items:center;width:34px;height:34px;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__folder-copy{display:grid;gap:2px;min-width:0;flex:1}.task-center__folder-copy strong{overflow:hidden;font-size:12px;text-overflow:ellipsis;white-space:nowrap}.task-center__folder-copy small{color:hsl(var(--muted-foreground));font-size:10px}.task-center__folder-arrow{flex:none;color:hsl(var(--muted-foreground))}.task-center__empty-section{display:grid;place-items:center;min-height:74px;margin-top:11px;border:1px dashed hsl(var(--border));border-radius:10px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__loading{display:flex;align-items:center;justify-content:center;gap:9px;min-height:220px;color:hsl(var(--muted-foreground));font-size:13px}.task-center__error{display:flex;align-items:center;gap:9px;border:1px solid hsl(var(--destructive)/.2);border-radius:11px;background:hsl(var(--destructive)/.05);padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.task-center__error span{flex:1}.task-center__more{display:flex;justify-content:center}.task-center__overlay{position:fixed;inset:0;z-index:80;display:grid;place-items:center;overflow:auto;background:rgba(18,20,37,.48);padding:22px}.task-center__dialog{display:flex;flex-direction:column;height:min(82vh,820px);overflow:hidden;border:1px solid var(--glass-border);border-radius:18px;background:hsl(var(--card)/.95);box-shadow:var(--glass-highlight),var(--glass-shadow-strong);backdrop-filter:none}.task-center__dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;border-bottom:1px solid hsl(var(--border)/.75);padding:20px 22px}.task-center__dialog-head h2{margin-top:3px;font-size:20px;font-weight:760;overflow-wrap:anywhere}.task-center__dialog-head p:last-child{margin-top:3px;color:hsl(var(--muted-foreground));font-size:11px}.task-center__close{display:grid;place-items:center;width:40px;height:40px;flex:none;border:1px solid hsl(var(--border));border-radius:10px;background:hsl(var(--background)/.65);color:hsl(var(--muted-foreground));transition:color .14s,border-color .14s}.task-center__close:hover{border-color:hsl(var(--primary)/.35);color:hsl(var(--foreground))}.task-center__task-list{flex:none;box-sizing:border-box;height:calc(10 * var(--tk-row,52px));display:grid;align-content:start;grid-auto-rows:var(--tk-row,52px);gap:0;min-height:0;overflow-y:hidden}.task-center__task-list.is-scroll{overflow-y:auto}.task-center__task-row{border-bottom:1px solid hsl(var(--border)/.72)}.task-center__task-row:last-child{border-bottom:0}.task-center__task-icon{display:grid;place-items:center;flex:none;border-radius:9px;background:hsl(var(--primary)/.08);color:hsl(var(--primary))}.task-center__task-progress{display:flex;align-items:center}.task-center__task-progress>div{flex:1}.task-center__task-progress>span{color:hsl(var(--muted-foreground));font-size:10px;text-align:right;font-variant-numeric:tabular-nums}.task-center__dialog-empty{display:grid;place-items:center;align-content:center;gap:8px;flex:1;min-height:0;color:hsl(var(--muted-foreground));font-size:12px}.task-center__dialog-empty svg{color:hsl(var(--primary))}@supports not (backdrop-filter:blur(1px)){.task-center__dialog{background:hsl(var(--background))}}@media(max-width:900px){.task-center__sections{grid-template-columns:1fr}}@media(max-width:520px){.task-center__header{align-items:flex-start}.task-center__header>button{width:100%}.task-center__section{padding:12px}.task-center__section-head{gap:8px}.task-center__section-copy h2{font-size:12px}.task-center__section-count{font-size:9px}.task-center__overlay{padding:10px}.task-center__dialog{height:90vh;border-radius:14px}.task-center__dialog-head{padding:16px}}
 /* Keep each task readable as a single horizontal entry. Narrow screens can scroll the row. */
 .task-center__dialog{width:min(1120px,100%)}
-.task-center__task-list{overflow:auto;padding:0 18px}
+.task-center__task-list{overflow-x:auto;padding:0 18px}
 /* 标题/时间/详情/状态列全部固定宽度（内容过长省略号截断，hover 可见全文），
  * 保证各行时间、进度条、详情、状态列纵向对齐，且行宽不足压缩时不因行内容
  * 宽度不同产生错位；进度条列 1fr 吃满剩余空间。
  * 时间列 64px（实测 MM/DD HH:mm 约 52px）；状态列 74px（最宽 3 汉字胶囊
  * "已完成" 实测 68px，留 6px 余量）。标题 display:block 是必需的：
  * 省略号只对块级容器渲染。 */
-.task-center__task-row{display:grid;grid-template-columns:32px minmax(0,380px) 64px minmax(180px,1fr) minmax(0,150px) 74px;align-items:center;gap:12px;width:100%;min-width:900px;padding:10px 0}
+.task-center__task-row{display:grid;grid-template-columns:32px minmax(0,380px) 64px minmax(180px,1fr) minmax(0,150px) 74px;align-items:center;gap:12px;width:100%;min-width:900px;height:var(--tk-row,52px);padding:0;overflow:hidden;box-sizing:border-box}
 .task-center__task-icon{width:30px;height:30px}
 .task-center__task-title{display:block;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task-center__task-time{color:hsl(var(--muted-foreground));font-size:10px;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -383,8 +373,9 @@ onDeactivated(() => closeDialog(false))
 .task-center__stage-detail .task-center__section-head { flex-shrink:0; padding:20px; border-bottom:1px solid hsl(var(--border)); }
 .task-center__stage-detail .task-center__section-copy h2 { font-size:15px; }
 .task-center__stage-detail .task-center__section-copy p { margin-top:5px; font-size:12px; }
-.task-center__stage-detail .task-center__folder-list { display:flex; flex-direction:column; flex:1; min-height:0; margin:0; gap:0; }
-.task-center__stage-detail .task-center__folder { flex:0 1 90px; border:0; border-bottom:1px solid hsl(var(--border)); border-radius:0; min-height:0; padding:18px 20px; background:transparent; }
+.task-center__stage-detail .task-center__folder-list { display:flex; flex-direction:column; flex:none; box-sizing:border-box; height:calc(10 * var(--tc-row,90px)); overflow-y:hidden; margin:0; gap:0; }
+.task-center__stage-detail .task-center__folder-list.is-scroll { overflow-y:auto; }
+.task-center__stage-detail .task-center__folder { flex:none; height:var(--tc-row,90px); border:0; border-bottom:1px solid hsl(var(--border)); border-radius:0; min-height:0; padding:18px 20px; background:transparent; }
 .task-center__stage-detail .task-center__folder:last-child { border-bottom:0; }
 .task-center__stage-detail .task-center__folder:hover { transform:none; background:hsl(var(--primary)/.035); }
 .task-center__stage-detail .task-center__folder-copy strong { font-size:14px; font-weight:600; }

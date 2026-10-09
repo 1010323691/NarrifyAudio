@@ -17,6 +17,7 @@ try {
   const response = new Promise(resolve => { release = resolve })
   await page.route('**/api/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname
+    if (!path.startsWith('/api/')) return route.continue()
     if (path === '/api/tts/batch') {
       submissions.push({ key: request.headers()['idempotency-key'], body: request.postDataJSON() })
       await response

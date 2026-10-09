@@ -93,7 +93,7 @@ test('filters are sent to the server and reset pagination to the first page', as
   await h.loader.load(); h.userPage.value = 3; await vue.nextTick(); await new Promise(resolve => setImmediate(resolve))
   h.userRole.value = 'admin'; h.userSearch.value = 'alice'; await vue.nextTick(); await new Promise(resolve => setImmediate(resolve))
   assert.equal(h.userPage.value, 1)
-  assert.deepEqual(calls.at(-1), { page: 1, search: 'alice', role: 'admin', state: 'all', sort: 'default' })
+  assert.deepEqual(calls.at(-1), { page: 1, page_size: 10, search: 'alice', role: 'admin', state: 'all', sort: 'default' })
 })
 
 test('mutations cannot run twice while a confirmation or request is pending', async () => {

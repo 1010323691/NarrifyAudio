@@ -17,7 +17,6 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from sqlalchemy.exc import TimeoutError as DatabasePoolTimeout
 from starlette.concurrency import run_in_threadpool
 
-from .api import audio as api_audio
 from .api import admin as api_admin
 from .api import admin_resources as api_admin_resources
 from .api import admin_analytics as api_admin_analytics
@@ -74,7 +73,6 @@ PLATFORM_ROUTERS = [
 LEGACY_ROUTERS = [
     api_config.router,
     api_files.router,
-    api_audio.router,
     api_bgm.router,
     api_tts.router,
     api_script.router,

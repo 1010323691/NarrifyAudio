@@ -167,6 +167,21 @@
 .admin-shell .admin-table table { min-width: 600px; }
 .admin-shell .admin-table .wide-table { min-width: 980px; }
 .admin-shell .admin-table .compact-table { min-width: 420px; }
+/* 固定行高分页表：盒子高度 = 表头 + 10 行（border-collapse: separate，行高 = td 高，无 1px 漂移）。
+   10 条时不出现内部滚动条；选 20/50 时盒子高度不变，内部纵向滚动。内容一律单行省略，状态/文案变化不改行高。 */
+.admin-shell { --admin-head-h: 40px; --admin-row-h: 48px; }
+.admin-shell .admin-table.is-fixed { height: calc(var(--admin-head-h) + 10 * var(--admin-row-h) + var(--admin-hbar, 0px)); overflow-x: auto; overflow-y: hidden; }
+.admin-shell .admin-table.is-fixed.is-scroll { overflow-y: auto; }
+.admin-shell .admin-table.is-fixed table { border-collapse: separate; border-spacing: 0; }
+.admin-shell .admin-table.is-fixed th { position: sticky; top: 0; z-index: 1; box-sizing: border-box; height: var(--admin-head-h); padding-block: 0; }
+.admin-shell .admin-table.is-fixed td { box-sizing: border-box; height: var(--admin-row-h); padding-block: 0; line-height: 18px; white-space: nowrap; }
+.admin-shell .admin-table.is-fixed tr:last-child td { border-bottom: 1px solid hsl(var(--border)); }
+.admin-shell .admin-table.is-fixed td :is(strong, small, p, span:not(.admin-live-dot)) { max-width: 100%; }
+.admin-shell .admin-table.is-fixed td > :is(strong, small) { overflow: hidden; text-overflow: ellipsis; }
+.admin-shell .admin-table.is-fixed td small { margin-top: 0; line-height: 16px; }
+.admin-shell .admin-table.is-fixed .mono { overflow-wrap: normal; white-space: nowrap; }
+.admin-shell .admin-table.is-fixed .badge-stack { flex-wrap: nowrap; }
+.admin-shell .admin-table.is-fixed .user-cell p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 280px; }
 .admin-shell th { text-align: left; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); white-space: nowrap; background: hsl(var(--muted)); }
 .admin-shell th, .admin-shell td { padding: 10px var(--space-3); border-bottom: 1px solid hsl(var(--border)); vertical-align: middle; }
 .admin-shell td { font-variant-numeric: tabular-nums; }
@@ -289,6 +304,7 @@
 .admin-shell .page-region > .admin-error { margin-top: var(--space-4); }
 .admin-shell .admin-error button { text-decoration: underline; margin-left: var(--space-2); }
 .admin-shell .text-danger { color: hsl(var(--destructive)); }
+.admin-shell td.admin-empty-cell { text-align: center; color: hsl(var(--muted-foreground)); }
 .admin-shell .admin-empty, .admin-shell .admin-empty-state { padding: var(--space-8) var(--space-4); text-align: center; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .admin-shell .admin-empty-state { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); }
 .admin-shell .admin-empty-state strong { color: hsl(var(--foreground)); font-weight: 500; }
@@ -297,6 +313,8 @@
 .admin-shell .settings-nav button { padding: var(--space-3) 0; white-space: nowrap; border-bottom: 2px solid transparent; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .admin-shell .settings-nav button.active { color: hsl(var(--primary)); border-bottom-color: hsl(var(--primary)); font-weight: 600; }
 .admin-shell .admin-settings { max-width: 1040px; }
+/* 网格子项默认 min-width:auto = 内容最小宽；卡片里的 overflow-x 表格会把整列撑过窄屏，须允许收缩。 */
+.admin-shell .admin-config > * { min-width: 0; }
 .admin-shell .admin-settings .settings-actions { position: sticky; top: 0; z-index: 5; padding: var(--space-3) 0; background: hsl(var(--background)); }
 .admin-shell .admin-config { display: grid; gap: var(--space-4); max-width: 1040px; }
 .admin-shell .admin-config input[type=number] { max-width: 180px; }
@@ -325,7 +343,7 @@
 .admin-feedback.fixed.bottom-4 { z-index: 110; }
 .admin-feedback .shadow-lg { box-shadow: 0 4px 16px hsl(222 25% 10% / .12); }
 .admin-shell .admin-table .resource-users-table { min-width: 0; table-layout: fixed; }
-.admin-shell .resource-users-table :is(th,td) { white-space: normal; overflow-wrap: anywhere; }
+.admin-shell .resource-users-table :is(th,td) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .admin-shell .resource-users-table :is(th,td):not(:first-child) { text-align: right; }
 .admin-shell .admin-tag-selection { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-3); background: hsl(var(--muted)); border-radius: var(--radius-md); font-size: 12px; }
 .admin-shell .admin-tag-selection > span { margin-right: auto; }

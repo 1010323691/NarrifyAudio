@@ -35,6 +35,7 @@ from ..platform.models import TaskEvent
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_identity import superseded_ids_hidden_by, superseded_task_ids
 from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
+from ..platform.task_registry import RETIRED_TASK_TYPES
 from .task_operations import task_module
 
 
@@ -65,14 +66,12 @@ def task_display_label(task_type: str, payload: dict | None) -> str:
     if payload.get("label"):
         return str(payload["label"])
     source = str(payload.get("source_name") or payload.get("output_name") or "")
+    if task_type in RETIRED_TASK_TYPES:
+        return RETIRED_TASK_TYPES[task_type]
     if task_type == 'project.progress':
         return '更新制作进度'
     if task_type == "script.parse":
         return f"文本解析（{source or '文件'}）"
-    if task_type == "audio.silences":
-        return f"停顿检测：{source or '音频'}"
-    if task_type == "audio.cut":
-        return f"音频分集：{source or '音频'}"
     if task_type.startswith("resources."):
         return {"resources.scan": "资源清单扫描", "resources.package": "资源文件打包", "resources.cleanup": "过期缓存清理"}.get(task_type, "资源管理")
     return f"持久化任务：{task_type}"

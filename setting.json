@@ -19,13 +19,6 @@
     "length_target": 3000,
     "smart_split_long_chapters": true
   },
-  "audio": {
-    "target_duration": "10:00",
-    "naming_format": "第 {} 集",
-    "start_number": "1",
-    "smart_align": true,
-    "align_tolerance": 15
-  },
   "tts": {
     "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
     "base_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
@@ -89,8 +82,7 @@
   },
   "ui": {
     "theme": "system",
-    "show_parse_logs": false,
-    "show_audio_split": false
+    "show_parse_logs": false
   },
   "bgm": {
     "volume": 0.18,

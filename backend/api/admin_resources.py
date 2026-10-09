@@ -24,17 +24,22 @@ from ..services.admin_storage import (
     project_storage_path,
 )
 
-from ..services.admin_lists import resource_page
+from ..services.admin_lists import resource_page, user_usage_page
+from ..services.list_paging import page_meta
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin-resources"])
 
 
 @router.get("/resources")
-def resources(_: User = Depends(require_admin), db: Session = Depends(get_db), light: bool = False,
-              page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=100)] = 20) -> dict:
+def resources(_: User = Depends(require_admin), db: Session = Depends(get_db), light: bool = False, users_only: bool = False,
+              page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=100)] = 10) -> dict:
     root = configured_storage_root(db)
     disk = shutil.disk_usage(root)
     if light: return resource_page(db, root, disk, MUSIC_LIBRARY_DIR, page, page_size)
+    # The full inventory pages its user table too: `users_only` re-scans just this page's users (page flips are cheap),
+    # while the first full request also scans everything for the aggregate cards.
+    page_rows, user_total = user_usage_page(db, page, page_size)
+    page_usernames = [row[0] for row in page_rows]
     file_rows = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).where(ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
     registered = {
         username: {"count": int(count), "size_bytes": int(size)}
@@ -44,10 +49,10 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db), l
             .where(ProjectFile.deleted_at.is_(None)).group_by(User.username)
         ).all()
     }
-    projects = db.execute(
-        select(Project, User.username).join(User, User.id == Project.owner_id)
-        .where(Project.deleted_at.is_(None))
-    ).all()
+    project_query = select(Project, User.username).join(User, User.id == Project.owner_id).where(Project.deleted_at.is_(None))
+    if users_only:
+        project_query = project_query.where(User.username.in_(page_usernames))
+    projects = db.execute(project_query).all()
     active_project_ids = set(db.scalars(
         select(Task.project_id).where(Task.status.in_(ACTIVE_TASK_STATUSES)).distinct()
     ).all())
@@ -69,11 +74,14 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db), l
             total = category_totals.setdefault(category, {"count": 0, "size_bytes": 0})
             total["count"] += values["count"]
             total["size_bytes"] += values["size_bytes"]
+    empty = {"project_count": 0, "size_bytes": 0, "file_count": 0}
     user_rows = [
-        {"username": username, **values, "registered_file_count": registered.get(username, {}).get("count", 0),
+        {"username": username, **users.get(username, empty), "registered_file_count": registered.get(username, {}).get("count", 0),
          "registered_file_bytes": registered.get(username, {}).get("size_bytes", 0)}
-        for username, values in sorted(users.items(), key=lambda item: item[1]["size_bytes"], reverse=True)[:20]
+        for username in page_usernames
     ]
+    if users_only:
+        return {"users": user_rows, "pagination": page_meta(user_total, page, page_size)}
     music_usage = music_use_counts(projects, root)
     music_files = [path for path in MUSIC_LIBRARY_DIR.iterdir() if path.is_file() and not path.is_symlink() and path.suffix.lower() in {".mp3", ".wav", ".flac"}] if MUSIC_LIBRARY_DIR.is_dir() else []
     return {
@@ -81,7 +89,7 @@ def resources(_: User = Depends(require_admin), db: Session = Depends(get_db), l
         "disk_free_bytes": disk.free,
         "projects": int(db.scalar(select(func.count()).select_from(Project).where(Project.deleted_at.is_(None))) or 0),
         "files": [{"kind": kind, "count": count, "size_bytes": size} for kind, count, size in file_rows],
-        "users": user_rows,
+        "users": user_rows, "pagination": page_meta(user_total, page, page_size),
         "project_storage": {
             "size_bytes": sum(row["size_bytes"] for row in users.values()),
             "file_count": sum(row["file_count"] for row in users.values()),

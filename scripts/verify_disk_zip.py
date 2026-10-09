@@ -1,4 +1,4 @@
-"""Isolated actual legacy-package executor measurement; no application DB/data."""
+"""Isolated actual BGM package (ZIP64) executor measurement; no application DB/data."""
 import hashlib
 import json
 from pathlib import Path
@@ -31,20 +31,22 @@ try:
     with tempfile.TemporaryDirectory(prefix='narrify-zip-probe-') as root:
         root = Path(root)
         source = root / 'chapter.mp3'
+        relative = '08_bgm/chapter.mp3'
         with source.open('wb') as writer:
             writer.truncate(size)
         record = {'identity': list(file_identity(source.stat()))}
         start = time.monotonic()
-        with patch.object(executor, '_validate_deliveries', lambda *_: {source.name: record}), \
-             patch.object(executor, 'get_or_prepare_layout', lambda: SimpleNamespace(workspace=root)), \
+        with patch.object(executor, '_validate_deliveries', lambda *_: {relative: record}), \
+             patch.object(executor, 'get_or_prepare_layout', lambda: SimpleNamespace(workspace=root, bgm=root)), \
              patch.object(executor, 'task_outcome_file', lambda *_: nullcontext(root / 'book.zip')), \
              patch.object(executor, 'cancellation_requested', lambda *_: False), \
              patch.object(executor, 'update_progress', lambda *_: None):
-            result = executor._run_audio_zip(SimpleNamespace(progress_percent=lambda *_: None), None,
-                {'base': 'book', 'files': [{'relative_path': source.name}]}, [], [])
+            claim = SimpleNamespace(owner_id='owner', project_id='project', task_id='task', attempt_id='attempt')
+            result = executor._run_bgm_package(SimpleNamespace(progress_percent=lambda *_: None), claim,
+                {'base': 'book', 'chapters': ['chapter']}, [], [])
         elapsed = time.monotonic() - start
         with zipfile.ZipFile(result.temp_path) as archive:
-            member = archive.getinfo(source.name)
+            member = archive.getinfo('book/' + source.name)
             assert member.file_size == size
             assert member.extract_version >= 45
             assert archive.testzip() is None

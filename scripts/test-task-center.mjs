@@ -116,7 +116,7 @@ test('switching category cancels old requests and caches only the matching page'
   const h = harness({ getTaskCenterGroups: category => category === 'script' ? old.promise : Promise.resolve(page([group('tts')])) })
   try {
     h.activate(); await flush()
-    const signal = h.calls.groups[0][2]
+    const signal = h.calls.groups[0][3]
     h.center.selectCategory('tts'); await flush()
     assert.equal(signal.aborted, true)
     assert.equal(h.center.groups.value.items[0].project_id, 'tts')
@@ -138,7 +138,7 @@ test('account changes clear cached content and discard an uncooperative late res
     h.auth.user = { id: 'user-b' }
     assert.equal(h.center.summary.value, null)
     assert.equal(h.center.groups.value, null)
-    assert.equal(h.calls.groups[0][2].aborted, true)
+    assert.equal(h.calls.groups[0][3].aborted, true)
     await flush()
     old.resolve(page([group('user-a-book')])); await flush()
     assert.equal(h.center.groups.value.items[0].project_id, 'user-b-book')
@@ -235,7 +235,7 @@ test('closing a pending dialog discards its response and a late control cannot a
   try {
     h.activate(); await flush()
     h.center.openGroup(group())
-    const signal = h.calls.items[0][4]
+    const signal = h.calls.items[0][5]
     h.center.closeGroup()
     assert.equal(signal.aborted, true)
     details.resolve({ ...page([{ id: 'late' }], 50), counts: group() })

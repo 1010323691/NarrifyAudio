@@ -73,7 +73,7 @@ def _write(root: Path, relative: str, content: bytes):
     return path
 
 
-def _delivery(workspace, relative, task_type="audio.cut", status="succeeded"):
+def _delivery(workspace, relative, task_type="bgm.mix", status="succeeded"):
     path = workspace["root"] / relative
     with SessionLocal() as db:
         task = Task(owner_id=workspace["owner"], project_id=workspace["project"], task_type=task_type, status=status, finished_at=utcnow())
@@ -104,13 +104,13 @@ def test_production_resources_cannot_download_or_package_even_with_forged_scope(
 
 
 def test_delivery_filter_counts_only_verified_products_and_blocks_old_zips(client, workspace):
-    for relative, kind in [("06_audio_merge/旁白.mp3", "tts.merge"), ("08_bgm/混音.mp3", "bgm.mix"), ("07_output/分集.wav", "audio.cut")]:
+    for relative, kind in [("06_audio_merge/旁白.mp3", "tts.merge"), ("08_bgm/混音.mp3", "bgm.mix"), ("08_bgm/混音二.wav", "bgm.mix")]:
         _write(workspace["root"], relative, b"completed audio")
         _delivery(workspace, relative, kind)
     _write(workspace["root"], "05_audio_chunk/segment.wav", b"middle")
-    _write(workspace["root"], "07_output/untracked.wav", b"unknown")
-    _write(workspace["root"], "07_output/failed.wav", b"partial")
-    _delivery(workspace, "07_output/failed.wav", status="failed")
+    _write(workspace["root"], "08_bgm/untracked.wav", b"unknown")
+    _write(workspace["root"], "08_bgm/failed.wav", b"partial")
+    _delivery(workspace, "08_bgm/failed.wav", status="failed")
     snapshot = _scan(client, workspace)
     products = client.get("/api/v1/resources/entries", params={"category": "deliverables"}).json()
     assert products["total"] == 3 and all(item["can_download"] for item in products["items"])
@@ -152,11 +152,11 @@ def test_worker_completion_records_delivery_identity_and_replacement_revokes_it(
 
 def test_queued_query_export_cannot_silently_drop_a_changed_product(client, workspace):
     for name in ("a.mp3", "b.mp3"):
-        _write(workspace["root"], f"07_output/{name}", b"ready")
-        _delivery(workspace, f"07_output/{name}")
+        _write(workspace["root"], f"08_bgm/{name}", b"ready")
+        _delivery(workspace, f"08_bgm/{name}")
     snapshot = _scan(client, workspace)
     task_id = _submit(client, workspace, "resources.package", {"scope": {"category": "deliverables", "snapshots": [{"project_id": workspace["project"], "snapshot_id": snapshot["snapshot_id"]}]}})
-    (workspace["root"] / "07_output/b.mp3").write_bytes(b"changed")
+    (workspace["root"] / "08_bgm/b.mp3").write_bytes(b"changed")
     claim = claim_task(task_id, "delivery-query-worker", lease_seconds=600)
     with pytest.raises(TaskExecutionError, match="成品范围已变化"):
         execute_claim(claim)
@@ -178,9 +178,9 @@ def test_old_successful_audio_results_are_recognized_but_old_archives_are_not(cl
 
 
 def test_legacy_zip_rechecks_source_identity_during_archive_creation(client, workspace, monkeypatch):
-    source = _write(workspace["root"], "07_output/ready.wav", b"ready audio")
-    _delivery(workspace, "07_output/ready.wav")
-    task_id = _submit(client, workspace, "audio.zip", {"base": "book", "files": [{"name": "ready.wav", "relative_path": "07_output/ready.wav"}]})
+    source = _write(workspace["root"], "08_bgm/ready.mp3", b"ready audio")
+    _delivery(workspace, "08_bgm/ready.mp3")
+    task_id = _submit(client, workspace, "bgm.package", {"base": "book", "chapters": ["ready"]})
     claim = claim_task(task_id, "delivery-zip-worker", lease_seconds=600)
     original = zipfile._ZipWriteFile.write
     def replaced(writer, *args, **kwargs):
@@ -225,54 +225,6 @@ def test_mix_delivery_requires_a_complete_narration_source(client, workspace, mo
     assert client.get("/api/v1/resources/entries", params={"category": "deliverables"}).json()["total"] == (2 if source_complete else 0)
 
 
-@pytest.mark.parametrize("module,producer,complete,changed", [
-    ("06_audio_merge", "tts.merge", True, False),
-    ("06_audio_merge", "tts.merge", False, False),
-    ("08_bgm", "bgm.mix", True, False),
-    ("08_bgm", "bgm.mix", False, False),
-    ("05_audio_chunk", None, False, False),
-    ("01_input", None, True, False),
-    ("01_input", None, True, True),
-])
-def test_cut_inherits_delivery_eligibility_and_preserves_uploaded_audio(client, workspace, monkeypatch, module, producer, complete, changed):
-    source = _write(workspace["root"], f"{module}/source.mp3", b"source audio")
-    if producer:
-        source_task = _delivery(workspace, f"{module}/source.mp3", producer)
-        if not complete:
-            with SessionLocal() as db:
-                record = db.get(TaskResult, source_task)
-                record.result = {**record.result, "complete": False, "path": str(source)}
-                db.commit()
-    monkeypatch.setattr("backend.platform.task_worker.audio_engine.probe_duration", lambda *args: (2.0, ""))
-
-    def fake_cut(path, segments, out_dir, *args, **kwargs):
-        output = _write(Path(out_dir), "episode.mp3", b"cut audio")
-        if changed:
-            source.write_bytes(b"replaced while cutting")
-        return [{"name": output.name, "path": str(output), "size": output.stat().st_size, "duration": 2.0}]
-
-    monkeypatch.setattr("backend.platform.task_worker.audio_engine.cut_segments", fake_cut)
-    response = client.post("/api/audio/cut", headers={"X-CSRF-Token": workspace["csrf"]}, json={
-        "path": str(source), "segments": [{"index": 0, "start": 0, "duration": 2}], "smart_align": False,
-    })
-    assert response.status_code == 200, response.text
-    result = _run(response.json()["task_id"])
-    eligible = complete and not changed
-    assert result["complete"] is eligible
-    assert bool(result["deliveries"]) is eligible
-    _scan(client, workspace)
-    assert client.get("/api/files/download/07_output/episode.mp3").status_code == (200 if eligible else 403)
-    assert client.get("/api/files/preview/07_output/episode.mp3").status_code == 200
-    for task_type in ("audio.zip", "audio.export"):
-        packaged = client.post("/api/v1/tasks", headers={"X-CSRF-Token": workspace["csrf"]}, json={
-            "project_id": workspace["project"], "task_type": task_type,
-            "payload": {"base": "book", "source_relative": f"{module}/source.mp3",
-                        "files": [{"name": "episode.mp3", "relative_path": "07_output/episode.mp3"}]},
-            "idempotency_key": uuid.uuid4().hex,
-        })
-        assert packaged.status_code == (201 if eligible else 403), packaged.text
-
-
 def test_inventory_searches_entire_workspace_with_natural_sort_and_no_fake_catalog(client, workspace):
     for index in range(1, 345):
         _write(workspace["root"], f"02_split_text/第{index}章.txt", f"第{index}章内容".encode())
@@ -283,7 +235,7 @@ def test_inventory_searches_entire_workspace_with_natural_sort_and_no_fake_catal
     snapshot = _scan(client, workspace)
     assert snapshot["file_count"] == 345
     assert snapshot["complete"]
-    page = client.get("/api/v1/resources/entries", params={"project_id": workspace["project"], "category": "02_split_text"}).json()
+    page = client.get("/api/v1/resources/entries", params={"project_id": workspace["project"], "category": "02_split_text", "page_size": 50}).json()
     assert page["total"] == 344
     assert len(page["items"]) == 50
     assert [item["name"] for item in page["items"][:3]] == ["第1章.txt", "第2章.txt", "第3章.txt"]
@@ -312,7 +264,7 @@ def test_directory_browsing_same_names_literal_search_and_size_sort(client, work
 def test_preview_redacts_config_and_supports_range_and_truncation(client, workspace):
     _write(workspace["root"], "config/setting.json", json.dumps({"llm": {"api_key": "super-secret"}, "speed": 1}).encode())
     _write(workspace["root"], "config/broken.json", b'{"api_key": "never-expose",')
-    _write(workspace["root"], "07_output/audio.mp3", b"0123456789")
+    _write(workspace["root"], "08_bgm/audio.mp3", b"0123456789")
     _write(workspace["root"], "02_split_text/large.txt", b"a" * (1024 * 1024 + 20))
     _scan(client, workspace)
     files = client.get("/api/v1/resources/entries", params={"category": "system"}).json()["items"]
@@ -336,10 +288,10 @@ def test_preview_redacts_config_and_supports_range_and_truncation(client, worksp
 
 
 def test_export_preserves_directory_structure_and_has_separate_storage(client, workspace):
-    _write(workspace["root"], "07_output/卷一/chapter.mp3", "第一卷".encode())
-    _write(workspace["root"], "07_output/卷二/chapter.mp3", "第二卷".encode())
-    _delivery(workspace, "07_output/卷一/chapter.mp3")
-    _delivery(workspace, "07_output/卷二/chapter.mp3")
+    _write(workspace["root"], "08_bgm/卷一/chapter.mp3", "第一卷".encode())
+    _write(workspace["root"], "08_bgm/卷二/chapter.mp3", "第二卷".encode())
+    _delivery(workspace, "08_bgm/卷一/chapter.mp3")
+    _delivery(workspace, "08_bgm/卷二/chapter.mp3")
     _write(workspace["root"], "config/setting.json", b"secret")
     snapshot = _scan(client, workspace)
     task_id = _submit(client, workspace, "resources.package", {"scope": {"snapshots": [{"project_id": workspace["project"], "snapshot_id": snapshot["snapshot_id"]}], "category": "all"}, "name": "家庭资料"})
@@ -349,15 +301,15 @@ def test_export_preserves_directory_structure_and_has_separate_storage(client, w
     response = client.get(f"/api/v1/resources/exports/{task_id}/download")
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-        assert sorted(archive.namelist()) == ["07_output/卷一/chapter.mp3", "07_output/卷二/chapter.mp3"]
+        assert sorted(archive.namelist()) == ["08_bgm/卷一/chapter.mp3", "08_bgm/卷二/chapter.mp3"]
     resources = client.get("/api/v1/resources").json()
     assert resources["storage"]["export_bytes"] == len(response.content)
     assert resources["projects"][0]["snapshot"]["size_bytes"] == len("第一卷第二卷".encode()) + len(b"secret")
 
 
 def test_changed_file_fails_package_without_publishing_partial_zip(client, workspace):
-    path = _write(workspace["root"], "07_output/book.mp3", b"first")
-    _delivery(workspace, "07_output/book.mp3")
+    path = _write(workspace["root"], "08_bgm/book.mp3", b"first")
+    _delivery(workspace, "08_bgm/book.mp3")
     _scan(client, workspace)
     file = client.get("/api/v1/resources/entries").json()["items"][0]
     task_id = _submit(client, workspace, "resources.package", {"files": [{"resource_id": file["id"], "snapshot_id": file["snapshot_id"]}]})
@@ -428,7 +380,7 @@ def test_resource_task_payload_rejects_forged_snapshots_and_paths(client, worksp
 def test_reference_audio_is_not_counted_as_production_audio(client, workspace):
     _write(workspace["root"], "04_voice_profiles/reference.wav", b"reference")
     _write(workspace["root"], "01_input/input.mp3", b"source")
-    _write(workspace["root"], "07_output/final.wav", b"output")
+    _write(workspace["root"], "08_bgm/final.wav", b"output")
     snapshot = _scan(client, workspace)
     assert snapshot["audio_count"] == 1
     assert client.get("/api/v1/resources/entries", params={"category": "audio"}).json()["total"] == 1
@@ -484,8 +436,8 @@ def test_trashed_project_resource_id_cannot_be_read(client, workspace):
 
 def test_frozen_snapshots_in_active_export_survive_retention(client, workspace):
     from backend.platform.resource_retention import purge_resource_artifacts
-    _write(workspace["root"], "07_output/book.mp3", b"book")
-    _delivery(workspace, "07_output/book.mp3")
+    _write(workspace["root"], "08_bgm/book.mp3", b"book")
+    _delivery(workspace, "08_bgm/book.mp3")
     snapshot = _scan(client, workspace)
     file = client.get("/api/v1/resources/entries").json()["items"][0]
     _submit(client, workspace, "resources.package", {"files": [{"resource_id": file["id"], "snapshot_id": file["snapshot_id"]}]})
@@ -529,7 +481,7 @@ def test_cross_project_search_deep_pages_have_stable_natural_order(client, works
     _run(task_id)
     items = []
     for page in (1, 2, 3):
-        result = client.get("/api/v1/resources/entries", params={"page": page}).json()
+        result = client.get("/api/v1/resources/entries", params={"page": page, "page_size": 50}).json()
         assert result["total"] == 128
         items.extend(result["items"])
     assert len({item["id"] for item in items}) == 128
@@ -539,8 +491,8 @@ def test_cross_project_search_deep_pages_have_stable_natural_order(client, works
 def test_exports_expire_and_are_inaccessible_after_project_trash(client, workspace):
     from datetime import datetime, timedelta, timezone
     from backend.platform.resource_retention import purge_resource_artifacts
-    _write(workspace["root"], "07_output/book.mp3", b"book")
-    _delivery(workspace, "07_output/book.mp3")
+    _write(workspace["root"], "08_bgm/book.mp3", b"book")
+    _delivery(workspace, "08_bgm/book.mp3")
     _scan(client, workspace)
     file = client.get("/api/v1/resources/entries").json()["items"][0]
     payload = {"files": [{"resource_id": file["id"], "snapshot_id": file["snapshot_id"]}]}
@@ -564,8 +516,8 @@ def test_exports_expire_and_are_inaccessible_after_project_trash(client, workspa
 def test_export_cancellation_and_disk_full_never_publish_partial_zip(client, workspace, monkeypatch):
     from backend.core.task_control import TaskCancelled
     from backend.platform import resource_tasks
-    _write(workspace["root"], "07_output/large.wav", b"x" * (2 * 1024 * 1024))
-    _delivery(workspace, "07_output/large.wav")
+    _write(workspace["root"], "08_bgm/large.wav", b"x" * (2 * 1024 * 1024))
+    _delivery(workspace, "08_bgm/large.wav")
     _scan(client, workspace)
     file = client.get("/api/v1/resources/entries").json()["items"][0]
     payload = {"files": [{"resource_id": file["id"], "snapshot_id": file["snapshot_id"]}]}
@@ -628,8 +580,8 @@ def test_indexed_package_rechecks_revocation_between_files(client, workspace, mo
     from backend.platform.delivery_index import backfill_project, write_authorities
     from backend.platform.models import User
     for name in ("a.mp3", "b.mp3"):
-        path = _write(workspace["root"], f"07_output/{name}", b"ready audio")
-        _delivery(workspace, f"07_output/{name}")
+        path = _write(workspace["root"], f"08_bgm/{name}", b"ready audio")
+        _delivery(workspace, f"08_bgm/{name}")
     with SessionLocal.begin() as db:
         assert backfill_project(db, db.get(User, workspace["owner"]), workspace["project"])
     _scan(client, workspace)
@@ -646,7 +598,7 @@ def test_indexed_package_rechecks_revocation_between_files(client, workspace, mo
             revoked = True
             relative = items[revoked_index]["relative_path"]
             with SessionLocal.begin() as db:
-                task = Task(owner_id=workspace["owner"], project_id=workspace["project"], task_type="audio.cut",
+                task = Task(owner_id=workspace["owner"], project_id=workspace["project"], task_type="bgm.mix",
                     status="succeeded", finished_at=utcnow())
                 db.add(task); db.flush()
                 result = {"complete": False, "path": str(workspace["root"] / relative)}
@@ -662,11 +614,8 @@ def test_indexed_package_rechecks_revocation_between_files(client, workspace, mo
         assert not internal_path(db, workspace["owner"], "exports", task_id, "files.zip").exists()
 
 
-@pytest.mark.parametrize("task_type,relative,producer,payload", [
-    ("audio.zip", "07_output/book.mp3", "audio.cut", {"base": "book", "files": [{"name": "book.mp3", "relative_path": "07_output/book.mp3"}]}),
-    ("bgm.package", "08_bgm/book.mp3", "bgm.mix", {"base": "book", "chapters": ["book"]}),
-])
-def test_legacy_archive_rechecks_qualification_after_copy(client, workspace, monkeypatch, task_type, relative, producer, payload):
+def test_legacy_archive_rechecks_qualification_after_copy(client, workspace, monkeypatch):
+    task_type, relative, producer, payload = "bgm.package", "08_bgm/book.mp3", "bgm.mix", {"base": "book", "chapters": ["book"]}
     from backend.platform.delivery_index import backfill_project, write_authorities
     from backend.platform.models import User
     path = _write(workspace["root"], relative, b"finished audio")

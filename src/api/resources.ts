@@ -138,8 +138,8 @@ export function resourceFileUrl(id: string, mode: 'preview' | 'download' = 'down
 export function resourceExportUrl(id: string): string {
   return `${API_BASE}/api/v1/resources/exports/${encodeURIComponent(id)}/download`
 }
-export function getCleanupPreview(projectIds: string[], page = 1, options?: RequestInit): Promise<CleanupPreview> {
-  const query = new URLSearchParams({ page: String(page) })
+export function getCleanupPreview(projectIds: string[], page = 1, page_size = 10, options?: RequestInit): Promise<CleanupPreview> {
+  const query = new URLSearchParams({ page: String(page), page_size: String(page_size) })
   for (const id of projectIds) query.append('project_ids', id)
   return http.get(`/api/v1/resources/cleanup-preview?${query}`, options)
 }

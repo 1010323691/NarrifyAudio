@@ -25,6 +25,7 @@
     "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs",
     "test:admin-console": "node scripts/test-admin-console.mjs",
     "test:mobile-layout": "node scripts/test-mobile-layout.mjs",
+    "test:fit-rows": "node scripts/test-fit-rows.mjs",
     "test:ten-row-layout": "node scripts/test-ten-row-layout.mjs",
     "test:project-cards": "node scripts/test-project-cards.mjs",
     "test:project-cards-browser": "node scripts/test-project-cards-browser.mjs",

@@ -80,8 +80,8 @@ def test_category_alignment_and_group_paging(db):
     db.commit()
     assert task_center.groups(db, "u", "preview")["items"][0]["resumable_count"] == 1
     assert task_center.groups(db, "u", "bgm")["items"][0]["active_count"] == 1
-    first = task_center.groups(db, "u", "script")
-    second = task_center.groups(db, "u", "script", 2)
+    first = task_center.groups(db, "u", "script", 1, 5)
+    second = task_center.groups(db, "u", "script", 2, 5)
     assert first["total"] == 7
     assert len(first["items"]) == 5 and len(second["items"]) == 2
     assert first["items"][0]["project_id"] == "p6"
@@ -116,14 +116,14 @@ def test_queries_are_bounded_and_first_level_never_reads_events_or_results(db):
         assert len(statements) == 3
         assert not any("task_events" in sql or "task_results" in sql for sql in statements)
         statements.clear()
-        first = task_center.items(db, "u", "script", "book")
+        first = task_center.items(db, "u", "script", "book", page_size=50)
         assert len(statements) == 3
         assert len(first["items"]) == 50 and first["total"] == 120
         assert first["counts"]["pausable_count"] == 120
         assert not any("task_results" in sql for sql in statements)
         assert all(not ({"logs", "result", "payload"} & item.keys()) for item in first["items"])
         statements.clear()
-        last = task_center.items(db, "u", "script", "book", page=3)
+        last = task_center.items(db, "u", "script", "book", page=3, page_size=50)
         assert len(last["items"]) == 20 and len(statements) == 3
         assert not ({item["id"] for item in first["items"]} & {item["id"] for item in last["items"]})
     finally:

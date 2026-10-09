@@ -7,7 +7,6 @@ import AdminView from '@/components/admin/AdminView.vue'
 import AdminSegmented from '@/components/admin/AdminSegmented.vue'
 import AdminTable from '@/components/admin/AdminTable.vue'
 import AdminDrawer from '@/components/admin/AdminDrawer.vue'
-import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import ChartCard from '@/components/admin/ChartCard.vue'
 import KpiCard from '@/components/admin/KpiCard.vue'
 import MeterBar from '@/components/admin/MeterBar.vue'
@@ -29,7 +28,7 @@ import { series, throughputScale } from './series'
 const { push: toast } = useToast()
 const RANGES = [['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天']] as const
 const range = ref<api.ThroughputRange>('24h')
-const PAGE_SIZE = 50
+const pageSize = ref(10)
 
 const metrics = ref<api.TaskMetrics | null>(null)
 const throughput = ref<api.Throughput | null>(null)
@@ -44,7 +43,7 @@ const detailLoading = ref(false)
 
 const loader = useAdminLoader(async (signal) => {
   const [taskMetrics, flow, rows] = await Promise.all([
-    api.getTaskMetrics(), api.getThroughput(range.value, signal), api.taskPage(filters.value, page.value, signal),
+    api.getTaskMetrics(), api.getThroughput(range.value, signal), api.taskPage(filters.value, page.value, pageSize.value, signal),
   ])
   return () => {
     metrics.value = taskMetrics; throughput.value = flow; tasks.value = rows.items; pagination.value = rows.pagination
@@ -57,6 +56,7 @@ const loader = useAdminLoader(async (signal) => {
 
 watch(range, () => { void loader.load() })
 watch(page, () => { void loader.load() })
+function changePageSize(size: number) { pageSize.value = size; if (page.value !== 1) page.value = 1; else void loader.load() }
 watch(filters, () => { if (page.value !== 1) page.value = 1; else void loader.load() }, { deep: true })
 // `?tab=tasks&search=<id>` deep-links from the logs drawer.
 const route = useRoute()
@@ -224,7 +224,7 @@ async function single(action: 'cancel' | 'retry') {
             <Button variant="destructive" size="sm" :disabled="!cancellable || loader.actionBusy.value" @click="bulk('cancel')"><Ban class="h-4 w-4" />取消 {{ cancellable || '' }}</Button>
           </div>
         </div>
-        <AdminTable table-class="wide-table task-table">
+        <AdminTable table-class="wide-table task-table" :page-size="pageSize">
           <thead><tr>
             <th class="select-cell"><input type="checkbox" :checked="allSelected" :indeterminate="selected.size > 0 && !allSelected" aria-label="全选本页" @change="toggleAll"></th>
             <th>类型 / ID</th><th>用户</th><th>状态</th><th>进度</th><th>耗时</th><th>Worker</th><th>创建时间</th><th class="user-actions">操作</th>
@@ -241,10 +241,10 @@ async function single(action: 'cancel' | 'retry') {
               <td :title="date(task.created_at)">{{ relative(task.created_at) }}</td>
               <td class="user-actions"><Button variant="outline" size="sm" @click="openDetail(task)">详情</Button></td>
             </tr>
+            <tr v-if="!tasks.length"><td colspan="9" class="admin-empty-cell">没有匹配的任务，调整状态、服务组或搜索条件后重试。<Button v-if="filtered" variant="outline" size="sm" class="ml-2" @click="clearFilters">清空筛选</Button></td></tr>
           </tbody>
         </AdminTable>
-        <AdminEmptyState v-if="!tasks.length" title="没有匹配的任务" description="调整状态、服务组或搜索条件后重试。"><Button v-if="filtered" variant="outline" size="sm" @click="clearFilters">清空筛选</Button></AdminEmptyState>
-        <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / PAGE_SIZE))" :total="pagination?.total ?? 0" :page-size="PAGE_SIZE" unit="条" @update:page="page = $event" />
+        <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / pageSize))" :total="pagination?.total ?? 0" :page-size="pageSize" unit="条" @update:page="page = $event" @update:page-size="changePageSize" />
       </section>
 
       <AdminDrawer v-if="detail" title="任务详情" @close="detail = null">

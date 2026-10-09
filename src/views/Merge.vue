@@ -13,7 +13,6 @@ import {
 } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
-import { usePipelineStateStore } from '@/stores/pipelineState'
 import { useWorkbenchScope, withinScope } from '@/composables/useWorkbenchScope'
 import { useWorkbenchRefresh } from '@/composables/useWorkbenchRefresh'
 import { useWorkbenchTaskControl } from '@/composables/useWorkbenchTaskControl'
@@ -22,7 +21,7 @@ import { useMergeSubmission } from '@/composables/useMergeSubmission'
 import { useToast } from '@/components/ui/toast'
 import { mergeList, ttsStatus } from '@/api/tts'
 import { previewUrl } from '@/utils/fileops'
-import type { MergePackageStatus, MergeResult, TaskSnapshot, TTSStatus } from '@/types'
+import type { MergePackageStatus, TaskSnapshot, TTSStatus } from '@/types'
 
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import Button from '@/components/ui/Button.vue'
@@ -46,7 +45,6 @@ import { Combine, Loader2, ArrowRight } from 'lucide-vue-next'
 
 const router = useRouter()
 const settings = useSettingsStore()
-const pipeline = usePipelineStateStore()
 const taskStore = useTaskStore()
 const taskControl = useWorkbenchTaskControl()
 const captureScope = useWorkbenchScope()
@@ -167,7 +165,7 @@ const mergedSelectedCount = computed(
 const mergeActive = computed(() => taskStore.activeTasks('merge'))
 
 // ---------------------------------------------------------------------------
-// 行刷新（磁盘口径）：listDir(05) -> listDir(06, .mp3) -> mergeStatusPackages。
+// 行刷新（磁盘口径）：按页读取 merge-list（含各包状态与已合并文件名）。
 // 仅在「无在途任务」的包上用磁盘值更新内存合并标记（在途包的内存态不被磁盘旧态覆盖）。
 // ---------------------------------------------------------------------------
 
@@ -331,7 +329,6 @@ watch(
         const file = (t.result?.file as string) || ''
         if (file.endsWith('.mp3')) {
           mergedNames.value[pkg] = file
-          pipeline.recordMerge(t.result as MergeResult)
           toast({ title: '音频合并完成', variant: 'success', description: `已生成 ${file}` })
         } else {
           // 编码失败兜底：WAV 是唯一产物，行回落「已就绪」，重合并（-y 覆盖）自愈。
@@ -622,12 +619,7 @@ onBeforeUnmount(stopScheduledRefresh)
       ><span v-if="submissionFailure" class="text-destructive text-sm">{{ submissionFailure }}</span>
       <Button v-if="mergeActive.length" variant="destructive" @click="cancelAll"
         >取消全部合并</Button
-      ><Button
-        v-if="pipeline.mergeResult && settings.config?.ui.show_audio_split"
-        variant="outline"
-        @click="router.push('/audio')"
-        >前往音频分集<ArrowRight class="h-4 w-4"
-      /></Button>
+      >
     </WorkbenchActionBar>
     <div v-if="error" class="workbench-feedback" tabindex="0" role="region" aria-label="制作反馈与报告">
       <Alert v-if="error" variant="destructive">{{ error }}</Alert>

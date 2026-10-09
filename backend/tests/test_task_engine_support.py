@@ -9,8 +9,7 @@ from backend.platform import task_engine_support
 from backend.platform.task_contracts import TaskCancelledError, TaskClaim
 
 
-@pytest.mark.parametrize("kind", ["audio.zip", "bgm.package"])
-def test_disk_zip_cancellation_removes_partial_artifact(tmp_path, monkeypatch, kind):
+def test_disk_zip_cancellation_removes_partial_artifact(tmp_path, monkeypatch):
     from backend.platform import engine_task_executor as executor
     from backend.core.safe_filesystem import file_identity
     source = tmp_path / "chapter.mp3"
@@ -20,7 +19,7 @@ def test_disk_zip_cancellation_removes_partial_artifact(tmp_path, monkeypatch, k
     db = SimpleNamespace(get=lambda *_: SimpleNamespace(username="user"))
     monkeypatch.setattr(task_engine_support, "SessionLocal", lambda: nullcontext(db))
     monkeypatch.setattr(task_engine_support, "task_attempt_path", lambda *_: staged)
-    relative = "08_bgm/chapter.mp3" if kind == "bgm.package" else source.name
+    relative = "08_bgm/chapter.mp3"
     monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {relative: {"identity": list(file_identity(source.stat()))}})
     monkeypatch.setattr(executor, "get_or_prepare_layout", lambda: SimpleNamespace(workspace=tmp_path, bgm=tmp_path))
     monkeypatch.setattr(executor, "update_progress", lambda *_: None)
@@ -30,10 +29,9 @@ def test_disk_zip_cancellation_removes_partial_artifact(tmp_path, monkeypatch, k
         calls += 1
         return calls >= 5
     monkeypatch.setattr(executor, "cancellation_requested", cancelled)
-    payload = {"base": "book", "chapters": ["chapter"], "files": [{"relative_path": source.name}]}
-    runner = executor._run_bgm_package if kind == "bgm.package" else executor._run_audio_zip
+    payload = {"base": "book", "chapters": ["chapter"]}
     with pytest.raises(TaskCancelledError):
-        runner(SimpleNamespace(progress_percent=lambda *_: None), claim, payload, [], [])
+        executor._run_bgm_package(SimpleNamespace(progress_percent=lambda *_: None), claim, payload, [], [])
     assert not staged.exists()
     assert source.stat().st_size == 4 * 1024 * 1024
 

@@ -103,6 +103,7 @@ watch(pickerTarget, (t) => {
 const mergeSource = ref<string | null>(null)
 const mergeQuery = ref('')
 const mergePage = ref(1)
+const mergePageSize = ref(10)
 const mergeTotal = ref(0)
 watch(mergeQuery, () => { mergePage.value = 1 })
 const mergeTarget = ref<string | null>(null)
@@ -171,13 +172,13 @@ function overlayKeydown(event: KeyboardEvent) {
 watch(mergeSourceItem, (t) => {
   if (!t && mergeSource.value) closeMerge()
 })
-watch([mergeSource, mergeQuery, mergePage], async () => {
+watch([mergeSource, mergeQuery, mergePage, mergePageSize], async () => {
   if (!mergeSource.value) return
   const isCurrent = captureScope()
-  const source = mergeSource.value, q = mergeQuery.value, page = mergePage.value
+  const source = mergeSource.value, q = mergeQuery.value, page = mergePage.value, size = mergePageSize.value
   try {
-    const result = await withinScope(listVoices(script, { page, page_size: 10, q, filter: 'all' }, undefined, false, true), isCurrent)
-    if (mergeSource.value === source && mergeQuery.value === q && mergePage.value === page) { mergeTargetItems.value = result.speakers; mergeTotal.value = result.pagination?.total ?? 0 }
+    const result = await withinScope(listVoices(script, { page, page_size: size, q, filter: 'all' }, undefined, false, true), isCurrent)
+    if (mergeSource.value === source && mergeQuery.value === q && mergePage.value === page && mergePageSize.value === size) { mergeTargetItems.value = result.speakers; mergeTotal.value = result.pagination?.total ?? 0 }
   } catch { /* The source row stays available while retrying a search. */ }
 })
 // Searchable target list: every character except the source itself (auto-filter).
@@ -927,11 +928,11 @@ watch(
           />
         </div>
 
-        <div class="max-h-80 space-y-1.5 overflow-y-auto">
+        <div class="box-border overflow-x-hidden" :class="mergePageSize > 10 ? 'overflow-y-auto' : 'overflow-y-hidden'" style="height: 360px">
           <label
             v-for="s in mergeOptions"
             :key="s.name"
-            class="flex cursor-pointer items-center gap-3 rounded px-2 py-1.5 hover:bg-accent/50"
+            class="flex h-9 cursor-pointer items-center gap-3 overflow-hidden rounded px-2 hover:bg-accent/50"
             :class="{ 'bg-accent/60': mergeTarget === s.name }"
           >
             <input
@@ -952,7 +953,7 @@ watch(
             没有匹配的目标角色。
           </p>
         </div>
-        <Pager :page="mergePage" :page-count="Math.max(1, Math.ceil(mergeTotal / 10))" :total="mergeTotal" :page-size="10" unit="个角色" @update:page="mergePage = $event" />
+        <Pager :page="mergePage" :page-count="Math.max(1, Math.ceil(mergeTotal / mergePageSize))" :total="mergeTotal" :page-size="mergePageSize" unit="个角色" @update:page="mergePage = $event" @update:page-size="(s: number) => { mergePageSize = s; mergePage = 1 }" />
 
         <Alert v-if="mergeError" variant="destructive">{{ mergeError }}</Alert>
 
@@ -998,24 +999,24 @@ watch(
 </template>
 
 <style scoped>
-.voices-page :deep(.page-header) { margin-bottom:12px; }
+.voices-page :deep(.page-header) { margin-bottom:8px; }
 .voices-production { overflow:hidden; border-radius:12px; }
 .voices-stage + .voices-stage { position:relative; }
 .voices-stage + .voices-stage::before { position:absolute; top:0; right:12px; left:12px; height:1px; background:hsl(var(--border) / .65); content:''; }
 @media(min-width:881px) and (min-height:700px) {
-  .voices-page { display:flex; flex-direction:column; height:100%; }
+  .voices-page.voices-page { display:flex; flex-direction:column; height:100%; gap:6px; }
   .voices-page > :not(.voice-workbench) { flex-shrink:0; }
   .voices-page :deep(.voice-workbench) { flex:1; min-height:180px; }
   .voices-page :deep(.voice-list), .voices-page :deep(.voice-detail) { min-height:0; }
   .voices-page :deep(.voice-scroll) { min-height:0; max-height:none; }
   .voices-page :deep(.voice-detail) { max-height:none; }
   .voices-stage { display:grid; grid-template-columns:160px minmax(0,1fr); align-items:center; }
-  .voices-stage-content { padding-top:12px; max-height:clamp(88px, 14dvh, 128px); overflow-y:auto; }
+  .voices-stage-content { padding-top:8px; max-height:clamp(88px, 14dvh, 128px); overflow-y:auto; }
 }
 .voices-stage :deep(button), .voices-footer :deep(button) { min-height:32px; height:32px; font-size:12px; }
 .voices-stage :deep(label), .voices-stage :deep(.text-sm) { font-size:12px; }
 
 .voices-stage :deep(h3) { font-size:12px; }
-@media(min-width:1200px) { .voices-stage { display:grid; grid-template-columns:200px minmax(0,1fr); align-items:center; } .voices-stage-content { padding-top:12px; } }
+@media(min-width:1200px) { .voices-stage { display:grid; grid-template-columns:200px minmax(0,1fr); align-items:center; } .voices-stage-content { padding-top:8px; } }
 @media(pointer:coarse) { .voices-stage :deep(button), .voices-footer :deep(button) { min-height:44px; height:auto; } }
 </style>

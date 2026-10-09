@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
 import { computed, onMounted, onActivated, onDeactivated, onBeforeUnmount, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, RefreshCw, Search, WalletCards } from 'lucide-vue-next'
+import { RefreshCw, Search, WalletCards } from 'lucide-vue-next'
 import Button from '@/components/ui/Button.vue'
 import Card from '@/components/ui/Card.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import { getQuota, quotaTransactionPage, type QuotaBalance, type QuotaTransaction } from '@/api/quota'
+import Pager from '@/views/textformat/Pager.vue'
 import { useListPage } from '@/composables/useListPage'
 import { formatBytes as formatBytesBase, type BytesFormat } from '@/utils/format'
 
@@ -18,7 +20,8 @@ const error = ref('')
 const search = ref('')
 const transactionFilter = ref('all')
 const page = ref(1)
-const pageSize = 20
+const pageSize = ref(10)
+function changePageSize(size: number) { pageSize.value = size; if (page.value !== 1) page.value = 1; else void loadTransactions() }
 let balanceAbort: AbortController | null = null
 const listPage = useListPage(loadTransactions, () => { balanceAbort?.abort(); transactions.value = []; balance.value = null; dailyAmounts.value = []; storageBytes.value = null })
 const pagination = listPage.pagination
@@ -38,7 +41,7 @@ const dailyUsage = computed(() => {
 const hasUsage = computed(() => dailyAmounts.value.some(amount => amount > 0))
 const transactionTotal = computed(() => pagination.value?.total ?? 0)
 const pagedTransactions = computed(() => transactions.value)
-const pageCount = computed(() => Math.max(1, Math.ceil(transactionTotal.value / pageSize)))
+const pageCount = computed(() => Math.max(1, Math.ceil(transactionTotal.value / pageSize.value)))
 watch([search, transactionFilter], () => { page.value = 1; void loadTransactions() })
 watch(page, () => { void loadTransactions() })
 
@@ -59,7 +62,7 @@ function formatDate(value: string) {
 async function loadTransactions() {
   const signal = listPage.begin()
   try {
-    const response = await quotaTransactionPage({ page: page.value, page_size: pageSize, q: search.value, filter: transactionFilter.value }, signal)
+    const response = await quotaTransactionPage({ page: page.value, page_size: pageSize.value, q: search.value, filter: transactionFilter.value }, signal)
     if (signal.aborted) return
     transactions.value = response.items; listPage.received(response.pagination, page)
     dailyAmounts.value = response.daily; storageBytes.value = response.registered_storage_bytes
@@ -93,7 +96,7 @@ onBeforeUnmount(() => balanceAbort?.abort())
         <div class="workbench-context-metric"><strong>{{ loading ? '…' : balance?.available_units ?? '—' }}</strong>可用额度</div>
         <div class="workbench-context-metric"><strong>{{ loading ? '…' : balance?.reserved_units ?? '—' }}</strong>预留额度</div>
       </template>
-      <template #actions><Button variant="outline" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" :class="refreshing ? 'animate-spin' : ''" />{{ refreshing ? '刷新中' : '刷新' }}</Button></template>
+      <template #actions><Button variant="outline" :disabled="refreshing" @click="load"><RefreshCw class="h-4 w-4" :class="refreshing ? 'animate-spin' : ''" />刷新</Button></template>
     </WorkbenchContextBar>
 
     <div class="page-region" role="region" aria-label="页面工作区" tabindex="0">
@@ -129,9 +132,9 @@ onBeforeUnmount(() => balanceAbort?.abort())
           </div>
         </div>
         <Card v-if="loading" class="usage-empty">正在读取…</Card>
-        <Card v-else-if="pagedTransactions.length" class="usage-table-card"><div class="usage-table"><table class="workbench-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>额度</th><th>可用余额</th></tr></thead>
+        <Card v-else-if="pagedTransactions.length" class="usage-table-card"><div class="usage-table fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', min: 28 }"><table class="workbench-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>额度</th><th>可用余额</th></tr></thead>
           <tbody><tr v-for="row in pagedTransactions" :key="row.id"><td>{{ formatDate(row.created_at) }}</td><td>{{ row.resource_type ? `${row.operation_type || '模型调用'}（${row.resource_type}）` : transactionLabel(row.kind) }}</td><td>{{ row.resource_type === 'LLM' ? '模型输出' : row.resource_type === 'TTS' ? '合成输入' : row.note || row.task_id || '—' }}</td><td>{{ ['consume', 'settle'].includes(row.kind) ? `-${row.char_count ?? Math.abs(row.amount)}` : `${row.amount > 0 ? '+' : ''}${row.amount}` }}</td><td>{{ row.available_after ?? '—' }}</td></tr></tbody></table></div>
-          <div class="usage-pagination"><span>第 {{ (page - 1) * pageSize + 1 }}–{{ Math.min(page * pageSize, transactionTotal) }} 条，共 {{ transactionTotal }} 条</span><div><Button size="sm" variant="outline" :disabled="page <= 1" aria-label="上一页" @click="page--"><ChevronLeft class="h-4 w-4" /></Button><span>{{ page }} / {{ pageCount }}</span><Button size="sm" variant="outline" :disabled="page >= pageCount" aria-label="下一页" @click="page++"><ChevronRight class="h-4 w-4" /></Button></div></div>
+          <Pager class="border-t px-3 py-2" :page="page" :page-count="pageCount" :total="transactionTotal" :page-size="pageSize" unit="条" @update:page="page = $event" @update:page-size="changePageSize" />
         </Card>
         <Card v-else class="usage-empty">{{ transactions.length ? '没有符合筛选条件的记录。' : '暂无额度明细。开始处理任务后，记录会显示在这里。' }}</Card>
       </section>
@@ -140,5 +143,5 @@ onBeforeUnmount(() => balanceAbort?.abort())
 </template>
 
 <style scoped>
-.usage-page{gap:10px}.usage-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.usage-card{display:grid;gap:5px;padding:14px}.usage-card>span,.usage-card small,.usage-card--plan>div{color:hsl(var(--muted-foreground));font-size:11px}.usage-card strong{font-size:21px;font-weight:750;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.usage-card--plan>div{display:flex;justify-content:space-between;align-items:center;gap:6px}.usage-card--plan strong{font-size:18px}.usage-note{display:flex;align-items:flex-start;gap:12px;padding:12px 14px}.usage-note strong{flex:none;font-size:11px}.usage-note p{color:hsl(var(--muted-foreground));font-size:11px;line-height:1.5}.usage-section{display:grid;gap:10px}.section-heading{display:flex;justify-content:space-between;align-items:center;gap:10px}.section-heading h2{font-size:14px;font-weight:750}.muted{color:hsl(var(--muted-foreground));font-size:11px}.usage-charts .section-heading>div{display:flex;align-items:baseline;gap:9px}.usage-chart{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;min-height:150px;padding:14px 20px}.chart-day{display:grid;grid-template-rows:16px 1fr 16px;justify-items:center;gap:7px;min-width:0}.chart-day>strong{font-size:10px;font-variant-numeric:tabular-nums}.chart-track{display:flex;align-items:flex-end;justify-content:center;width:100%;max-width:52px;border-radius:7px;background:hsl(var(--muted)/.55)}.chart-track span{display:block;width:100%;min-height:0;border-radius:7px;background:linear-gradient(180deg,hsl(199 89% 58%),hsl(var(--primary)));transition:height .2s}.chart-day small{color:hsl(var(--muted-foreground));font-size:10px}.usage-empty{padding:22px;text-align:center;color:hsl(var(--muted-foreground));font-size:12px}.usage-table-card{overflow:hidden}.usage-table{overflow-x:auto}table{width:100%;min-width:620px;border-collapse:collapse;font-size:11px}.usage-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid hsl(var(--destructive)/.25);border-radius:9px;padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.usage-transaction-heading>div:first-child{display:flex;align-items:baseline;gap:9px}.usage-filters{display:flex;align-items:center;gap:8px}.usage-search{display:flex;align-items:center;gap:7px;width:min(280px,35vw);height:34px;padding:0 10px;border:1px solid hsl(var(--input));border-radius:9px;color:hsl(var(--muted-foreground));background:hsl(var(--card))}.usage-search input{min-width:0;width:100%;border:0;outline:0;background:transparent;color:hsl(var(--foreground));font-size:12px}.usage-filters select{height:34px;padding:0 10px;border:1px solid hsl(var(--input));border-radius:9px;background:hsl(var(--card));font-size:12px}.usage-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;border-top:1px solid hsl(var(--border));color:hsl(var(--muted-foreground));font-size:11px}.usage-pagination>div{display:flex;align-items:center;gap:8px}.usage-pagination button{width:30px;height:30px;padding:0}@media(max-width:1000px){.usage-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:650px){.usage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.usage-note{flex-direction:column}.usage-charts .section-heading>div{align-items:flex-start;flex-direction:column;gap:2px}.usage-chart{gap:7px;padding:13px 10px}.usage-transaction-heading{align-items:flex-start;flex-direction:column}.usage-filters{width:100%}.usage-search{width:auto;flex:1}}
+.usage-page{gap:10px}.usage-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px}.usage-card{display:grid;gap:5px;padding:14px}.usage-card>span,.usage-card small,.usage-card--plan>div{color:hsl(var(--muted-foreground));font-size:11px}.usage-card strong{font-size:21px;font-weight:750;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.usage-card--plan>div{display:flex;justify-content:space-between;align-items:center;gap:6px}.usage-card--plan strong{font-size:18px}.usage-note{display:flex;align-items:flex-start;gap:12px;padding:12px 14px}.usage-note strong{flex:none;font-size:11px}.usage-note p{color:hsl(var(--muted-foreground));font-size:11px;line-height:1.5}.usage-section{display:grid;gap:10px}.section-heading{display:flex;justify-content:space-between;align-items:center;gap:10px}.section-heading h2{font-size:14px;font-weight:750}.muted{color:hsl(var(--muted-foreground));font-size:11px}.usage-charts .section-heading>div{display:flex;align-items:baseline;gap:9px}.usage-chart{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:12px;min-height:150px;padding:14px 20px}.chart-day{display:grid;grid-template-rows:16px 1fr 16px;justify-items:center;gap:7px;min-width:0}.chart-day>strong{font-size:10px;font-variant-numeric:tabular-nums}.chart-track{display:flex;align-items:flex-end;justify-content:center;width:100%;max-width:52px;border-radius:7px;background:hsl(var(--muted)/.55)}.chart-track span{display:block;width:100%;min-height:0;border-radius:7px;background:linear-gradient(180deg,hsl(199 89% 58%),hsl(var(--primary)));transition:height .2s}.chart-day small{color:hsl(var(--muted-foreground));font-size:10px}.usage-empty{padding:22px;text-align:center;color:hsl(var(--muted-foreground));font-size:12px}.usage-table-card{overflow:hidden}.usage-table{min-width:0}table{width:100%;min-width:620px;border-collapse:collapse;font-size:11px}.usage-alert{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid hsl(var(--destructive)/.25);border-radius:9px;padding:10px 12px;color:hsl(var(--destructive));font-size:12px}.usage-transaction-heading>div:first-child{display:flex;align-items:baseline;gap:9px}.usage-filters{display:flex;align-items:center;gap:8px}.usage-search{display:flex;align-items:center;gap:7px;width:min(280px,35vw);height:34px;padding:0 10px;border:1px solid hsl(var(--input));border-radius:9px;color:hsl(var(--muted-foreground));background:hsl(var(--card))}.usage-search input{min-width:0;width:100%;border:0;outline:0;background:transparent;color:hsl(var(--foreground));font-size:12px}.usage-filters select{height:34px;padding:0 10px;border:1px solid hsl(var(--input));border-radius:9px;background:hsl(var(--card));font-size:12px}.usage-pagination{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;border-top:1px solid hsl(var(--border));color:hsl(var(--muted-foreground));font-size:11px}.usage-pagination>div{display:flex;align-items:center;gap:8px}.usage-pagination button{width:30px;height:30px;padding:0}@media(max-width:1000px){.usage-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}@media(max-width:650px){.usage-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.usage-note{flex-direction:column}.usage-charts .section-heading>div{align-items:flex-start;flex-direction:column;gap:2px}.usage-chart{gap:7px;padding:13px 10px}.usage-transaction-heading{align-items:flex-start;flex-direction:column}.usage-filters{width:100%}.usage-search{width:auto;flex:1}}
 </style>

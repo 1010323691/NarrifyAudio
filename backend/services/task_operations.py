@@ -14,7 +14,7 @@ from ..platform.models import OutboxEvent, Project, QuotaTransaction, Task, Task
 from ..platform.platform_settings import settings
 from ..platform.task_context import _as_utc
 from ..platform.task_admission import LLM_TASK_TYPES
-from ..platform.task_registry import task_worker_group  # noqa: F401 — admin views import it from here
+from ..platform.task_registry import RETIRED_TASK_TYPES, task_worker_group  # noqa: F401 — admin views import it from here
 from ..platform.task_lifecycle import (
     ACTIVE_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -84,6 +84,8 @@ def check_retry_eligible(db: Session, task: Task) -> int:
     """
     if task.status not in {"failed", "cancelled", "timeout"}:
         raise RetryNotAllowedError("任务当前不可重试")
+    if task.task_type in RETIRED_TASK_TYPES:
+        raise RetryNotAllowedError("该任务类型已下线，无法重试")
     metered = db.scalar(select(QuotaTransaction.id).where(
         QuotaTransaction.task_id == task.id,
         QuotaTransaction.resource_type.in_(["LLM", "TTS"]),

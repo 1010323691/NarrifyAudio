@@ -102,6 +102,8 @@ const lib = ref<MusicLibrary | null>(null)
 const listPage = useListPage(refresh, () => { lib.value = null; pageNames.value = []; clearSelection() })
 const pagination = listPage.pagination
 const page = ref(1)
+const pageSize = ref(10)
+function changePageSize(size: number) { pageSize.value = size; if (page.value !== 1) page.value = 1; else void refresh() }
 const pageNames = ref<string[]>([])
 const tagCounts = ref<Record<string, Record<string, number>>>({})
 const loading = ref(true)
@@ -184,7 +186,7 @@ async function refresh() {
   loadError.value = ''
   const signal = listPage.begin()
   try {
-    const response = await getLibrary({ page: page.value, page_size: 20, q: search.value }, signal, musicFilters())
+    const response = await getLibrary({ page: page.value, page_size: pageSize.value, q: search.value }, signal, musicFilters())
     if (signal.aborted) return
     loadError.value = ''
     const retainedTracks = Object.fromEntries(Object.entries(lib.value?.tracks ?? {}).filter(([name]) => selected[name]))
@@ -1158,7 +1160,7 @@ onActivated(() => {
             </div>
 
             <!-- 行 = 曲目表 -->
-            <Table class="music-data-table rounded-lg border" tabindex="0" role="region" aria-label="音乐列表，可横向滚动">
+            <Table class="music-data-table rounded-lg border" :page-size="pageSize" :row-height="72" tabindex="0" role="region" aria-label="音乐列表，可横向滚动">
               <TableHeader>
                 <TableRow>
                   <TableHead class="w-8">
@@ -1227,7 +1229,7 @@ onActivated(() => {
                   <TableCell class="w-28">
                     <div
                       v-if="CATEGORIES.some((c) => tr.tags?.[c]?.length)"
-                      class="group relative flex min-h-8 w-32 flex-wrap items-center gap-1 focus:outline-none"
+                      class="group relative flex min-h-8 w-32 flex-nowrap items-center gap-1 focus:outline-none"
                       tabindex="0"
                       :aria-label="`查看 ${name} 的全部标签`"
                     >
@@ -1356,7 +1358,7 @@ onActivated(() => {
               </TableBody>
             </Table>
 
-            <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / 20))" :total="pagination?.total ?? 0" :page-size="20" unit="首" @update:page="page = $event" />
+            <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / pageSize))" :total="pagination?.total ?? 0" :page-size="pageSize" unit="首" @update:page="page = $event" @update:page-size="changePageSize" />
             <p v-if="!trackList.length" class="text-sm text-muted-foreground">
               <template v-if="view.kind === 'folder'">
                 「{{ view.name }}」下没有曲目——点「批量上传」，或把 mp3 / wav / flac 直接拖入本卡片（文件将归属该文件夹）。

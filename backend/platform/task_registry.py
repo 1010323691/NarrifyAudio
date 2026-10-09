@@ -9,7 +9,7 @@ source of truth.
 
 The executor column names the binding entry in the owning dispatcher's
 explicit function map (``task_worker.DIRECT_EXECUTORS`` for the platform
-direct types, ``engine_task_executor.ENGINE_BRANCHES`` for the thirteen
+direct types, ``engine_task_executor.ENGINE_BRANCHES`` for the eleven
 legacy engine types). The table deliberately holds names, not live function
 references: a single literal table holding the references would create a
 module cycle (both dispatchers import the type frozensets at module level),
@@ -44,19 +44,16 @@ class TaskTypeSpec:
 
 _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("project.progress", "_execute_project_progress"),
-    # 平台直连（6）：task_worker.DIRECT_EXECUTORS
+    # 平台直连（含 project.progress 共 8）：task_worker.DIRECT_EXECUTORS
     TaskTypeSpec("text.format", "_execute_text_format"),
     TaskTypeSpec("book.analyze", "_execute_book_analyze"),
     TaskTypeSpec("book.split", "_execute_book_split"),
     TaskTypeSpec("script.parse", "_execute_script_parse", billable=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  entry_identity=("source_name",)),
-    TaskTypeSpec("audio.silences", "_execute_audio_silences",
-                 entry_identity=("source_name",)),
-    TaskTypeSpec("audio.cut", "_execute_audio_cut", entry_identity=("source_name",)),
     TaskTypeSpec("resources.scan", "_execute_resource_scan", entry_identity=("scan_scope",)),
     TaskTypeSpec("resources.package", "_execute_resource_package", entry_identity=("export_id",)),
     TaskTypeSpec("resources.cleanup", "_execute_resource_cleanup", entry_identity=("cleanup_id",)),
-    # legacy 引擎（13）：engine_task_executor.ENGINE_BRANCHES
+    # legacy 引擎（11）：engine_task_executor.ENGINE_BRANCHES
     TaskTypeSpec("voices.foundation", "_run_voices_foundation", billable=True, legacy_engine=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  entry_identity=("speakers", "script")),
     TaskTypeSpec("voices.clone", "_run_voices_clone", billable=True, legacy_engine=True, gpu_initial="TTS", gpu_stages=("TTS",),
@@ -74,9 +71,6 @@ _SPECS: tuple[TaskTypeSpec, ...] = (
     TaskTypeSpec("bgm.package", "_run_bgm_package", legacy_engine=True, entry_identity=("base",)),
     TaskTypeSpec("music.suggest_tags", "_run_music_suggest_tags", billable=True, admin_only=True, gpu_initial="LLM", gpu_stages=("LLM",),
                  legacy_engine=True, entry_identity=("name",)),
-    TaskTypeSpec("audio.zip", "_run_audio_zip", legacy_engine=True, entry_identity=("base",)),
-    TaskTypeSpec("audio.export", "_run_audio_export", legacy_engine=True,
-                 entry_identity=("source_relative",)),
     TaskTypeSpec("tts.reset", "_run_tts_reset", legacy_engine=True, entry_identity=("scripts",)),
 )
 
@@ -96,7 +90,6 @@ _WORKER_GROUPS = {
     "music": "llm",
     "tts": "tts",
     "voices": "tts",
-    "audio": "audio",
     "bgm": "audio",
     "book": "system",
     "text": "system",
@@ -104,7 +97,18 @@ _WORKER_GROUPS = {
 }
 WORKER_GROUP_NAMES = ("llm", "tts", "audio", "system", "worker")
 
+# 已下线的任务类型（「音频分集」）：库里可能还留着历史行或升级时在途的行。
+# 不再有执行器，但要给出诚实的展示名、拒绝重试，并让在途行带着明确原因失败。
+RETIRED_TASK_TYPES = {
+    "audio.silences": "音频分集（停顿检测，已下线）",
+    "audio.cut": "音频分集（切分，已下线）",
+    "audio.zip": "音频分集（打包，已下线）",
+    "audio.export": "音频分集（导出，已下线）",
+}
+
 
 def task_worker_group(task_type: str) -> str:
     """Coarse worker group (llm/tts/audio/system/worker) for the admin console."""
+    if task_type in RETIRED_TASK_TYPES:
+        return "audio"
     return _WORKER_GROUPS.get(task_type.split(".", 1)[0], "worker")

@@ -1,11 +1,10 @@
-"""File endpoints — list a module's output directory and serve files for
-download / preview (fetched by the browser; also the source of preview text)."""
+"""File endpoints — upload, and serve a module's files for download / preview
+(fetched by the browser; also the source of preview text)."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -16,13 +15,11 @@ from ..platform.project_context import active_project
 from ..platform.models import Project, ProjectFile, new_id
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.platform_settings import settings
-from ..platform.storage import configured_storage_root, project_input_object_key, safe_display_name, project_directory_key, available_file_name, project_workspace_path
+from ..platform.storage import project_input_object_key, safe_display_name, available_file_name, project_workspace_path
 from . import _common
 from ..platform.resource_delivery import require_delivery, DeliveryDenied
 from ..core.safe_filesystem import safe_regular_path
 from ..core.filenames import safe_filename, legacy_storage_name
-
-from ..services.list_paging import path_page
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -39,69 +36,6 @@ def _module_dir(module: str) -> Path:
     if d is None:
         raise HTTPException(404, "未知模块")
     return d
-
-
-@router.get("/list/{module}")
-def list_module(
-    module: str,
-    recursive: bool = Query(False),
-    page: Annotated[int | None, Query(ge=1)] = None,
-    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    q: str = "", extensions: str = "", exclude_suffix: str = "", kind: str = "all",
-    ctx: AuthContext = Depends(get_auth_context),
-    db: Session = Depends(get_db),
-) -> dict:
-    if module not in _MODULE_ATTRS:
-        raise HTTPException(404, "未知模块")
-    if not is_workspace_set():
-        # No workspace yet: nothing to list (the pipeline is locked).
-        return {"path": "", "items": []}
-    d = _module_dir(module)
-    if not d.exists():
-        return {"path": str(d), "items": []}
-    paths = sorted(d.rglob("*") if recursive else d.iterdir())
-    pagination = None
-    if page is not None:
-        paths, pagination = path_page([p for p in paths if not recursive or not p.is_dir()], d, page, page_size, q, extensions, exclude_suffix, kind)
-    catalog: dict[str, ProjectFile] = {}
-    project = active_project(db, ctx.user, ctx.session)
-    if project is not None:
-        prefix = f"{project_directory_key(db, ctx.user.username, project.id)}/{module}/"
-        catalog = {
-            item.object_key: item
-            for item in db.scalars(
-                select(ProjectFile).where(
-                    ProjectFile.owner_id == ctx.user.id,
-                    ProjectFile.project_id == project.id,
-                    ProjectFile.object_key.in_([prefix + p.relative_to(d).as_posix() for p in paths]) if page is not None else ProjectFile.object_key.like(prefix + "%"),
-                    ProjectFile.deleted_at.is_(None),
-                )
-            ).all()
-        }
-    storage_root = configured_storage_root(db).resolve()
-    items = []
-    for p in paths:
-        resolved = p.resolve()
-        if not resolved.is_relative_to(d.resolve()) or p.is_symlink():
-            continue
-        if recursive and p.is_dir():
-            continue
-        relative = p.relative_to(d).as_posix()
-        item = {
-            "name": relative if recursive else p.name,
-            "is_dir": p.is_dir(),
-            "size": (p.stat().st_size if p.is_file() else None),
-        }
-        if p.is_file():
-            try:
-                object_key = p.resolve().relative_to(storage_root).as_posix()
-            except ValueError:
-                object_key = ""
-            cataloged = catalog.get(object_key)
-            if cataloged is not None:
-                item.update({"id": cataloged.id, "file_id": cataloged.id, "project_id": cataloged.project_id})
-        items.append(item)
-    return {"path": str(d), "items": items, **({"pagination": pagination} if pagination else {})}
 
 
 @router.get("/download/{module}/{name:path}")

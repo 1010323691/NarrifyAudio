@@ -20,7 +20,6 @@ export const TASK_MODULES: TaskModuleDef[] = [
   { key: 'tts', label: '音频合成', prefixes: ['tts.batch', 'tts.reset'] },
   { key: 'preview', label: '整章预览', prefixes: ['tts.preview_render'] },
   { key: 'merge', label: '音频合并', prefixes: ['tts.merge'] },
-  { key: 'audio', label: '音频分集', prefixes: ['audio.'] },
   { key: 'bgm', label: '背景音乐', prefixes: ['bgm.'] },
   { key: 'music', label: '音乐库', prefixes: ['music.'] },
   { key: 'resources', label: '资源管理', prefixes: ['resources.'] },

@@ -77,7 +77,7 @@
     height: auto;
     min-height: 0;
   }
-  .app-shell.app-shell :is(.production-scroll, .voice-scroll),
+  .app-shell.app-shell :is(.production-scroll, .voice-scroll):not(.fixed-rows),
   .app-shell.app-shell .wb-grid > :first-child > .overflow-y-auto {
     flex: none;
     height: 320px;

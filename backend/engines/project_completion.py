@@ -137,8 +137,6 @@ def project_completion(root: Path, *, section: str | None = None) -> dict:
         "05_audio_chunk": ratio(segment_done, segment_total, "段", known=parsed_all or not total_chapters),
         "06_audio_merge": ratio(merged, total_chapters, "章节"),
         "08_bgm": ratio(mixed, total_chapters, "章节"),
-        # Episode totals require the chosen splitting plan; a file alone cannot establish 100%.
-        "07_output": ratio(0, 0, "分集", known=False),
     }
     return production if section == "production" else {"02_split_text": text_completion, **catalog, **production}
 

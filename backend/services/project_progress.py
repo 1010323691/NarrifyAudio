@@ -20,7 +20,7 @@ from .task_operations import owned_project
 STAGE_SECTIONS = {
     'text': ('02_split_text',),
     'catalog': ('03_parsed_json', '04_voice_profiles'),
-    'production': ('05_audio_chunk', '06_audio_merge', '08_bgm', '07_output'),
+    'production': ('05_audio_chunk', '06_audio_merge', '08_bgm'),
 }
 
 

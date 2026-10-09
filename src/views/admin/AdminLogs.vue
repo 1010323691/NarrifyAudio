@@ -6,7 +6,6 @@ import AdminView from '@/components/admin/AdminView.vue'
 import AdminSegmented from '@/components/admin/AdminSegmented.vue'
 import AdminTable from '@/components/admin/AdminTable.vue'
 import AdminDrawer from '@/components/admin/AdminDrawer.vue'
-import AdminEmptyState from '@/components/admin/AdminEmptyState.vue'
 import ChartCard from '@/components/admin/ChartCard.vue'
 import AdminChart from '@/components/admin/charts/AdminChart.vue'
 import { donutOption, timeSeriesOption } from '@/components/admin/charts/options'
@@ -22,7 +21,7 @@ import { series } from './series'
 const HOURS = [[1, '1 小时'], [24, '24 小时'], [168, '7 天'], [720, '30 天']] as const
 const MODULES = ['system', 'api', 'llm', 'tts', 'audio', 'worker']
 const MODULE_LABELS: Record<string, string> = { system: '系统 / 审计', api: 'API', llm: 'LLM', tts: 'TTS', audio: '音频', worker: '其他' }
-const PAGE_SIZE = 50
+const pageSize = ref(10)
 
 const logHours = ref<number>(24)
 const logLevel = ref('all')
@@ -39,7 +38,7 @@ const auditError = ref('')
 
 const loader = useAdminLoader(async (signal) => {
   const [rows, distribution] = await Promise.all([
-    api.eventPage(logLevel.value, logModule.value, logSearch.value, logHours.value, eventPage.value, signal),
+    api.eventPage(logLevel.value, logModule.value, logSearch.value, logHours.value, eventPage.value, pageSize.value, signal),
     api.getEventStats(logLevel.value, logModule.value, logSearch.value, logHours.value, signal),
   ])
   return () => {
@@ -49,6 +48,7 @@ const loader = useAdminLoader(async (signal) => {
 })
 watch([logLevel, logModule, logHours, logSearch], () => { eventPage.value = 1 })
 watch([eventPage, logLevel, logModule, logHours, logSearch], () => { void loader.load() })
+function changePageSize(size: number) { pageSize.value = size; if (eventPage.value !== 1) eventPage.value = 1; else void loader.load() }
 const exportUrl = computed(() => api.eventExportUrl(logLevel.value, logModule.value, logSearch.value, logHours.value))
 
 const scale = computed(() => (stats.value?.step_seconds ?? 3600) >= 21600 ? 'hour' as const : 'minute' as const)
@@ -99,7 +99,7 @@ async function openEvent(entry: api.AdminEvent) {
           <form class="search-field" role="search" @submit.prevent="logSearch = searchDraft.trim()"><Search class="h-4 w-4" aria-hidden="true" /><Input v-model="searchDraft" aria-label="搜索日志" placeholder="搜索类型、消息或 ID，回车确认" class="search" /></form>
         </div>
       </div>
-      <AdminTable table-class="log-table">
+      <AdminTable table-class="log-table" :page-size="pageSize">
         <thead><tr><th>时间</th><th>级别</th><th>模块</th><th>类型</th><th>摘要</th></tr></thead>
         <tbody>
           <tr v-for="entry in events" :key="entry.id" class="is-clickable" tabindex="0" :aria-selected="selected?.id === entry.id" @click="openEvent(entry)" @keydown.enter="openEvent(entry)">
@@ -109,10 +109,10 @@ async function openEvent(entry: api.AdminEvent) {
             <td class="mono">{{ entry.type }}</td>
             <td class="clip" :title="entry.message">{{ entry.message }}</td>
           </tr>
+          <tr v-if="!events.length"><td colspan="5" class="admin-empty-cell">当前范围内没有记录，尝试扩大时间范围或调整筛选条件。</td></tr>
         </tbody>
       </AdminTable>
-      <AdminEmptyState v-if="!events.length" title="当前范围内没有记录" description="尝试扩大时间范围或调整筛选条件。" />
-      <Pager :page="eventPage" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / PAGE_SIZE))" :total="pagination?.total ?? 0" :page-size="PAGE_SIZE" unit="条" @update:page="eventPage = $event" />
+      <Pager :page="eventPage" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / pageSize))" :total="pagination?.total ?? 0" :page-size="pageSize" unit="条" @update:page="eventPage = $event" @update:page-size="changePageSize" />
     </section>
 
     <AdminDrawer v-if="selected" :title="selected.level === 'error' ? '异常详情' : '审计记录'" @close="selected = null">

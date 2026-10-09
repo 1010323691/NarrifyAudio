@@ -1,6 +1,6 @@
 // Display helpers — mirror the backend's formatting so the UI and backend agree.
 
-/** 90 -> "1:30", 3723 -> "1:02:03" (mirrors engines/audio.format_duration). */
+/** 90 -> "1:30", 3723 -> "1:02:03" (mm:ss / h:mm:ss). */
 export function formatDuration(totalSeconds: number | null | undefined): string {
   if (totalSeconds == null || Number.isNaN(totalSeconds)) return '—'
   const s = Math.max(0, Math.round(totalSeconds))
@@ -24,7 +24,7 @@ export interface BytesFormat {
 
 const DEFAULT_BYTES_FORMAT: BytesFormat = { emptyText: '—', lowRange: 'raw', decimals: 'smart' }
 
-/** 1536 -> "1.5 KB", 1048576 -> "1.0 MB" (mirrors engines/audio.format_bytes). */
+/** 1536 -> "1.5 KB", 1048576 -> "1.0 MB" (B / KB / MB …). */
 export function formatBytes(b: number | null | undefined, format: BytesFormat = DEFAULT_BYTES_FORMAT): string {
   if (b == null || Number.isNaN(b)) return format.emptyText
   if (format.nonFiniteText !== undefined && !Number.isFinite(b)) return format.nonFiniteText

@@ -10,19 +10,6 @@ export interface UploadResult {
   file_id?: string
   project_id?: string
 }
-export interface FileItem {
-  name: string
-  is_dir: boolean
-  size: number | null
-  id?: string
-  file_id?: string
-  project_id?: string
-}
-/** Response of ``GET /api/files/list/{module}``. */
-export interface DirListResult {
-  path: string
-  items: FileItem[]
-}
 
 // ------------------------------ text ------------------------------
 export interface TextStats {
@@ -151,57 +138,6 @@ export interface BookSmartSplitResult {
   baseline_chars: number | null
   original_count: number
   expected_format: string
-}
-
-// ------------------------------ audio ------------------------------
-export interface AudioProbeResult {
-  ok: boolean
-  name: string
-  path: string
-  duration: number
-  size: number
-  ext: string
-  mime: string
-}
-export interface AudioSegment {
-  index: number
-  start: number
-  duration: number
-}
-export interface AudioPlanResult {
-  duration: number
-  count: number
-  each: number
-  target: number
-  segments: AudioSegment[]
-}
-export interface AudioPause {
-  start: number
-  end: number
-}
-export interface AudioSilencesResult {
-  duration: number
-  pause_count: number
-  pauses: AudioPause[]
-  count: number
-  segments: AudioSegment[]
-  snapped: number
-  fallbacks: number
-  aligned: boolean
-  shifts: number[]
-}
-export interface AudioCutFile {
-  name: string
-  path: string
-  size: number
-  duration: number
-}
-export interface AudioCutResult {
-  output_dir: string
-  file_count: number
-  files: AudioCutFile[]
-  duration: number
-  smart_align: boolean
 }
 
 // ------------------------------ tts ------------------------------
@@ -353,13 +289,6 @@ export interface BatchFileStatus {
 /** Response of ``GET /api/tts/batch-status?scripts=…`` (one entry per requested file, in order). */
 export interface BatchStatusFiles {
   files: BatchFileStatus[]
-}
-/** Synthesis progress for the 待合成 card's 【已合成 / 总段落】 (``GET /api/tts/batch-status``). */
-export interface MergeResult {
-  file: string
-  path: string
-  segments: number
-  size: number
 }
 /** One row of the merge page's package list (GET /api/tts/merge-status): the package's
  *  synthesis completion. `total` = the source parsed JSON's synthesizable segment count
@@ -513,13 +442,6 @@ export interface AppConfig {
     ffmpeg_path: string
     ffprobe_path: string
   }
-  audio: {
-    target_duration: string
-    naming_format: string
-    start_number: string
-    smart_align: boolean
-    align_tolerance: number
-  }
   tts: {
     /** 长度排序后每批最多容纳的行数；合成支持 1..128。 */
     batch_concurrency: number
@@ -596,8 +518,6 @@ export interface AppConfig {
   ui: {
     theme: string
     show_parse_logs: boolean
-    /** 侧边栏是否显示「音频分集」导航项（默认关 = 隐藏）。 */
-    show_audio_split: boolean
   }
   /** 背景音乐系统（阶段 7）：章节级 BGM 匹配 + 最终混音。 */
   bgm: {

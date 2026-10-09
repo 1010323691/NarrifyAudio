@@ -8,7 +8,6 @@ import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import { useProjectOverview } from '@/composables/useProjectOverview'
 import { useProjectStore } from '@/stores/project'
-import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { modulePrefixes } from '@/utils/taskTypes'
 import { previewCompletion, stageProgressColor } from '@/utils/projectStageProgress'
@@ -16,7 +15,6 @@ import { previewCompletion, stageProgressColor } from '@/utils/projectStageProgr
 const route = useRoute()
 const router = useRouter()
 const project = useProjectStore()
-const settings = useSettingsStore()
 const projectId = computed(() => String(route.params.projectId || ''))
 const { completion, loading, refreshing, errors, refresh: load, tasks: taskSummary, tasksLoading, tasksError } = useProjectOverview(projectId)
 const tasks = computed(() => taskSummary.value?.statuses ?? [])
@@ -24,7 +22,7 @@ const error = ref('')
 let viewActive = false
 let scopeGeneration = 0
 
-const STAGE_DEFS = [
+const STAGES = [
   { key: 'text', label: '排版与分册', path: '/text', dir: '02_split_text', icon: FileText, taskTypes: modulePrefixes('text', 'book') },
   { key: 'script', label: '文本解析', path: '/script', dir: '03_parsed_json', icon: FileText, taskTypes: modulePrefixes('script') },
   { key: 'voices', label: '角色配音', path: '/voices', dir: '04_voice_profiles', icon: AudioLines, taskTypes: modulePrefixes('voices') },
@@ -32,17 +30,15 @@ const STAGE_DEFS = [
   { key: 'batch', label: '音频合成', path: '/batch', dir: '05_audio_chunk', icon: FileAudio2, taskTypes: ['tts.batch'] },
   { key: 'preview', label: '整章预览', path: '/preview', dir: '05_audio_chunk', icon: FileAudio2, taskTypes: ['tts.preview_render'] },
   { key: 'merge', label: '音频合并', path: '/merge', dir: '06_audio_merge', icon: FileAudio2, taskTypes: modulePrefixes('merge') },
-  { key: 'audio', label: '音频分集', path: '/audio', dir: '07_output', icon: AudioLines, taskTypes: modulePrefixes('audio'), optional: true },
   { key: 'bgm', label: '背景音乐', path: '/bgm', dir: '08_bgm', icon: AudioLines, taskTypes: modulePrefixes('bgm') },
 ]
-const STAGES = computed(() => STAGE_DEFS.filter((stage) => !stage.optional || settings.config?.ui.show_audio_split))
 
-function taskFor(stage: typeof STAGE_DEFS[number]) {
+function taskFor(stage: typeof STAGES[number]) {
   return tasks.value.find((task) => stage.taskTypes.some((prefix) => task.task_type.startsWith(prefix))
     && !['succeeded', 'cancelled'].includes(task.status))
 }
 
-function stageStatus(stage: typeof STAGE_DEFS[number]) {
+function stageStatus(stage: typeof STAGES[number]) {
   const task = taskFor(stage)
   if (task && ['failed', 'timeout'].includes(task.status)) return { label: '需处理', tone: 'negative' as const }
   if (task && ['running', 'queued', 'pending', 'retrying', 'paused', 'cancelling'].includes(task.status)) {
@@ -57,21 +53,21 @@ function stageStatus(stage: typeof STAGE_DEFS[number]) {
   return { label: '待开始', tone: 'neutral' as const }
 }
 
-function completionFor(stage: typeof STAGE_DEFS[number]) {
+function completionFor(stage: typeof STAGES[number]) {
   const value = completion.value[stage.dir]
   return stage.key === 'preview' && value ? previewCompletion(value) : value
 }
-const productionStages = computed(() => STAGES.value.filter(stage => stage.key !== 'preview'))
-const doneStages = computed(() => STAGES.value.filter(stage => completionFor(stage)?.percent === 100).length)
+const productionStages = computed(() => STAGES.filter(stage => stage.key !== 'preview'))
+const doneStages = computed(() => STAGES.filter(stage => completionFor(stage)?.percent === 100).length)
 const unknownStages = computed(() => productionStages.value.filter(stage => completionFor(stage)?.percent == null).length)
 const nextStage = computed(() => productionStages.value.find(stage => stageStatus(stage).tone === 'negative')
   || productionStages.value.find(stage => completionFor(stage)?.percent !== 100)
   || productionStages.value[productionStages.value.length - 1]!)
-function completionNote(stage: typeof STAGE_DEFS[number]) {
+function completionNote(stage: typeof STAGES[number]) {
   const value = completionFor(stage)
   if (!value) return errors.value.length ? '进度暂未更新' : '正在读取进度'
   if (stage.key === 'preview') return `${value.completed.toLocaleString()} / ${value.total.toLocaleString()} 段 · 已解析台词`
-  if (value.percent === null) return stage.key === 'audio' ? '确定分集计划后统计' : `当前 ${value.completed} / ${value.total} ${value.unit} · 总量待解析`
+  if (value.percent === null) return `当前 ${value.completed} / ${value.total} ${value.unit} · 总量待解析`
   return `${value.completed.toLocaleString()} / ${value.total.toLocaleString()} ${value.unit}`
 }
 function nextStageReason() {
@@ -89,7 +85,6 @@ const stageDescriptions: Record<string, string> = {
   batch: '按章节生成台词音频',
   preview: '逐句试听，修订台词与声音',
   merge: '将台词音频合并为整章',
-  audio: '按时长切分发布音频',
   bgm: '匹配音乐，混音与试听',
 }
 const recentFailures = computed(() => taskSummary.value?.failures ?? [])

@@ -3,6 +3,7 @@
   lang="ts"
   generic="T extends { workKey: string; workName: string; workState: string }"
 >
+import { vFitRows } from '@/directives/fitRows'
 import type { ListPagination, ListQuery } from '@/api/listPaging'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import Button from '@/components/ui/Button.vue'
@@ -10,9 +11,9 @@ import WorkbenchToolbar from '@/components/WorkbenchToolbar.vue'
 import Pager from '@/views/textformat/Pager.vue'
 import { X } from 'lucide-vue-next'
 import { useWorkbenchDialog } from '@/composables/useWorkbenchDialog'
-import { useTenRowHeight } from '@/composables/useTenRowHeight'
 
 const props = defineProps<{
+  /** 兼容旧调用：列表始终按页从服务端加载，不再有前端全量切片。 */
   remote?: boolean
   pagination?: ListPagination
   rows: T[]
@@ -32,14 +33,11 @@ const emit = defineEmits<{
   selectScope: [query: ListQuery]
   refresh: []
   select: [key: string, event: Event]
-  selectFiltered: [keys: string[]]
 }>()
 const query = ref('')
 const filter = ref('all')
 const page = ref(1)
 const pageSize = ref(10)
-const table = ref<HTMLTableElement | null>(null)
-const rowHeight = useTenRowHeight(table, pageSize)
 const focusedKey = ref('')
 const narrow = ref(false)
 const detailOpen = ref(false)
@@ -47,21 +45,13 @@ const detailPanel = ref<HTMLElement | null>(null)
 const shell = ref<HTMLElement | null>(null)
 let media: MediaQueryList | null = null
 let returnFocus: HTMLElement | null = null
-const filtered = computed(() =>
-  props.remote ? props.rows : props.rows.filter(
-    (row) =>
-      (filter.value === 'all' || row.workState === filter.value) &&
-      row.workName.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase()),
-  ),
-)
-const pageCount = computed(() => Math.max(1, Math.ceil((props.remote ? props.pagination?.total ?? 0 : filtered.value.length) / pageSize.value)))
-const visible = computed(() =>
-  props.remote ? filtered.value : filtered.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
-)
+// 当前页就是服务端返回的行：过滤、分页都在服务端完成，这里不再做任何前端筛选或切片。
+const filtered = computed(() => props.rows)
+const pageCount = computed(() => Math.max(1, Math.ceil((props.pagination?.total ?? 0) / pageSize.value)))
+const visible = filtered
 const focused = computed(
   () => filtered.value.find((row) => row.workKey === focusedKey.value) ?? null,
 )
-const eligible = computed(() => filtered.value.filter((row) => !props.rowDisabled?.(row)))
 const modalOpen = computed(() => narrow.value && detailOpen.value)
 const trapDetail = useWorkbenchDialog(modalOpen, detailPanel, closeDetail, () => returnFocus)
 watch([query, filter], () => {
@@ -81,11 +71,10 @@ watch(
   { immediate: true },
 )
 watch([page, pageSize, query, filter], () => {
-  if (props.remote) emit('requestPage', { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value })
+  emit('requestPage', { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value })
 })
 function selectScope() {
-  if (props.remote) emit('selectScope', { page: 1, page_size: pageSize.value, q: query.value, filter: filter.value })
-  else emit('selectFiltered', eligible.value.map(row => row.workKey))
+  emit('selectScope', { page: 1, page_size: pageSize.value, q: query.value, filter: filter.value })
 }
 function updateNarrow() {
   narrow.value = media?.matches ?? false
@@ -142,7 +131,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
       <WorkbenchToolbar
         v-model:query="query"
         v-model:filter="filter"
-        :filters="[{ key: 'all', label: '全部', count: remote ? pagination?.counts.all : rows.length }, ...filters.map(item => ({ ...item, count: remote ? pagination?.counts[item.key] : rows.filter(row => row.workState === item.key).length }))]"
+        :filters="[{ key: 'all', label: '全部', count: pagination?.counts.all }, ...filters.map(item => ({ ...item, count: pagination?.counts[item.key] }))]"
         :loading="loading"
         @refresh="emit('refresh')"
       >
@@ -150,9 +139,9 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
           <Button
             variant="ghost"
             size="sm"
-            :disabled="disabled || loading || !!loadError || (remote ? !pagination?.total : !eligible.length)"
+            :disabled="disabled || loading || !!loadError || !pagination?.total"
             @click="selectScope"
-            >选择筛选结果（{{ remote ? pagination?.total ?? 0 : eligible.length }}）</Button
+            >选择筛选结果（{{ pagination?.total ?? 0 }}）</Button
           >
           <slot name="selection" />
         </template>
@@ -169,8 +158,8 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
           >重试加载</Button
         >
       </div>
-      <div class="production-scroll">
-        <table ref="table" class="production-table workbench-table" :class="{ 'workbench-table--fit': pageSize === 10 }" :style="{ '--list-row-height': rowHeight }" :aria-label="label + '列表'">
+      <div class="production-scroll fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height' }">
+        <table class="production-table workbench-table" :aria-label="label + '列表'">
           <colgroup>
             <col style="width: 32px" />
             <col />
@@ -238,7 +227,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
         class="border-t px-3 py-2"
         :page="page"
         :page-count="pageCount"
-        :total="remote ? pagination?.total ?? 0 : filtered.length"
+        :total="pagination?.total ?? 0"
         :page-size="pageSize"
         :page-size-options="[10, 20, 50]"
         unit="项"
@@ -291,13 +280,12 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
 .production-list {
   min-width: 0;
   min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   border-right: 1px solid hsl(var(--border));
 }
 .production-scroll {
-  flex: 1;
-  overflow: auto;
   min-height: 0;
 }
 .production-table {
@@ -307,7 +295,7 @@ onBeforeUnmount(() => media?.removeEventListener('change', updateNarrow))
   line-height: 18px;
   border-collapse: collapse;
 }
-.production-table td { overflow-wrap:anywhere; }
+.production-table td { overflow-wrap: normal; }
 .production-table tr:hover {
   background: hsl(var(--muted) / 0.5);
 }

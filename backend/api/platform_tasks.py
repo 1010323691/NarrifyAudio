@@ -217,19 +217,20 @@ def task_center_summary(user: User = Depends(require_authenticated_user), db: Se
 
 
 @router.get("/center/groups")
-def task_center_groups(category: str, page: int = Query(1, ge=1),
+def task_center_groups(category: str, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
                        user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     try:
-        return task_center.groups(db, user.id, category, page)
+        return task_center.groups(db, user.id, category, page, page_size)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/center/items")
 def task_center_items(category: str, project_id: str, filter: str = "all", page: int = Query(1, ge=1),
+                      page_size: int = Query(10, ge=1, le=100),
                       user: User = Depends(require_authenticated_user), db: Session = Depends(get_db)) -> dict:
     try:
-        return task_center.items(db, user.id, category, project_id, filter, page)
+        return task_center.items(db, user.id, category, project_id, filter, page, page_size)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 

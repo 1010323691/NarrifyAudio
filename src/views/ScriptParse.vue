@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectGate } from '@/composables/useProjectGate'
@@ -240,7 +241,7 @@ onBeforeUnmount(() => {
                 </Button>
               </template>
             </WorkbenchToolbar>
-            <div class="min-h-0 flex-1 overflow-y-auto">
+            <div class="fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height' }">
               <ParseChapterTable
                 :rows="pagedRows"
                 :selected="selected"

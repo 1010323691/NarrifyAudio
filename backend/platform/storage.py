@@ -105,8 +105,6 @@ def artifact_module(task_type: str, name: str = "") -> str:
         return "00_temp"
     if task_type.startswith(("book.", "script.")):
         return "03_parsed_json"
-    if task_type.startswith("audio."):
-        return "07_output" if Path(name).suffix.lower() != ".json" else "03_parsed_json"
     return "07_output"
 
 

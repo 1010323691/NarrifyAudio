@@ -42,7 +42,7 @@ try {
         assert.ok(section, 'no full summary allowed')
         if (section === 'production') await gate
         const ratio = {completed:1,total:2,unit:'章节',percent:50}
-        body = {project_id:path.split('/')[4],stage_completion:section === 'text' ? {'02_split_text':ratio} : section === 'catalog' ? {'03_parsed_json':ratio,'04_voice_profiles':ratio} : {'05_audio_chunk':ratio,'06_audio_merge':ratio,'08_bgm':ratio,'07_output':{completed:0,total:0,unit:'分集',percent:null}}}
+        body = {project_id:path.split('/')[4],stage_completion:section === 'text' ? {'02_split_text':ratio} : section === 'catalog' ? {'03_parsed_json':ratio,'04_voice_profiles':ratio} : {'05_audio_chunk':ratio,'06_audio_merge':ratio,'08_bgm':ratio}}
       }
       return route.fulfill({status:body === null ? 503 : 200,contentType:'application/json',body:JSON.stringify(body ?? {})})
     })

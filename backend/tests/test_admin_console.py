@@ -12,7 +12,7 @@ from backend.services.admin_storage import scan_project_directory
 from backend.core import observability
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.models import QuotaTransaction, Task, User
+from backend.platform.models import QuotaTransaction, Task, User, WorkerHeartbeat
 from backend.platform.storage import configured_storage_root
 
 
@@ -319,6 +319,27 @@ def test_business_requests_and_mutations_still_increase_daily_usage(monkeypatch)
             assert observability.api_requests_today() == 1, (route, method,)
             assert observability.api_requests_today(0) == 1, (route, method,)
             assert observability.api_requests_today(-540) == 1, (route, method,)
+
+
+def test_admin_worker_table_loads_one_page_at_a_time(client: TestClient):
+    from datetime import timedelta
+    from backend.platform.models import utcnow
+    _create_admin(client)
+    prefix = f"pagetest-{uuid.uuid4().hex[:8]}"
+    now = utcnow()
+    with SessionLocal.begin() as db:
+        db.query(WorkerHeartbeat).delete()
+        for index in range(23):
+            seen = now - timedelta(seconds=index if index < 20 else 600 + index)
+            db.add(WorkerHeartbeat(worker_id=f"{prefix}-{index:02d}", status="idle", capabilities={}, last_seen_at=seen, started_at=seen))
+    first = client.get("/api/v1/admin/workers?page=1&limit=10").json()
+    last = client.get("/api/v1/admin/workers?page=3&limit=10").json()
+    assert len(first["items"]) == 10 and len(last["items"]) == 3
+    assert first["pagination"]["total"] == 23 and first["pagination"]["counts"]["online"] == 20
+    assert first["items"][0]["worker_id"] == f"{prefix}-00" and last["items"][-1]["status"] == "offline"
+    assert "workers" not in client.get("/api/v1/admin/performance").json()
+    with SessionLocal.begin() as db:
+        db.query(WorkerHeartbeat).delete()
 
 
 def test_admin_polling_routes_do_not_count_their_own_requests(client, monkeypatch):

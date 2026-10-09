@@ -88,8 +88,6 @@ async function refreshVoiceSummary() {
   }
 }
 
-// The same filter WorkspaceEntryPicker applied: plain .json files, excluding the two-checks
-// shared product (<stem>_checked.json).
 /** A 待合成 row: the directory's file name + its live stats (zeros when stats are missing). */
 interface FileRow {
   name: string
@@ -546,11 +544,6 @@ const latestTask = computed(
       .sort((a, b) => b.seq - a.seq)[0] ??
     null,
 )
-function selectFiltered(names: string[]) {
-  clearSelection()
-  for (const name of names) selected[name] = true
-  syncScript()
-}
 async function retryBatch() {
   const isCurrent = captureScope()
 
@@ -627,7 +620,6 @@ async function retryBatch() {
       empty-text="暂无解析结果，请先完成文本解析。"
       @refresh="refreshRows"
       @select="onRowChange"
-      @select-filtered="selectFiltered"
     >
       <template #selection
         ><Button

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useListPage } from '@/composables/useListPage'
 import Pager from '@/views/textformat/Pager.vue'
@@ -75,6 +76,8 @@ function chapterTitle(name: string): string {
 }
 
 const page = ref(1)
+const pageSize = ref(10)
+function changePageSize(size: number) { pageSize.value = size; if (page.value !== 1) page.value = 1; else void refreshList() }
 const listPage = useListPage(refreshList, () => { chapterRows.value = []; detail.value = null; openName.value = ''; voices.value = []; drafts.value = {} })
 const pagination = listPage.pagination
 watch(query, () => { page.value = 1; void refreshList() })
@@ -85,7 +88,7 @@ async function refreshList() {
   listError.value = ''
   const signal = listPage.begin()
   try {
-    const response = await batchList({ page: page.value, page_size: 20, q: query.value, filter: 'all' }, signal)
+    const response = await batchList({ page: page.value, page_size: pageSize.value, q: query.value, filter: 'all' }, signal)
     if (signal.aborted) return
     listError.value = ''
     listPage.received(response.pagination, page)
@@ -654,11 +657,11 @@ onBeforeUnmount(() => {
           {{ listError }}
         </Alert>
 
-        <div class="min-h-0 flex-1 overflow-y-auto p-1.5">
+        <div class="fixed-list p-1.5" :class="{ 'is-scroll': pageSize > 10 }" style="--fl-pad: 12px" v-fit-rows="{ prop: '--fl-row', max: 56, min: 50 }">
           <div
             v-for="row in visibleRows"
             :key="row.name"
-            class="relative cursor-pointer rounded-lg py-2 pl-3 pr-2 transition-colors"
+            class="fl-row relative flex flex-col justify-center cursor-pointer rounded-lg py-1 pl-3 pr-2 transition-colors"
             :class="row.name === openName ? 'bg-accent/80' : 'hover:bg-accent/40'"
             @click="openChapter(row.name)"
           >
@@ -688,7 +691,7 @@ onBeforeUnmount(() => {
             {{ listLoading ? '加载中…' : '暂无已解析章节，请先到「文本解析」生成剧本。' }}
           </p>
         </div>
-        <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / 20))" :total="pagination?.total ?? 0" :page-size="20" unit="章" @update:page="page = $event" />
+        <Pager :page="page" :page-count="Math.max(1, Math.ceil((pagination?.total ?? 0) / pageSize))" :total="pagination?.total ?? 0" :page-size="pageSize" unit="章" @update:page="page = $event" @update:page-size="changePageSize" />
       </Card>
 
       <!-- 中栏：台词列表（视觉中心） -->

@@ -41,7 +41,6 @@ const PROJECT_STAGES = [
   { to: '/batch', label: '音频合成', icon: Layers },
   { to: '/preview', label: '整章预览', icon: Eye },
   { to: '/merge', label: '音频合并', icon: Combine },
-  { to: '/audio', label: '音频分集', icon: AudioLines, optional: true },
   { to: '/bgm', label: '背景音乐', icon: Music4 },
 ]
 
@@ -57,7 +56,6 @@ const ADMIN_ITEMS = [
 ] as const
 
 const isAdminArea = computed(() => auth.user?.role === 'admin' && (route.path === '/admin' || route.path.startsWith('/admin/')))
-const visibleStages = computed(() => PROJECT_STAGES.filter((item) => !item.optional || settings.config?.ui.show_audio_split))
 watch(() => route.fullPath, () => { accountMenuOpen.value = false })
 
 function isActive(to: string) {
@@ -145,7 +143,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', handleDocument
           </span>
           <ChevronRight class="app-nav__project-chevron" aria-hidden="true" />
         </RouterLink>
-        <RouterLink v-for="item in visibleStages" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
+        <RouterLink v-for="item in PROJECT_STAGES" :key="item.to" :to="item.to" class="app-nav__item app-nav__stage-item" :class="isActive(item.to) ? 'is-active' : ''">
           <component :is="item.icon" class="app-nav__icon" aria-hidden="true" /><span>{{ item.label }}</span>
         </RouterLink>
       </div>

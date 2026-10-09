@@ -118,7 +118,7 @@ test('page selection includes only deliverable entries', async () => {
 test('a newly completed task refreshes products even when its running frame was missed', async () => {
   const h = harness()
   await flush()
-  h.task.tasks = [{ id: 'fast-cut', project_id: 'a', task_type: 'audio.cut', status: 'succeeded', created_at: new Date().toISOString(), result: { deliveries: [{}] } }]
+  h.task.tasks = [{ id: 'fast-mix', project_id: 'a', task_type: 'bgm.mix', status: 'succeeded', created_at: new Date().toISOString(), result: { deliveries: [{}] } }]
   await flush()
   assert.match(h.center.actionResult.value, /成品已生成/)
   await new Promise(resolve => setTimeout(resolve, 700))

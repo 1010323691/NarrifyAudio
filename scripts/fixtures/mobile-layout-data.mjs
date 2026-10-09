@@ -12,7 +12,6 @@ runInNewContext(ts.transpileModule(adminSource, {
 const config = JSON.parse(readFileSync(new URL('../../setting.json', import.meta.url), 'utf8'));
 config.paths.working_dir = '/fixture/project';
 config.llm.api_key = 'fixture';
-config.ui.show_audio_split = true;
 const name = '第001章_移动端长章节名称与边界检查';
 const project = {id:'demo',name:'移动端展示检查项目名称',directory_key:'demo',created_at:'2026-10-06T00:00:00Z',updated_at:'2026-10-06T00:00:00Z'};
 const chapters = Array.from({length:24},(_,i)=>({key:String(i),seq:i+1,num:i+1,numStr:String(i+1),title:'长章节标题用于测试移动端展示效果',chars:3000,orig_num:i+1,orig_numStr:String(i+1),final_num:i+1,actions:[],reasons:[],confidence:'high',pending:false,adjusted:false,matters:[]}));
@@ -43,12 +42,11 @@ export function layoutResponse(path, role) {
   if(path==='/api/v1/tasks/overview')return {statuses:[],failures:[],failure_count:0};
   if(path==='/api/v1/tasks/history')return {items:[{id:'task',project_id:'demo',project_name:project.name,task_type:'script.parse',label:name,status:'succeeded',progress:1,current:'',error:'',created:1791244800,created_at:project.created_at}],next_cursor:null};
   if(path==='/api/v1/projects')return [project];
-  if(path==='/api/v1/projects/trash')return [{...project,deleted_at:project.created_at,expires_at:'2026-11-01T00:00:00Z'}];
+  if(path==='/api/v1/projects/trash')return {items:[{...project,deleted_at:project.created_at,expires_at:'2026-11-01T00:00:00Z'}],pagination:{total:1,page:1,page_size:10,counts:{all:1,active:1}}};
   if(path.endsWith('/summary'))return {project_id:'demo',name:project.name,updated_at:project.updated_at,file_count:24,size_bytes:72000,split_volume_count:24,stage_keys:[],stage_completion:{},categories:[],recent_files:[],recent_outputs:[],cleanup_candidates:{count:0,size_bytes:0,older_than_days:7,blocked_by_active_tasks:false}};
   if(path.endsWith('/text-format/state'))return {flow:{id:'flow',source_file_id:'input',source_file_name:'长篇小说.txt',config_snapshot:{},whole_book:false,force_by_length:false,status:'ready',manifest_count:24},version,next_task:null,active_tasks:[]};
   if(path.endsWith('/script-parse/summary'))return {total:125,done_count:0,active_task_ids:[]};
   if(path.endsWith('/script-parse/state'))return {source:{mode:'version',version},text_format_busy:false,files:version.files.map(f=>({name:f.name,input:{name:f.name,sha256:'hash',size:3000},latest_task:null,result:null,result_status:null}))};
-  if(path.startsWith('/api/files/list/'))return {path:'',items:[{name:name+(path.includes('03_parsed')?'.json':path.includes('audio')?'.mp3':'.txt'),is_dir:path.includes('05_audio'),size:3000}]};
   if(path.startsWith('/api/tts/preview/chapter/'))return {name:name+'.json',package:name,lines:Array.from({length:12},(_,index)=>({index,speaker:'长角色名称',text:'用于检查手机端台词编辑区域的长文本。'.repeat(4),instruct:'平静',audio:'',audio_mtime_ns:null,duration:null,ok:false,reason:'',staged:null,start_offset:null})),chapter_audio:null,timeline_exists:false,downstream:{merged:false,mixed:false,timeline:false,segment_stale:false}};
   if(path==='/api/tts/batch-status'||path==='/api/tts/batch-list')return {files:[{name:name+'.json',total:20,completed:10,complete:false,speakers:3,ready:3,missing:[]}]};
   if(path==='/api/tts/merge-status'||path==='/api/tts/merge-list')return {packages:[{name,total:20,completed:10,remaining:10,complete:false}]};
@@ -60,6 +58,7 @@ export function layoutResponse(path, role) {
   if(path==='/api/v1/resources')return {projects:[{project_id:'demo',name:project.name,delivery_count:24,delivery_bytes:72000,production_audio_count:0,production_categories:[],snapshot:{snapshot_id:'snapshot',scanned_at:project.updated_at,complete:true,errors:[],file_count:24,size_bytes:72000,categories:[],audio_count:0,latest_modified_at:project.updated_at},scan_task_id:null,scan_status:null,scan_error:null,stale:false}],categories:[],storage:{project_bytes:0,project_complete:true,trash_bytes:0,trash_complete:true,export_bytes:0},exports:[]};
   if(path.endsWith('/files/file/preview'))return {file:resourceEntry,content:'移动端长文本预览。'.repeat(500),truncated:false,warning:null};
   if(path.endsWith('/entries'))return {items:[resourceEntry],total:1,size_bytes:0,page:1,page_size:20,snapshots:[],complete:true,incomplete_projects:[]};
-  if(path.includes('/tasks')||path.endsWith('/transactions')||path.endsWith('/files'))return [];
+  if(path.endsWith('/transactions'))return {items:[],pagination:{total:0,page:1,page_size:10,counts:{all:0}},daily:[0,0,0,0,0,0,0],registered_storage_bytes:0};
+  if(path.includes('/tasks')||path.endsWith('/files'))return [];
  return null;
 }

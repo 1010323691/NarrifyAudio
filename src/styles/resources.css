@@ -35,13 +35,21 @@
 .rc-matrix { border:1px solid hsl(var(--border)); border-radius:12px; background:hsl(var(--card)); box-shadow:0 2px 6px hsl(var(--foreground)/.025); }
 .rc-matrix-head,.rc-project-row { display:grid; grid-template-columns:minmax(220px,2fr) minmax(125px,1fr) minmax(100px,.85fr) minmax(110px,1fr) minmax(120px,1.05fr) 132px; align-items:center; gap:14px; padding:14px 18px; }
 .rc-matrix-head { font-size:11px; color:hsl(var(--muted-foreground)); background:hsl(var(--muted)/.4); border-bottom:1px solid hsl(var(--border)); border-radius:12px 12px 0 0; padding-top:10px; padding-bottom:10px; }
-.rc-project-row { min-height:106px; border-bottom:1px solid hsl(var(--border)/.65); }
+.rc-project-row { height:var(--rp-row,106px); padding-top:0; padding-bottom:0; overflow:hidden; box-sizing:border-box; border-bottom:1px solid hsl(var(--border)/.65); }
 .rc-project-row:last-child { border-bottom:0; }
 .rc-project-row:hover { background:hsl(var(--primary)/.018); }
-.rc-project-identity { display:flex; align-items:flex-start; gap:11px; min-width:0; }
+.rc-project-identity { display:flex; align-items:center; gap:11px; min-width:0; }
 .rc-project-icon { flex:none; width:34px; height:34px; display:grid; place-items:center; background:hsl(var(--primary)/.075); color:hsl(var(--primary)); border-radius:9px; margin-top:2px; }
 .rc-project-copy { min-width:0; width:100%; }
-.rc-project-name { font-size:14px; font-weight:600; line-height:1.6; text-align:left; max-width:100%; overflow-wrap:anywhere; }
+.rc-project-name { display:block; min-width:0; font-size:14px; font-weight:600; line-height:22px; text-align:left; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rc-project-titleline { display:flex; align-items:center; gap:8px; min-width:0; }
+.rc-project-titleline .rc-current-label { flex:none; margin:0; }
+.rc-matrix--fixed { box-sizing:border-box; height:calc(38px + 10 * var(--rp-row,106px) + 2px); overflow-y:hidden; }
+.rc-matrix--fixed.is-scroll { overflow-y:auto; }
+.rc-matrix--fixed .rc-matrix-head { position:sticky; top:0; z-index:2; box-sizing:border-box; height:38px; padding-top:0; padding-bottom:0; }
+.rc-project-row .rc-task-line,.rc-project-row .rc-task-link { display:none; }
+.rc-project-row .rc-task-brief,.rc-project-row .rc-scan-time { display:none; }
+@media (max-height:960px) { .rc-projects .rc-section-footnote { display:none; } }
 .rc-project-name:hover { color:hsl(var(--primary)); }
 .rc-current-label { display:block; width:fit-content; font-size:10px; padding:1px 5px; border-radius:4px; background:hsl(var(--primary)/.07); color:hsl(var(--primary)); margin:3px 0; }
 .rc-project-status { display:flex; align-items:center; gap:4px; font-size:11px; color:hsl(var(--muted-foreground)); margin-top:4px; }
@@ -281,7 +289,8 @@
   .rc-nav { flex-wrap:wrap; gap:2px; }
   .rc-overview-meta { padding-bottom:8px; width:100%; }
   .rc-matrix-head { display:none; }
-  .rc-project-row { grid-template-columns:repeat(3,minmax(0,1fr)); gap:15px 18px; padding:17px; }
+  .rc-matrix--fixed { height:auto; overflow:visible; }
+  .rc-project-row { height:auto; padding-top:17px; padding-bottom:17px; overflow:visible; grid-template-columns:repeat(3,minmax(0,1fr)); gap:15px 18px; padding:17px; }
   .rc-project-identity { grid-column:1 / -1; }
   .rc-project-actions { grid-column:2 / 4; align-self:end; }
   .rc-project-capacity { text-align:left; }
@@ -341,3 +350,11 @@
 .rc-structured-field h4 { margin: 0 0 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }
 .rc-structured-field .rc-structured-field { border: 0; border-radius: 0; padding: 6px 0; }
 .rc-structured-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+
+/* 文件清单：固定行高分页盒子（表头 36px + 10 × 56px），10 条无内部滚动条，选 20/50 盒内滚动。 */
+.rc-file-table--fixed { box-sizing:border-box; height:calc(36px + 10 * var(--rf-row,56px) + 2px); overflow-x:hidden; overflow-y:hidden; }
+.rc-file-table--fixed.is-scroll { overflow-y:auto; }
+.rc-file-table--fixed table { border-collapse:separate; border-spacing:0; }
+.rc-file-table--fixed th { position:sticky; top:0; z-index:1; box-sizing:border-box; height:36px; padding-block:0; white-space:nowrap; }
+.rc-file-table--fixed td { box-sizing:border-box; height:var(--rf-row,56px); padding-block:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.rc-file-table--fixed tbody tr:last-child td { border-bottom:1px solid hsl(var(--border)/.55); }

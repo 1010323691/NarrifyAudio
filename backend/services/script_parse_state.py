@@ -13,7 +13,6 @@ Layering: ``api/script_parse`` -> this service -> platform.
 """
 from __future__ import annotations
 
-import mimetypes
 from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
@@ -119,49 +118,6 @@ def _resolve_split_name(rows: dict[str, ProjectFile], name: str) -> ProjectFile 
     matches = {item.id: item for key, item in rows.items()
                if key in spellings or Path(item.object_key).name in spellings}
     return next(iter(matches.values())) if len(matches) == 1 else None
-
-
-def _catalog_split_file(db: Session, user: User, project: Project, path: Path) -> ProjectFile:
-    """Register a legacy split file that predates the file table.
-
-    Pre-workbench data lives on disk with no ProjectFile row, hence no
-    digest; cataloging here gives the version-bound submit a digest to
-    work with. Mirrors ``catalog_managed_file`` but stays scoped to THIS
-    project instead of the active-workspace pointer (the anti-pattern this
-    contract replaces)."""
-    object_key = (
-        f"{project_directory_key(db, user.username, project.id)}/{_SPLIT_MODULE}/{path.name}"
-    )
-    values = {
-        "size_bytes": path.stat().st_size,
-        "sha256": sha256_file(path),
-    }
-    item = db.scalar(
-        select(ProjectFile).where(
-            ProjectFile.object_key == object_key,
-            ProjectFile.project_id == project.id,
-            ProjectFile.owner_id == user.id,
-        )
-    )
-    if item is None:
-        item = ProjectFile(
-            project_id=project.id,
-            owner_id=user.id,
-            object_key=object_key,
-            content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-            kind="legacy",
-            original_name=path.name,
-            **values,
-        )
-        db.add(item)
-    else:
-        # 已有行的 original_name 可能是引擎原始名（legacy/历史数据，版本列表
-        # 与排版页仍按它引用）；补登只更新摘要，绝不能改写名字——改写会让
-        # 同一文件的所有旧名字引用变成「分册文本不存在」。
-        for key, value in values.items():
-            setattr(item, key, value)
-        item.deleted_at = None
-    return item
 
 
 def _catalog_split_files(db, user, project, paths):

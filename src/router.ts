@@ -16,6 +16,8 @@ const router = createRouter({
     { path: '/access-denied', name: 'access-denied', component: AccessDenied, meta: { title: '无权访问' } },
     // Keep old links working after the admin console route was nested under /admin.
     { path: '/music', redirect: '/admin/music' },
+    // 「音频分集」已下线：旧书签回到项目首页。
+    { path: '/audio', redirect: '/dashboard' },
     {
       path: '/',
       component: MainLayout,
@@ -34,7 +36,6 @@ const router = createRouter({
         { path: 'batch', name: 'batch', component: () => import('@/views/BatchTTS.vue'), meta: { title: '音频合成', projectStage: true } },
         { path: 'preview', name: 'preview', component: () => import('@/views/ChapterPreview.vue'), meta: { title: '整章预览', projectStage: true, fullBleed: true } },
         { path: 'merge', name: 'merge', component: () => import('@/views/Merge.vue'), meta: { title: '音频合并', projectStage: true } },
-        { path: 'audio', name: 'audio', component: () => import('@/views/AudioSplit.vue'), meta: { title: '音频分集', projectStage: true } },
         { path: 'bgm', name: 'bgm', component: () => import('@/views/BGM.vue'), meta: { title: '背景音乐', projectStage: true } },
         { path: 'settings', name: 'settings', component: () => import('@/views/Settings.vue'), meta: { title: '设置' } },
       ],

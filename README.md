@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-NarrifyAudio is a self-hosted audiobook production workbench. Turn TXT and EPUB manuscripts into chapter scripts, generate and select character voices, synthesize dialogue, review individual lines, and produce chapter audio with optional episode splitting and background music.
+NarrifyAudio is a self-hosted audiobook production workbench. Turn TXT and EPUB manuscripts into chapter scripts, generate and select character voices, synthesize dialogue, review individual lines, and produce chapter audio with optional background music.
 
 Version **0.1.0**. Run locally on Windows or deploy on Linux. The application uses Vue 3 + TypeScript, FastAPI, PostgreSQL, a Redis-compatible service, and independent task workers. Model services and audio tools are installed separately; see the platform guides for prerequisites and validation boundaries.
 
@@ -13,7 +13,7 @@ Version **0.1.0**. Run locally on Windows or deploy on Linux. The application us
 | Manuscripts | Import and reorder multiple TXT/EPUB files; format text, split chapters, review boundaries | Base application; no GPU or LLM |
 | Scripts | Identify speakers, dialogue and delivery instructions; review parsing checks | Reachable LLM service and application character quota |
 | Character voices | Infer descriptions, generate candidate voices, listen and select a reference voice | LLM for descriptions; local TTS for candidates; character quota |
-| Audio production | Synthesize lines, revise and re-render previews, merge chapters, optionally split episodes | TTS and character quota for synthesis/previews; FFmpeg/ffprobe and Python audio dependencies for audio processing |
+| Audio production | Synthesize lines, revise and re-render previews, merge chapters | TTS and character quota for synthesis/previews; FFmpeg/ffprobe and Python audio dependencies for audio processing |
 | Background music | Match music, optionally analyze scenes with an LLM, review timelines and mix narration | Music library and audio tools; LLM/quota for scene analysis |
 | Projects and resources | Track progress, inspect materials, preview/download eligible finished audio, package exports, manage storage and the recycle bin | Base application; audio tools for relevant operations |
 | Administration | Manage users, character quotas, settings, tasks, workers and optional local GPU service scheduling | Separate administrator account |
@@ -30,10 +30,8 @@ flowchart LR
   Voices --> TTS[Synthesize dialogue]
   TTS --> Review[Listen, revise and save]
   Review --> Merge[Merge chapter audio]
-  Merge --> Split[Optional episode splitting]
   Merge --> BGM[Optional background music mixing]
   Merge --> Resources[Finished audio and resources]
-  Split --> Resources
   BGM --> Resources
 ```
 

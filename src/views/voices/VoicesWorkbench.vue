@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
 import type { ListPagination, ListQuery } from '@/api/listPaging'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { VoiceItem } from '@/types'
@@ -65,21 +66,13 @@ onBeforeUnmount(() => {
   media?.removeEventListener('change', updateNarrow)
 })
 const pendingCount = computed(() => props.pagination?.counts.pending ?? props.speakers.filter(v => v.status !== 'ready').length)
-const filtered = computed(() => {
-  if (props.remote) return props.speakers
-  const q = query.value.trim().toLocaleLowerCase()
-  return props.speakers.filter(v => (filter.value === 'all' || v.status !== 'ready') &&
-    (!q || `${v.name} ${v.alias_of || ''}`.toLocaleLowerCase().includes(q)))
-})
-const pageCount = computed(() => Math.max(1, Math.ceil((props.remote ? props.pagination?.total ?? 0 : filtered.value.length) / pageSize.value)))
-const visible = computed(() => {
-  if (props.remote) return filtered.value
-  const p = Math.min(page.value, pageCount.value)
-  return filtered.value.slice((p - 1) * pageSize.value, p * pageSize.value)
-})
+// 当前页即服务端返回的角色：筛选与分页都在服务端完成，这里不做前端切片。
+const filtered = computed(() => props.speakers)
+const pageCount = computed(() => Math.max(1, Math.ceil((props.pagination?.total ?? 0) / pageSize.value)))
+const visible = filtered
 const selected = computed(() => props.speakers.find(v => v.name === selectedName.value) ?? null)
 watch([query, filter], () => { page.value = 1 })
-watch([page, pageSize, query, filter], () => { if (props.remote) emit('requestPage', { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value }) })
+watch([page, pageSize, query, filter], () => { emit('requestPage', { page: page.value, page_size: pageSize.value, q: query.value, filter: filter.value }) })
 watch(pageCount, n => { page.value = Math.min(page.value, n) })
 watch(() => props.speakers, items => {
   if (!items.some(v => v.name === selectedName.value)) selectedName.value = items[0]?.name ?? ''
@@ -111,7 +104,7 @@ function detailKeydown(event: KeyboardEvent) {
         v-model:query="query"
         v-model:filter="filter"
         placeholder="搜索角色或别名"
-        :filters="[{ key: 'all', label: '全部', count: remote ? pagination?.counts.all : speakers.length }, { key: 'pending', label: '待完善', count: pendingCount }]"
+        :filters="[{ key: 'all', label: '全部', count: pagination?.counts.all }, { key: 'pending', label: '待完善', count: pendingCount }]"
         :loading="loading"
         @refresh="emit('refresh')"
       />
@@ -119,7 +112,7 @@ function detailKeydown(event: KeyboardEvent) {
         <p>{{ loadError }}</p><p v-if="speakers.length" class="mt-1 text-muted-foreground">正在展示上次已知状态。</p>
         <Button variant="outline" class="mt-2 h-8" :disabled="loading" @click="emit('refresh')">重试加载</Button>
       </div>
-      <div class="voice-scroll">
+      <div class="voice-scroll fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', min: 28 }">
         <table class="voice-table workbench-table" aria-label="角色状态列表">
           <thead><tr><th>角色 / 别名</th><th class="voice-number">台词</th><th>基础</th><th>音色</th></tr></thead>
           <tbody v-if="loading && !speakers.length">
@@ -145,7 +138,7 @@ function detailKeydown(event: KeyboardEvent) {
         class="shrink-0 border-t px-4 py-2"
         :page="page"
         :page-count="pageCount"
-        :total="remote ? pagination?.total ?? 0 : filtered.length"
+        :total="pagination?.total ?? 0"
         :page-size="pageSize"
         :page-size-options="[10, 20, 50]"
         unit="个角色"
@@ -192,7 +185,7 @@ function detailKeydown(event: KeyboardEvent) {
 .voice-workbench { display:grid; grid-template-columns:minmax(0,1fr) 34%; min-height:390px; border:1px solid hsl(var(--border)); border-radius:12px; background:hsl(var(--card) / .95); overflow:hidden; box-shadow:var(--glass-shadow); }
 .voice-list { min-width:0; display:flex; flex-direction:column; border-right:1px solid hsl(var(--border)); }
 
-.voice-scroll { min-height:320px; max-height:440px; overflow:auto; flex:1; }
+.voice-scroll { min-height:0; }
 .voice-table { width:100%; table-layout:fixed; font-size:12px; line-height:18px; border-collapse:collapse; }
 .voice-table th:first-child { width:40%; }
 .voice-table th:nth-child(2) { width:16%; }

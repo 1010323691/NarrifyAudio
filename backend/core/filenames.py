@@ -41,17 +41,6 @@ def safe_filename(name: str, *, fallback: str = "upload.bin") -> str:
     return fit_filename(candidate)
 
 
-def unique_filename(name: str, occupied: set[str]) -> str:
-    """Disambiguate final names, including Windows case-insensitive extraction."""
-    name = safe_filename(name)
-    folded = {value.casefold() for value in occupied}
-    candidate, number = name, 2
-    while candidate.casefold() in folded:
-        candidate = fit_filename(name, disambiguator=f" ({number})")
-        number += 1
-    return candidate
-
-
 def legacy_storage_name(name: str) -> str:
     """Exact pre-v2 storage spelling, for existing paths only."""
     candidate = _LEGACY.sub("_", Path(name or "upload.bin").name).strip(" .")
