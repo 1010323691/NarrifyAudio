@@ -33,6 +33,7 @@ npm.cmd run typecheck            # vue-tsc 前端类型检查
 npm.cmd run build                # 类型检查 + 生产构建（dist/）
 npm.cmd run build:all            # 前端构建 + 后端 compileall + 分层门禁（lint-imports）
 npm.cmd run lint:imports         # 分层门禁单独运行
+npm.cmd run test:ci              # 13 个 node:test 沙箱回归合并并行跑（CI 用；下列单项命令仍可单独跑）
 npm.cmd run test:state-isolation # 前端状态隔离回归（node:test 沙箱跑 Pinia store）
 npm.cmd run test:workbench       # 章节核对工作台组合回归（node:test 沙箱跑 useTextFormatWorkbench 恢复/派生/分页逻辑）
 npm.cmd run test:script-parse-workbench # 文本解析工作台组合回归（node:test 沙箱跑 useScriptParseWorkbench 行状态/提交/缓存/竞态）
@@ -43,6 +44,8 @@ npm.cmd run test:voices-workbench # 角色音色工作台组合回归（node:tes
 ```
 
 测试默认跑在 sqlite + 临时存储上（`backend/tests/conftest.py` 覆盖 `NARRIFY_DATABASE_URL` / `NARRIFY_STORAGE_ROOT`），全套件不需要本机 PostgreSQL/Memurai 在运行；少数真实 DB 用例（`test_migrations`、`test_postgres_cancellation_concurrency` 等）带 `skipif`，无 DB 时自动跳过。全量套件用 pytest-xdist 并行跑，worker 数**固定 4**（实测：串行 90s，`-n 2/4/8/12/16` = 61s/37s/61s/57s/71s——套件含大量派生子进程的测试，超过 4 worker 后 CPU 超额订阅，比串行还慢，故不用 `-n auto`）；`loadscope` 不可省——`test_platform` 有用例依赖同文件前序用例留下的模块级 DB 状态，同一文件必须整体留在一个 worker 内按序执行。
+
+后端测试支持 `--shard I/N`（按文件整体分片，CI 用 3 片）。新增测试避免真实等待：轮询/超时/锁等待提成模块常量并在测试里 monkeypatch 缩短（例：`task_views.STREAM_POLL_SECONDS`、`api.tts.PREVIEW_LOCK_TIMEOUT`），节流类时钟测试用步进而非逐秒；确需长跑的用例可打 `@pytest.mark.slow`（已注册，用 `-m "not slow"` 排除）。CI 按改动路径决定跑前端/后端 job（`ci.yml` 的 `changes` job）。
 
 提交后端改动前跑完整后端测试套件；涉及前端或共享流程时额外跑 `npm.cmd run typecheck` 和 `npm.cmd run build`。不可逆数据库变更前先备份（历史备份在 `.backups/`）。
 

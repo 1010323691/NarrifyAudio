@@ -19,8 +19,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # 按改动路径决定跑哪些 job：只改文档不跑任何测试；只改前端不装 Python/ffmpeg，反之亦然。
+  # push 到 main 一律全跑。被 `if` 跳过的 job 在分支保护里视为通过。
+  changes:
+    name: 变更路径检测
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.f.outputs.frontend }}
+      backend: ${{ steps.f.outputs.backend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"; echo "backend=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "$files"
+          # 逐文件归类：纯文档不触发；前端专属/后端专属只触发对应端；
+          # 其余一切（CI 本身、依赖清单、根 setting.json、launch/、迁移配置……）两端都跑——
+          # 白名单漏路径时宁可多跑，不静默跳过。
+          fe=false; be=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              docs/*|*.md|LICENSE) ;;
+              src/*|public/*|index.html|vite.config.*|tsconfig*|tailwind.config.*|postcss.config.*) fe=true ;;
+              scripts/*.py|backend/*|tts-engine/*) be=true ;;
+              scripts/*.mjs) fe=true ;;
+              .github/*|package.json|package-lock.json) fe=true; be=true ;;
+              *) fe=true; be=true ;;
+            esac
+          done <<< "$files"
+          echo "frontend=$fe" >> "$GITHUB_OUTPUT"
+          echo "backend=$be" >> "$GITHUB_OUTPUT"
+
   frontend:
     name: 前端 typecheck / build / 沙箱回归
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,40 +76,29 @@ jobs:
       - name: 类型检查 + 生产构建
         run: npm run build
 
-      # Pinia store 竞态隔离回归（node:test 沙箱跑真实 store 代码，改 store 行为的门禁）
-      - name: 状态隔离回归
-        run: npm run test:state-isolation
-      - name: 项目制作总览分区加载回归
-        run: npm run test:project-overview
-      - name: 任务中心分层加载回归
-        run: npm run test:task-center
-      - name: 制作工作台及完整目标范围回归
-        run: npm run test:production-workbench
-      - name: 资源中心完整范围回归
-        run: npm run test:resources
-      - name: 管理控制台回归
-        run: npm run test:admin-console
-      - name: 固定十行行高算法回归
-        run: npm run test:fit-rows
-
-      # 三个工作台组合回归（node:test 沙箱跑真实 composable/view 代码，改其竞态逻辑的门禁，
-      # 与 state-isolation 同款机制，见 scripts/test-*-workbench.mjs）
-      - name: 章节核对工作台回归
-        run: npm run test:workbench
-      - name: 文本解析工作台回归
-        run: npm run test:script-parse-workbench
-      - name: 角色音色工作台回归
-        run: npm run test:voices-workbench
+      # 13 个 node:test 沙箱回归（store 状态隔离、项目总览/卡片、任务中心、制作工作台、
+      # 资源中心、管理控制台、行高算法、三个工作台组合逻辑）合为一次 `node --test`，
+      # 文件级并行、只付一次启动开销；清单见 package.json 的 test:ci。
+      - name: 沙箱回归（node:test 合并）
+        run: npm run test:ci
 
   backend:
-    name: 后端 compileall / 分层门禁 / pytest
+    name: 后端 pytest 分片 ${{ matrix.shard }}/3
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
       # test_audio 的 FFmpeg 集成用例按 shutil.which 探测 PATH，装上才跑
       - name: 安装 FFmpeg
@@ -92,6 +120,7 @@ jobs:
 
       # 本地 build:all 的后端两半：Python 语法/字节码检查 + .importlinter 分层契约
       - name: compileall + lint-imports
+        if: matrix.shard == 1
         run: |
           .venv/bin/python -m compileall -q backend tts-engine
           .venv/bin/lint-imports
@@ -108,5 +137,6 @@ jobs:
       # - test_admin_console 的 symlink 用例：本地非提权 Windows 无目录 symlink 权限故跳过，CI 执行；
       # - test_audio FFmpeg ×3：仅当 ffmpeg/ffprobe 不在 PATH 时跳过——本 job 安装 FFmpeg，两端都执行。
       # 命令带 -rs 让 SKIPPED 原因逐条进日志；数量与本地对不上时先看这些行再判断。
-      - name: 全量测试套件
-        run: .venv/bin/python -m pytest backend/tests -n 2 --dist loadscope -rs
+      # 分片：按测试文件整体切 3 片（--shard 见 backend/tests/conftest.py，保持 loadscope 语义）。
+      - name: 测试套件分片
+        run: .venv/bin/python -m pytest backend/tests -n 2 --dist loadscope -rs --shard ${{ matrix.shard }}/3

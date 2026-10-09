@@ -338,6 +338,11 @@ def session_still_valid(auth_token: str, user_id: str) -> bool:
         return session_is_valid_for_user(db, auth_token, user_id)
 
 
+# SSE 轮询节奏：空闲 ping/新事件轮询间隔与会话有效性复查间隔。提成常量只为测试可缩短，生产值不变。
+STREAM_POLL_SECONDS = 0.5
+AUTH_RECHECK_SECONDS = 5.0
+
+
 async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnected, compact=False):
     """The shared aggregate SSE body: replay ``snapshot_all`` for every row
     ``rows_fn(db)`` returns (the caller scopes it — current project for the
@@ -369,14 +374,14 @@ async def aggregate_stream(rows_fn, auth_token: str, user_id: str, is_disconnect
         if now >= next_auth_check:
             if not await anyio.to_thread.run_sync(session_still_valid, auth_token, user_id):
                 return
-            next_auth_check = now + 5.0
+            next_auth_check = now + AUTH_RECHECK_SECONDS
         frames = await anyio.to_thread.run_sync(compact_new_frames if compact else _new_frames, rows_fn, seen, delivered)
         for frame in frames:
             yield sse(frame)
         if not frames:
             yield sse({"type": "ping"})
         idle_delay = 1.0 if frames else min(3.0, idle_delay + 0.5)
-        await asyncio.sleep(idle_delay if compact else 0.5)
+        await asyncio.sleep(idle_delay if compact else STREAM_POLL_SECONDS)
 
 
 def compact_snapshots(db, rows):

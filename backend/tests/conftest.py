@@ -125,3 +125,37 @@ def _fresh_layout_cache():
     core_paths.reset_layout_cache()
     yield
     core_paths.reset_layout_cache()
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--shard", default=None, metavar="I/N",
+        help="只跑第 I 片（1 起，共 N 片）。按测试文件整体分片、按用例数贪心均衡，"
+             "保持 loadscope 要求的“同文件留在同一 worker”。CI 用它做 matrix 并行。")
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "slow: 单用例 >10s 的长耗时用例（真实轮询/大循环）；默认也会跑，本地可用 -m 'not slow' 排除")
+
+
+def pytest_collection_modifyitems(config, items):
+    spec = config.getoption("--shard")
+    if not spec:
+        return
+    index, total = (int(part) for part in spec.split("/"))
+    if not 1 <= index <= total:
+        raise pytest.UsageError(f"--shard {spec}: 需满足 1 <= I <= N")
+    by_file: dict[str, list] = {}
+    for item in items:
+        by_file.setdefault(item.nodeid.split("::", 1)[0], []).append(item)
+    loads = [0] * total
+    owner: dict[str, int] = {}
+    for path, group in sorted(by_file.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        target = loads.index(min(loads))
+        owner[path] = target
+        loads[target] += len(group)
+    keep = [item for item in items if owner[item.nodeid.split("::", 1)[0]] == index - 1]
+    kept = {id(item) for item in keep}
+    config.hook.pytest_deselected(items=[item for item in items if id(item) not in kept])
+    items[:] = keep

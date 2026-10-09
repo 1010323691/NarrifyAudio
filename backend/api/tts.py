@@ -1288,6 +1288,10 @@ def _is_safe_script_name(name: str) -> bool:
     return bool(name) and name == Path(name).name and name not in {".", ".."}
 
 
+# 预览编辑/应用抢章节排他锁的等待上限；提成常量只为测试可缩短，生产值不变。
+PREVIEW_LOCK_TIMEOUT = 5.0
+
+
 def _chapter_preview_lock_held(layout, package: str) -> bool:
     """Non-blocking probe of the chapter lock (held during a preview save or merge execution)."""
     if layout.temp is None:
@@ -1907,7 +1911,7 @@ def apply_preview_edits(
         raise HTTPException(409, "；".join(gate_errors))
 
     # 章节锁（apply 取不到 → 409；tts.merge 执行期持同一把锁，超时由 Worker 重试）
-    lock = exclusive_file_lock(Batch.preview_lock_path(layout, pkg), timeout=5.0)
+    lock = exclusive_file_lock(Batch.preview_lock_path(layout, pkg), timeout=PREVIEW_LOCK_TIMEOUT)
     try:
         lock.__enter__()
     except TimeoutError:
@@ -1944,7 +1948,7 @@ def purge_preview_stale(
     if conflict:
         raise HTTPException(409, conflict)
     failures: list[dict] = []
-    lock = exclusive_file_lock(Batch.preview_lock_path(layout, pkg), timeout=5.0)
+    lock = exclusive_file_lock(Batch.preview_lock_path(layout, pkg), timeout=PREVIEW_LOCK_TIMEOUT)
     try:
         lock.__enter__()
     except TimeoutError:
