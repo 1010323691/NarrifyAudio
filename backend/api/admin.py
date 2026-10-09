@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, load_only
 
 from ..platform.platform_settings import settings
@@ -516,7 +517,11 @@ def create_user(payload: UserCreate, actor: User = Depends(require_admin_csrf), 
         raise HTTPException(exc.status_code, exc.message) from exc
     db.add(AuditLog(actor_user_id=actor.id, action="admin.user_created", target_type="user", target_id=user.id,
                     metadata_json={"username": user.username, "role": user.role}))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:  # a concurrent request took the same email or username
+        db.rollback()
+        raise HTTPException(409, "邮箱或用户名已被占用，请刷新后重试") from exc
     return {"id": user.id, "email": user.email, "username": user.username, "display_name": user.display_name,
             "role": user.role, "is_active": user.is_active, "created_at": user.created_at.isoformat()}
 
@@ -1019,6 +1024,12 @@ def admin_events(level: str = "all", module: str = "all", search: str = "", limi
 _EXPORT_LIMIT = 5000
 
 
+def _csv_cell(value):
+    """Neutralise spreadsheet formulas: summaries can carry user-controlled text."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 @router.get("/events/export")
 def export_events(level: str = "all", module: str = "all", search: str = "", since_hours: int = 24,
                   _: User = Depends(require_admin), db: Session = Depends(get_db)) -> StreamingResponse:
@@ -1030,7 +1041,7 @@ def export_events(level: str = "all", module: str = "all", search: str = "", sin
     writer = csv.writer(buffer)
     writer.writerow(["时间", "级别", "模块", "类型", "摘要", "ID"])
     for row in db.execute(statement).mappings():
-        writer.writerow([row["time"].isoformat(), row["level"], row["module"], row["type"], row["message"], row["id"]])
+        writer.writerow([row["time"].isoformat(), *(_csv_cell(row[key]) for key in ("level", "module", "type", "message")), row["id"]])
     filename = f"narrify-events-{utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
     return StreamingResponse(iter([buffer.getvalue()]), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})

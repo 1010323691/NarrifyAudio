@@ -14,6 +14,7 @@ from statistics import mean
 from sqlalchemy import Integer, cast, func, select
 from sqlalchemy.orm import Session
 
+from ..platform.metrics_sampler import SAMPLE_INTERVAL_SECONDS
 from ..platform.models import QuotaTransaction, SystemMetricSample, Task, User, UserSession, utcnow
 from ..platform.task_registry import WORKER_GROUP_NAMES, task_worker_group
 from .admin_lists import event_union, filtered_events
@@ -108,13 +109,23 @@ def _db_rates(previous: dict, current: dict, seconds: float) -> dict[str, float]
     return rates
 
 
+def _history_stride(step: int) -> int:
+    return max(1, step // 300)
+
+
 def metrics_history(db: Session, range_name: str, now: datetime | None = None) -> dict:
     span, step = HISTORY_RANGES.get(range_name, HISTORY_RANGES["1h"])
     moment = now or utcnow()
     start = moment - timedelta(seconds=span)
+    # Long ranges read every Nth 30-second frame, about one frame per 5 minutes.
+    # Cumulative counters make the difference between kept frames the true mean
+    # rate over the stride, so rates stay exact; gauges become sampled means.
+    stride = _history_stride(step)
+    span_seconds = SAMPLE_INTERVAL_SECONDS * stride
     rows = db.execute(
         select(SystemMetricSample.sampled_at, SystemMetricSample.data)
-        .where(SystemMetricSample.sampled_at >= start - timedelta(seconds=90))
+        .where(SystemMetricSample.sampled_at >= start - timedelta(seconds=2 * span_seconds),
+               SystemMetricSample.bucket % stride == 0)
         .order_by(SystemMetricSample.bucket)
     ).all()
     buckets: dict[int, list[dict[str, float]]] = defaultdict(list)
@@ -124,7 +135,7 @@ def metrics_history(db: Session, range_name: str, now: datetime | None = None) -
         point = _flatten_frame(frame or {})
         if previous is not None:
             seconds = (sampled_at - previous[0]).total_seconds()
-            if seconds <= 5 * 30:  # a longer gap means the sampler was down
+            if seconds <= 5 * span_seconds:  # a longer gap means the sampler was down
                 point.update(_db_rates(previous[1], frame or {}, seconds))
         previous = (sampled_at, frame or {})
         if sampled_at >= start:
@@ -258,7 +269,7 @@ def throughput(db: Session, range_name: str, tz_offset_minutes: int = 0, now: da
     return {
         "range": range_name if range_name in THROUGHPUT_RANGES else "24h",
         "step_seconds": step,
-        "points": [{"time": datetime.fromtimestamp(index * step - offset, timezone.utc).isoformat(), **series[index]}
+        "points": [{"time": datetime.fromtimestamp(index * step + offset, timezone.utc).isoformat(), **series[index]}
                    for index in frame],
         "totals": window_totals(start, moment + timedelta(seconds=1)),
         "previous_totals": window_totals(previous_start, start),
@@ -314,7 +325,7 @@ def user_daily_usage(db: Session, user_id: str, days: int = 30, tz_offset_minute
     ).all():
         if bucket in series:
             series[bucket]["tasks"] += int(count)
-    return [{"time": datetime.fromtimestamp(index * 86400 - offset, timezone.utc).isoformat(), **series[index]} for index in frame]
+    return [{"time": datetime.fromtimestamp(index * 86400 + offset, timezone.utc).isoformat(), **series[index]} for index in frame]
 
 
 # ---------------------------------------------------------------- events
@@ -339,7 +350,7 @@ def event_stats(db: Session, hours: int, recent_errors: list[dict], level: str =
     ).all()]
     return {
         "step_seconds": step,
-        "points": [{"time": datetime.fromtimestamp(index * step - offset, timezone.utc).isoformat(), **series[index]} for index in frame],
+        "points": [{"time": datetime.fromtimestamp(index * step + offset, timezone.utc).isoformat(), **series[index]} for index in frame],
         "modules": modules,
         "total": sum(item["count"] for item in modules),
     }

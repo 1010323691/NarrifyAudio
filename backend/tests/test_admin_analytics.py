@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -274,3 +274,48 @@ def test_tts_batch_activity_counts_members_not_pools(client, quiet_probes):
     point = metrics_history.__globals__["_flatten_frame"](frame)
     assert point["tts_batch_active"] == after["active_members"] and point["tts_batch_queued"] == after["queued_members"]
     assert "tts_batch_pools" not in metrics_history.__globals__["_flatten_frame"]({"tasks": {}})  # old samples stay absent
+
+
+def test_daily_labels_point_at_local_midnight_in_utc(client: TestClient):
+    from backend.platform.models import QuotaTransaction
+    from backend.services.admin_analytics import user_daily_usage
+
+    _, user_id, _ = _register(client)
+    now = datetime(2026, 10, 9, 3, 0, tzinfo=timezone.utc)  # 11:00 on 2026-10-09 at UTC+8
+    with SessionLocal.begin() as db:
+        db.add(QuotaTransaction(user_id=user_id, amount=7, kind="consume", resource_type="TTS", operation_type="tts.batch",
+                                char_count=7, idempotency_key=str(uuid.uuid4()), note="label", created_at=now - timedelta(hours=1),
+                                available_after=1))
+    with SessionLocal() as db:
+        rows = user_daily_usage(db, user_id, 3, 480, now=now)
+    today = next(row for row in rows if row["tts_chars"] == 7)
+    # local midnight 2026-10-09 at UTC+8 is 2026-10-08T16:00Z; the old sign put it 16 hours later
+    assert today["time"] == "2026-10-08T16:00:00+00:00"
+
+
+def test_csv_cells_neutralise_spreadsheet_formulas():
+    from backend.api.admin import _csv_cell
+
+    assert _csv_cell("=HYPERLINK(\"http://x\")") == "'=HYPERLINK(\"http://x\")"
+    assert _csv_cell("+1") == "'+1" and _csv_cell("@cmd") == "'@cmd" and _csv_cell("-2") == "'-2"
+    assert _csv_cell("普通摘要") == "普通摘要" and _csv_cell(None) == ""
+
+
+def test_long_range_history_keeps_exact_rates_from_strided_frames():
+    initialize_schema()
+    base = utcnow() + timedelta(days=501)
+    with SessionLocal.begin() as db:
+        for index in range(0, 2 * 3600 // 30 + 1):  # two hours of 30-second frames
+            moment = base + timedelta(seconds=30 * index)
+            db.add(SystemMetricSample(bucket=metrics_sampler.sample_bucket(moment), sampled_at=moment, data={
+                "tasks": {"tts": {"running": index % 5, "queued": 0}},
+                "workers": {"active_slots": 1, "total_slots": 4, "online_workers": 2},
+                "db": {"counters": {"xact_commit": 1000 + 10 * 30 * index, "tup_inserted": 0, "tup_deleted": 0,
+                                    "blks_hit": 0, "blks_read": 0}, "connections": {"total": 5}},
+            }))
+    with SessionLocal() as db:
+        history = metrics_history(db, "7d", now=base + timedelta(hours=2))
+    rated = [point for point in history["points"] if "db_commit_ps" in point]
+    assert rated and history["step_seconds"] == 3600
+    # each frame adds 300 commits over 30 seconds: 10 per second, however many frames are kept
+    assert all(abs(point["db_commit_ps"] - 10.0) < 1e-6 for point in rated)
