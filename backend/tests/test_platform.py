@@ -759,9 +759,9 @@ def test_legacy_workspace_is_managed_and_requires_authenticated_csrf(client: Tes
     )
     assert submitted.status_code == 201, submitted.text
     assert process_task_message({"payload": {"task_id": submitted.json()["id"]}}, worker_id="test-worker") == "succeeded"
-    split_listing = client.get("/api/files/list/02_split_text?recursive=true")
-    assert split_listing.status_code == 200
-    assert split_listing.json()["items"]
+    split_files = client.get(f"/api/v1/projects/{legacy_file['project_id']}/files")
+    assert split_files.status_code == 200
+    assert any(item["module"] == "02_split_text" for item in split_files.json())
 
 
 def test_durable_worker_splits_chapterless_text_by_length(client: TestClient):
@@ -1026,41 +1026,6 @@ def test_durable_worker_by_length_uses_admin_configured_split_target(client: Tes
         update_feature_defaults_cache({})
 
 
-def test_legacy_audio_packaging_route_uses_durable_worker(client: TestClient):
-    first = _register(client, f"{uuid.uuid4()}@example.com")
-    csrf = first["csrf_token"]
-    uploaded = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files={"file": ("cut.mp3", b"fake audio", "audio/mpeg")},
-    )
-    assert uploaded.status_code == 200, uploaded.text
-    source = uploaded.json()
-    project_id = client.get("/api/v1/projects/active").json()["project_id"]
-    with SessionLocal() as db:
-        cut = project_workspace_path(db, first["user"]["username"], project_id) / "07_output" / "cut.mp3"
-    cut.parent.mkdir(parents=True, exist_ok=True)
-    cut.write_bytes(b"completed cut audio")
-    record_delivery(first["user"]["id"], project_id, "07_output/cut.mp3")
-    source["path"] = str(cut)
-    submitted = client.post(
-        "/api/audio/zip",
-        headers={"X-CSRF-Token": csrf},
-        json={
-            "base": "book",
-            "files": [{"name": "cut.mp3", "path": source["path"]}],
-        },
-    )
-    assert submitted.status_code == 200, submitted.text
-    task_id = submitted.json()["task_id"]
-    assert process_task_message({"payload": {"task_id": task_id}}, worker_id="test-audio-package-worker") == "succeeded"
-    task = client.get(f"/api/v1/tasks/{task_id}").json()
-    assert task["status"] == "succeeded"
-    assert task["result"]["engine"] == "audio.zip"
-    assert task["result"]["file_id"]
-    assert "/07_output/" in task["result"]["path"].replace("\\", "/")
-
-
 def test_durable_worker_formats_uploaded_file_without_quota_charge(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
@@ -1309,90 +1274,6 @@ def test_durable_worker_parses_script_into_scoped_artifact(client: TestClient, m
     artifacts = [item for item in files if item["module"] == "03_parsed_json"]
     assert len(artifacts) == 1
     assert artifacts[0]["name"] == "chapter.json"
-
-
-def test_durable_worker_runs_audio_tasks_and_catalogs_outputs(client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    first = _register(client, f"{uuid.uuid4()}@example.com")
-    csrf = first["csrf_token"]
-    project = client.post(
-        "/api/v1/projects",
-        headers={"X-CSRF-Token": csrf},
-        json={"name": "Durable audio"},
-    ).json()
-    activated = client.put(
-        "/api/v1/projects/active",
-        headers={"X-CSRF-Token": csrf},
-        json={"project_id": project["id"]},
-    )
-    assert activated.status_code == 200, activated.text
-    uploaded = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files={"file": ("merged.mp3", b"audio", "audio/mpeg")},
-    )
-    assert uploaded.status_code == 200, uploaded.text
-    input_file = uploaded.json()
-    with SessionLocal.begin() as db:
-        account = db.get(UserQuotaAccount, first["user"]["id"])
-        assert account is not None
-        account.available_units = 3
-
-    monkeypatch.setattr("backend.platform.task_worker.audio_engine.probe_duration", lambda *args: (4.0, ""))
-    monkeypatch.setattr(
-        "backend.platform.task_worker.audio_engine.detect_silences",
-        lambda *args, **kwargs: {"ok": True, "pauses": [{"start": 1.0, "end": 1.5}]},
-    )
-    planned = client.post(
-        "/api/v1/tasks",
-        headers={"X-CSRF-Token": csrf},
-        json={
-            "project_id": project["id"],
-            "task_type": "audio.silences",
-            "payload": {"input_file_id": input_file["id"], "target": "2", "tolerance": 5},
-            "idempotency_key": "durable-audio-plan-123",
-        },
-    )
-    assert planned.status_code == 201, planned.text
-    planned_id = planned.json()["id"]
-    assert process_task_message({"payload": {"task_id": planned_id}}, worker_id="test-audio-worker") == "succeeded"
-    planned_result = client.get(f"/api/v1/tasks/{planned_id}").json()
-    assert planned_result["result"]["engine"] == "audio.silences"
-    assert planned_result["result"]["count"] == 2
-
-    def fake_cut(path, segments, out_dir, naming, start_number, *args, **kwargs):
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        result = []
-        for index, segment in enumerate(segments):
-            output = out_dir / f"episode-{index + 1}.mp3"
-            output.write_bytes(f"part-{index}".encode())
-            result.append({"name": output.name, "path": str(output), "size": output.stat().st_size, "duration": segment["duration"]})
-        return result
-
-    monkeypatch.setattr("backend.platform.task_worker.audio_engine.cut_segments", fake_cut)
-    cut = client.post(
-        "/api/v1/tasks",
-        headers={"X-CSRF-Token": csrf},
-        json={
-            "project_id": project["id"],
-            "task_type": "audio.cut",
-            "payload": {
-                "input_file_id": input_file["id"],
-                "smart_align": False,
-                "segments": [{"index": 0, "start": 0, "duration": 2}, {"index": 1, "start": 2, "duration": 2}],
-                "naming": "第 {} 集",
-                "start_number": "1",
-            },
-            "idempotency_key": "durable-audio-cut-123",
-        },
-    )
-    assert cut.status_code == 201, cut.text
-    cut_id = cut.json()["id"]
-    assert process_task_message({"payload": {"task_id": cut_id}}, worker_id="test-audio-worker") == "succeeded"
-    cut_result = client.get(f"/api/v1/tasks/{cut_id}").json()
-    assert cut_result["result"]["engine"] == "audio.cut"
-    assert cut_result["result"]["file_count"] == 2
-    assert all("/07_output/" in item["path"].replace("\\", "/") for item in cut_result["result"]["files"])
 
 
 def test_cancel_before_claim_releases_quota(client: TestClient):
@@ -2139,56 +2020,6 @@ def test_publication_reconciles_directory_removal(tmp_path, committed, should_ex
     if should_exist:
         assert (target / "keep.wav").read_bytes() == b"audio"
     assert not journal_path.exists()
-
-
-def test_audio_export_stages_replacement_until_commit(client: TestClient, monkeypatch):
-    from backend.platform import task_worker
-
-    first = _register(client, f"{uuid.uuid4()}@example.com")
-    csrf = first["csrf_token"]
-    project = client.post("/api/v1/projects", headers={"X-CSRF-Token": csrf}, json={"name": "Export journal"}).json()
-    with SessionLocal() as db:
-        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
-    source = workspace / "07_output" / "source.wav"
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(b"source audio")
-    record_delivery(first["user"]["id"], project["id"], "07_output/source.wav")
-    submitted = client.post(
-        "/api/v1/tasks", headers={"X-CSRF-Token": csrf},
-        json={
-            "project_id": project["id"], "task_type": "audio.export",
-            "payload": {"source_relative": "07_output/source.wav", "files": [
-                {"relative_path": "07_output/source.wav", "name": "take.wav"},
-            ]},
-            "idempotency_key": uuid.uuid4().hex,
-        },
-    )
-    assert submitted.status_code == 201, submitted.text
-    claim = claim_task(submitted.json()["id"], "export-journal-worker")
-    assert claim is not None
-    with SessionLocal() as db:
-        workspace = project_workspace_path(db, first["user"]["username"], project["id"])
-    source = workspace / "07_output" / "source.wav"
-    final = workspace / "07_output" / "分集" / "take.wav"
-    final.parent.mkdir(parents=True, exist_ok=True)
-    final.write_bytes(b"original export")
-
-    outcome = execute_claim(claim)
-    assert final.read_bytes() == b"original export"
-    assert len(outcome.side_effect_outputs) == 1
-    assert outcome.side_effect_outputs[0].temp_path.read_bytes() == b"source audio"
-
-    original_factory = task_worker.SessionLocal
-
-    def failing_session():
-        session = original_factory()
-        session.commit = lambda: (_ for _ in ()).throw(RuntimeError("commit failed"))
-        return session
-
-    monkeypatch.setattr(task_worker, "SessionLocal", failing_session)
-    with pytest.raises(RuntimeError, match="commit failed"):
-        complete_claim(claim, outcome)
-    assert final.read_bytes() == b"original export"
 
 
 def test_tts_reset_restores_deleted_package_when_commit_fails(client: TestClient, monkeypatch):

@@ -58,14 +58,6 @@ class SplitConfig(BaseModel):
     smart_split_long_chapters: bool = True
 
 
-class AudioConfig(BaseModel):
-    target_duration: str = "10:00"
-    naming_format: str = "第 {} 集"
-    start_number: str = "1"
-    smart_align: bool = True
-    align_tolerance: int = 15
-
-
 class TTSConfig(BaseModel):
     # Local Qwen3-TTS engine — runs in the shared ``.venv`` as a one-shot subprocess
     # (see ``backend/engines/tts.py``); the app backend never imports torch directly.
@@ -123,10 +115,6 @@ class UIConfig(BaseModel):
     # 解析页「解析进度」日志区（每文件实时日志 + 流式反馈）是否显示；默认关。
     # 关闭时性能指标移到「开始处理」按钮下方（每文件行内的进度/速度/状态不受影响）。
     show_parse_logs: bool = False
-    # 侧边栏是否显示「音频分集」导航项；默认关（隐藏）。
-    # 关 = 导航栏隐藏该项（音频合并页的「前往音频分集」按钮随之隐藏），
-    # 页面路由保留——直接访问 URL 仍可打开；开 = 导航栏显示该项。
-    show_audio_split: bool = False
 
 
 class LLMConfig(BaseModel):
@@ -235,7 +223,6 @@ class AppConfig(BaseModel):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     text: TextConfig = Field(default_factory=TextConfig)
     split: SplitConfig = Field(default_factory=SplitConfig)
-    audio: AudioConfig = Field(default_factory=AudioConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)

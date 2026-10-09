@@ -23,7 +23,7 @@ def _claim(task_type: str) -> TaskClaim:
 
 def test_registry_policy_and_dispatch_contract():
     # table has all types with policy sets pinned
-    assert len(TASK_TYPES) == 23
+    assert len(TASK_TYPES) == 19
     assert set(TASK_TYPES) == SUPPORTED_TASK_TYPES
     # 策略集合按批次 2 的字面量钉扎——单一事实源即注册表，集合只能从表导出。
     assert BILLABLE_TASK_TYPES == frozenset({
@@ -34,12 +34,11 @@ def test_registry_policy_and_dispatch_contract():
     assert LEGACY_ENGINE_TASK_TYPES == frozenset({
         "voices.foundation", "voices.clone", "tts.batch", "tts.merge",
         "tts.preview_render", "bgm.segment", "bgm.mix", "bgm.match", "bgm.package",
-        "music.suggest_tags", "audio.zip", "audio.export", "tts.reset",
+        "music.suggest_tags", "tts.reset",
     })
     # Direct executors cover the remaining admitted task types.
     assert set(SUPPORTED_TASK_TYPES) - LEGACY_ENGINE_TASK_TYPES == frozenset({
         "text.format", "book.analyze", "book.split", "script.parse",
-        "audio.silences", "audio.cut",
         "resources.scan", "resources.package", "resources.cleanup",
         "project.progress",
     })
@@ -54,8 +53,8 @@ def test_registry_policy_and_dispatch_contract():
         else:
             runner = task_worker.DIRECT_EXECUTORS[name]
             assert runner.__name__ == spec.executor, name
-    assert len(engine_task_executor.ENGINE_BRANCHES) == 13
-    assert len(task_worker.DIRECT_EXECUTORS) == 10
+    assert len(engine_task_executor.ENGINE_BRANCHES) == 11
+    assert len(task_worker.DIRECT_EXECUTORS) == 8
 
 
 def test_unsupported_type_still_rejected_by_execute_claim():

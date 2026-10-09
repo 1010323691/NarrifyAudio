@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -14,8 +13,7 @@ from ..core.task_control import TaskCancelled
 from ..core.safe_filesystem import file_identity
 from ..platform.database import SessionLocal
 from ..platform.models import User
-from ..platform.storage import safe_display_name, task_attempt_path
-from ..core.filenames import unique_filename
+from ..platform.storage import safe_display_name
 from ..platform.task_registry import TASK_TYPES
 from ..platform.task_types import LEGACY_ENGINE_TASK_TYPES
 from ..platform.task_validation import legacy_task_payload_error
@@ -275,89 +273,6 @@ def _run_bgm_package(handle, claim: TaskClaim, payload: dict, side_effect_output
     return result
 
 
-def _run_audio_zip(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
-    deliveries = _validate_deliveries(claim, payload)
-    workspace = get_or_prepare_layout().workspace
-    if workspace is None:
-        raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
-    base = safe_display_name(str(payload.get("base") or "audio"))
-    files = payload.get("files") or []
-    reserved_names: set[str] = set()
-    with task_outcome_file(claim, f"{base}.zip") as archive:
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED, allowZip64=True) as output:
-            for index, item in enumerate(files, 1):
-                if cancellation_requested(claim):
-                    raise TaskCancelledError()
-                if not isinstance(item, dict):
-                    raise TaskExecutionError("invalid_payload", "打包文件参数无效")
-                relative = Path(str(item.get("relative_path") or ""))
-                source = (workspace / relative).resolve()
-                if not source.is_relative_to(workspace.resolve()) or not source.is_file():
-                    raise TaskExecutionError("input_missing", "待打包文件不存在")
-                name = unique_filename(str(item.get("name") or source.name), reserved_names)
-                reserved_names.add(name)
-                record = deliveries[relative.as_posix()]
-                _revalidate_deliveries(claim, {**payload, "files": [item]}, {relative.as_posix(): record})
-                _archive_source(output, source, name, record, claim)
-                update_progress(claim, int(index * 90 / max(1, len(files))), f"打包 {index}/{len(files)}")
-        # Closing the archive writes its central directory before publication.
-        _revalidate_deliveries(claim, payload, deliveries)
-        result = file_task_outcome(
-            archive, f"{base}.zip", "application/zip",
-            {"engine": "audio.zip", "file_count": len(files), "delivery_policy": POLICY_VERSION},
-            publish_module="07_output", check=lambda: _package_check(claim),
-        )
-        handle.progress_percent(100, "完成")
-    return result
-
-
-def _run_audio_export(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
-    deliveries = _validate_deliveries(claim, payload)
-    workspace = get_or_prepare_layout().workspace
-    if workspace is None:
-        raise TaskExecutionError("workspace_missing", "尚未设置工作空间")
-    source_relative = Path(str(payload.get("source_relative") or ""))
-    source = (workspace / source_relative).resolve()
-    if not source.is_relative_to(workspace.resolve()) or not source.is_file():
-        raise TaskExecutionError("input_missing", "源音频不存在")
-    destination = source.parent / "分集"
-    written = []
-    files = payload.get("files") or []
-    for index, item in enumerate(files, 1):
-        if cancellation_requested(claim):
-            raise TaskCancelledError()
-        if not isinstance(item, dict):
-            raise TaskExecutionError("invalid_payload", "导出文件参数无效")
-        relative = Path(str(item.get("relative_path") or ""))
-        input_path = (workspace / relative).resolve()
-        if not input_path.is_relative_to(workspace.resolve()) or not input_path.is_file():
-            raise TaskExecutionError("input_missing", "待导出文件不存在")
-        name = safe_display_name(str(item.get("name") or input_path.name))
-        target = destination / name
-        with SessionLocal() as db:
-            user = db.get(User, claim.owner_id)
-            if user is None:
-                raise TaskExecutionError("owner_not_found", "任务所属用户不存在")
-            staged = task_attempt_path(
-                db, user.username, claim.project_id, claim.task_id, claim.attempt_id,
-                f"audio-export-{index:05d}-{name}",
-            )
-        staged.parent.mkdir(parents=True, exist_ok=True)
-        record = deliveries[relative.as_posix()]
-        _check_delivery_identity(input_path, record)
-        shutil.copy2(input_path, staged)
-        try:
-            _check_delivery_identity(input_path, record)
-        except TaskExecutionError:
-            staged.unlink(missing_ok=True)
-            raise
-        side_effect_outputs.append(TaskSideEffectOutput(staged, target))
-        written.append({"name": name, "path": str(target)})
-        update_progress(claim, int(index * 90 / max(1, len(files))), f"导出 {index}/{len(files)}")
-    _revalidate_deliveries(claim, payload, deliveries)
-    return {"engine": "audio.export", "dest_dir": str(destination), "file_count": len(written), "files": written}
-
-
 def _run_tts_reset(handle, claim: TaskClaim, payload: dict, side_effect_outputs, side_effect_deletes) -> Any:
     from ..engines import tts_batch
     layout = get_or_prepare_layout()
@@ -389,8 +304,6 @@ ENGINE_BRANCHES: dict[str, Callable] = {
     "music.suggest_tags": _run_music_suggest_tags,
     "bgm.match": _run_bgm_match,
     "bgm.package": _run_bgm_package,
-    "audio.zip": _run_audio_zip,
-    "audio.export": _run_audio_export,
     "tts.reset": _run_tts_reset,
 }
 

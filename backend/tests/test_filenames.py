@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import io
 import hashlib
-import zipfile
 import uuid
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from backend.core.filenames import (
-    safe_filename, legacy_storage_name, package_stem, unique_filename,
+    safe_filename, legacy_storage_name, package_stem,
     MAX_NAME_BYTES, workspace_audio_identity,
 )
 from backend.platform.storage import available_file_name, safe_display_name, storage_username
@@ -100,27 +98,6 @@ def test_new_usernames_cannot_alias_storage_roots(name):
     assert storage_username("reader.") == "reader"
 
 
-def test_zip_deduplicates_final_names_and_preserves_both_contents(tmp_path, monkeypatch):
-    from backend.platform import engine_task_executor as executor
-    sources = [tmp_path / "first.mp3", tmp_path / "second.mp3", tmp_path / "third.mp3"]
-    for index, path in enumerate(sources):
-        path.write_bytes(bytes([index]))
-    payload = {"files": [{"relative_path": path.name, "name": name} for path, name in zip(
-        sources, ['A?.mp3', 'A*.mp3', 'a_.mp3'])]}
-    from backend.core.safe_filesystem import file_identity
-    monkeypatch.setattr(executor, "_validate_deliveries", lambda *_: {p.name: {"identity": list(file_identity(p.stat()))} for p in sources})
-    monkeypatch.setattr(executor, "get_or_prepare_layout", lambda: SimpleNamespace(workspace=tmp_path))
-    monkeypatch.setattr(executor, "_check_delivery_identity", lambda *_: None)
-    monkeypatch.setattr(executor, "cancellation_requested", lambda *_: False)
-    monkeypatch.setattr(executor, "update_progress", lambda *_: None)
-    monkeypatch.setattr(executor, "task_outcome_file", lambda *_: nullcontext(tmp_path / "archive.zip"))
-    result = executor._run_audio_zip(SimpleNamespace(progress_percent=lambda *_: None), None, payload, [], [])
-    with zipfile.ZipFile(result.temp_path) as archive:
-        names = archive.namelist()
-        assert names == ['A_.mp3', 'A_ (2).mp3', 'a_ (3).mp3']
-        assert [archive.read(name) for name in names] == [b'\x00', b'\x01', b'\x02']
-
-
 def test_legacy_alias_resolution_refuses_ambiguous_records():
     from backend.services.script_parse_state import _resolve_split_name
     rows = {
@@ -137,7 +114,6 @@ def test_new_punctuation_names_do_not_alias_each_other():
     from backend.services.script_parse_state import _resolve_split_name
     rows = {"甲，乙.txt": SimpleNamespace(id="comma", object_key="02_split_text/甲，乙.txt")}
     assert _resolve_split_name(rows, "甲—乙.txt") is None
-    assert unique_filename("甲—乙.txt", set(rows)) == "甲—乙.txt"
 
 
 @pytest.mark.parametrize("previous", [False, True])

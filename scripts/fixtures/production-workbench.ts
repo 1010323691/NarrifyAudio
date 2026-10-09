@@ -139,24 +139,6 @@ window.fetch = async (input, options) => {
     return json({ detail: '测试夹具：读取失败，请重试。' }, 503)
   const empty = scenario.value === 'empty'
   if (path === '/api/tts/status') return json({ implemented: true, ready: true, message: '' })
-  if (path.startsWith('/api/files/list/')) {
-    const module = path.split('/').pop()
-    const items = empty
-      ? []
-      : names
-          .filter((_, i) => module !== '06_audio_merge' || i < 7)
-          .map((name, i) => ({
-            name:
-              module === '03_parsed_json'
-                ? `${name}.json`
-                : module === '06_audio_merge'
-                  ? `${name}.${i === 6 ? 'wav' : 'mp3'}`
-                  : name,
-            is_dir: module === '05_audio_chunk',
-            size: 1024,
-          }))
-    return json({ module, items })
-  }
   if (path === '/api/tts/batch-status')
     return json({
       files: empty
@@ -298,7 +280,7 @@ project.projects = [
 const settings = useSettingsStore(pinia)
 settings.config = {
   paths: { working_dir: 'fixture' },
-  ui: { theme: 'light', show_audio_split: true },
+  ui: { theme: 'light' },
   tts: { batch_concurrency: 4, batch_auto: false },
 } as AppConfig
 settings.loaded = true

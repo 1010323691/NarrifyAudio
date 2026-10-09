@@ -15,14 +15,11 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from types import SimpleNamespace
 
 pytest.importorskip("sqlalchemy")
 
 from backend.main import app
 from backend.platform.database import SessionLocal, initialize_schema
-from backend.platform.deps import AuthContext
-from backend.platform.file_catalog import catalog_managed_file
 from backend.platform.models import Project, ProjectFile, Task, TaskResult, User, UserQuotaAccount, utcnow
 from backend.platform.storage import configured_storage_root, object_path
 from backend.platform.task_submission import task_dict
@@ -670,40 +667,6 @@ def test_download_falls_back_to_storage_sanitized_name(client: TestClient):
     assert client.get("/api/files/preview/02_split_text/不存在_章节.txt").status_code == 400
 
     assert client.get(f"/api/files/download/02_split_text/{raw_name}").status_code == 403
-
-def test_catalog_managed_file_collision_keeps_original_name(client: TestClient):
-    """catalog_managed_file 撞已有行（与解析补登同款根因）：只更新摘要，
-    不把 original_name 改写成磁盘名。"""
-    email, csrf, user_id, project_id = _register(client)
-    raw_name = "第 007 章 清明，故人.txt"
-    disk_name = "第 007 章 清明_故人.txt"
-    with SessionLocal() as db:
-        user = db.scalar(select(User).where(User.email == email))
-        split_dir = configured_storage_root(db) / db.get(Project, project_id).directory_key / "02_split_text"
-        split_dir.mkdir(parents=True, exist_ok=True)
-        path = split_dir / disk_name
-        path.write_text("章节内容", encoding="utf-8")
-        sha = hashlib.sha256(path.read_bytes()).hexdigest()
-        item = ProjectFile(
-            project_id=project_id,
-            owner_id=user_id,
-            original_name=raw_name,
-            object_key=f"{db.get(Project, project_id).directory_key}/02_split_text/{disk_name}",
-            content_type="text/plain",
-            kind="artifact",
-            size_bytes=4,
-            sha256=_sha("旧摘要"),
-        )
-        db.add(item)
-        db.commit()
-        item_id = item.id
-        ctx = AuthContext(user=user, session=SimpleNamespace(active_project_id=project_id))
-        row = catalog_managed_file(path, ctx, db)
-        db.commit()
-    assert row.id == item_id
-    assert row.original_name == raw_name
-    assert row.sha256 == sha
-
 
 def test_build_file_states_resolves_storage_sanitized_alias(client: TestClient):
     """version 列表按引擎原始名（含，）引用、行 original_name 已是磁盘名

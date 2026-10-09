@@ -243,7 +243,7 @@ function workerTypes(worker: api.WorkerStatus): string {
         <ChartCard title="LLM 并发与排队" :subtitle="`script.* / music.* 任务 · 任务容量 ${performance.llm_task_limit}（含机械阶段，可插队）· 闸门并发 ${performance.llm_limit}`" :span="4">
           <AdminChart :option="llmChart" :height="220" label="LLM 并发与排队趋势" />
         </ChartCard>
-        <ChartCard title="音频处理并发" subtitle="合并 / 混音 / 分集 (FFmpeg)" :span="4">
+        <ChartCard title="音频处理并发" subtitle="合并 / 混音 (FFmpeg)" :span="4">
           <AdminChart :option="audioChart" :height="220" label="音频处理并发趋势" />
         </ChartCard>
         <ChartCard title="TTS 合成吞吐" :subtitle="`${flowUnit}输入字数（额度账本实耗）`" :span="6"

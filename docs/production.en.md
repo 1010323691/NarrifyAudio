@@ -15,7 +15,7 @@ Start with a short manuscript and complete one chapter before processing a whole
 | Projects, text formatting, splitting, and chapter review | Application, database, queue, and Worker pool running |
 | Script parsing, voice foundations, and BGM paragraph analysis | Accessible LLM configured by an administrator; sufficient quota |
 | Voice candidates, dialogue synthesis, and individual line regeneration | Working local TTS environment and models; sufficient quota |
-| Audio probing, merging, episode splitting, and mixing | FFmpeg, ffprobe and shared `.venv` audio dependencies (merging requires pydub); mixing also needs a music library |
+| Audio probing, merging, and mixing | FFmpeg, ffprobe and shared `.venv` audio dependencies (merging requires pydub); mixing also needs a music library |
 
 A remote LLM does not require local CUDA. Follow the deployment guide for the GPU, environment, and models used by local TTS. The presence of engine files alone does not prove that real synthesis works.
 
@@ -80,12 +80,6 @@ Edits first remain in the editing state. Regenerated audio is a staged preview; 
 ### Merge a complete chapter
 
 In Audio Merge (「音频合并」), check input completeness and submit ready chapters. Only fully synthesized chapters can be submitted. The first merge creates a chapter MP3; merging again overwrites the selected chapters' previous output. Audition the result and check transitions and the chapter as a whole.
-
-### Optional: split into episodes
-
-Episode Splitting (「音频分集」) divides merged audiobook audio by target duration. Preview the plan, align cuts with pauses, and set naming and starting numbers. Probing and cutting require FFmpeg and ffprobe. Once verified, collect results through packaging or export operations that meet finished-output eligibility rules.
-
-Hide this navigation item in Settings (「设置」) if you do not need it. Episode splitting is not a prerequisite for BGM.
 
 ### Optional: background music
 

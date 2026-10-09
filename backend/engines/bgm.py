@@ -1740,8 +1740,7 @@ def _mix_chapter_once(handle, stem: str, bgm_cfg, ffmpeg_cfg) -> dict:
       ``filter_complex``) dumps more startup output than that, so without a
       concurrent reader ffmpeg blocks on its stderr write before it ever opens
       the output file (progress frozen at 5%, task never finishes). The pump
-      keeps only the last 4KB as the error-report tail (same idiom as
-      ``audio.detect_silences``).
+      keeps only the last 4KB as the error-report tail.
     """
     handle.check()
     layout = core_paths.get_or_prepare_layout()

@@ -143,13 +143,3 @@ def quota_page(db, user, page, page_size, query, filter, tz_offset=0):
     daily = db.execute(select(*[func.coalesce(func.sum(case((Q.created_at >= start, case((Q.created_at < start + timedelta(days=1), func.abs(Q.amount)), else_=0)), else_=0)), 0) for start in starts]).where(Q.user_id == user.id, Q.kind.in_(["consume", "settle"]), Q.created_at >= starts[0])).one()
     storage = db.scalar(select(func.coalesce(func.sum(ProjectFile.size_bytes), 0)).join(Project, Project.id == ProjectFile.project_id).where(ProjectFile.owner_id == user.id, ProjectFile.deleted_at.is_(None), Project.deleted_at.is_(None))) or 0
     return {"items": items, "pagination": page_meta(total, page, page_size), "daily": list(daily), "registered_storage_bytes": storage}
-
-
-def path_page(paths, root, page, size, query="", extensions="", exclude_suffix="", kind="all"):
-    allowed = {"." + e.strip().lower().lstrip(".") for e in extensions.split(",") if e.strip()}
-    paths = [p for p in paths if not p.is_symlink() and p.resolve().is_relative_to(root.resolve())
-             and query.strip().casefold() in p.name.casefold()
-             and (kind == "all" or p.is_dir() == (kind == "directories"))
-             and (not allowed or p.suffix.lower() in allowed)
-             and (not exclude_suffix or not p.name.lower().endswith(exclude_suffix.lower()))]
-    return page_slice(paths, page, size), page_meta(len(paths), page, size)

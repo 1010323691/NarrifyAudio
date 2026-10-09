@@ -453,34 +453,6 @@ def test_move_project_synthesize_resume(sandbox, monkeypatch):
     assert result["completed"] == 1
 
 
-def test_move_project_inbound_paths_recovered(sandbox):
-    """API endpoints accept a stale absolute path (sent by a UI that still holds the
-    old location) and recover it against the new workspace; unresolvable values get
-    a clear 400."""
-    from backend.api import _common
-
-    ws = _legacy_project(sandbox, "OldPlace", "重活了")
-    _set_pointer(sandbox, ws)
-    stale = str(ws / "01_input" / "book.txt")
-    ws_new = sandbox / "NewPlace" / "重活了"
-    ws_new.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(ws), str(ws_new))
-    _set_pointer(sandbox, ws_new)
-
-    p = _common.resolve_inbound_path(stale)
-    assert p == ws_new / "01_input" / "book.txt"
-    assert p.is_file()
-
-    # a file that is gone entirely → a clear 400, not a silent miss
-    with pytest.raises(HTTPException) as ei:
-        _common.resolve_inbound_path(str(ws / "01_input" / "gone.txt"))
-    assert ei.value.status_code == 400
-
-    # a workspace-relative value resolves against the current root
-    p2 = _common.resolve_inbound_path("01_input/book.txt")
-    assert p2 == ws_new / "01_input" / "book.txt"
-
-
 def test_require_workspace_reports_missing_dir(sandbox):
     """A pointer to a deleted/moved folder yields a clear, actionable error (409)."""
     from backend.api import _common

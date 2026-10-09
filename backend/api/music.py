@@ -162,7 +162,7 @@ class ApplySuggestionsReq(BaseModel):
 
 @router.get("/library")
 def get_library(ctx: AuthContext = Depends(get_auth_context), db: Session = Depends(get_db),
-                page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+                page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10,
                 q: str = "", folder: str | None = None, tag: str = "", include_usage: bool = False,
                 keys_only: bool = False, enabled_only: bool = False) -> dict:
     """The full index (incl. the ``folders`` section + each track's ``folder``

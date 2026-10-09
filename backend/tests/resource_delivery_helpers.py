@@ -5,7 +5,7 @@ from backend.platform.resource_delivery import capture_deliveries
 from backend.platform.storage import safe_project_workspace_path
 
 
-def record_delivery(owner_id, project_id, relative, task_type="audio.cut"):
+def record_delivery(owner_id, project_id, relative, task_type="bgm.mix"):
     with SessionLocal() as db:
         user = db.get(User, owner_id)
         root = safe_project_workspace_path(db, user.username, project_id)

@@ -22,7 +22,7 @@ export const RESOURCE_FILTERS = [
 export const RESOURCE_STAGES: Record<string, string> = {
   '01_input': '/text', '02_split_text': '/text', '03_parsed_json': '/script',
   '04_voice_profiles': '/voices', '05_audio_chunk': '/batch', '06_audio_merge': '/merge',
-  '07_output': '/audio', '08_bgm': '/bgm',
+  '08_bgm': '/bgm',
 }
 export function resourceBytes(value: number | null | undefined): string {
   return value == null ? '未读取' : formatBytes(value, { emptyText: '0 B', lowRange: 'clamp', decimals: 'always-one', nonFiniteText: '未读取' })

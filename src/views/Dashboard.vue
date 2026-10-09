@@ -31,11 +31,10 @@ const pageError = ref('')
 const openError = ref('')
 const deletingProjectId = ref('')
 let loadGeneration = 0
-const STAGE_KEYS = ['02_split_text', '03_parsed_json', '04_voice_profiles', '05_audio_chunk', '06_audio_merge', '07_output', '08_bgm']
-const visibleStageKeys = computed(() => STAGE_KEYS.filter((key) => key !== '07_output' || settings.config?.ui.show_audio_split))
+const STAGE_KEYS = ['02_split_text', '03_parsed_json', '04_voice_profiles', '05_audio_chunk', '06_audio_merge', '08_bgm']
 const stageLabels: Record<string, string> = {
   '02_split_text': '分册', '03_parsed_json': '解析', '04_voice_profiles': '配音',
-  '05_audio_chunk': '合成', '06_audio_merge': '合并', '07_output': '分割', '08_bgm': '混音',
+  '05_audio_chunk': '合成', '06_audio_merge': '合并', '08_bgm': '混音',
 }
 function progressFor(projectId: string, key: string) {
   return summaries.value[projectId]?.stage_completion?.[key]
@@ -43,7 +42,7 @@ function progressFor(projectId: string, key: string) {
 function progressTitle(projectId: string, key: string) {
   const value = progressFor(projectId, key)
   if (!value) return `${stageLabels[key]}：正在读取进度`
-  if (value.percent === null) return `${stageLabels[key]}：总量尚未确定，需先完成上游解析或分集计划`
+  if (value.percent === null) return `${stageLabels[key]}：总量尚未确定，需先完成上游解析`
   return `${stageLabels[key]}：${value.percent}%；已完成 ${value.completed} / ${value.total} ${value.unit}`
 }
 const projectPage = ref(1)

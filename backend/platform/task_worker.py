@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 import logging
-import mimetypes
 import os
 import secrets
 import threading
@@ -44,7 +43,6 @@ from ..engines.book import (
 from ..engines.epub import EpubError, read_epub
 from ..engines.text import format_text
 from ..engines import script as script_engine
-from ..engines import audio as audio_engine
 from .platform_settings import settings
 from .artifact_publication import PublicationJournal, PublicationJournalBundle, publication_transaction
 from .database import SessionLocal
@@ -114,7 +112,7 @@ from .gpu_scheduler.admission import claim_allowed, allowed_task_types, bind_cla
 from .gpu_scheduler.store import guarded_claim
 WORKSPACE_MUTATING_TASK_TYPES = {
     "voices.foundation", "voices.clone", "tts.batch", "tts.merge", "tts.reset",
-    "bgm.segment", "bgm.mix", "bgm.match", "audio.export",
+    "bgm.segment", "bgm.mix", "bgm.match",
 }
 
 
@@ -683,180 +681,6 @@ def _execute_script_parse(claim: TaskClaim) -> TaskOutcome:
     )
 
 
-def _execute_audio_silences(claim: TaskClaim) -> TaskOutcome:
-    with SessionLocal() as db:
-        user, _project, item, source_path = _input_file(db, claim)
-        workspace = project_workspace_path(db, user.username, claim.project_id)
-    handle = EngineExecutionContext(claim)
-    target = str(claim.payload.get("target") or "10:00")
-    tolerance = int(claim.payload.get("tolerance") or audio_engine.DEFAULT_TOLERANCE)
-    token = bind_workspace(workspace)
-    try:
-        ffmpeg = core_config.get_config().ffmpeg
-    finally:
-        reset_workspace(token)
-    handle.progress_percent(2, "读取时长")
-    duration, err = audio_engine.probe_duration(source_path, ffmpeg.ffprobe_path)
-    if err or not (duration > 0):
-        raise TaskExecutionError("probe_failed", f"无法读取音频时长：{err}")
-    try:
-        result = audio_engine.detect_silences(
-            source_path,
-            duration,
-            ffmpeg.ffmpeg_path,
-            on_progress=lambda value: handle.progress_percent(5 + value * 85, "检测停顿"),
-            should_cancel=lambda: handle.cancelled,
-            on_log=handle.log,
-        )
-    except TaskCancelled as exc:
-        raise TaskCancelledError() from exc
-    if not result["ok"]:
-        raise TaskExecutionError("silence_detection_failed", result["reason"])
-    plan = audio_engine.build_aligned_plan(duration, target, result["pauses"], tolerance)
-    if not plan["valid"]:
-        raise TaskExecutionError("invalid_plan", plan["reason"])
-    payload = {
-        "duration": duration,
-        "pause_count": len(result["pauses"]),
-        "pauses": result["pauses"],
-        "count": plan["count"],
-        "segments": plan["segments"],
-        "snapped": plan.get("snapped", 0),
-        "fallbacks": plan.get("fallbacks", 0),
-        "aligned": plan.get("aligned", False),
-        "shifts": plan.get("shifts", []),
-    }
-    handle.progress_percent(100, "完成")
-    output_name = safe_display_name(f"{Path(item.original_name).stem}_silences.json")
-    return write_task_outcome(
-        claim,
-        output_name,
-        "application/json",
-        json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),
-        {"engine": "audio.silences", "source_file_id": item.id, **payload},
-    )
-
-
-def _execute_audio_cut(claim: TaskClaim) -> TaskOutcome:
-    from ..core.safe_filesystem import file_identity, safe_regular_path
-    from .resource_delivery import delivery_records
-
-    with SessionLocal() as db:
-        user, _project, item, source_path = _input_file(db, claim)
-        output_dir = task_attempt_path(
-            db, user.username, claim.project_id, claim.task_id, claim.attempt_id, "cut"
-        )
-        workspace = project_workspace_path(db, user.username, claim.project_id)
-        source_relative = source_path.relative_to(workspace).as_posix()
-        source_path = safe_regular_path(workspace, source_relative)
-        source_identity = file_identity(source_path.stat())
-        # Uploaded audio is a valid standalone input. Production intermediates
-        # inherit their source's delivery eligibility rather than gaining it by cutting.
-        source_complete = source_relative.startswith("01_input/") or source_relative in delivery_records(db, user, claim.project_id, [source_relative])
-    handle = EngineExecutionContext(claim)
-    token = bind_workspace(workspace)
-    try:
-        ffmpeg = core_config.get_config().ffmpeg
-    finally:
-        reset_workspace(token)
-    target = str(claim.payload.get("target") or "10:00")
-    smart_align = bool(claim.payload.get("smart_align"))
-    tolerance = int(claim.payload.get("tolerance") or audio_engine.DEFAULT_TOLERANCE)
-    naming = str(claim.payload.get("naming") or "第 {} 集")
-    start_number = str(claim.payload.get("start_number") or "1")
-    segments = claim.payload.get("segments")
-    try:
-        handle.progress_percent(2, "读取时长")
-        duration, err = audio_engine.probe_duration(source_path, ffmpeg.ffprobe_path)
-        if err or not (duration > 0):
-            raise TaskExecutionError("probe_failed", f"无法读取音频时长：{err}")
-        if segments is None:
-            if smart_align:
-                silence = audio_engine.detect_silences(
-                    source_path,
-                    duration,
-                    ffmpeg.ffmpeg_path,
-                    on_progress=lambda value: handle.progress_percent(5 + value * 25, "检测停顿"),
-                    should_cancel=lambda: handle.cancelled,
-                    on_log=handle.log,
-                )
-                if not silence["ok"]:
-                    raise TaskExecutionError("silence_detection_failed", silence["reason"])
-                plan = audio_engine.build_aligned_plan(duration, target, silence["pauses"], tolerance)
-            else:
-                plan = audio_engine.build_plan(duration, target)
-            if not plan["valid"]:
-                raise TaskExecutionError("invalid_plan", plan["reason"])
-            segments = plan["segments"]
-        if not isinstance(segments, list) or not segments:
-            raise TaskExecutionError("invalid_payload", "未提供有效的切割方案")
-        if len(segments) > audio_engine.MAX_SEGMENTS:
-            raise TaskExecutionError("invalid_payload", f"段数 {len(segments)} 超过上限 {audio_engine.MAX_SEGMENTS}")
-        files = audio_engine.cut_segments(
-            source_path,
-            segments,
-            output_dir,
-            naming,
-            start_number,
-            ffmpeg.ffmpeg_path,
-            audio_engine.get_extension(item.original_name),
-            on_progress=lambda value: handle.progress_percent(32 + value * 66, "切割"),
-            should_cancel=lambda: handle.cancelled,
-            on_log=handle.log,
-        )
-    except TaskCancelled as exc:
-        raise TaskCancelledError() from exc
-    if not files:
-        raise TaskExecutionError("missing_output", "音频切割未生成文件")
-    with SessionLocal() as db:
-        user = db.get(User, claim.owner_id)
-        source_complete = source_complete and file_identity(safe_regular_path(workspace, source_relative).stat()) == source_identity
-        if not source_relative.startswith("01_input/"):
-            source_complete = source_complete and source_relative in delivery_records(db, user, claim.project_id, [source_relative])
-    outputs = [Path(file["path"]) for file in files]
-    metadata_files = [
-        {
-            "name": file["name"],
-            "size": file["size"],
-            "duration": file["duration"],
-        }
-        for file in files
-    ]
-    handle.progress_percent(100, "完成")
-    first = outputs[0]
-    additional: list[TaskFileOutcome] = []
-    for index, (file, path) in enumerate(zip(files[1:], outputs[1:]), 1):
-        additional.append(
-            TaskFileOutcome(
-                temp_path=path,
-                output_name=safe_display_name(file["name"]),
-                content_type=mimetypes.guess_type(file["name"])[0] or "application/octet-stream",
-                size_bytes=path.stat().st_size,
-                sha256=sha256_file(path),
-                publish_module="07_output",
-            )
-        )
-    return TaskOutcome(
-        temp_path=first,
-        output_name=safe_display_name(files[0]["name"]),
-        content_type=mimetypes.guess_type(files[0]["name"])[0] or "application/octet-stream",
-        size_bytes=first.stat().st_size,
-        sha256=sha256_file(first),
-        metadata={
-            "engine": "audio.cut",
-            "complete": source_complete,
-            "source_file_id": item.id,
-            "output_dir": "07_output",
-            "file_count": len(files),
-            "files": metadata_files,
-            "duration": duration,
-            "smart_align": smart_align,
-        },
-        publish_module="07_output",
-        additional_outputs=tuple(additional),
-    )
-
-
 def _execute_load_simulation(claim: TaskClaim) -> TaskOutcome:
     if os.getenv("NARRIFY_LOAD_SIMULATION_ENABLED", "false").lower() != "true":
         raise TaskExecutionError("simulation_disabled", "当前 worker 未启用负载模拟")
@@ -1176,8 +1000,6 @@ DIRECT_EXECUTORS: dict[str, Callable[[TaskClaim], TaskOutcome]] = {
     "book.analyze": _execute_book_analyze,
     "book.split": _execute_book_split,
     "script.parse": _execute_script_parse,
-    "audio.silences": _execute_audio_silences,
-    "audio.cut": _execute_audio_cut,
     "resources.scan": _execute_resource_scan,
     "resources.package": _execute_resource_package,
     "resources.cleanup": _execute_resource_cleanup,
@@ -1457,7 +1279,7 @@ def complete_claim(claim: TaskClaim, outcome: TaskOutcome) -> bool | None:
                     for index in range(len(published))
                 ]
             from .resource_delivery import capture_deliveries
-            if task.task_type in {"tts.merge", "bgm.mix", "audio.cut", "audio.export", "audio.zip", "bgm.package"}:
+            if task.task_type in {"tts.merge", "bgm.mix", "bgm.package"}:
                 result_payload["deliveries"] = capture_deliveries(
                     db, user, task.project_id, task.task_type, result_payload,
                     [str(item.final_path) for item in outcome.side_effect_outputs],

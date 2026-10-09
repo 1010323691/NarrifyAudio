@@ -398,7 +398,7 @@ export function useResourceCenter() {
         actionResult.value = `清理结果：删除${deleted}项（${resourceBytes(bytes)}），跳过${skipped}项，失败${failed}项，${blocked}个项目被任务阻塞。正在更新容量。`
       } else if (item.status === 'succeeded' && item.task_type === 'tts.batch') {
         actionResult.value = '合成完成，可继续合并。正在更新制作资料。'
-      } else if (item.status === 'succeeded' && ['tts.merge', 'bgm.mix', 'audio.cut', 'audio.export'].includes(item.task_type)) {
+      } else if (item.status === 'succeeded' && ['tts.merge', 'bgm.mix'].includes(item.task_type)) {
         actionResult.value = item.result?.deliveries?.length ? '成品已生成，正在更新成品清单。' : '此制作阶段已完成，正在核对成品与更新资源。'
       }
       submittedScopes.delete(item.id)

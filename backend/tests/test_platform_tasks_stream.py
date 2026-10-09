@@ -189,7 +189,7 @@ def test_v1_stream_route_is_user_scoped_and_terminates_on_session_revocation(cli
     a = _register(f"v1stream-a-{uuid.uuid4().hex[:10]}@example.com")
     a_id = a["json"]["user"]["id"]
     ta = _create_task(a_id, label="任务 A")
-    tb = _create_task(a_id, task_type="audio.zip", status="queued", progress=0)
+    tb = _create_task(a_id, task_type="bgm.mix", status="queued", progress=0)
     _add_event(ta, 1, "submitted", {})
     _add_event(ta, 2, "progress", {"current": "第一步", "fraction": 0.4})
     _add_event(ta, 3, "log", {"level": "INFO", "msg": "开始"})

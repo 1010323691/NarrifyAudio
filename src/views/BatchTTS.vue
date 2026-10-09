@@ -88,8 +88,6 @@ async function refreshVoiceSummary() {
   }
 }
 
-// The same filter WorkspaceEntryPicker applied: plain .json files, excluding the two-checks
-// shared product (<stem>_checked.json).
 /** A 待合成 row: the directory's file name + its live stats (zeros when stats are missing). */
 interface FileRow {
   name: string

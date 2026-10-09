@@ -172,7 +172,6 @@ try:
             project=checked(client.post('/api/v1/projects',json={'name':name}))['id']
             checked(client.put('/api/v1/projects/active',json={'project_id':project}))
             txt=checked(client.post('/api/files/upload',files={'file':('source.txt',f'第一章 测试\n用户{name}走进房间。\n他说今天开始并发测试。'.encode(),'text/plain')}))['id']
-            audio=checked(client.post('/api/files/upload',files={'file':('source.wav',(RUN/'template.wav').read_bytes(),'audio/wav')}))['id']
             resource_project=checked(client.post('/api/v1/projects',json={'name':name+'-resources'}))['id']
             cleanup_project=checked(client.post('/api/v1/projects',json={'name':name+'-cleanup'}))['id']
             with SessionLocal.begin() as db:
@@ -199,10 +198,10 @@ try:
                     write(root,relative,(RUN/'template.mp3').read_bytes())
                     manifest.append({'index':n,'speaker':'旁白','text':f'用户{name}的{stem}测试第'+('一' if n==0 else '二')+'段。','ok':True,'path':relative,'voice_used':tts_batch.voice_params('旁白',vc)})
                 write(root,f'05_audio_chunk/{stem}/manifest.json',manifest)
-            for relative,kind in [('07_output/seed.mp3','audio.cut'),('06_audio_merge/mix.mp3','tts.merge'),('06_audio_merge/match.mp3','tts.merge'),('06_audio_merge/segment.mp3','tts.merge'),('08_bgm/package.mp3','bgm.mix')]:
+            for relative,kind in [('06_audio_merge/mix.mp3','tts.merge'),('06_audio_merge/match.mp3','tts.merge'),('06_audio_merge/segment.mp3','tts.merge'),('08_bgm/package.mp3','bgm.mix')]:
                 write(root,relative,(RUN/'template.mp3').read_bytes()); record_delivery(owner,project,relative,kind)
             write(root,'08_bgm/bgm_assignments.json',{'version':1,'chapters':{'mix':{'music':'base.mp3','mode':'random'}}})
-            write(rr,'07_output/seed.mp3',(RUN/'template.mp3').read_bytes()); record_delivery(owner,resource_project,'07_output/seed.mp3')
+            write(rr,'08_bgm/seed.mp3',(RUN/'template.mp3').read_bytes()); record_delivery(owner,resource_project,'08_bgm/seed.mp3')
             stale=write(cr,'00_temp/stale.bin',b'expired'); os.utime(stale,(time.time()-9*86400,)*2)
             write(cr,'00_temp/fresh.bin',b'keep')
             refs=[]
@@ -219,7 +218,6 @@ try:
                 'text.format':{'input_file_id':txt,'output_name':'formatted.txt'},
                 'book.analyze':{'input_file_id':txt}, 'book.split':{'input_file_id':txt,'whole_book':True,'base':'book'},
                 'script.parse':{'input_file_id':txt,'output_name':'parsed.json'},
-                'audio.silences':{'input_file_id':audio}, 'audio.cut':{'input_file_id':audio,'target':'00:01','naming':'cut-{}'},
                 'resources.scan':{'project_ids':[project]},
                 'resources.package':{'scope':{'snapshots':[refs[0]],'category':'deliverables'}},
                 'resources.cleanup':{'snapshots':[refs[1]]},
@@ -229,8 +227,7 @@ try:
                 'tts.preview_render':{'script':'preview.json','render':[{'index':0}]},
                 'bgm.segment':{'stem':'segment'}, 'bgm.mix':{'stem':'mix'},
                 'bgm.match':{'chapters':['match'],'mode':'random'}, 'bgm.package':{'chapters':['package'],'base':'bgm'},
-                'music.suggest_tags':{'name':track}, 'audio.zip':{'files':[{'relative_path':'07_output/seed.mp3','name':'seed.mp3'}],'base':'archive'},
-                'audio.export':{'source_relative':'06_audio_merge/mix.mp3','files':[{'relative_path':'07_output/seed.mp3','name':'seed.mp3'}]},
+                'music.suggest_tags':{'name':track},
                 'tts.reset':{'scripts':['reset.json']}}
             assert set(payloads)==set(TASK_TYPES)
             sessions.append((client,owner,project,payloads,resource_project,cleanup_project,root,cr,track))
@@ -347,8 +344,6 @@ try:
                 if ledger!=account.consumed_units or account.available_units+account.consumed_units!=10000:validation.append('quota ledger mismatch '+s[1])
                 with wave.open(str(s[6]/voice['克隆角色']['ref_audio'])) as clone:
                     assert clone.getnframes()>0
-                export=s[6]/'06_audio_merge/分集/seed.mp3'
-                if export.read_bytes()!=(RUN/'template.mp3').read_bytes():validation.append('export mismatch '+s[1])
                 if (s[6]/'05_audio_chunk/reset').exists():validation.append('reset package remains '+s[1])
             permits=db.scalar(select(func.count()).select_from(GPURequest))
             if permits:validation.append('GPU admission request leak '+str(permits))

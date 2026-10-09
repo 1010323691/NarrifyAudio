@@ -13,8 +13,6 @@ import Card from '@/components/ui/Card.vue'
 import CardHeader from '@/components/ui/CardHeader.vue'
 import CardTitle from '@/components/ui/CardTitle.vue'
 import CardContent from '@/components/ui/CardContent.vue'
-import Label from '@/components/ui/Label.vue'
-import Switch from '@/components/ui/Switch.vue'
 import StatusPill from '@/components/ui/StatusPill.vue'
 import Alert from '@/components/ui/Alert.vue'
 import WorkbenchContextBar from '@/components/WorkbenchContextBar.vue'
@@ -143,15 +141,6 @@ async function save() {
               >
                 <component :is="t.icon" class="h-4 w-4" />{{ t.label }}
               </Button>
-            </div>
-            <div class="space-y-1">
-              <div class="flex items-center justify-between">
-                <Label class="font-normal">音频分集导航项</Label>
-                <Switch v-model="draft.ui.show_audio_split" />
-              </div>
-              <p class="text-xs text-muted-foreground">
-                开启后在侧边栏显示「音频分集」。
-              </p>
             </div>
           </CardContent>
         </Card>

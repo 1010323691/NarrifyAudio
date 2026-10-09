@@ -85,7 +85,6 @@ def test_task_module_and_worker_group_labels():
         "music.suggest_tags": "music-ai-tags",
         # fallback: task prefix
         "script.parse": "script",
-        "audio.silences": "audio",
         "book.ocr": "book",
         "unknown.type": "unknown",
     }
@@ -98,7 +97,6 @@ def test_task_module_and_worker_group_labels():
         "music.suggest_tags": "llm",
         "tts.batch": "tts",
         "voices.clone": "tts",
-        "audio.silences": "audio",
         "bgm.mix": "audio",
         "book.ocr": "system",
         "text.format": "system",

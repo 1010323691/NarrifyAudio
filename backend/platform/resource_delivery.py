@@ -15,12 +15,9 @@ AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"}
 DELIVERY_TYPES = {
     "tts.merge": ({"06_audio_merge"}, "纯旁白成品"),
     "bgm.mix": ({"08_bgm"}, "混音成品"),
-    "audio.cut": ({"07_output"}, "分集成品"),
-    "audio.export": ({"06_audio_merge", "07_output", "08_bgm"}, "分集成品"),
-    "audio.zip": ({"07_output"}, "成品合集"),
     "bgm.package": ({"08_bgm"}, "混音合集"),
 }
-ARCHIVE_TYPES = {"audio.zip", "bgm.package"}
+ARCHIVE_TYPES = {"bgm.package"}
 
 
 class DeliveryDenied(ValueError):
@@ -145,9 +142,9 @@ def require_delivery(db, user, project_id: str, relative: str) -> dict:
 
 
 def validate_delivery_sources(db, user, project_id: str, task_type: str, payload: dict) -> dict:
-    if task_type not in {"audio.zip", "audio.export", "bgm.package"}:
+    if task_type != "bgm.package":
         return {}
-    files = [f"08_bgm/{stem}.mp3" for stem in payload.get("chapters", [])] if task_type == "bgm.package" else [str(item.get("relative_path", "")) for item in payload.get("files", [])]
+    files = [f"08_bgm/{stem}.mp3" for stem in payload.get("chapters", [])]
     records = delivery_records(db, user, project_id, files)
     if not files or any(relative not in records for relative in files):
         raise DeliveryDenied("只允许导出已完成的音频成品，制作资料不能打包或导出。")

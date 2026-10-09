@@ -28,7 +28,6 @@ import {
   SlidersHorizontal,
   MessageSquareText,
   AudioWaveform,
-  AudioLines,
   Music4,
   Scissors,
   RefreshCw,
@@ -117,7 +116,6 @@ async function save() {
   try {
     const patch: Record<string, unknown> = {
       text: Object.fromEntries(Object.entries(config.text).filter(([key]) => key !== 'split_long_continuous_chapters')),
-      audio: config.audio,
       tts,
       llm: config.llm,
       persona_prompts: config.persona_prompts,
@@ -409,39 +407,6 @@ watch(
             </div>
           </div>
           <p class="text-xs text-muted-foreground">自动模式按同批最长文本字数匹配安全批量档位；Seed 设为 -1 时随机取值。</p>
-        </CardContent>
-      </Card>
-
-      <!-- 音频分集 -->
-      <Card v-if="active === 'audio'">
-        <CardHeader>
-          <CardTitle class="flex items-center gap-2"><AudioLines class="h-5 w-5" />音频分集</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <div class="flex items-center gap-3">
-              <Label for="admin-setting-13" class="w-24 shrink-0">目标时长</Label>
-              <Input id="admin-setting-13" v-model="draft.audio.target_duration" placeholder="10:00" class="max-w-[120px]" />
-            </div>
-            <div class="flex items-center gap-3">
-              <Label class="w-24 shrink-0">智能对齐</Label>
-              <Switch aria-label="智能对齐" v-model="draft.audio.smart_align" />
-            </div>
-            <div class="flex items-center gap-3">
-              <Label for="admin-setting-14" class="w-24 shrink-0">偏移容差</Label>
-              <Input id="admin-setting-14" v-model.number="draft.audio.align_tolerance" type="number" min="5" max="30" class="max-w-[100px]" />
-              <span class="text-xs text-muted-foreground">秒</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <Label for="admin-setting-15" class="w-24 shrink-0">命名格式</Label>
-              <Input id="admin-setting-15" v-model="draft.audio.naming_format" placeholder="书名 第 {} 集" class="max-w-[160px]" />
-              <span class="text-xs text-muted-foreground">完整文件名，{} 为编号</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <Label for="admin-setting-16" class="w-24 shrink-0">起始编号</Label>
-              <Input id="admin-setting-16" v-model="draft.audio.start_number" class="max-w-[100px]" />
-            </div>
-          </div>
         </CardContent>
       </Card>
 

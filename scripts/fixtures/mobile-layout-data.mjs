@@ -12,7 +12,6 @@ runInNewContext(ts.transpileModule(adminSource, {
 const config = JSON.parse(readFileSync(new URL('../../setting.json', import.meta.url), 'utf8'));
 config.paths.working_dir = '/fixture/project';
 config.llm.api_key = 'fixture';
-config.ui.show_audio_split = true;
 const name = '第001章_移动端长章节名称与边界检查';
 const project = {id:'demo',name:'移动端展示检查项目名称',directory_key:'demo',created_at:'2026-10-06T00:00:00Z',updated_at:'2026-10-06T00:00:00Z'};
 const chapters = Array.from({length:24},(_,i)=>({key:String(i),seq:i+1,num:i+1,numStr:String(i+1),title:'长章节标题用于测试移动端展示效果',chars:3000,orig_num:i+1,orig_numStr:String(i+1),final_num:i+1,actions:[],reasons:[],confidence:'high',pending:false,adjusted:false,matters:[]}));
@@ -48,7 +47,6 @@ export function layoutResponse(path, role) {
   if(path.endsWith('/text-format/state'))return {flow:{id:'flow',source_file_id:'input',source_file_name:'长篇小说.txt',config_snapshot:{},whole_book:false,force_by_length:false,status:'ready',manifest_count:24},version,next_task:null,active_tasks:[]};
   if(path.endsWith('/script-parse/summary'))return {total:125,done_count:0,active_task_ids:[]};
   if(path.endsWith('/script-parse/state'))return {source:{mode:'version',version},text_format_busy:false,files:version.files.map(f=>({name:f.name,input:{name:f.name,sha256:'hash',size:3000},latest_task:null,result:null,result_status:null}))};
-  if(path.startsWith('/api/files/list/'))return {path:'',items:[{name:name+(path.includes('03_parsed')?'.json':path.includes('audio')?'.mp3':'.txt'),is_dir:path.includes('05_audio'),size:3000}]};
   if(path.startsWith('/api/tts/preview/chapter/'))return {name:name+'.json',package:name,lines:Array.from({length:12},(_,index)=>({index,speaker:'长角色名称',text:'用于检查手机端台词编辑区域的长文本。'.repeat(4),instruct:'平静',audio:'',audio_mtime_ns:null,duration:null,ok:false,reason:'',staged:null,start_offset:null})),chapter_audio:null,timeline_exists:false,downstream:{merged:false,mixed:false,timeline:false,segment_stale:false}};
   if(path==='/api/tts/batch-status'||path==='/api/tts/batch-list')return {files:[{name:name+'.json',total:20,completed:10,complete:false,speakers:3,ready:3,missing:[]}]};
   if(path==='/api/tts/merge-status'||path==='/api/tts/merge-list')return {packages:[{name,total:20,completed:10,remaining:10,complete:false}]};

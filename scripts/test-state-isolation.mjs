@@ -160,12 +160,12 @@ test('audio task reattachment is restricted to the active project', () => {
   const load = harness()
   const { findActiveDurableTask } = load('@/api/durableTasks')
   const tasks = [
-    { id: 'task-A', project_id: 'A', task_type: 'audio.cut', status: 'running' },
-    { id: 'task-B', project_id: 'B', task_type: 'audio.cut', status: 'running' },
-    { id: 'task-C', project_id: 'A', task_type: 'audio.cut', status: 'succeeded' },
+    { id: 'task-A', project_id: 'A', task_type: 'bgm.mix', status: 'running' },
+    { id: 'task-B', project_id: 'B', task_type: 'bgm.mix', status: 'running' },
+    { id: 'task-C', project_id: 'A', task_type: 'bgm.mix', status: 'succeeded' },
   ]
-  assert.equal(findActiveDurableTask(tasks, 'B', 'audio.cut')?.id, 'task-B')
-  assert.equal(findActiveDurableTask(tasks, 'C', 'audio.cut'), undefined)
+  assert.equal(findActiveDurableTask(tasks, 'B', 'bgm.mix')?.id, 'task-B')
+  assert.equal(findActiveDurableTask(tasks, 'C', 'bgm.mix'), undefined)
 })
 
 test('task control confirms the status over the SSE stream, not from the POST response', async () => {

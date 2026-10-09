@@ -169,31 +169,13 @@ def test_ui_config_defaults_and_round_trip():
     cfg = AppConfig.model_validate(data)
     assert cfg.ui.show_parse_logs is False
 
-    # ui config show audio split default off
-    # 默认关：侧边栏隐藏「音频分集」导航项（页面路由保留，仍可直访）。
-    u = UIConfig()
-    assert u.show_audio_split is False
-
-    # ui config round trips show audio split
+    # 已下线的「音频分集」配置残留在旧工作空间配置里：加载时静默丢弃，不影响读取链。
     data = AppConfig().model_dump()
+    data["audio"] = {"target_duration": "10:00", "naming_format": "第 {} 集"}
     data["ui"]["show_audio_split"] = True
-    back = AppConfig.model_validate(data)
-    assert back.ui.show_audio_split is True
-    # 再次落盘/重读不丢字段（schema 稳定）。
-    again = AppConfig.model_validate(back.model_dump())
-    assert again.ui.show_audio_split is True
-
-    # ui config missing show audio split falls back to default
-    # 旧工作空间配置缺该字段 → Pydantic 默认值填充（False），读取链不报错。
-    data = AppConfig().model_dump()
-    del data["ui"]["show_audio_split"]
     cfg = AppConfig.model_validate(data)
-    assert cfg.ui.show_audio_split is False
+    assert not hasattr(cfg, "audio") and not hasattr(cfg.ui, "show_audio_split")
 
-
-# --------------------------------------------------------------------------- #
-# UIConfig: 音频分集导航项显隐开关（侧边栏「音频分集」项）
-# --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
 # _deep_update (the merge update_config uses)
@@ -387,19 +369,6 @@ def test_update_config_persists_ui_show_parse_logs(sandbox):
     assert _read(ws / "config" / "setting.json")["ui"]["show_parse_logs"] is True
     # 再读（缓存已更新）保持 True。
     assert core_config.get_config().ui.show_parse_logs is True
-
-
-def test_update_config_persists_ui_show_audio_split(sandbox):
-    # 设置页保存「音频分集导航项」→ 工作空间配置落盘（根模板不动）。
-    ws = sandbox / "MyBook"
-    core_config.init_workspace_config(ws)  # seeds ws/config/setting.json
-    core_config.set_workspace_pointer(str(ws))
-
-    cfg = core_config.update_config({"ui": {"show_audio_split": True}})
-    assert cfg.ui.show_audio_split is True
-    assert _read(ws / "config" / "setting.json")["ui"]["show_audio_split"] is True
-    # 再读（缓存已更新）保持 True。
-    assert core_config.get_config().ui.show_audio_split is True
 
 
 def test_init_workspace_config_copies_template_and_sets_pointer(sandbox):

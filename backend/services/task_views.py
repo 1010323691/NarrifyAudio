@@ -69,10 +69,6 @@ def task_display_label(task_type: str, payload: dict | None) -> str:
         return '更新制作进度'
     if task_type == "script.parse":
         return f"文本解析（{source or '文件'}）"
-    if task_type == "audio.silences":
-        return f"停顿检测：{source or '音频'}"
-    if task_type == "audio.cut":
-        return f"音频分集：{source or '音频'}"
     if task_type.startswith("resources."):
         return {"resources.scan": "资源清单扫描", "resources.package": "资源文件打包", "resources.cleanup": "过期缓存清理"}.get(task_type, "资源管理")
     return f"持久化任务：{task_type}"

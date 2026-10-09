@@ -2029,9 +2029,8 @@ def _encode_mp3_streaming(wav_path, mp3_path, duration_s, ffmpeg="", threads=0):
     of the growing output file's *real* duration every 2 s while the encoder
     runs (measured, never estimated). If ffprobe is missing the label degrades
     to an elapsed-time tick, so the progress text still changes at least every
-    2 s. Mirrors backend/engines/audio.py::detect_silences (reader thread over
-    stderr + the time= regex) minus the task-cancellation hook — the backend
-    kills the worker on cancel, and the finally below kills the encoder. The
+    2 s. Uses a reader thread over stderr + the time= regex, with no
+    task-cancellation hook — the backend kills the worker on cancel, and the finally below kills the encoder. The
     encoder args match the old _wav_to_mp3 (pydub default export) exactly:
     libmp3lame with NO explicit bitrate — pydub's export passes no -b:a, and an
     explicit 192k would clamp differently per sample rate (160k at 22.05/24 kHz)
