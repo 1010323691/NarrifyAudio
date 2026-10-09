@@ -40,6 +40,16 @@ export function solveRowHeight(
   return height
 }
 
+/** 迟滞：变化不足 1px 时沿用上次行高（不 NaN 时），抑制亚像素取整造成的来回跳动。 */
+export function settleHeight(previous: number, target: number): number {
+  return Number.isFinite(previous) && Math.abs(previous - target) < 1 ? previous : target
+}
+
+/** 视口有剩余空间时，把父容器空闲高度平摊到各行，结果按 STEP 取整并不超过 cap。 */
+export function growHeight(max: number, free: number, rows: number, cap: number): number {
+  return Math.min(cap, Math.floor((max + free / rows) * STEP) / STEP)
+}
+
 function clippingAncestors(el: HTMLElement): HTMLElement[] {
   const out: HTMLElement[] = []
   for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
@@ -90,12 +100,12 @@ function fit(el: HTMLElement, options: FitRowsOptions) {
   // ResizeObserver 重新适配，列表就持续抽动。变化不足 1px 时沿用上次行高。
   let target = next
   if (options.grow && next >= max) {
-    const grown = Math.min(options.grow, Math.floor((max + freeSpace(el) / rows) * STEP) / STEP)
+    const grown = growHeight(max, freeSpace(el), rows, options.grow)
     apply(grown)
     // 放大后若让祖先溢出（测量误差），回退到不放大。
     target = grown > max && maxOverflow(ancestors) <= 0.5 ? grown : max
   }
-  apply(Number.isFinite(previous) && Math.abs(previous - target) < 1 ? previous : target)
+  apply(settleHeight(previous, target))
   // 祖先链可能在挂载之后变化（条件渲染的外层容器）：每次适配后补挂观察，observe 对同一节点幂等。
   const state = bound.get(el)
   if (state) for (const node of ancestors.slice(0, 2)) state.resize.observe(node)
