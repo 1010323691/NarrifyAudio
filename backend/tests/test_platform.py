@@ -79,6 +79,48 @@ def test_shared_music_rollback_keeps_concurrent_writer(monkeypatch, tmp_path):
     assert index_path.read_bytes() == b"concurrent tags"
 
 
+def test_guarded_rollback_restores_backup_when_crash_left_no_fingerprint(tmp_path):
+    root = tmp_path / "lib"
+    root.mkdir()
+    final = root / "music_index.json"
+    final.write_text("original", encoding="utf-8")
+    journal = PublicationJournal(root, root / ".tasks" / "t" / "a" / "publication.json")
+    journal.prepare()
+    index = journal.add(final, guard=True)
+    # 模拟崩溃：original 已移到 backup，新内容尚未落位，也没有指纹记录。
+    _final, backup, _had, _guard = journal.entries[index]
+    final.replace(backup)
+
+    journal.rollback()
+
+    assert final.read_text("utf-8") == "original"
+
+
+def test_journal_rollback_lock_is_used_without_explicit_lock(tmp_path):
+    from contextlib import contextmanager
+    root = tmp_path / "lib"
+    root.mkdir()
+    final = root / "music_index.json"
+    final.write_text("original", encoding="utf-8")
+    journal = PublicationJournal(root, root / ".tasks" / "t" / "a" / "publication.json")
+    journal.prepare()
+    staged = root / "staged.bin"
+    staged.write_bytes(b"new")
+    journal.publish(journal.add(final, guard=True), staged)
+    calls = []
+
+    @contextmanager
+    def lock():
+        calls.append("held")
+        yield
+
+    journal.rollback_lock = lock
+    journal.rollback()
+
+    assert calls == ["held"]
+    assert final.read_text("utf-8") == "original"
+
+
 def test_session_cookie_and_project_scope(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]

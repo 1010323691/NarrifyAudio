@@ -122,6 +122,8 @@ class EngineExecutionContext:
                 library_root / ".tasks" / self.claim.task_id / self.claim.attempt_id / "publication.json",
             )
             journal.prepare()
+            from ..core.file_lock import exclusive_file_lock
+            journal.rollback_lock = lambda: exclusive_file_lock(library_root / ".music_index.lock")
             self._shared_publication_journal = journal
         return self._shared_publication_journal
 
@@ -331,10 +333,7 @@ class EngineExecutionContext:
                 lock = factory(*args)
             self._publication_journal.rollback(guarded_lock=lock)
         if self._shared_publication_journal is not None:
-            from ..core.file_lock import exclusive_file_lock
-            library_root = self._shared_publication_journal.root
-            self._shared_publication_journal.rollback(
-                guarded_lock=exclusive_file_lock(library_root / ".music_index.lock"))
+            self._shared_publication_journal.rollback()
 
     def _paused(self) -> bool:
         with SessionLocal() as db:

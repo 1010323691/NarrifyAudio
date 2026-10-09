@@ -25,6 +25,8 @@ class PublicationJournal:
         self._checkpoints: set[int] = set()
         self._closed = False
         self._append_failed = False
+        # 可选：guarded 条目回滚时默认持有的跨进程锁工厂（调用方未显式传 guarded_lock 时使用）。
+        self.rollback_lock = None
         self.metrics = {"journal_seconds": 0.0, "journal_bytes": 0,
                         "journal_flushes": 0, "move_seconds": 0.0, "published_audio": 0}
 
@@ -187,6 +189,8 @@ class PublicationJournal:
         guarded = [(index, self.entries[index]) for index in reversed(range(len(self.entries)))
                    if self.entries[index][3] and index not in self._checkpoints]
         if guarded:
+            if guarded_lock is None and self.rollback_lock is not None:
+                guarded_lock = self.rollback_lock()
             try:
                 with (guarded_lock if guarded_lock is not None else nullcontext()):
                     for index, (final, backup, had_original, _guard) in guarded:
@@ -211,6 +215,12 @@ class PublicationJournal:
             # Guarded entry without a fingerprint (crash between add and
             # publish): cannot verify — keeping the on-disk version is the
             # safe side.
+            # 崩溃发生在 publish 的两次 os.replace 之间：final 已被移走而新内容未落位，
+            # 此时 backup 是唯一副本，必须先还原，不能删除。
+            if not final.exists() and backup.exists():
+                with managed_mutation(final):
+                    os.replace(backup, final)
+                return
             log.warning("Guarded publication has no recorded fingerprint — keeping on-disk version: %s", final)
             self._remove_backup(backup)
             return
