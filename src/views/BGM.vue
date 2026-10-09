@@ -1082,7 +1082,10 @@ onBeforeUnmount(() => {
           >
         </td>
         <td>
-          <WorkbenchStatus :variant="row.data.segment_analysis?.stale ? 'warning' : row.data.segment_analysis ? 'success' : 'secondary'">{{
+          <WorkbenchStatus v-if="row.segmentTask" variant="secondary">{{
+            `${Math.round(row.segmentTask.progress * 100)}% · 分析`
+          }}</WorkbenchStatus
+          ><WorkbenchStatus v-else :variant="row.data.segment_analysis?.stale ? 'warning' : row.data.segment_analysis ? 'success' : 'secondary'">{{
             row.data.segment_analysis
               ? row.data.segment_analysis.stale
                 ? '已失效'
@@ -1095,8 +1098,8 @@ onBeforeUnmount(() => {
         </td>
         <td>
           <WorkbenchStatus :variant="row.variant" :mixed="row.data.mix_exists">{{
-            row.task
-              ? `${Math.round(row.task.progress * 100)}% · ${row.task.module === 'bgm-mix' ? '混音' : '分析'}`
+            row.mixTask
+              ? `${Math.round(row.mixTask.progress * 100)}% · 混音`
               : row.label
           }}</WorkbenchStatus>
         </td></template
