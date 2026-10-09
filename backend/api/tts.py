@@ -43,6 +43,7 @@ from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
 from ..core.role_hint_cache import cached_role_hints
+from ..core.role_hints import collect_cooccurrence
 from ..core.script_snapshot import capture_reference, source_version
 from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
@@ -251,7 +252,7 @@ def _clone_status(entry: dict) -> str:
     return "none"
 
 
-def _fold_script(order: list[str], counts: dict[str, int], data) -> bool:
+def _fold_script(order: list[str], counts: dict[str, int], data, pairs: dict | None = None) -> bool:
     """Fold one parsed script (a list of entries) into the shared ``order``/``counts``.
 
     Dedupes by speaker name (falling back to ``type``), sums line counts, and keeps
@@ -261,6 +262,7 @@ def _fold_script(order: list[str], counts: dict[str, int], data) -> bool:
     """
     if not isinstance(data, list) or not data:
         return False
+    sequence = []
     for entry in data:
         sp = (entry.get("speaker") or entry.get("type") or "").strip()
         if not sp:
@@ -269,6 +271,9 @@ def _fold_script(order: list[str], counts: dict[str, int], data) -> bool:
             counts[sp] = 0
             order.append(sp)
         counts[sp] += 1
+        sequence.append(sp)
+    if pairs is not None:
+        collect_cooccurrence(sequence, pairs)
     return True
 
 
@@ -280,18 +285,18 @@ def _script_speakers(path):
     try:
         stat = path.stat()
     except OSError:
-        return False, [], {}
+        return False, [], {}, {}
     key = (str(path), stat.st_mtime_ns, stat.st_size)
     with _SPEAKER_CACHE_LOCK:
         if key in _SPEAKER_CACHE:
             _SPEAKER_CACHE.move_to_end(key)
             return _SPEAKER_CACHE[key]
-    order, counts = [], {}
+    order, counts, pairs = [], {}, {}
     try:
-        has_script = _fold_script(order, counts, read_json(path))
+        has_script = _fold_script(order, counts, read_json(path), pairs)
     except (OSError, ValueError, UnicodeError):
-        return False, [], {}
-    value = (has_script, order, counts)
+        return False, [], {}, {}
+    value = (has_script, order, counts, pairs)
     with _SPEAKER_CACHE_LOCK:
         _SPEAKER_CACHE[key] = value
         while len(_SPEAKER_CACHE) > 2048: _SPEAKER_CACHE.popitem(last=False)
@@ -369,9 +374,12 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     has_script = False
     order: list[str] = []
     counts: dict[str, int] = {}
+    cooccur: dict = {}
     for sp in script_paths:
-        found, file_order, file_counts = _script_speakers(sp)
+        found, file_order, file_counts, file_pairs = _script_speakers(sp)
         has_script = has_script or found
+        for pair, n in file_pairs.items():
+            cooccur[pair] = cooccur.get(pair, 0) + n
         for name in file_order:
             if name not in counts: order.append(name)
             counts[name] = counts.get(name, 0) + file_counts[name]
@@ -394,7 +402,7 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     # ties keep first-appearance (or voice_config) order.
     names = sorted(order if has_script else list(voice_config.keys()),
                    key=lambda sp: -counts.get(sp, 0))
-    hints = cached_role_hints(names, voice_config, counts, layout.temp / "role-hints")
+    hints = cached_role_hints(names, voice_config, counts, layout.temp / "role-hints", cooccur)
 
     ready_names = {n for n in names if _voice_ready(n, voice_config)}
     counts_out = {"all": len(names), "ready": len(ready_names), "pending": len(names) - len(ready_names),
