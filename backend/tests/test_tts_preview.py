@@ -596,6 +596,7 @@ def test_apply_downstream_failure_reports_dirty_without_rollback(workspace, monk
 def test_apply_mutually_exclusive_with_chapter_lock(workspace, monkeypatch):
     _seed_apply_scene(workspace, staged_triples={0: ("0001.mp3", ("line 0", "B", ""))})
     _no_conflicts(monkeypatch)
+    monkeypatch.setattr(api_tts, "PREVIEW_LOCK_TIMEOUT", 0.2)  # 生产 5s：测的是“锁被占即 409”，不必真等
     layout = core_paths.get_or_prepare_layout()
     lock_path = Batch.preview_lock_path(layout, "s")
 

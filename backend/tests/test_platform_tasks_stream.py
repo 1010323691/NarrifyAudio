@@ -38,6 +38,13 @@ def client():
         yield value
 
 
+@pytest.fixture(autouse=True)
+def _fast_stream_clock(monkeypatch):
+    """SSE 轮询 0.5s / 鉴权复查 5s 是真实等待；缩短后行为不变、用例从秒级降到毫秒级。"""
+    monkeypatch.setattr(task_views, "STREAM_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(task_views, "AUTH_RECHECK_SECONDS", 0.3)
+
+
 def _register(email: str) -> dict:
     # Bare TestClient (no ``with``) — no second app lifespan / worker.
     c = TestClient(app)
@@ -210,7 +217,7 @@ def test_v1_stream_route_is_user_scoped_and_terminates_on_session_revocation(cli
 
     thread = threading.Thread(target=read_stream, daemon=True)
     thread.start()
-    time.sleep(2.0)  # stream is open: snapshot_all + pings are on the wire
+    time.sleep(0.5)  # stream is open: snapshot_all + pings are on the wire
     _revoke_sessions(a_id)  # the generator's 5 s auth re-check then ends the stream
     thread.join(timeout=15)
 

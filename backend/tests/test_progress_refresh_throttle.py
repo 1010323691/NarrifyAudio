@@ -144,7 +144,8 @@ def test_thirty_minute_polling_coalesces_and_never_starts_under_thirty_seconds(b
         starts.append(clock[0])
         return original(path)
     monkeypatch.setattr(calculator, 'project_completion', scan)
-    for second in range(1801):
+    # 每个 30s 窗口边界附近（28~31s）逐秒走，保住“29s 不得起扫”的精度；其余用 5s 步长省时
+    for second in sorted(set(range(0, 1801, 5)) | {s for s in range(1801) if s % 30 in (0, 1, 28, 29)}):
         clock[0] = baseline + timedelta(seconds=second)
         rewrite_json_file(root / '03_parsed_json/a.json', [{'speaker': 'A', 'text': str(second)}])
         task = request(book)
