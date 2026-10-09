@@ -106,3 +106,16 @@ def test_compressed_input_decodes_to_disk_with_legacy_sample_parity(tmp_path):
     path, _ = tw._merge_stage2(parts, str(tmp_path), "book.mp3", 500, 250, 1)
     assert AudioSegment.from_file(path).raw_data == expected.raw_data
     assert not list(tmp_path.glob("decode-*"))
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg required for media decoding")
+def test_ogg_vorbis_input_is_not_dropped_by_decode_fallback(tmp_path):
+    tw = worker()
+    wav = tmp_path / "input.wav"
+    ogg = tmp_path / "input.ogg"
+    audio_file(wav, 1, 24000, 2)
+    made = subprocess.run(["ffmpeg", "-v", "error", "-i", str(wav), "-codec:a", "libvorbis", str(ogg)])
+    if made.returncode:
+        pytest.skip("ffmpeg lacks libvorbis")
+    parts = tw._merge_stage1([{"path": str(ogg), "speaker": "A"}], str(tmp_path), 500, 250, 100, 1, str(tmp_path))
+    assert parts

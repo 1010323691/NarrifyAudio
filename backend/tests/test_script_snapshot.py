@@ -141,3 +141,50 @@ def test_snapshot_prune_ignores_foreign_files_and_stale_stages(tmp_path):
     assert pruned == 1
     assert foreign.exists()
     assert stray.exists()
+
+
+def test_bands_tolerate_tiny_per_and_use_a_single_connection(tmp_path, monkeypatch):
+    from backend.core import script_snapshot
+    rows = [{"speaker": "A", "text": f"line {index}"} for index in range(50)]
+    path = tmp_path / "script.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    pairs = open_snapshot([path], tmp_path / "snapshots").samples["A"]
+    assert pairs.bands(1) == pairs.bands(2)
+    connects = []
+    original = script_snapshot._connect
+    monkeypatch.setattr(script_snapshot, "_connect", lambda *a, **k: connects.append(1) or original(*a, **k))
+    front, middle, back = pairs.bands(8)
+    assert len(front) == len(middle) == len(back) == 8 and len(connects) <= 2
+
+
+def test_prune_skips_a_snapshot_whose_version_lock_is_held(tmp_path):
+    import os
+    from backend.core.file_lock import exclusive_file_lock
+    from backend.core.script_snapshot import prune_snapshots
+    names = [f"{index:064x}" for index in range(3)]
+    for index, name in enumerate(names):
+        path = tmp_path / f"{name}.sqlite"
+        path.write_bytes(b"x")
+        os.utime(path, (1000 + index, 1000 + index))
+    with exclusive_file_lock(tmp_path / f"{names[0]}.lock"):
+        assert prune_snapshots(tmp_path, keep=1, max_age=1, interval=0) == 1
+    assert (tmp_path / f"{names[0]}.sqlite").exists()
+    assert not (tmp_path / f"{names[1]}.sqlite").exists()
+
+
+def test_reused_snapshot_is_refreshed_and_pruned_lock_is_removed(tmp_path):
+    import os
+    from backend.core.script_snapshot import open_snapshot, prune_snapshots
+    source = tmp_path / "03_parsed_json" / "a.json"
+    source.parent.mkdir()
+    source.write_text('[{"speaker": "A", "text": "hi"}]', encoding="utf-8")
+    cache = tmp_path / "cache"
+    snapshot = open_snapshot([source], cache)
+    sqlite = snapshot.path
+    os.utime(sqlite, (1000, 1000))
+    open_snapshot([source], cache)  # reuse refreshes the age gate
+    assert sqlite.stat().st_mtime > 1000
+    assert prune_snapshots(cache, keep=0, max_age=60, interval=0) == 0
+    os.utime(sqlite, (1000, 1000))
+    assert prune_snapshots(cache, keep=0, max_age=60, interval=0) == 1
+    assert not sqlite.exists() and not sqlite.with_suffix(".lock").exists()

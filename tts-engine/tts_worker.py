@@ -1902,8 +1902,13 @@ def _merge_input(path, tmp_dir):
         if not streams:
             raise ValueError("No audio stream")
         stream = streams[0]
-        bits = stream.get("bits_per_sample", 16)
-        if stream.get("sample_fmt") == "fltp" and stream.get("codec_name") in ("mp3", "mp4", "aac", "webm", "ogg"):
+        try:
+            bits = int(stream.get("bits_per_sample", 16) or 0)
+        except (TypeError, ValueError):
+            bits = 0
+        # Lossy streams report 0 bits (flt/fltp sample formats): decode to 16-bit.
+        if bits <= 0 or (stream.get("sample_fmt") in ("flt", "fltp")
+                         and stream.get("codec_name") in ("mp3", "mp4", "aac", "webm", "ogg", "vorbis", "opus")):
             bits = 16
         codec = "pcm_u8" if bits == 8 else f"pcm_s{bits}le"
         with tempfile.TemporaryDirectory(prefix="decode-", dir=tmp_dir) as decoded:

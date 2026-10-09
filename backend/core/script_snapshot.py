@@ -108,9 +108,13 @@ def prune_snapshots(directory, *, keep=PRUNE_KEEP, max_age=PRUNE_MAX_AGE_SECONDS
             if deleted >= limit or mtime > cutoff or index < keep:
                 continue
             try:
-                path.unlink()
+                # A holder of the version lock is validating/opening it right now.
+                lock = directory / (path.stem + ".lock")
+                with exclusive_file_lock(lock, timeout=0):
+                    path.unlink()
+                lock.unlink(missing_ok=True)
                 deleted += 1
-            except OSError:
+            except (OSError, TimeoutError):
                 continue
         for path in directory.glob(".*.sqlite"):
             if deleted >= limit:
@@ -157,6 +161,11 @@ def open_snapshot(paths, directory, *, check=lambda: None, log=lambda *_: None, 
                     valid = db.execute("SELECT value FROM metadata WHERE key='version'").fetchone() == (version,)
             except sqlite3.DatabaseError:
                 pass
+            if valid:
+                try:
+                    os.utime(path)  # in use: the age gate must keep protecting it
+                except OSError:
+                    pass
         if not valid:
             pending = directory / ("." + version + "." + uuid.uuid4().hex + ".sqlite")
             try:
@@ -286,13 +295,21 @@ class RolePairs(Sequence):
             yield from db.execute("SELECT position, text FROM entries WHERE speaker=? ORDER BY role_position", (self.name,))
 
     def bands(self, per):
+        per = max(2, int(per))
         count = len(self)
         if count <= 3 * per:
-            return [self[rank][0] for rank in range(count)], [], []
+            return [position for position, _text in self], [], []
         region = count - 2 * per
         middle = list(range(per, count - per)) if region <= per else [per + round(index * (region - 1) / (per - 1)) for index in range(per)]
-        return ([self[rank][0] for rank in range(per)], [self[rank][0] for rank in middle],
-                [self[rank][0] for rank in range(count - per, count)])
+        front, back = list(range(per)), list(range(count - per, count))
+        wanted = sorted(set(front + middle + back))
+        with closing(_connect(self.snapshot.path)) as db:
+            # One query for every sampled rank instead of a connection per rank.
+            positions = dict(db.execute(
+                f"SELECT role_position, position FROM entries WHERE speaker=? AND role_position IN ({','.join('?' for _ in wanted)})",
+                (self.name, *wanted)))
+        return ([positions[rank] for rank in front], [positions[rank] for rank in middle],
+                [positions[rank] for rank in back])
 
     def texts(self):
         return RoleTexts(self)

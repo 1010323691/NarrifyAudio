@@ -101,13 +101,14 @@ def _split_files(db: Session, user: User, project_id: str) -> dict[str, ProjectF
             ProjectFile.project_id == project_id,
             ProjectFile.owner_id == user.id,
             ProjectFile.deleted_at.is_(None),
-            ProjectFile.object_key.like(f"%/{_SPLIT_MODULE}/%"),
+            ProjectFile.object_key.like(f"%/{_SPLIT_MODULE.replace('_', chr(92) + '_')}/%", escape="\\"),
         )
     ).all()
+    # LIKE is only a pre-filter; confirm the exact module.
     return {
         item.original_name: item
         for item in rows
-        if item.original_name
+        if item.original_name and _module_of(item.object_key) == _SPLIT_MODULE
     }
 
 

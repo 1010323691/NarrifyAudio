@@ -279,6 +279,28 @@ def test_queue_view_deduplicates_stages_and_excludes_ineligible_tasks():
             db.execute(delete(User).where(User.id == owner))
 
 
+def test_stale_waiting_request_of_retrying_task_still_counts_the_task():
+    from backend.platform.models import User, Project
+    baseline = QueueMonitor().snapshot()
+    owner, project, task = new_id(), new_id(), new_id()
+    try:
+        with SessionLocal.begin() as db:
+            db.add(User(id=owner, username="gpu"+owner[:8], email=f"{owner}@example.test", password_hash="unused-test-hash"))
+            db.flush()
+            db.add(Project(id=project, owner_id=owner, name="queue test", directory_key=project))
+            db.flush()
+            db.add(Task(id=task, owner_id=owner, project_id=project, task_type="script.parse", status="retrying"))
+            db.add(GPURequest(task_id=task, service="LLM", status="waiting", owner_pid=os.getpid()))
+        result = QueueMonitor().snapshot()
+        assert result["LLM"].waiting - baseline["LLM"].waiting == 1
+    finally:
+        with SessionLocal.begin() as db:
+            db.execute(delete(GPURequest).where(GPURequest.task_id == task))
+            db.execute(delete(Task).where(Task.owner_id == owner))
+            db.execute(delete(Project).where(Project.id == project))
+            db.execute(delete(User).where(User.id == owner))
+
+
 def test_scheduler_lifetime_lock_allows_only_one_coordinator(tmp_path, monkeypatch):
     from backend.platform.gpu_scheduler import runtime
     monkeypatch.setattr(runtime, "PROJECT_ROOT", tmp_path)
