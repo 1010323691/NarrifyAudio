@@ -45,6 +45,14 @@ export function settleHeight(previous: number, target: number): number {
   return Number.isFinite(previous) && Math.abs(previous - target) < 1 ? previous : target
 }
 
+/**
+ * 最终写入的行高（纯函数）：迟滞结果若超过上限而目标未超过（放大后回退），必须落回目标，不保留溢出的放大值。
+ */
+export function resolveFinal(previous: number, target: number, max: number): number {
+  const settled = settleHeight(previous, target)
+  return settled > max && target <= max ? target : settled
+}
+
 /** 断路器计数（纯函数）：丢弃 1 秒前的记录，记入本次适配；窗口内已达 `limit` 次则判定为振荡、不再记入。 */
 export function tallyBurst(burst: number[], now: number, limit = 8): { burst: number[]; tripped: boolean } {
   const recent = burst.filter((t) => now - t < 1000)
@@ -113,9 +121,7 @@ function fit(el: HTMLElement, options: FitRowsOptions): boolean {
     // 放大后若让祖先溢出（测量误差），回退到不放大。
     target = grown > max && maxOverflow(ancestors) <= 0.5 ? grown : max
   }
-  // 迟滞结果若超过上限而目标未超过（上次行高为放大值、本次回退），必须落回目标，不能保留溢出值。
-  const settled = settleHeight(previous, target)
-  const final = settled > max && target <= max ? target : settled
+  const final = resolveFinal(previous, target, max)
   apply(final)
   // 祖先链可能在挂载之后变化（条件渲染的外层容器）：每次适配后补挂观察，observe 对同一节点幂等。
   const state = bound.get(el)
