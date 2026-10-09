@@ -112,7 +112,7 @@ function detailKeydown(event: KeyboardEvent) {
         <p>{{ loadError }}</p><p v-if="speakers.length" class="mt-1 text-muted-foreground">正在展示上次已知状态。</p>
         <Button variant="outline" class="mt-2 h-8" :disabled="loading" @click="emit('refresh')">重试加载</Button>
       </div>
-      <div class="voice-scroll fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', min: 28 }">
+      <div class="voice-scroll fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height', min: 24, grow: 52 }">
         <table class="voice-table workbench-table" aria-label="角色状态列表">
           <thead><tr><th>角色 / 别名</th><th class="voice-number">台词</th><th>基础</th><th>音色</th></tr></thead>
           <tbody v-if="loading && !speakers.length">
