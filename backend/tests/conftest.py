@@ -34,20 +34,60 @@ os.environ["NARRIFY_PROBE_CACHE_DIR"] = str(Path(_test_storage.name) / "audio-pr
 
 @pytest.fixture(autouse=True)
 def _stable_memory_snapshot():
-    """Pin the memory guard to a healthy reading for every test.
+    """Pin every host-memory guard to a healthy reading for each test.
 
     CI runs the frontend job (npm) alongside the backend job on a 7 GiB
     runner: MemAvailable can dip below the 2 GiB guard, which STICKY-sets
-    ``MechanicalAudioState.memory_paused`` in the worker's session DB and
-    blocks every audio claim in that worker for the rest of the run (observed
-    as ``claim is None`` failures across unrelated files). The suite must not
-    depend on the host's free memory; tests that exercise the guard
-    (test_mechanical_audio) override this per test."""
-    from backend.platform import mechanical_audio
+    the admission pause (``MechanicalAudioState.memory_paused`` row, or the
+    ``tts_resource_budget._memory_paused`` module global) for the rest of that
+    worker process. The suite must not depend on the host's free memory. The
+    guards read the module-bound ``memory_snapshot`` in BOTH modules, so pin
+    both bindings — and clear the sticky states around every test. Tests that
+    exercise the guards (test_mechanical_audio, test_tts_overload) override
+    per test via monkeypatch, which restores afterwards."""
+    from backend.platform import mechanical_audio, tts_resource_budget
 
     gib = 1024 ** 3
-    mechanical_audio.memory_snapshot = lambda: (16 * gib, 32 * gib)
+    healthy = (16 * gib, 32 * gib)
+    saved = (mechanical_audio.memory_snapshot, tts_resource_budget.memory_snapshot)
+    mechanical_audio.memory_snapshot = lambda: healthy
+    tts_resource_budget.memory_snapshot = lambda: healthy
+    tts_resource_budget._memory_paused = False
     yield
+    mechanical_audio.memory_snapshot, tts_resource_budget.memory_snapshot = saved
+    tts_resource_budget._memory_paused = False
+
+
+@pytest.fixture(autouse=True)
+def _clean_mechanical_audio_permits():
+    """No audio permit or sticky state may survive a test.
+
+    Admission tests (test_platform's claim-path tests, test_audio_worker_*)
+    reserve machine-wide tts.merge/bgm.mix permits for their in-test workers
+    and end without releasing them — the permit's owner is the test process
+    itself, which ``_reap`` correctly refuses to free. Under ``--dist
+    loadscope`` a whole file shares one worker's session DB, so those permits
+    accumulate across tests: on the 4-vCPU CI runner (merge limit = CPU/2 = 2)
+    two stragglers exhaust the budget and every later audio claim in that
+    worker returns None, while a 4-slot local host never notices. Clear the
+    permit table and reset the sticky state row on both sides of every test;
+    the guard tests (test_mechanical_audio) manage their own isolated DB."""
+    from sqlalchemy import delete
+
+    from backend.platform.database import SessionLocal
+    from backend.platform.models import MechanicalAudioPermit, MechanicalAudioState
+
+    def _clean():
+        with SessionLocal.begin() as db:
+            db.execute(delete(MechanicalAudioPermit))
+            state = db.get(MechanicalAudioState, "local")
+            if state is not None:
+                state.memory_paused = False
+                state.error = ""
+
+    _clean()
+    yield
+    _clean()
 
 
 @pytest.fixture(scope="session", autouse=True)
