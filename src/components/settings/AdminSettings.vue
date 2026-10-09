@@ -319,15 +319,6 @@ watch(
             </div>
           </div>
           <div class="space-y-1.5">
-            <Label for="admin-setting-9">角色基础信息生成并发数</Label>
-            <div class="flex flex-wrap items-center gap-3">
-              <Input id="admin-setting-9" v-model.number="draft.generation.max_concurrency" type="number" min="1" step="1" class="max-w-[8rem]" />
-              <span class="text-xs text-muted-foreground">
-                控制角色基础信息的并行生成。
-              </span>
-            </div>
-          </div>
-          <div class="space-y-1.5">
             <Label for="admin-setting-10">归属抽样率（0 = 关闭）</Label>
             <div class="flex flex-wrap items-center gap-3">
               <Input id="admin-setting-10" v-model.number="draft.generation.spot_check_rate" type="number" step="0.01" min="0" max="0.5" class="max-w-[8rem]" />

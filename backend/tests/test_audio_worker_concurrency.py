@@ -390,6 +390,10 @@ def test_eight_foundations_overlap_and_preserve_every_checkpoint(audio_project, 
     # Other modules in this xdist process may leave active LLM rows behind;
     # reserve capacity here instead of depending on their execution order.
     monkeypatch.setattr("backend.platform.task_admission.parse_worker_concurrency", lambda **_kwargs: 32)
+    from backend.core.concurrency import gate, set_concurrency
+    previous_limit = gate().limit
+    set_concurrency(32)  # the Worker's coordinator normally sizes the process gate
+    monkeypatch.setattr("backend.core.concurrency.set_concurrency", set_concurrency)
     submit, workspace = audio_project
     names = [f"role-{index}" for index in range(8)]
     script = workspace / "03_parsed_json" / "roles.json"
@@ -413,20 +417,23 @@ def test_eight_foundations_overlap_and_preserve_every_checkpoint(audio_project, 
         return complete(claim, outcome)
 
     monkeypatch.setattr(task_worker, "complete_claim", fail_one)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(_run_claim_fenced, claims))
+    try:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(_run_claim_fenced, claims))
+    finally:
+        set_concurrency(previous_limit)
     assert results == ["worker_error", *(["succeeded"] * 7)]
     profiles = json.loads((workspace / "04_voice_profiles" / "voice_config.json").read_text())
     assert set(profiles) == set(names)
     assert all(profiles[name]["description"] == f"voice for {name}" for name in names)
 
 
-def test_foundation_row_dispatch_respects_configured_role_limit(audio_project, monkeypatch):
+def test_foundation_row_dispatch_ignores_legacy_role_limit(audio_project):
+    """Foundation rows are bounded by the host-wide LLM task limit, not generation.max_concurrency."""
     submit, _ = audio_project
     payload = {"config": {"generation": {"max_concurrency": 2}}}
     first = submit("voices.foundation", {**payload, "speakers": ["A"]})
     second = submit("voices.foundation", {**payload, "speakers": ["B"]})
-    # Submit the third pending row through the API without manually claiming it.
     with SessionLocal.begin() as db:
         third = Task(owner_id=first.owner_id, project_id=first.project_id,
                      task_type="voices.foundation", status="pending",
@@ -434,19 +441,13 @@ def test_foundation_row_dispatch_respects_configured_role_limit(audio_project, m
         db.add(third)
         db.flush()
         third_id = third.id
-    assert claim_task(third_id, "over-role-limit") is None
-    original = task_worker._workspace_claim_eligibility
-    monkeypatch.setattr(task_worker, "_workspace_claim_eligibility",
-                        lambda now: original(now) & (Task.owner_id == first.owner_id))
-    assert task_worker.claim_fair_task("over-role-limit", task_types=("voices.foundation",)) is None
-    with SessionLocal.begin() as db:
-        db.get(Task, second.task_id).status = "succeeded"
-        db.get(TaskAttempt, second.attempt_id).status = "succeeded"
-    claimed = claim_task(third_id, "free-role-slot")
+    claimed = claim_task(third_id, "third-row")
     assert claimed is not None
     with SessionLocal.begin() as db:
-        db.get(Task, third_id).status = "cancelled"
-        db.get(TaskAttempt, claimed.attempt_id).status = "cancelled"
+        for task_id, attempt_id in ((first.task_id, first.attempt_id), (second.task_id, second.attempt_id),
+                                    (third_id, claimed.attempt_id)):
+            db.get(Task, task_id).status = "cancelled"
+            db.get(TaskAttempt, attempt_id).status = "cancelled"
 
 
 def test_match_claims_allow_disjoint_chapters_and_defer_overlapping_legacy_batches(audio_project, monkeypatch):
