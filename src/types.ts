@@ -474,7 +474,7 @@ export interface AppConfig {
     banned_tokens: number[]
     /** Concurrent script.parse Tasks per backend worker process. */
     parse_worker_concurrency: number
-    /** Max character-foundation LLM jobs generated in parallel by one voice task. */
+    /** Deprecated: 语音推理基础（阶段 1）并发已跟随 parse_worker_concurrency；无读取方，仅保留以兼容旧配置。 */
     max_concurrency: number
     /** 解析后归属抽样率（0 = 关闭）：1/3 纯随机（整书错误率仪表）+ 2/3 风险加权。
      *  每本读数记入任务日志与 config/spot_check_history.json；降不降由用户手动决定。 */
