@@ -6,6 +6,7 @@ the durable request hash also binds the resolved inputs and configuration.
 from __future__ import annotations
 
 from contextlib import nullcontext
+from datetime import timedelta
 import hashlib
 import json
 import uuid
@@ -156,7 +157,11 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
             db.add(batch)
             db.flush()
             now, rows, events = utcnow(), [], []
-            for tid, entry in zip(ids, entries):
+            for index, (tid, entry) in enumerate(zip(ids, entries)):
+                # Claims and lists order by (created_at, id); ids are random UUIDs,
+                # so rows of one batch need distinct, entry-ordered timestamps to
+                # start in the order they were submitted.
+                created = now + timedelta(microseconds=index)
                 payload = {k: v for k, v in entry["payload"].items() if k != "config"}
                 payload.update(label=entry["label"], _batch_config_id=batch_id, _request_hash=digest)
                 payload.pop("_audio_identity", None)
@@ -167,9 +172,9 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
                     payload["execution_batch"] = batch_id
                 rows.append(dict(id=tid, owner_id=user.id, project_id=project.id, task_type=task_type,
                     payload=payload, batch_id=batch_id, event_sequence=1, ui_state={}, admission_units=1,
-                    status="pending", progress=0, idempotency_key=f"batch:{batch_id}:{tid}", created_at=now, updated_at=now))
+                    status="pending", progress=0, idempotency_key=f"batch:{batch_id}:{tid}", created_at=created, updated_at=now))
                 events.append(dict(id=str(uuid.uuid4()), task_id=tid, sequence=1, event_type="submitted",
-                    payload={"status": "pending", "estimated_units": 0}, created_at=now))
+                    payload={"status": "pending", "estimated_units": 0}, created_at=created))
             for offset in range(0, len(rows), 100):
                 db.execute(insert(Task), rows[offset:offset + 100])
                 db.execute(insert(TaskEvent), events[offset:offset + 100])

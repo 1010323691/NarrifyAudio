@@ -270,3 +270,13 @@ def test_receipt_lookup_preserves_mapping_and_owner_isolation(sessions):
         with pytest.raises(HTTPException) as error:
             submission_receipt("receipt-lookup", User(id="another"), db)
         assert error.value.status_code == 404
+
+
+def test_batch_rows_sort_by_created_at_in_submission_order(sessions):
+    # Claims and task lists order by (created_at, id); ids are random UUIDs.
+    # Rows of one batch must therefore sort exactly as they were submitted.
+    receipt = submit(sessions, kind="script.parse", count=50, key="ordering")
+    with sessions() as db:
+        ordered = db.scalars(select(Task.id).where(Task.id.in_(receipt["task_ids"]))
+                             .order_by(Task.created_at.asc(), Task.id.asc())).all()
+    assert list(ordered) == receipt["task_ids"]
