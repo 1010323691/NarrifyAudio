@@ -30,9 +30,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: HeadersInit = { ...(isForm ? {} : { 'Content-Type': 'application/json' }), ...(csrf ? { 'X-CSRF-Token': csrf } : {}), ...(options.headers || {}) }
   // Merge the hard timeout with any caller-supplied signal: whichever fires
   // first aborts the fetch, and the abort reason decides how the error surfaces.
+  // Form uploads (manuscript / music-library files) are exempt from the hard
+  // timer — a large file on a slow link can legitimately outlast it — but still
+  // honour an explicit caller signal.
   const controller = new AbortController()
   let timedOut = false
-  const timer = setTimeout(() => { timedOut = true; controller.abort() }, REQUEST_TIMEOUT_MS)
+  const timer: ReturnType<typeof setTimeout> | null = isForm ? null : setTimeout(() => { timedOut = true; controller.abort() }, REQUEST_TIMEOUT_MS)
   const external = options.signal
   const onExternalAbort = () => controller.abort(external?.reason)
   if (external) {
@@ -66,7 +69,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     }
     throw error
   } finally {
-    clearTimeout(timer)
+    if (timer !== null) clearTimeout(timer)
     external?.removeEventListener('abort', onExternalAbort)
   }
 }
