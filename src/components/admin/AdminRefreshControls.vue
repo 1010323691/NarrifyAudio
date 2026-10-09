@@ -16,6 +16,6 @@ const intervalLabel = (value: number) => value ? `每 ${value / 1000} 秒` : '�
     </select>
   </label>
   <Button variant="outline" size="sm" :disabled="loader.loading.value || loader.actionBusy.value" @click="loader.load()">
-    <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loader.loading.value }" />{{ loader.loading.value ? '刷新中' : '刷新' }}
+    <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': loader.loading.value }" />刷新
   </Button>
 </template>

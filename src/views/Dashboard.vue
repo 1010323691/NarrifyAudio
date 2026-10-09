@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { BookOpen, Clock3, FolderPlus, LoaderCircle, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
@@ -9,7 +10,6 @@ import StatusPill from '@/components/ui/StatusPill.vue'
 import { useToast } from '@/components/ui/toast'
 import { showConfirm } from '@/components/ui/dialog'
 import { useProjectStore } from '@/stores/project'
-import { useSettingsStore } from '@/stores/settings'
 import { taskTypeLabel } from '@/utils/taskLabels'
 import { listProjectPage, deleteProject, getActiveProject } from '@/api/project'
 import type { ProjectSummary } from '@/api/project'
@@ -21,7 +21,6 @@ const router = useRouter()
 const auth = useAuthStore()
 let viewActive = false
 const projectStore = useProjectStore()
-const settings = useSettingsStore()
 const { push: toast } = useToast()
 const loading = ref(true)
 const refreshing = ref(false)
@@ -46,6 +45,8 @@ function progressTitle(projectId: string, key: string) {
   return `${stageLabels[key]}：${value.percent}%；已完成 ${value.completed} / ${value.total} ${value.unit}`
 }
 const projectPage = ref(1)
+const projectPageSize = ref(10)
+function changeProjectPageSize(size: number) { projectPageSize.value = size; if (projectPage.value !== 1) projectPage.value = 1; else { pageProjects.value = null; loading.value = true; if (viewActive && auth.user) void loadProjectPage() } }
 const projectTotal = ref(0)
 const pageProjects = ref<ProjectSummary[] | null>(null)
 const projects = computed(() => pageProjects.value ?? [])
@@ -65,10 +66,10 @@ async function loadProjectPage() {
   const request = ++projectPageRequest
   const generation = loadGeneration
   try {
-    const response = await listProjectPage({ page: projectPage.value, page_size: 12 }, signal)
+    const response = await listProjectPage({ page: projectPage.value, page_size: projectPageSize.value }, signal)
     if (signal.aborted || request !== projectPageRequest || generation !== loadGeneration) return
     pageProjects.value = response.items; projectTotal.value = response.pagination.total
-    const last = Math.max(1, Math.ceil(projectTotal.value / 12))
+    const last = Math.max(1, Math.ceil(projectTotal.value / projectPageSize.value))
     if (projectPage.value > last) { projectPage.value = last; return }
     pageError.value = ''
     loading.value = false
@@ -248,7 +249,7 @@ watch(() => auth.user?.id, () => {
         <div v-if="loading" class="project-grid" aria-label="正在加载项目">
           <Card v-for="n in 3" :key="n" class="project-skeleton"><div class="skeleton-line w-2/5" /><div class="skeleton-line w-4/5" /><div class="skeleton-line w-1/2" /></Card>
         </div>
-        <div v-else-if="projects.length" class="project-grid">
+        <div v-else-if="projects.length" class="project-grid project-grid--fixed" :class="{ 'is-scroll': projectPageSize > 10 }" v-fit-rows="{ prop: '--pc-row', max: 100, min: 64 }">
           <Card v-for="project in projects" :key="project.id" class="project-card" :class="projectStore.activeProjectId === project.id ? 'project-card--active' : ''" @click="!projectStore.busy && !deletingProjectId && openProject(project)">
             <div class="project-card__head">
               <button class="project-card__main" type="button" :disabled="projectStore.busy || !!deletingProjectId" @click.stop="openProject(project)">
@@ -266,24 +267,26 @@ watch(() => auth.user?.id, () => {
               </div>
             </div>
             <div class="project-card__meta">
-              <div v-if="projectState(project)" class="project-card__task">
-                <StatusPill :label="statusLabel(projectState(project)!.status)" :tone="tone(projectState(project)!.status)" />
-                <span>{{ taskTypeLabel(projectState(project)!.task_type) }}</span>
+              <!-- 固定一行：任务状态 / 失败原因 / 读取错误共用此行，卡片高度不随内容变化 -->
+              <div class="project-card__task">
+                <template v-if="cardError(project.id)">
+                  <span class="project-error-line" role="alert" :title="cardError(project.id)" @click.stop>{{ cardError(project.id) }}</span>
+                  <button type="button" class="underline" @click.stop="refreshSummaries(project.id)">重试</button>
+                </template>
+                <template v-else-if="projectState(project)">
+                  <StatusPill :label="statusLabel(projectState(project)!.status)" :tone="tone(projectState(project)!.status)" />
+                  <span :class="{ 'project-card__error': projectState(project)!.status === 'failed' }" :title="projectState(project)!.status === 'failed' ? (projectState(project)!.error_message || '最近任务失败，可进入项目查看详情。') : undefined">{{ projectState(project)!.status === 'failed' ? (projectState(project)!.error_message || '最近任务失败，可进入项目查看详情。') : taskTypeLabel(projectState(project)!.task_type) }}</span>
+                </template>
               </div>
-                <div class="progress-label"><span>制作进度</span></div>
-                <div class="project-stage-track" aria-label="各阶段制作完成进度">
-                  <div v-for="key in visibleStageKeys" :key="key" class="project-stage" :class="{ 'progress-unknown': progressFor(project.id, key)?.percent == null }" :style="{ '--progress-color': stageProgressColor(progressFor(project.id, key)?.percent ?? 0) }" :title="progressTitle(project.id, key)">
+                <div class="project-stage-track" role="group" aria-label="制作进度：各阶段制作完成进度">
+                  <div v-for="key in STAGE_KEYS" :key="key" class="project-stage" :class="{ 'progress-unknown': progressFor(project.id, key)?.percent == null }" :style="{ '--progress-color': stageProgressColor(progressFor(project.id, key)?.percent ?? 0) }" :title="progressTitle(project.id, key)">
                     <div class="stage-progress-bar" role="progressbar" :aria-label="`${stageLabels[key]}制作进度`" :aria-valuemin="0" :aria-valuemax="100" :aria-valuenow="progressFor(project.id, key)?.percent ?? undefined" :aria-valuetext="progressTitle(project.id, key)">
                       <span :style="{ width: `${progressFor(project.id, key)?.percent ?? 0}%` }" />
                     </div>
                     <div class="stage-progress-label"><span>{{ stageLabels[key] }}</span><strong>{{ progressFor(project.id, key)?.percent != null ? `${progressFor(project.id, key)!.percent}%` : '—' }}</strong></div>
                   </div>
                 </div>
-              <div v-if="cardError(project.id)" class="project-error" role="alert" @click.stop>
-                {{ cardError(project.id) }} <button type="button" class="underline" @click="refreshSummaries(project.id)">重试</button>
-              </div>
             </div>
-            <p v-if="projectState(project)?.status === 'failed'" class="project-card__error">{{ projectState(project)?.error_message || '最近任务失败，可进入项目查看详情。' }}</p>
           </Card>
         </div>
         <div v-else-if="!pageError" class="project-empty">
@@ -292,7 +295,7 @@ watch(() => auth.user?.id, () => {
           <p>创建项目后导入原文，制作进度和生成内容都会归在这里。</p>
           <Button @click="createOpen = true"><FolderPlus class="h-4 w-4" />创建第一个项目</Button>
         </div>
-        <Pager :page="projectPage" :page-count="Math.max(1, Math.ceil(projectTotal / 12))" :total="projectTotal" :page-size="12" unit="个项目" @update:page="projectPage = $event" />
+        <Pager class="pager-sticky" :page="projectPage" :page-count="Math.max(1, Math.ceil(projectTotal / projectPageSize))" :total="projectTotal" :page-size="projectPageSize" unit="个项目" @update:page="projectPage = $event" @update:page-size="changeProjectPageSize" />
       </section>
     </div>
 
@@ -309,30 +312,36 @@ watch(() => auth.user?.id, () => {
 .project-card:last-child { border-bottom:0; }
 .project-card--active { background:hsl(var(--primary)/.035); box-shadow:inset 3px 0 hsl(var(--primary)); }
 .project-card__head { display:contents; }
-.project-card__main { grid-column:1; grid-row:1; min-height:100px; padding:20px; }
+.project-card__main { grid-column:1; grid-row:1; height:var(--pc-row,100px); padding:0 20px; }
 .project-card__actions { grid-column:3; grid-row:1; display:flex; align-items:center; justify-content:flex-end; padding-right:12px; }
 .project-card__icon { width:38px; height:46px; border-radius:6px; border:1px solid hsl(var(--primary)/.12); }
 .project-card__title { flex-wrap:nowrap; }
 .project-card__title h3 { min-width:0; font-size:15px; font-weight:650; }
 .project-card__title :deep([role="status"]) { flex-shrink:0; }
-.project-card__meta { grid-column:2; grid-row:1; min-width:0; margin:0; padding:20px 16px; border:0; }
-.project-stage-track { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:5px; margin-top:12px; }
+.project-card__meta { grid-column:2; grid-row:1; min-width:0; margin:0; padding:0 16px; border:0; }
+.project-stage-track { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:5px; margin-top:4px; }
 .project-stage { min-width:0; }
 .stage-progress-bar { height:5px; overflow:hidden; border-radius:3px; background:rgb(var(--progress-color)/.16); transition:background-color .45s; }
 .stage-progress-bar>span { display:block; min-width:2px; height:100%; border-radius:inherit; background:rgb(var(--progress-color)); transition:width .45s ease,background-color .45s ease; }
 .progress-unknown .stage-progress-bar { background:hsl(var(--muted)); }
 .progress-unknown .stage-progress-bar>span { min-width:0; }
-.stage-progress-label { display:flex; flex-direction:column; align-items:center; gap:2px; margin-top:6px; font-size:10px; color:hsl(var(--muted-foreground)); }
+.stage-progress-label { display:flex; flex-direction:column; align-items:center; gap:0; margin-top:3px; font-size:10px; color:hsl(var(--muted-foreground)); }
 .stage-progress-label strong { font-size:9px; font-weight:500; font-variant-numeric:tabular-nums; color:hsl(var(--foreground)); }
 .project-card__task { margin-bottom:8px; }
 @media(prefers-reduced-motion:reduce) { .stage-progress-bar,.stage-progress-bar>span { transition:none; } }
-.project-card__error { grid-column:1/-1; }
-.project-card__task { flex-wrap:wrap; }
-.project-card__task>span { white-space:normal; overflow-wrap:anywhere; }
+.project-card { height:var(--pc-row,100px); }
+.project-grid--fixed { box-sizing:border-box; height:calc(10 * var(--pc-row,100px) + 2px); overflow-y:hidden; }
+.project-grid--fixed.is-scroll { overflow-y:auto; }
+.project-card__error { color:hsl(var(--destructive)); }
+.project-card__task { flex-wrap:nowrap; height:22px; margin-bottom:0; min-width:0; }
+.project-card__task>span, .project-error-line { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.project-error-line { color:hsl(var(--destructive)); font-size:12px; }
 @media(max-width:900px) {
   .project-card { grid-template-columns:minmax(0,1fr) 52px; }
   .project-card__actions { grid-column:2; }
-  .project-card__main { min-height:78px; padding:16px; }
+  .project-card { height:auto; }
+  .project-grid--fixed { height:auto; overflow:visible; }
+  .project-card__main { height:auto; min-height:78px; padding:16px; }
   .project-card__meta { grid-column:1/-1; grid-row:2; padding:0 16px 16px 66px; }
 }
 @media(prefers-reduced-motion:reduce) { .project-card, .project-card__arrow, .skeleton-line { transition:none; animation:none; } }

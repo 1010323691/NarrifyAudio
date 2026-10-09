@@ -1209,6 +1209,8 @@ html, body, #app { overflow: hidden; }
   padding: 2px 4px 8px 0;
 }
 .page-region > * { flex-shrink: 0; min-width: 0; }
+/* 视口过矮、母容器不得不滚动时，分页条钉在可视区底部，始终可见可点。 */
+.app-shell .page-region .pager-sticky { position: sticky; bottom: 0; z-index: 5; padding-block: 6px; background: hsl(var(--background)); }
 .page-region:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
 .app-shell .app-content > .viewport-workbench > :is(.production-workbench, .voice-workbench, .wb-workspace) {
   flex: 1 1 0;
@@ -1253,9 +1255,11 @@ html, body, #app { overflow: hidden; }
   overscroll-behavior: contain;
 }
 /* Keep the toolbar, several role rows and pagination usable. On short or narrow
-   screens the role page scrolls so its stage panels and action bar stay reachable. */
+   screens the role page scrolls so its stage panels and action bar stay reachable.
+   flex-basis:auto 让工作台至少撑到内容高度（十行 + 工具栏 + 分页条），行高不够压时由页面滚动兜底，
+   而不是把分页条裁掉。 */
 .app-shell .app-content > .voices-page > .voice-workbench {
-  flex: 1 0 300px;
+  flex: 1 0 auto;
   min-height: 300px;
 }
 .app-shell .viewport-workbench .voices-production { max-height: 26dvh; overflow: auto; }
@@ -1293,6 +1297,31 @@ html, body, #app { overflow: hidden; }
   height:var(--list-row-height);
   padding-top:clamp(0px, calc((var(--list-row-height) - 27px) / 2), 5px);
   padding-bottom:clamp(0px, calc((var(--list-row-height) - 27px) / 2), 5px);
+}
+/* ui/Table 的固定行高盒子（音乐库等）：表头 40px + 10 × --ft-row，边框/横向滚动条厚度由组件量出补进 --ft-extra。 */
+.ui-fixed-table { --ft-head:40px; box-sizing:border-box; height:calc(var(--ft-head) + 10 * var(--ft-row) + var(--ft-extra, 0px)); overflow-x:auto; overflow-y:hidden; }
+.ui-fixed-table.is-scroll { overflow-y:auto; }
+.ui-fixed-table table { border-collapse:separate; border-spacing:0; }
+.ui-fixed-table th { position:sticky; top:0; z-index:1; box-sizing:border-box; height:var(--ft-head); padding-block:0; white-space:nowrap; background:hsl(var(--muted) / .95); border-bottom:1px solid hsl(var(--border)); }
+.ui-fixed-table td { box-sizing:border-box; height:var(--ft-row); padding-block:0; white-space:nowrap; border-bottom:1px solid hsl(var(--border)); }
+.ui-fixed-table tr { border-bottom:0; }
+/* 固定行高列表盒子（非 <table> 的行式列表，如章节预览侧栏）：同样 10 行高，行高固定。 */
+.app-shell .fixed-list { flex:none; min-height:0; box-sizing:border-box; height:calc(var(--fl-pad, 0px) + 10 * var(--fl-row)); overflow:hidden; }
+.app-shell .fixed-list.is-scroll { overflow-y:auto; }
+.app-shell .fixed-list > .fl-row { box-sizing:border-box; height:var(--fl-row); overflow:hidden; }
+/* 固定行高分页盒子（全项目多条目表格统一契约）：高度 = 表头 + 10 行，行高不随内容/状态变化。
+   10 条无内部滚动条；选 20/50 时盒子高度不变，在盒内纵向滚动。表头 sticky 已由 .workbench-table th 提供。 */
+.app-shell .fixed-rows { flex:none; min-height:0; height:calc(var(--list-header-height) + 10 * var(--list-row-height)); overflow-x:hidden; overflow-y:hidden; }
+.app-shell .fixed-rows.is-scroll { overflow-y:auto; }
+.app-shell .fixed-rows table.workbench-table { width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0; }
+.app-shell .fixed-rows table.workbench-table th {
+  height:var(--list-header-height); padding-block:0; line-height:18px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.app-shell .fixed-rows table.workbench-table td:not([colspan]),
+.app-shell .fixed-rows table.workbench-table tr[aria-hidden] td {
+  height:var(--list-row-height); padding-block:0; line-height:18px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
 @media(pointer:coarse) {
   .app-shell { --list-row-height:48px; }

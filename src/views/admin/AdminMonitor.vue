@@ -11,9 +11,11 @@ import AdminChart from '@/components/admin/charts/AdminChart.vue'
 import { barOption, donutOption, gaugeOption, timeSeriesOption, type TimeSeries } from '@/components/admin/charts/options'
 import type { ChartTokens } from '@/components/admin/charts/tokens'
 import StatusPill from '@/components/ui/StatusPill.vue'
+import Pager from '@/views/textformat/Pager.vue'
 import GpuScheduler from '@/components/settings/GpuScheduler.vue'
 import { useAdminLoader } from '@/composables/useAdminLoader'
 import * as api from '@/api/admin'
+import type { ListPagination } from '@/api/listPaging'
 import { bytes, compact, percent, plain, relative, seconds, statusLabel, tone } from '@/utils/adminFormat'
 import { gpuIndexes, hasKey, scaleFor, series, throughputScale, values } from './series'
 
@@ -29,11 +31,11 @@ const throughput = ref<api.Throughput | null>(null)
 
 const loader = useAdminLoader(async (signal) => {
   const selected = range.value
-  const [snapshot, samples, latency, flow] = await Promise.all([
+  const [snapshot, samples, latency, flow, applyWorkers] = await Promise.all([
     api.getPerformance(), api.getMetricsHistory(selected, signal), api.getApiSeries(API_MINUTES[selected], signal),
-    api.getThroughput(selected === '7d' ? '7d' : '24h', signal),
+    api.getThroughput(selected === '7d' ? '7d' : '24h', signal), applyWorkerPage(workerPage.value, signal),
   ])
-  return () => { performance.value = snapshot; history.value = samples; apiSeries.value = latency; throughput.value = flow }
+  return () => { performance.value = snapshot; history.value = samples; apiSeries.value = latency; throughput.value = flow; applyWorkers?.() }
 }, { poll: true })
 watch(range, () => { void loader.load() })
 
@@ -49,7 +51,32 @@ const latestWriteRate = computed(() => {
 })
 const writeTrend = computed(() => points.value.map(point => typeof point.db_inserted_ps === 'number'
   ? ['db_inserted_ps', 'db_updated_ps', 'db_deleted_ps'].reduce((sum, key) => sum + (Number(point[key]) || 0), 0) : null))
-const liveWorkers = computed(() => (performance.value?.workers ?? []).filter(worker => worker.status !== 'offline'))
+const workerPageSize = ref(10)
+const workerPage = ref(1)
+const workers = ref<api.WorkerStatus[]>([])
+const workerPagination = ref<ListPagination>()
+const workerTotal = computed(() => workerPagination.value?.total ?? 0)
+const workerOnline = computed(() => workerPagination.value?.counts.online ?? 0)
+const workerPageCount = computed(() => Math.max(1, Math.ceil(workerTotal.value / workerPageSize.value)))
+// 页码翻页只拉当前页；ticket 保证慢响应不会覆盖更新的页。
+let workerTicket = 0
+async function applyWorkerPage(page: number, signal?: AbortSignal) {
+  const ticket = ++workerTicket
+  const rows = await api.workerPage(page, workerPageSize.value, signal)
+  if (ticket !== workerTicket) return null
+  return () => {
+    const last = Math.max(1, Math.ceil(rows.pagination.total / workerPageSize.value))
+    workers.value = rows.items; workerPagination.value = rows.pagination
+    if (workerPage.value > last) workerPage.value = last
+  }
+}
+function changeWorkerPageSize(size: number) { workerPageSize.value = size; if (workerPage.value !== 1) workerPage.value = 1; else void reloadWorkers() }
+async function reloadWorkers() {
+  try { (await applyWorkerPage(workerPage.value))?.() } catch { /* 下一次轮询会重试 */ }
+}
+watch(workerPage, async page => {
+  try { (await applyWorkerPage(page))?.() } catch { /* 下一次轮询会重试 */ }
+})
 
 type Line = Omit<TimeSeries, 'data'> & { key: string }
 function lines(definitions: (tokens: ChartTokens) => Line[], format: (value: number) => string, extra: { decimals?: boolean; max?: number; fit?: boolean } = {}) {
@@ -203,7 +230,7 @@ function workerTypes(worker: api.WorkerStatus): string {
 
       <h2 class="section-title"><Boxes class="h-4 w-4" />Worker 与队列</h2>
       <div class="kpi-grid kpi-grid--5">
-        <KpiCard label="在线 Worker" :value="plain(performance.tasks.worker_pool.online_workers)" :icon="Server" :accent="0" :hint="`共登记 ${performance.workers.length} 个`" />
+        <KpiCard label="在线 Worker" :value="plain(performance.tasks.worker_pool.online_workers)" :icon="Server" :accent="0" :hint="`共登记 ${workerTotal} 个`" />
         <KpiCard label="槽位占用" :value="`${performance.tasks.worker_pool.active_slots} / ${performance.tasks.worker_pool.total_slots}`" :icon="Layers" :accent="2" :trend="values(points, 'slots_active')" :hint="`${performance.tasks.worker_pool.idle_slots} 个空闲`" />
         <KpiCard label="队列长度" :value="queue?.available ? plain(queue.length) : '不可用'" :icon="ListOrdered" :accent="3" :trend="values(points, 'queue_length')" :tone="queue?.available ? 'default' : 'danger'" :hint="queue?.available ? `${queue.pending} 条待确认` : queue?.error" />
         <KpiCard label="Redis 吞吐" :value="queue?.ops_per_sec != null ? `${plain(queue.ops_per_sec)}/s` : '—'" :icon="Zap" :accent="4" :trend="values(points, 'redis_ops_per_sec')" :hint="queue?.used_memory_bytes != null ? `内存 ${bytes(queue.used_memory_bytes)} · ${queue.connected_clients} 个连接` : ''" />
@@ -216,11 +243,11 @@ function workerTypes(worker: api.WorkerStatus): string {
         <ChartCard title="任务队列积压" subtitle="Redis Stream 长度与已投递未确认消息" :span="6">
           <AdminChart :option="queueChart" :height="220" label="任务队列积压趋势" />
         </ChartCard>
-        <ChartCard title="Worker 明细" :subtitle="`${liveWorkers.length} 个在线 · 槽位与各进程数据库连接池`" :span="12">
-          <AdminTable table-class="wide-table worker-table">
+        <ChartCard title="Worker 明细" :subtitle="`${workerOnline} 个在线 · 槽位与各进程数据库连接池`" :span="12">
+          <AdminTable table-class="wide-table worker-table" :page-size="workerPageSize">
             <thead><tr><th>Worker</th><th>状态</th><th>通道</th><th>槽位</th><th>DB 连接池</th><th>任务类型</th><th>最近心跳</th></tr></thead>
             <tbody>
-              <tr v-for="worker in performance.workers" :key="worker.worker_id">
+              <tr v-for="worker in workers" :key="worker.worker_id">
                 <td class="mono">{{ worker.worker_id }}</td>
                 <td><StatusPill :label="statusLabel(worker.status)" :tone="tone(worker.status)" /></td>
                 <td>{{ worker.capabilities.task_lane ?? '—' }}</td>
@@ -229,9 +256,10 @@ function workerTypes(worker: api.WorkerStatus): string {
                 <td class="clip" :title="workerTypes(worker)">{{ workerTypes(worker) }}</td>
                 <td>{{ relative(worker.last_seen_at) }}</td>
               </tr>
+              <tr v-if="!workers.length"><td colspan="7" class="admin-empty-cell">暂无 Worker 心跳</td></tr>
             </tbody>
           </AdminTable>
-          <p v-if="!performance.workers.length" class="admin-empty">暂无 Worker 心跳</p>
+          <Pager :page="workerPage" :page-count="workerPageCount" :total="workerTotal" :page-size="workerPageSize" unit="个 Worker" @update:page="workerPage = $event" @update:page-size="changeWorkerPageSize" />
         </ChartCard>
       </div>
 

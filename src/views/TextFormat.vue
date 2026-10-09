@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vFitRows } from '@/directives/fitRows'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
@@ -558,7 +559,7 @@ onBeforeUnmount(() => {
                 </button>
               </template>
             </WorkbenchToolbar>
-            <div ref="tableScrollEl" class="min-h-0 flex-1 overflow-y-auto">
+            <div ref="tableScrollEl" class="fixed-rows" :class="{ 'is-scroll': pageSize > 10 }" v-fit-rows="{ prop: '--list-row-height' }">
               <ChapterTable
                 :chapters="pagedChapters"
                 :selected-key="selectedKey"

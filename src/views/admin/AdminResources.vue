@@ -20,17 +20,24 @@ import { bytes, compact, percent, plain } from '@/utils/adminFormat'
 const { push: toast } = useToast()
 const resources = ref<api.AdminResources | null>(null)
 const page = ref(1)
+const pageSize = ref(10)
+// 完整盘点模式下翻页/改页大小只重扫当页用户，不重新盘点整个工作空间。
+let usersOnlyNext = false
 /** Catalog totals by default; a full directory inventory is an explicit, slower action. */
 const fullScan = ref(false)
 
 const loader = useAdminLoader(async () => {
-  const result = await api.getResources(!fullScan.value, page.value)
+  const onlyUsers = usersOnlyNext && fullScan.value && !!resources.value
+  usersOnlyNext = false
+  const result = await api.getResources(!fullScan.value, page.value, pageSize.value, onlyUsers)
   return () => {
-    resources.value = result
+    if (onlyUsers && resources.value) resources.value = { ...resources.value, users: result.users, pagination: result.pagination }
+    else resources.value = result
     if (result.pagination) page.value = Math.min(page.value, Math.max(1, Math.ceil(result.pagination.total / result.pagination.page_size)))
   }
 }, { onActionError: message => toast({ title: '操作未完成', description: message, variant: 'destructive' }) })
-watch(page, () => { void loader.load() })
+watch(page, () => { usersOnlyNext = true; void loader.load() })
+function changePageSize(size: number) { pageSize.value = size; usersOnlyNext = true; if (page.value !== 1) page.value = 1; else void loader.load() }
 async function scan() { fullScan.value = true; await loader.load() }
 function backToCatalog() { fullScan.value = false; page.value = 1; void loader.load() }
 
@@ -102,12 +109,12 @@ async function cleanupTemp() {
           <AdminChart v-if="topUsers.length" :option="userChart" :height="Math.max(200, topUsers.length * 32)" label="用户存储占用条形图" />
           <p v-else class="admin-empty">暂无用户资源</p>
         </ChartCard>
-        <ChartCard title="用户明细" :subtitle="fullScan ? '完整盘点 · 按实际占用前 20 位' : '每页 20 位'" :span="6">
-          <AdminTable table-class="resource-users-table">
+        <ChartCard title="用户明细" :subtitle="fullScan ? '完整盘点 · 当页用户目录实际大小' : '已登记文件大小'" :span="6">
+          <AdminTable table-class="resource-users-table" :page-size="pageSize">
             <thead><tr><th>用户</th><th>项目</th><th>文件数</th><th>{{ fullScan ? '实际占用' : '登记大小' }}</th><th>登记文件</th></tr></thead>
-            <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '—' }}</td><td>{{ plain(row.file_count ?? 0) }}</td><td>{{ bytes(row.size_bytes) }}</td><td>{{ plain(row.registered_file_count ?? row.count ?? 0) }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr></tbody>
+            <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '—' }}</td><td>{{ plain(row.file_count ?? 0) }}</td><td>{{ bytes(row.size_bytes) }}</td><td>{{ plain(row.registered_file_count ?? row.count ?? 0) }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr><tr v-if="!resources.users.length"><td colspan="5" class="admin-empty-cell">暂无用户资源</td></tr></tbody>
           </AdminTable>
-          <Pager v-if="resources.pagination" :page="page" :page-count="Math.max(1, Math.ceil(resources.pagination.total / 20))" :total="resources.pagination.total" :page-size="20" unit="位用户" @update:page="page = $event" />
+          <Pager v-if="resources.pagination" :page="page" :page-count="Math.max(1, Math.ceil(resources.pagination.total / pageSize))" :total="resources.pagination.total" :page-size="pageSize" unit="位用户" @update:page="page = $event" @update:page-size="changePageSize" />
         </ChartCard>
       </div>
 

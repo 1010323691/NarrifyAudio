@@ -126,12 +126,12 @@ export type TaskCenterFilter = 'all' | 'active' | 'completed'
 export function getTaskCenterSummary(signal: AbortSignal): Promise<TaskCenterSummary> {
   return http.get('/api/v1/tasks/center/summary', { signal })
 }
-export function getTaskCenterGroups(category: TaskCenterCategoryId, page: number, signal: AbortSignal): Promise<TaskCenterPage<TaskCenterGroup>> {
-  const query = new URLSearchParams({ category, page: String(page) })
+export function getTaskCenterGroups(category: TaskCenterCategoryId, page: number, page_size: number, signal: AbortSignal): Promise<TaskCenterPage<TaskCenterGroup>> {
+  const query = new URLSearchParams({ category, page: String(page), page_size: String(page_size) })
   return http.get(`/api/v1/tasks/center/groups?${query}`, { signal })
 }
-export function getTaskCenterItems(category: TaskCenterCategoryId, projectId: string, filter: TaskCenterFilter, page: number, signal: AbortSignal): Promise<TaskCenterItems> {
-  const query = new URLSearchParams({ category, project_id: projectId, filter, page: String(page) })
+export function getTaskCenterItems(category: TaskCenterCategoryId, projectId: string, filter: TaskCenterFilter, page: number, page_size: number, signal: AbortSignal): Promise<TaskCenterItems> {
+  const query = new URLSearchParams({ category, project_id: projectId, filter, page: String(page), page_size: String(page_size) })
   return http.get(`/api/v1/tasks/center/items?${query}`, { signal })
 }
 export function controlTaskCenterGroup(projectId: string, category: TaskCenterCategoryId, action: 'pause' | 'resume' | 'cancel', signal: AbortSignal): Promise<{ changed: number }> {

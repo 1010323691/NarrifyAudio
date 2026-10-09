@@ -384,14 +384,11 @@ export function useScriptParseWorkbench() {
     }
     return list
   })
-  const pageCount = computed(() => Math.max(1, Math.ceil((state.value?.pagination?.total ?? filteredRows.value.length) / pageSize.value)))
-  const pagedRows = computed(() => {
-    if (state.value?.pagination) return filteredRows.value
-    const p = Math.min(page.value, pageCount.value)
-    return filteredRows.value.slice((p - 1) * pageSize.value, p * pageSize.value)
-  })
+  const pageCount = computed(() => Math.max(1, Math.ceil((state.value?.pagination?.total ?? 0) / pageSize.value)))
+  // 页由服务端切好并随 page/page_size 请求返回；前端不再对全量数据做分页切片。
+  const pagedRows = computed(() => filteredRows.value)
   watch([filter, query], () => { page.value = 1 })
-  watch([page, pageSize, query, filter], () => { if (state.value?.pagination) void refreshState() })
+  watch([page, pageSize, query, filter], () => { void refreshState() })
 
   const currentRow = computed<ParseRow | null>(() =>
     rows.value.find((r) => r.chapter.name === selectedName.value) ?? null,

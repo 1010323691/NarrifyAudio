@@ -91,7 +91,7 @@ export interface HostMetrics {
 export interface AdminPerformance {
   generated_at: string
   system: HostMetrics
-  gpu: GpuStatus[]; tasks: TaskMetrics; workers: WorkerStatus[]; queue: QueueStatus; api: ApiSnapshot
+  gpu: GpuStatus[]; tasks: TaskMetrics; queue: QueueStatus; api: ApiSnapshot
   api_pool: DbPool | null
   database: { counters: Record<string, number>; size_bytes: number | null; connections: DbConnections } | null
   /** LLM gate concurrency (configured). */
@@ -257,7 +257,13 @@ export function adjustQuota(userId: string, amount: number, idempotency_key: str
 
 export function getOverview(): Promise<AdminOverview> { return http.get(`/api/v1/admin/overview?tz_offset_minutes=${new Date().getTimezoneOffset()}`) }
 export function getPerformance(): Promise<AdminPerformance> { return http.get('/api/v1/admin/performance') }
-export function getResources(light = true, page = 1): Promise<AdminResources> { return http.get(`/api/v1/admin/resources?light=${light}&page=${page}`) }
+/** One page of worker heartbeats (counts.online = workers seen within the heartbeat timeout). */
+export function workerPage(page: number, page_size: number, signal?: AbortSignal): Promise<{ items: WorkerStatus[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/workers?${listQuery(undefined, { page, page_size })}`, { signal })
+}
+export function getResources(light = true, page = 1, page_size = 10, usersOnly = false): Promise<AdminResources> {
+  return http.get(`/api/v1/admin/resources?${listQuery(undefined, { light, page, page_size, users_only: usersOnly || undefined })}`)
+}
 export function getTaskMetrics(): Promise<TaskMetrics> {
   return http.get('/api/v1/admin/task-metrics')
 }
@@ -274,15 +280,15 @@ export function cleanupStaleTemp(): Promise<{ deleted_count: number; deleted_byt
   return http.post('/api/v1/admin/resources/cleanup-temp')
 }
 
-export function userPage(options: { page: number; search: string; role: string; state: string; sort: string }, signal?: AbortSignal): Promise<{ items: AdminUser[]; pagination: ListPagination }> {
+export function userPage(options: { page: number; page_size: number; search: string; role: string; state: string; sort: string }, signal?: AbortSignal): Promise<{ items: AdminUser[]; pagination: ListPagination }> {
   return http.get(`/api/v1/admin/users?${listQuery(undefined, options)}`, { signal })
 }
 export interface TaskFilters { status: string; search: string; group: string; task_type: string }
-export function taskPage(filters: TaskFilters, page: number, signal?: AbortSignal): Promise<{ items: AdminTask[]; pagination: ListPagination }> {
-  return http.get(`/api/v1/admin/tasks?${listQuery(undefined, { ...filters, page })}`, { signal })
+export function taskPage(filters: TaskFilters, page: number, page_size: number, signal?: AbortSignal): Promise<{ items: AdminTask[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/tasks?${listQuery(undefined, { ...filters, page, page_size })}`, { signal })
 }
-export function eventPage(level: string, module: string, search: string, since_hours: number, page: number, signal?: AbortSignal): Promise<{ items: AdminEvent[]; pagination: ListPagination }> {
-  return http.get(`/api/v1/admin/events?${listQuery(undefined, { level, module, search, since_hours, page })}`, { signal })
+export function eventPage(level: string, module: string, search: string, since_hours: number, page: number, page_size: number, signal?: AbortSignal): Promise<{ items: AdminEvent[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/events?${listQuery(undefined, { level, module, search, since_hours, page, page_size })}`, { signal })
 }
 
 const tz = () => new Date().getTimezoneOffset()
@@ -356,8 +362,8 @@ export function bulkTasks(action: 'cancel' | 'retry', ids: string[]): Promise<Bu
 }
 export function createUser(payload: NewUser): Promise<AdminUser> { return http.post('/api/v1/admin/users', payload) }
 export function getUserDetail(id: string): Promise<UserDetail> { return http.get(`/api/v1/admin/users/${id}?tz_offset_minutes=${tz()}`) }
-export function userQuotaTransactions(id: string, page: number): Promise<{ items: QuotaTransactionRow[]; pagination: ListPagination }> {
-  return http.get(`/api/v1/admin/users/${id}/quota-transactions?page=${page}&page_size=20`)
+export function userQuotaTransactions(id: string, page: number, page_size = 10): Promise<{ items: QuotaTransactionRow[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/users/${id}/quota-transactions?page=${page}&page_size=${page_size}`)
 }
 export function revokeUserSessions(id: string): Promise<{ id: string; revoked: number }> {
   return http.post(`/api/v1/admin/users/${id}/sessions/revoke`)

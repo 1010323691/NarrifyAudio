@@ -13,9 +13,11 @@ export function useTaskCenter() {
   const auth = useAuthStore()
   const category = ref<TaskCenterCategoryId | null>(null)
   const groupPage = ref(1)
+  const groupPageSize = ref(10)
   const selectedGroup = ref<{ categoryId: TaskCenterCategoryId; projectId: string; initial: TaskCenterGroup } | null>(null)
   const taskFilter = ref<TaskCenterFilter>('all')
   const taskPage = ref(1)
+  const taskPageSize = ref(10)
   const controllingCategory = ref<TaskCenterCategoryId | null>(null)
   const controlError = ref('')
   let active = false
@@ -88,8 +90,8 @@ export function useTaskCenter() {
     }
   })
   const groupsSlot = slot<TaskCenterPage<TaskCenterGroup>>(
-    () => userKey() && category.value ? JSON.stringify([userKey(), category.value, groupPage.value]) : null,
-    signal => getTaskCenterGroups(category.value!, groupPage.value, signal),
+    () => userKey() && category.value ? JSON.stringify([userKey(), category.value, groupPage.value, groupPageSize.value]) : null,
+    signal => getTaskCenterGroups(category.value!, groupPage.value, groupPageSize.value, signal),
     value => {
       const last = Math.max(1, Math.ceil(value.total / value.page_size))
       if (groupPage.value > last) groupPage.value = last
@@ -97,8 +99,8 @@ export function useTaskCenter() {
   )
   const itemsSlot = slot<TaskCenterItems>(
     () => userKey() && selectedGroup.value
-      ? JSON.stringify([userKey(), selectedGroup.value.categoryId, selectedGroup.value.projectId, taskFilter.value, taskPage.value]) : null,
-    signal => getTaskCenterItems(selectedGroup.value!.categoryId, selectedGroup.value!.projectId, taskFilter.value, taskPage.value, signal),
+      ? JSON.stringify([userKey(), selectedGroup.value.categoryId, selectedGroup.value.projectId, taskFilter.value, taskPage.value, taskPageSize.value]) : null,
+    signal => getTaskCenterItems(selectedGroup.value!.categoryId, selectedGroup.value!.projectId, taskFilter.value, taskPage.value, taskPageSize.value, signal),
     value => {
       const last = Math.max(1, Math.ceil(value.total / value.page_size))
       if (taskPage.value > last) taskPage.value = last
@@ -113,8 +115,8 @@ export function useTaskCenter() {
     controllingCategory.value = null
     controlError.value = ''
   }
-  watch(() => [category.value, groupPage.value], () => groupsSlot.select(), { flush: 'sync' })
-  watch(() => [selectedGroup.value?.categoryId, selectedGroup.value?.projectId, taskFilter.value, taskPage.value], () => itemsSlot.select(), { flush: 'sync' })
+  watch(() => [category.value, groupPage.value, groupPageSize.value], () => groupsSlot.select(), { flush: 'sync' })
+  watch(() => [selectedGroup.value?.categoryId, selectedGroup.value?.projectId, taskFilter.value, taskPage.value, taskPageSize.value], () => itemsSlot.select(), { flush: 'sync' })
   watch(() => auth.user?.id, () => {
     const wasActive = active
     active = false
@@ -123,6 +125,7 @@ export function useTaskCenter() {
     selectedGroup.value = null
     category.value = null
     groupPage.value = taskPage.value = 1
+    groupPageSize.value = taskPageSize.value = 10
     taskFilter.value = 'all'
     active = wasActive
     if (active) void summarySlot.refresh()
@@ -217,7 +220,7 @@ export function useTaskCenter() {
   const browsingSection = computed(() => sections.value.find(value => value.id === category.value) ?? sections.value[0]!)
   const selectedCounts = computed(() => itemsSlot.data.value?.counts ?? selectedGroup.value?.initial)
   return {
-    sections, browsingSection, groupPage, selectedGroup, taskFilter, taskPage, selectedCounts,
+    sections, browsingSection, groupPage, groupPageSize, selectedGroup, taskFilter, taskPage, taskPageSize, selectedCounts,
     summary: summarySlot.data, summaryLoading: summarySlot.loading, summaryError: summarySlot.error,
     groups: groupsSlot.data, groupsLoading: groupsSlot.loading, groupsError: groupsSlot.error,
     items: itemsSlot.data, itemsLoading: itemsSlot.loading, itemsError: itemsSlot.error,

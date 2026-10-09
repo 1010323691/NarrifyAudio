@@ -19,6 +19,11 @@ const emit = defineEmits<{
 }>()
 
 const u = computed(() => props.unit ?? '章')
+/** 统一页大小 10 / 20 / 50；当前值不在选项内时补上，避免下拉显示错误值。 */
+const sizeOptions = computed(() => {
+  const base = props.pageSizeOptions ?? [10, 20, 50]
+  return base.includes(props.pageSize) ? base : [...base, props.pageSize].sort((a, b) => a - b)
+})
 
 /** 左侧结果范围：「第 1–20 条，共 339 章」；空列表只给总数。 */
 const rangeLabel = computed(() => {
@@ -68,7 +73,7 @@ const pageItems = computed<(number | '...')[]>(() => {
       :value="props.pageSize"
       @change="emit('update:pageSize', Number(($event.target as HTMLSelectElement).value))"
     >
-      <option v-for="n in props.pageSizeOptions ?? [20, 50]" :key="n" :value="n">{{ n }} 条 / 页</option>
+      <option v-for="n in sizeOptions" :key="n" :value="n">{{ n }} 条 / 页</option>
     </select>
     <!-- 页码靠右：36×36 无边框点击区，当前页浅紫底紫字，其他页悬停浅灰底，键盘聚焦保留轮廓。 -->
     <nav class="ml-auto flex items-center gap-px" aria-label="分页">

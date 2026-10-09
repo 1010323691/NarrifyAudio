@@ -25,7 +25,7 @@ import { bytes, compact, date, plain, relative, statusLabel, tone } from '@/util
 import { series } from './series'
 
 const { push: toast } = useToast()
-const PAGE_SIZE = 20
+const pageSize = ref(10)
 const users = ref<api.AdminUser[]>([])
 const usersPagination = ref<ListPagination>()
 const userSearch = ref('')
@@ -35,15 +35,16 @@ const userSort = ref('default')
 const userPage = ref(1)
 
 const loader = useAdminLoader(async (signal) => {
-  const result = await api.userPage({ page: userPage.value, search: userSearch.value, role: userRole.value, state: userState.value, sort: userSort.value }, signal)
+  const result = await api.userPage({ page: userPage.value, page_size: pageSize.value, search: userSearch.value, role: userRole.value, state: userState.value, sort: userSort.value }, signal)
   return () => { users.value = result.items; usersPagination.value = result.pagination }
 }, { onActionError: message => toast({ title: '操作未完成', description: message, variant: 'destructive' }) })
 
 watch([userSearch, userRole, userState, userSort], () => { userPage.value = 1 })
 watch([userPage, userSearch, userRole, userState, userSort], () => { void loader.load() })
+function changePageSize(size: number) { pageSize.value = size; if (userPage.value !== 1) userPage.value = 1; else void loader.load() }
 const userFiltered = computed(() => !!userSearch.value || userRole.value !== 'all' || userState.value !== 'all')
 function clearUserFilters() { userSearch.value = ''; userRole.value = 'all'; userState.value = 'all' }
-const userPages = computed(() => Math.max(1, Math.ceil((usersPagination.value?.total ?? 0) / PAGE_SIZE)))
+const userPages = computed(() => Math.max(1, Math.ceil((usersPagination.value?.total ?? 0) / pageSize.value)))
 const counts = computed(() => usersPagination.value?.counts ?? {})
 
 function lastAdmin(user: Pick<api.AdminUser, 'role' | 'is_active'>) {
@@ -65,6 +66,7 @@ const detail = ref<api.UserDetail | null>(null)
 const ledger = ref<api.QuotaTransactionRow[]>([])
 const ledgerPagination = ref<ListPagination>()
 const ledgerPage = ref(1)
+const ledgerPageSize = ref(10)
 const quotaAmount = ref('')
 let detailTicket = 0
 
@@ -81,7 +83,7 @@ async function refreshDetail() {
   if (!user) return
   const ticket = ++detailTicket
   try {
-    const [info, rows] = await Promise.all([api.getUserDetail(user.id), api.userQuotaTransactions(user.id, ledgerPage.value)])
+    const [info, rows] = await Promise.all([api.getUserDetail(user.id), api.userQuotaTransactions(user.id, ledgerPage.value, ledgerPageSize.value)])
     if (ticket !== detailTicket) return
     detail.value = info; ledger.value = rows.items; ledgerPagination.value = rows.pagination
   } catch (cause) {
@@ -89,6 +91,7 @@ async function refreshDetail() {
   }
 }
 watch(ledgerPage, () => { if (selectedUser.value) void refreshDetail() })
+function changeLedgerPageSize(size: number) { ledgerPageSize.value = size; if (ledgerPage.value !== 1) ledgerPage.value = 1; else if (selectedUser.value) void refreshDetail() }
 watch(selectedUser, user => { if (!user) detailTicket++ })
 
 async function changeUser(user: api.AdminUser, patch: { is_active?: boolean; role?: 'user' | 'admin' }) {
@@ -188,7 +191,7 @@ async function submitCreate() {
           <Button v-if="userFiltered" variant="ghost" size="sm" @click="clearUserFilters">清空筛选</Button>
         </div>
       </div>
-      <AdminTable table-class="wide-table users-table">
+      <AdminTable table-class="wide-table users-table" :page-size="pageSize">
         <thead><tr><th>用户</th><th>角色 / 状态</th><th>注册 / 最近活跃</th><th>额度使用</th><th>项目</th><th>已登记存储</th><th class="user-actions">操作</th></tr></thead>
         <tbody>
           <tr v-for="user in users" :key="user.id" :aria-selected="selectedUser?.id === user.id">
@@ -200,10 +203,10 @@ async function submitCreate() {
             <td>{{ bytes(user.storage_bytes) }}<small>{{ user.file_count ?? 0 }} 个文件</small></td>
             <td class="user-actions"><Button variant="outline" size="sm" @click="openUser(user)">管理</Button></td>
           </tr>
+          <tr v-if="!users.length"><td colspan="7" class="admin-empty-cell">没有匹配的用户，尝试其他用户名或邮箱，或清空搜索条件。<Button v-if="userFiltered" variant="outline" size="sm" class="ml-2" @click="clearUserFilters">清空搜索</Button></td></tr>
         </tbody>
       </AdminTable>
-      <AdminEmptyState v-if="!users.length" title="没有匹配的用户" description="尝试其他用户名或邮箱，或清空搜索条件。"><Button v-if="userFiltered" variant="outline" size="sm" @click="clearUserFilters">清空搜索</Button></AdminEmptyState>
-      <Pager :page="userPage" :page-count="userPages" :total="usersPagination?.total ?? 0" :page-size="PAGE_SIZE" unit="位用户" @update:page="userPage = $event" />
+      <Pager :page="userPage" :page-count="userPages" :total="usersPagination?.total ?? 0" :page-size="pageSize" unit="位用户" @update:page="userPage = $event" @update:page-size="changePageSize" />
     </section>
 
     <AdminDrawer v-if="selectedUser" :title="selectedUser.display_name || selectedUser.username" @close="selectedUser = null">
@@ -257,7 +260,7 @@ async function submitCreate() {
         </template>
 
         <template v-else-if="detailTab === 'ledger'">
-          <AdminTable table-class="compact-table ledger-table">
+          <AdminTable table-class="compact-table ledger-table" :page-size="ledgerPageSize">
             <thead><tr><th>时间</th><th>类型</th><th>变动</th><th>资源</th><th>结余</th><th>备注</th></tr></thead>
             <tbody><tr v-for="row in ledger" :key="row.id">
               <td>{{ date(row.time) }}</td><td>{{ KIND_LABELS[row.kind] ?? row.kind }}</td>
@@ -265,10 +268,9 @@ async function submitCreate() {
               <td>{{ row.resource_type ?? '—' }}<small v-if="row.operation_type">{{ row.operation_type }}</small></td>
               <td>{{ row.available_after == null ? '—' : plain(row.available_after) }}</td>
               <td class="clip" :title="row.note">{{ row.note || '—' }}</td>
-            </tr></tbody>
+            </tr><tr v-if="!ledger.length"><td colspan="6" class="admin-empty-cell">暂无额度流水</td></tr></tbody>
           </AdminTable>
-          <AdminEmptyState v-if="!ledger.length" title="暂无额度流水" />
-          <Pager :page="ledgerPage" :page-count="Math.max(1, Math.ceil((ledgerPagination?.total ?? 0) / 20))" :total="ledgerPagination?.total ?? 0" :page-size="20" unit="条" @update:page="ledgerPage = $event" />
+          <Pager :page="ledgerPage" :page-count="Math.max(1, Math.ceil((ledgerPagination?.total ?? 0) / ledgerPageSize))" :total="ledgerPagination?.total ?? 0" :page-size="ledgerPageSize" unit="条" @update:page="ledgerPage = $event" @update:page-size="changeLedgerPageSize" />
         </template>
 
         <template v-else>

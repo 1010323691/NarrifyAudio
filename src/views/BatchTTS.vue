@@ -544,11 +544,6 @@ const latestTask = computed(
       .sort((a, b) => b.seq - a.seq)[0] ??
     null,
 )
-function selectFiltered(names: string[]) {
-  clearSelection()
-  for (const name of names) selected[name] = true
-  syncScript()
-}
 async function retryBatch() {
   const isCurrent = captureScope()
 
@@ -625,7 +620,6 @@ async function retryBatch() {
       empty-text="暂无解析结果，请先完成文本解析。"
       @refresh="refreshRows"
       @select="onRowChange"
-      @select-filtered="selectFiltered"
     >
       <template #selection
         ><Button

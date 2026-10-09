@@ -677,6 +677,7 @@ async function doLock(stem: string, locked: boolean) {
 const manualStem = ref<string | null>(null)
 const manualPick = ref<string | null>(null)
 const manualPage = ref(1)
+const manualPageSize = ref(10)
 const manualQuery = ref('')
 const manualTotal = ref(0)
 let manualAbort: AbortController | null = null
@@ -685,7 +686,7 @@ const manualLoading = ref(false)
 const manualError = ref('')
 const manualRetry = ref(0)
 watch(manualQuery, () => { manualPage.value = 1 })
-watch([manualStem, manualPage, manualQuery, manualRetry], async () => {
+watch([manualStem, manualPage, manualPageSize, manualQuery, manualRetry], async () => {
   manualAbort?.abort()
   const request = ++manualRequest
   if (!manualStem.value) return
@@ -693,10 +694,10 @@ watch([manualStem, manualPage, manualQuery, manualRetry], async () => {
   const isCurrent = captureScope()
   manualLoading.value = true; manualError.value = ''
   try {
-    const value = await withinScope(getLibrary({ page: manualPage.value, page_size: 10, q: manualQuery.value }, manualAbort.signal, { enabled_only: true }), isCurrent)
+    const value = await withinScope(getLibrary({ page: manualPage.value, page_size: manualPageSize.value, q: manualQuery.value }, manualAbort.signal, { enabled_only: true }), isCurrent)
     if (request === manualRequest) {
       lib.value = value; manualTotal.value = value.pagination?.total ?? 0
-      manualPage.value = Math.min(manualPage.value, Math.max(1, Math.ceil(manualTotal.value / 10)))
+      manualPage.value = Math.min(manualPage.value, Math.max(1, Math.ceil(manualTotal.value / manualPageSize.value)))
     }
   } catch (e: any) { if (request === manualRequest && isCurrent() && !manualAbort.signal.aborted) manualError.value = e?.message || '曲目暂未更新' }
   finally { if (request === manualRequest) manualLoading.value = false }
@@ -1316,10 +1317,10 @@ onBeforeUnmount(() => {
           选择曲目后，该章节将使用手动指定的音乐；锁定后不会被重新匹配。
         </p>
         <input v-model="manualQuery" class="mt-3 h-8 w-full rounded border bg-background px-2 text-xs" placeholder="搜索曲目…" />
-        <ScrollArea class="mt-3 h-72 rounded-md border">
-          <div class="space-y-1 p-2">
+        <ScrollArea class="mt-3 box-border rounded-md border" :class="manualPageSize > 10 ? '' : '!overflow-y-hidden'" :style="{ height: `${11 * 44 + 18}px` }">
+          <div class="p-2">
             <label
-              class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 hover:bg-accent/50"
+              class="flex h-11 cursor-pointer items-center gap-2 overflow-hidden rounded px-2 hover:bg-accent/50"
             >
               <input
                 type="radio"
@@ -1333,7 +1334,7 @@ onBeforeUnmount(() => {
             <label
               v-for="tr in manualTracks"
               :key="tr.name"
-              class="flex cursor-pointer items-center gap-2 rounded px-2 py-1 hover:bg-accent/50"
+              class="flex h-11 cursor-pointer items-center gap-2 overflow-hidden rounded px-2 hover:bg-accent/50"
             >
               <input
                 type="radio"
@@ -1352,7 +1353,7 @@ onBeforeUnmount(() => {
             </p>
           </div>
         </ScrollArea>
-        <Pager :page="manualPage" :page-count="Math.max(1, Math.ceil(manualTotal / 10))" :total="manualTotal" :page-size="10" unit="首" @update:page="manualPage = $event" />
+        <Pager :page="manualPage" :page-count="Math.max(1, Math.ceil(manualTotal / manualPageSize))" :total="manualTotal" :page-size="manualPageSize" unit="首" @update:page="manualPage = $event" @update:page-size="(s: number) => { manualPageSize = s; manualPage = 1 }" />
         <label class="mt-3 flex items-center gap-2 text-sm">
           <input
             type="checkbox"

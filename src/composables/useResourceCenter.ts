@@ -20,6 +20,8 @@ export function useResourceCenter() {
   const task = useTaskStore()
   const { push: toast } = useToast()
   const projectPage = ref(1)
+  const projectPageSize = ref(10)
+  const filePageSize = ref(10)
   const overview = shallowRef<ResourceOverview | null>(null)
   const entries = shallowRef<ResourceEntries | null>(null)
   const loading = ref(true)
@@ -42,6 +44,7 @@ export function useResourceCenter() {
   const cleanup = shallowRef<CleanupPreview | null>(null)
   const cleanupIds = ref<string[]>([])
   const cleanupPage = ref(1)
+  const cleanupPageSize = ref(10)
   const cleanupLoading = ref(false)
   const submitting = ref(false)
   const updatingProjects = ref(new Set<string>())
@@ -82,7 +85,7 @@ export function useResourceCenter() {
     role: tab.value === 'materials' ? 'production' : 'deliverable',
     project_id: projectId.value || undefined, category: category.value, path: path.value,
     query: String(route.query.q || ''), extension: extension.value, sort: sort.value,
-    page: page.value, page_size: 50, directory_mode: directoryMode.value,
+    page: page.value, page_size: filePageSize.value, directory_mode: directoryMode.value,
   }))
   const activeTasks = computed(() => task.tasks.filter(isActiveResourceTask))
   const currentTasks = computed(() => activeTasks.value.filter(item => tab.value === 'storage' || !projectId.value || item.project_id === projectId.value))
@@ -119,6 +122,8 @@ export function useResourceCenter() {
     if (module && projectId.value) void changeQuery({ path: module, mode: 'directory', q: undefined, page: undefined })
   }
   function setPage(next: number) { void changeQuery({ page: next }) }
+  function setFilePageSize(size: number) { filePageSize.value = size; void changeQuery({ page: undefined }) }
+  function setProjectPageSize(size: number) { projectPageSize.value = size; if (projectPage.value !== 1) projectPage.value = 1; else void loadOverview() }
   function toggleSelected(id: string) {
     if (tab.value !== 'projects' || !entries.value?.items.some(item => item.id === id && item.can_package)) return
     const next = new Set(selection.value)
@@ -140,7 +145,7 @@ export function useResourceCenter() {
       if (!alive || currentLifecycle !== lifecycle || sequence !== entriesSequence) return
       if (entries.value && JSON.stringify(entries.value.snapshots) !== JSON.stringify(result.snapshots)) selection.value = new Set()
       entries.value = result
-      const pages = Math.max(1, Math.ceil(result.total / 50))
+      const pages = Math.max(1, Math.ceil(result.total / filePageSize.value))
       if (page.value > pages) setPage(pages)
     } catch (error: any) {
       if (alive && currentLifecycle === lifecycle && sequence === entriesSequence && error?.name !== 'AbortError') entriesError.value = error?.message || '文件清单暂不可用'
@@ -177,11 +182,11 @@ export function useResourceCenter() {
     refreshing.value = true
     pageError.value = ''
     try {
-      const result = await getResourceOverview({ signal: overviewAbort.signal }, tab.value === 'storage' ? undefined : { page: projectPage.value, page_size: 12, q: projectSearch.value, sort: projectSort.value, project_id: projectId.value || undefined })
+      const result = await getResourceOverview({ signal: overviewAbort.signal }, tab.value === 'storage' ? undefined : { page: projectPage.value, page_size: projectPageSize.value, q: projectSearch.value, sort: projectSort.value, project_id: projectId.value || undefined })
       if (!alive || currentLifecycle !== lifecycle || sequence !== overviewSequence) return
       overview.value = result
-      if (result.pagination && projectPage.value > Math.max(1, Math.ceil(result.pagination.total / 12))) {
-        projectPage.value = Math.max(1, Math.ceil(result.pagination.total / 12)); void loadOverview()
+      if (result.pagination && projectPage.value > Math.max(1, Math.ceil(result.pagination.total / projectPageSize.value))) {
+        projectPage.value = Math.max(1, Math.ceil(result.pagination.total / projectPageSize.value)); void loadOverview()
       }
       const running = new Set(result.projects.filter(item => item.scan_task_id).map(item => item.project_id))
       updatingProjects.value = new Set([...updatingProjects.value].filter(id => running.has(id) || pendingRefresh.has(id)))
@@ -302,7 +307,8 @@ export function useResourceCenter() {
     } catch (error: any) { if (alive && currentLifecycle === lifecycle) toast({ title: '打包未能提交', description: error?.message, variant: 'destructive' }) }
     finally { if (currentLifecycle === lifecycle) submitting.value = false }
   }
-  async function loadCleanup(pageNumber = 1) {
+  async function loadCleanup(pageNumber = 1, size = cleanupPageSize.value) {
+    cleanupPageSize.value = size
     if (!cleanupIds.value.length) return
     const currentLifecycle = lifecycle
     const sequence = ++cleanupSequence
@@ -310,7 +316,7 @@ export function useResourceCenter() {
     cleanupAbort = new AbortController()
     cleanupLoading.value = true
     try {
-      const result = await getCleanupPreview(cleanupIds.value, pageNumber, { signal: cleanupAbort.signal })
+      const result = await getCleanupPreview(cleanupIds.value, pageNumber, cleanupPageSize.value, { signal: cleanupAbort.signal })
       if (!alive || currentLifecycle !== lifecycle || sequence !== cleanupSequence) return
       cleanup.value = result
       cleanupPage.value = pageNumber
@@ -437,7 +443,7 @@ export function useResourceCenter() {
   activate()
 
   return {
-    projectPage, overview, entries, loading, refreshing, entriesLoading, pageError, entriesError,
+    projectPage, projectPageSize, filePageSize, cleanupPageSize, setFilePageSize, setProjectPageSize, overview, entries, loading, refreshing, entriesLoading, pageError, entriesError,
     projectSearch, projectSort, fileSearch, selection, previewEntry, modal, submitting,
     tab, projectId, browsing, category, path, directoryMode, extension, sort, page,
     currentProject, projects, completeCount, scanTasks, currentTasks, operationTasks,

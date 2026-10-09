@@ -166,12 +166,9 @@ export function useTextFormatWorkbench() {
     }
     return seen
   })
-  const pageCount = computed(() => Math.max(1, Math.ceil((pagination.value?.total ?? filteredChapters.value.length) / pageSize.value)))
-  const pagedChapters = computed(() => {
-    if (pagination.value) return filteredChapters.value
-    const p = Math.min(page.value, pageCount.value)
-    return filteredChapters.value.slice((p - 1) * pageSize.value, p * pageSize.value)
-  })
+  const pageCount = computed(() => Math.max(1, Math.ceil((pagination.value?.total ?? 0) / pageSize.value)))
+  // 页由服务端切好并随 page/page_size 请求返回；前端不再对全量数据做分页切片。
+  const pagedChapters = computed(() => filteredChapters.value)
   watch([filter, query, reasonFilter, sameOrigNum], () => { page.value = 1 })
 
   watch([page, pageSize, query, filter, reasonFilter, sameOrigNum], () => { if (pagination.value && !internalPageChange) void refreshState({ recover: false }) }, { flush: 'sync' })
