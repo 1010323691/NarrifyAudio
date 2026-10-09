@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..platform.platform_settings import settings
@@ -11,7 +12,7 @@ from ..platform.deps import AuthContext, get_auth_context, require_csrf
 from ..platform.models import User
 from ..platform.system_config import registration_enabled
 from ..platform.security import create_session, revoke_session, verify_password
-from ..services.user_provisioning import EMAIL_RE, ProvisioningError, provision_user
+from ..services.user_provisioning import EMAIL_RE, ProvisioningError, account_taken, provision_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -40,11 +41,16 @@ def register(payload: Credentials, response: Response, db: Session = Depends(get
     try:
         user, project = provision_user(db, email=payload.email or "", username=payload.username,
                                        password=payload.password, display_name=payload.display_name)
+        token, csrf, session = create_session(db, user)
+        session.active_project_id = project.id
+        db.commit()
     except ProvisioningError as exc:
         raise HTTPException(exc.status_code, exc.message) from exc
-    token, csrf, session = create_session(db, user)
-    session.active_project_id = project.id
-    db.commit()
+    except IntegrityError as exc:  # a concurrent registration took the same email or username
+        db.rollback()
+        if not account_taken(db, email=payload.email or "", username=payload.username):
+            raise
+        raise HTTPException(409, "邮箱或用户名已被占用，请刷新后重试") from exc
     _set_cookies(response, token, csrf)
     return {"user": _user_json(user), "csrf_token": csrf}
 

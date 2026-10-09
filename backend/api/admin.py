@@ -45,7 +45,7 @@ from ..services.admin_storage import (
 from ..services.admin_analytics import today_chars, user_counts, user_daily_usage
 from ..services.admin_lists import event_page, event_union, filtered_events
 from ..services.list_paging import page_meta
-from ..services.user_provisioning import ProvisioningError, provision_user
+from ..services.user_provisioning import ProvisioningError, account_taken, provision_user
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -518,8 +518,10 @@ def create_user(payload: UserCreate, actor: User = Depends(require_admin_csrf), 
     except ProvisioningError as exc:
         db.rollback()
         raise HTTPException(exc.status_code, exc.message) from exc
-    except IntegrityError as exc:  # a concurrent request took the same email or username (flush or commit)
+    except IntegrityError as exc:  # flush or commit: only a concurrent duplicate is a conflict
         db.rollback()
+        if not account_taken(db, email=payload.email, username=payload.username):
+            raise
         raise HTTPException(409, "邮箱或用户名已被占用，请刷新后重试") from exc
     return {"id": user.id, "email": user.email, "username": user.username, "display_name": user.display_name,
             "role": user.role, "is_active": user.is_active, "created_at": user.created_at.isoformat()}

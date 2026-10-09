@@ -336,3 +336,15 @@ def test_heatmap_counts_local_hour_and_weekday_at_utc_plus_8(client: TestClient)
         after = throughput(db, "24h", -480, now=now)["heatmap"]
     assert after[3][10] == before[3][10] + 1  # Thursday (weekday 3), local hour 10
     assert after[3][2] == before[3][2]  # not the UTC hour
+
+
+def test_account_taken_only_reports_existing_email_or_username(client: TestClient):
+    from backend.services.user_provisioning import account_taken
+
+    _, _, username = _register(client)
+    with SessionLocal() as db:
+        assert account_taken(db, email="fresh-nobody@example.test", username=None) is False  # derived username is free too
+        existing = db.scalar(select(User).where(User.username == username))
+        assert account_taken(db, email=existing.email, username=username) is True
+        assert account_taken(db, email="nobody@example.test", username=username) is True
+        assert account_taken(db, email="nobody@example.test", username="someoneelse1") is False

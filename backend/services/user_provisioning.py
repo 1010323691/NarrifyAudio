@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..core.filenames import safe_filename
@@ -63,3 +63,16 @@ def provision_user(db: Session, *, email: str, username: str | None, password: s
     )
     project_workspace_path(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
     return user, project
+
+
+def account_taken(db: Session, *, email: str, username: str | None) -> bool:
+    """After a failed insert: did a concurrent request take this email or username?
+
+    Lets callers answer 409 for a real race and re-raise anything else.
+    """
+    email = (email or "").strip().lower()
+    try:
+        username = normalize_username(username, email)
+    except ProvisioningError:
+        return False
+    return db.scalar(select(User.id).where(or_(User.email == email, User.username == username)).limit(1)) is not None
