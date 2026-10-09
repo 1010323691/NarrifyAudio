@@ -127,16 +127,47 @@ def _fresh_layout_cache():
     core_paths.reset_layout_cache()
 
 
+_SHARD_WEIGHTS_FILE = Path(__file__).with_name("shard_weights.json")
+# 新增（权重表里还没有）的测试文件按每用例的平均耗时估算，下次更新权重表后即被实测值取代。
+_DEFAULT_SECONDS_PER_TEST = 0.07
+_file_seconds: dict[str, float] = {}
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--shard", default=None, metavar="I/N",
-        help="只跑第 I 片（1 起，共 N 片）。按测试文件整体分片、按用例数贪心均衡，"
-             "保持 loadscope 要求的“同文件留在同一 worker”。CI 用它做 matrix 并行。")
+        help="只跑第 I 片（1 起，共 N 片）。按测试文件整体分片（保持 loadscope 要求的“同文件留在同一 worker”），"
+             "以 shard_weights.json 里的每文件实测耗时做贪心均衡。CI 用它做 matrix 并行。")
+    parser.addoption(
+        "--write-shard-weights", action="store_true", default=False,
+        help="跑完把每个测试文件的实测耗时（秒）写回 backend/tests/shard_weights.json，用于更新分片权重。")
 
 
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: 单用例 >10s 的长耗时用例（真实轮询/大循环）；默认也会跑，本地可用 -m 'not slow' 排除")
+
+
+def pytest_runtest_logreport(report):
+    # xdist 下此钩子在主控进程收到各 worker 的报告时触发，三个阶段（setup/call/teardown）都计入。
+    _file_seconds[report.nodeid.split("::", 1)[0]] = (
+        _file_seconds.get(report.nodeid.split("::", 1)[0], 0.0) + report.duration)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if not session.config.getoption("--write-shard-weights") or hasattr(session.config, "workerinput"):
+        return
+    import json
+    ordered = {path: round(seconds, 2) for path, seconds in sorted(_file_seconds.items())}
+    _SHARD_WEIGHTS_FILE.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _load_shard_weights() -> dict[str, float]:
+    import json
+    try:
+        return json.loads(_SHARD_WEIGHTS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 def pytest_collection_modifyitems(config, items):
@@ -146,16 +177,22 @@ def pytest_collection_modifyitems(config, items):
     index, total = (int(part) for part in spec.split("/"))
     if not 1 <= index <= total:
         raise pytest.UsageError(f"--shard {spec}: 需满足 1 <= I <= N")
+    weights = _load_shard_weights()
     by_file: dict[str, list] = {}
     for item in items:
         by_file.setdefault(item.nodeid.split("::", 1)[0], []).append(item)
-    loads = [0] * total
+
+    def weight(path: str) -> float:
+        return weights.get(path, len(by_file[path]) * _DEFAULT_SECONDS_PER_TEST)
+
+    # 最长处理时间优先的贪心：先放最重的文件到当前最轻的分片；同权重按路径排序保证各 worker 收集结果一致。
+    loads = [0.0] * total
     owner: dict[str, int] = {}
-    for path, group in sorted(by_file.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+    for path in sorted(by_file, key=lambda p: (-weight(p), p)):
         target = loads.index(min(loads))
         owner[path] = target
-        loads[target] += len(group)
-    keep = [item for item in items if owner[item.nodeid.split("::", 1)[0]] == index - 1]
-    kept = {id(item) for item in keep}
-    config.hook.pytest_deselected(items=[item for item in items if id(item) not in kept])
-    items[:] = keep
+        loads[target] += weight(path)
+    kept = [item for item in items if owner[item.nodeid.split("::", 1)[0]] == index - 1]
+    kept_ids = {id(item) for item in kept}
+    config.hook.pytest_deselected(items=[item for item in items if id(item) not in kept_ids])
+    items[:] = kept

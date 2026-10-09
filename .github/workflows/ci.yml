@@ -137,6 +137,6 @@ jobs:
       # - test_admin_console 的 symlink 用例：本地非提权 Windows 无目录 symlink 权限故跳过，CI 执行；
       # - test_audio FFmpeg ×3：仅当 ffmpeg/ffprobe 不在 PATH 时跳过——本 job 安装 FFmpeg，两端都执行。
       # 命令带 -rs 让 SKIPPED 原因逐条进日志；数量与本地对不上时先看这些行再判断。
-      # 分片：按测试文件整体切 3 片（--shard 见 backend/tests/conftest.py，保持 loadscope 语义）。
+      # 分片：按测试文件整体切 3 片，用 backend/tests/shard_weights.json 的实测耗时均衡（见 conftest.py，保持 loadscope 语义）。
       - name: 测试套件分片
         run: .venv/bin/python -m pytest backend/tests -n 2 --dist loadscope -rs --shard ${{ matrix.shard }}/3
