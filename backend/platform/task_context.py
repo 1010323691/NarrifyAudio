@@ -122,6 +122,8 @@ class EngineExecutionContext:
                 library_root / ".tasks" / self.claim.task_id / self.claim.attempt_id / "publication.json",
             )
             journal.prepare()
+            from ..core.file_lock import exclusive_file_lock
+            journal.rollback_lock = lambda: exclusive_file_lock(library_root / ".music_index.lock")
             self._shared_publication_journal = journal
         return self._shared_publication_journal
 
@@ -287,7 +289,8 @@ class EngineExecutionContext:
         try:
             staged.parent.mkdir(parents=True, exist_ok=True)
             staged.write_bytes(data)
-            journal.publish(journal.add(final_path), staged)
+            # guard：回滚仅在文件仍是本任务所发布的字节时才还原，避免覆盖并发任务/手动编辑写入的标签。
+            journal.publish(journal.add(final_path, guard=True), staged)
         except BaseException:
             staged.unlink(missing_ok=True)
             raise

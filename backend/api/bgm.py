@@ -323,7 +323,10 @@ def _prepare_analyze_segment(req, ctx, db):
         )
     return ([{"label": f"{SEGMENT_LABEL}：{stem}",
               "payload": _versioned_payload(layout, stem, {"stem": stem}, segment=True),
-              "receipt": {"stem": stem}} for stem in stems], _library_reference(cfg.model_dump(mode="json")))
+              "receipt": {"stem": stem}} for stem in stems],
+            # 不绑定 music_index.json：段落分析自身会登记新标签并写回该文件，
+            # 绑定后任务自己（及同批兄弟任务）一写就会因 input_changed 失败。
+            cfg.model_dump(mode="json"))
 
 
 # --------------------------------------------------------------------------- #
