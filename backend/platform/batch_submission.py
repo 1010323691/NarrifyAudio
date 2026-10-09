@@ -108,8 +108,10 @@ def _batch_base_time(db, owner_id):
     Rows inside one batch get ``base + index`` microseconds. Starting from the
     wall clock alone would let two batches submitted in the same instant (or
     within the batch's own span) sort by random ids. The owner's newest
-    ``created_at`` is the previous batch's last row; project locks serialize
-    submissions, so the next batch always begins after it.
+    ``created_at`` is the previous batch's last row. The caller holds the
+    owner's UserQuotaAccount row lock until commit, so batches of one owner
+    are admitted one at a time (across projects too) and the next batch always
+    begins after the previous one's last row.
     """
     now = utcnow()
     latest = db.scalar(select(func.max(Task.created_at)).where(Task.owner_id == owner_id))
@@ -157,8 +159,10 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
             entries = [{**entry, "payload": {k: v for k, v in entry["payload"].items() if k != "config"}}
                        for entry in entries]
             _validate_inputs_and_conflicts(db, user, project, task_type, entries)
+            # Owner-wide row lock for every batch type: it serializes batch
+            # admissions across projects, which _batch_base_time relies on.
+            account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
             if task_type in BILLABLE_TASK_TYPES and entries:
-                account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
                 if account is None or account.available_units <= 0:
                     raise TaskSubmissionError(409, "额度不足")
             config = dict(config)
