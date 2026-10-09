@@ -12,6 +12,12 @@ from functools import wraps
 _samples: deque[tuple[float, str, str, int, float, str]] = deque(maxlen=5000)
 _daily_counts: dict[str, int] = {}
 _minute_counts: dict[int, int] = {}
+# Per-minute latency/error aggregate for the admin trend charts (24 h):
+# minute -> [requests, business_requests, errors_5xx, total_ms, max_ms, histogram]
+_LATENCY_BOUNDS_MS = (5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000)
+_STATS_RETENTION_MINUTES = 24 * 60
+_minute_stats: dict[int, list] = {}
+_last_pruned_minute = 0
 _lock = Lock()
 _tts_stages: deque[tuple[float, str, float]] = deque(maxlen=2000)
 
@@ -43,6 +49,10 @@ _STATUS_ROUTES = frozenset({
     "/api/v1/admin/task-metrics",
     "/api/v1/admin/tasks",
     "/api/v1/admin/gpu-scheduler/status",
+    "/api/v1/admin/metrics/history",
+    "/api/v1/admin/analytics/throughput",
+    "/api/v1/admin/analytics/api",
+    "/api/v1/admin/events/stats",
     "/api/v1/tasks",
     "/api/v1/tasks/{task_id}",
     "/api/v1/tasks/stream",
@@ -50,18 +60,35 @@ _STATUS_ROUTES = frozenset({
 
 
 def record_api_request(route: str, status: int, duration_ms: float, method: str = "GET") -> None:
+    global _last_pruned_minute
     now = datetime.now(timezone.utc)
     local_day = datetime.now().astimezone().date().isoformat()
     minute = int(now.timestamp() // 60)
+    business = method.upper() != "GET" or route not in _STATUS_ROUTES
     with _lock:
         _samples.append((monotonic(), method, route, status, duration_ms, now.isoformat()))
-        if method.upper() != "GET" or route not in _STATUS_ROUTES:
+        if business:
             _daily_counts[local_day] = _daily_counts.get(local_day, 0) + 1
             _minute_counts[minute] = _minute_counts.get(minute, 0) + 1
+        stats = _minute_stats.get(minute)
+        if stats is None:
+            stats = _minute_stats[minute] = [0, 0, 0, 0.0, 0.0, [0] * (len(_LATENCY_BOUNDS_MS) + 1)]
+        stats[0] += 1
+        stats[1] += int(business)
+        stats[2] += int(status >= 500)
+        stats[3] += duration_ms
+        stats[4] = max(stats[4], duration_ms)
+        stats[5][next((i for i, bound in enumerate(_LATENCY_BOUNDS_MS) if duration_ms <= bound), len(_LATENCY_BOUNDS_MS))] += 1
+        if minute == _last_pruned_minute:
+            return
+        _last_pruned_minute = minute
         cutoff_minute = minute - 3 * 24 * 60
         for bucket in tuple(_minute_counts):
             if bucket < cutoff_minute:
                 del _minute_counts[bucket]
+        for bucket in tuple(_minute_stats):
+            if bucket < minute - _STATS_RETENTION_MINUTES:
+                del _minute_stats[bucket]
         for day in tuple(_daily_counts):
             if day != local_day:
                 del _daily_counts[day]
@@ -127,3 +154,52 @@ def api_snapshot(window_seconds: int = 300) -> dict:
         ][-50:],
         "scope": "当前 API 进程近五分钟；重启后重新计数",
     }
+
+
+def _histogram_p95(histogram: list[int], total: int, max_ms: float) -> float | None:
+    if not total:
+        return None
+    threshold = ceil(total * .95)
+    running = 0
+    for index, count in enumerate(histogram):
+        running += count
+        if running >= threshold:
+            return float(_LATENCY_BOUNDS_MS[index]) if index < len(_LATENCY_BOUNDS_MS) else round(max_ms, 1)
+    return round(max_ms, 1)
+
+
+def api_timeseries(minutes: int = 60) -> dict:
+    """Bucketed request/error/latency series for the admin trend charts.
+
+    Process-local like the other API aggregates: it covers at most the last
+    24 hours and restarts empty with the API process. P95 is approximated
+    from a fixed latency histogram (the upper bound of the P95 bucket).
+    """
+    minutes = max(5, min(int(minutes), _STATS_RETENTION_MINUTES))
+    step = 1 if minutes <= 120 else 5 if minutes <= 360 else 15
+    current = int(datetime.now(timezone.utc).timestamp() // 60)
+    first = (current - minutes + 1) // step * step
+    with _lock:
+        stats = {minute: (row[0], row[1], row[2], row[3], row[4], list(row[5]))
+                 for minute, row in _minute_stats.items() if minute >= first}
+    points = []
+    for start in range(first, current + 1, step):
+        requests = business = errors = 0
+        total_ms = max_ms = 0.0
+        histogram = [0] * (len(_LATENCY_BOUNDS_MS) + 1)
+        for minute in range(start, start + step):
+            row = stats.get(minute)
+            if row is None:
+                continue
+            requests += row[0]; business += row[1]; errors += row[2]; total_ms += row[3]
+            max_ms = max(max_ms, row[4])
+            histogram = [a + b for a, b in zip(histogram, row[5])]
+        points.append({
+            "time": datetime.fromtimestamp(start * 60, timezone.utc).isoformat(),
+            "requests": requests, "business_requests": business, "errors": errors,
+            "rps": round(requests / (step * 60), 3),
+            "average_ms": round(total_ms / requests, 1) if requests else None,
+            "p95_ms": _histogram_p95(histogram, requests, max_ms),
+        })
+    return {"minutes": minutes, "step_minutes": step, "points": points,
+            "scope": "当前 API 进程；最长 24 小时；重启后重新计数；P95 为分桶近似"}

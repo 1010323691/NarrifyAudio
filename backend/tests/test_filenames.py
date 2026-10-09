@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
 
 from backend.core.filenames import (
     safe_filename, legacy_storage_name, package_stem, unique_filename,
@@ -93,9 +92,9 @@ def test_package_naming_and_lock_identity_share_canonical_target():
 
 @pytest.mark.parametrize("name", ["reader.", "reader..", "con.txt", "lpt1.foo"])
 def test_new_usernames_cannot_alias_storage_roots(name):
-    from backend.api.auth import _username
-    with pytest.raises(HTTPException) as error:
-        _username(name, "valid@example.test")
+    from backend.services.user_provisioning import ProvisioningError, normalize_username
+    with pytest.raises(ProvisioningError) as error:
+        normalize_username(name, "valid@example.test")
     assert error.value.status_code == 422
     # Existing accounts remain at their existing roots.
     assert storage_username("reader.") == "reader"

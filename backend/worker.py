@@ -18,7 +18,7 @@ from .platform.worker_registry import heartbeat, mark_offline
 from .platform.database import SessionLocal
 from .platform.models import Task, TaskAttempt
 from .platform.task_types import SUPPORTED_TASK_TYPES
-from .core.concurrency import merge_gate, set_concurrency
+from .core.concurrency import gate, merge_gate, set_concurrency
 from .platform.task_worker import _run_claim_fenced, claim_fair_task
 from .platform.system_config import parse_worker_concurrency
 from .services.project_retention import purge_expired_projects
@@ -81,8 +81,14 @@ def _mark_offline_safely(worker_id: str) -> None:
 
 
 def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once, lane="mechanical"):
+    from .platform.database import pool_status
+
+    def beat():
+        # The admin console shows each process's business-pool occupancy and held LLM permits.
+        heartbeat(worker_id, status="idle", capabilities={**capabilities, "db_pool": pool_status(), "llm_gate_active": gate().active})
+
     def dispatch():
-        heartbeat(worker_id, status="idle", capabilities=capabilities)
+        beat()
         if once:
             from .platform.delivery_maintenance import run_dispatch_once
             run_dispatch_once(recover=recover_database_tasks, publish=publish_pending)
@@ -96,7 +102,7 @@ def _dispatch_loop(client, worker_id, capabilities, stop, *, interval, once, lan
             ),
         )
         if result not in {"idle", "skipped"}:
-            heartbeat(worker_id, status="idle", capabilities=capabilities)
+            beat()
 
     while _retry_database_operation(dispatch, stop, once=once):
         if once:
@@ -331,6 +337,8 @@ def main() -> None:
         delivery_worker = threading.Thread(target=_host_maintenance_loop, args=(stop,),
             name="host-maintenance", daemon=True)
         delivery_worker.start()
+        from .platform.metrics_sampler import run as run_metrics_sampler
+        threading.Thread(target=run_metrics_sampler, args=(stop,), name="metrics-sampler", daemon=True).start()
         if args.task_lane == "mechanical":
             merge_workers = _start_merge_workers(args.worker_id, stop)
         if args.task_lane == "model":

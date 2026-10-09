@@ -130,6 +130,32 @@ def tts_capacity_available(db, *, exclude_task_id=None, resume_claim=None):
     return db.scalar(query.limit(1)) is None
 
 
+def tts_batch_activity(db) -> dict:
+    """Observed state of TTS batch pools, counted in member tasks (chapters/scripts).
+
+    One executing pool holds the primary task plus every member it claimed
+    (all share ``ui_state.tts_slot`` and are ``running``), so a single pool can
+    be processing hundreds of members while the executing-pool count is 1.
+    Parked pools keep their leases but release the slot, so they are reported
+    apart from members actually being synthesized.
+    """
+    from sqlalchemy import func, select
+    from .models import Task
+    running = db.execute(select(Task.id, Task.ui_state['tts_slot'].as_string(), Task.ui_state['tts_parked'].as_boolean())
+                         .where(Task.task_type == 'tts.batch', Task.status.in_(('running', 'cancelling')))).all()
+    active_pools, parked_pools, active, parked = set(), set(), 0, 0
+    for task_id, slot, is_parked in running:
+        pool = slot or task_id  # legacy rows without a slot are their own pool
+        if is_parked:
+            parked += 1; parked_pools.add(pool)
+        else:
+            active += 1; active_pools.add(pool)
+    queued = db.scalar(select(func.count()).select_from(Task).where(
+        Task.task_type == 'tts.batch', Task.status.in_(('pending', 'queued', 'retrying')))) or 0
+    return {"pools": len(active_pools), "active_members": active, "parked_pools": len(parked_pools),
+            "parked_members": parked, "queued_members": int(queued)}
+
+
 def set_tts_parked(db, claim, parked):
     """Mark the actual claimed pool after stopping its child, under host_lock."""
     from sqlalchemy import select

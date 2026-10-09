@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import {
   LayoutDashboard, Layers, AudioLines, Settings, Type, ScanText, Users,
   Combine, Music4, ShieldCheck, FolderOpen, ChevronRight, LogOut, Monitor, Sun, Moon, ListTodo, Trash2, Eye,
+  Activity, HardDrive, ListChecks, ScrollText,
 } from 'lucide-vue-next'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
@@ -46,13 +47,13 @@ const PROJECT_STAGES = [
 
 const ADMIN_ITEMS = [
   { to: '/admin', label: '总览', icon: LayoutDashboard },
-  { to: '/admin?tab=performance', label: '性能监控', icon: AudioLines, tab: 'performance' },
+  { to: '/admin?tab=performance', label: '系统监控', icon: Activity, tab: 'performance' },
   { to: '/admin?tab=users', label: '用户管理', icon: Users, tab: 'users' },
-  { to: '/admin?tab=resources', label: '资源管理', icon: Layers, tab: 'resources' },
+  { to: '/admin?tab=resources', label: '资源与存储', icon: HardDrive, tab: 'resources' },
   { to: '/admin/music', label: '音乐库管理', icon: Music4 },
   { to: '/admin?tab=settings', label: '系统配置', icon: Settings, tab: 'settings' },
-  { to: '/admin?tab=tasks', label: '任务 / 队列', icon: Combine, tab: 'tasks' },
-  { to: '/admin?tab=logs', label: '日志 / 异常', icon: ScanText, tab: 'logs' },
+  { to: '/admin?tab=tasks', label: '任务与队列', icon: ListChecks, tab: 'tasks' },
+  { to: '/admin?tab=logs', label: '日志与异常', icon: ScrollText, tab: 'logs' },
 ] as const
 
 const isAdminArea = computed(() => auth.user?.role === 'admin' && (route.path === '/admin' || route.path.startsWith('/admin/')))

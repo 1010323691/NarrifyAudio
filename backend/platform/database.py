@@ -82,6 +82,15 @@ lock_engine = create_engine(settings.database_url, future=True, **_lock_engine_k
 LockSessionLocal = sessionmaker(bind=lock_engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
+def pool_status() -> dict | None:
+    """Business-pool occupancy of this process (``None`` for pool-less SQLite)."""
+    pool = engine.pool
+    if not all(hasattr(pool, name) for name in ("size", "checkedout", "overflow")):
+        return None
+    return {"size": int(pool.size()), "checked_out": int(pool.checkedout()),
+            "overflow": max(0, int(pool.overflow())), "max_overflow": int(getattr(pool, "_max_overflow", 0) or 0)}
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:

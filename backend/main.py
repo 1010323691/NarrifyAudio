@@ -20,6 +20,7 @@ from starlette.concurrency import run_in_threadpool
 from .api import audio as api_audio
 from .api import admin as api_admin
 from .api import admin_resources as api_admin_resources
+from .api import admin_analytics as api_admin_analytics
 from .api import auth as api_auth
 from .api import bgm as api_bgm
 from .api import config as api_config
@@ -67,6 +68,7 @@ PLATFORM_ROUTERS = [
     api_script_parse.router,
     api_admin.router,
     api_admin_resources.router,
+    api_admin_analytics.router,
 ]
 
 LEGACY_ROUTERS = [

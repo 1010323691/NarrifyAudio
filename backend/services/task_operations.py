@@ -14,6 +14,7 @@ from ..platform.models import OutboxEvent, Project, QuotaTransaction, Task, Task
 from ..platform.platform_settings import settings
 from ..platform.task_context import _as_utc
 from ..platform.task_admission import LLM_TASK_TYPES
+from ..platform.task_registry import task_worker_group  # noqa: F401 — admin views import it from here
 from ..platform.task_lifecycle import (
     ACTIVE_TASK_STATUSES,
     TERMINAL_TASK_STATUSES,
@@ -72,26 +73,6 @@ _MODULE_LABELS = {
 def task_module(task_type: str) -> str:
     """Fine-grained module label shown in the user task list."""
     return _MODULE_LABELS.get(task_type, task_type.split(".", 1)[0])
-
-
-# Coarse execution group per task prefix for the admin console.
-# A different axis from task_module (group of workers, not display label).
-_WORKER_GROUPS = {
-    "script": "llm",
-    "music": "llm",
-    "tts": "tts",
-    "voices": "tts",
-    "audio": "audio",
-    "bgm": "audio",
-    "book": "system",
-    "text": "system",
-    "resources": "system",
-}
-
-
-def task_worker_group(task_type: str) -> str:
-    """Coarse worker group (llm/tts/audio/system/worker) for the admin console."""
-    return _WORKER_GROUPS.get(task_type.split(".", 1)[0], "worker")
 
 
 def check_retry_eligible(db: Session, task: Task) -> int:

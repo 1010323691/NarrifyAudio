@@ -7,7 +7,12 @@ from .task_operations import task_worker_group
 from .list_paging import page_meta
 
 
-def event_page(db, page, size, level, module, search, hours, recent_errors):
+def event_union(hours, recent_errors):
+    """Union of persisted task failures, audit events and in-process API 5xx.
+
+    Columns: id, time, level, module, type, message. Shared by the paged list,
+    the CSV export and the distribution charts so they always agree.
+    """
     cutoff = utcnow() - timedelta(hours=max(1, min(hours, 24*30)))
     task_module = case(*[(Task.task_type == t, task_worker_group(t)) for t in TASK_TYPES], else_="worker")
     parts = [select(Task.id.label("id"), Task.updated_at.label("time"), literal("error").label("level"),
@@ -22,12 +27,21 @@ def event_page(db, page, size, level, module, search, hours, recent_errors):
         if time < cutoff.replace(tzinfo=timezone.utc): continue
         parts.append(select(literal(f"api-{item['time']}-{item['route']}"), literal(time), literal("error"), literal("api"),
                             literal(f"HTTP {item['status']}"), literal(f"{item['method']} {item['route']} 返回 {item['status']}")))
-    events = union_all(*parts).subquery()
+    return union_all(*parts).subquery()
+
+
+def filtered_events(events, level, module, search):
     statement = select(events)
     if level != "all": statement = statement.where(events.c.level == level)
     if module != "all": statement = statement.where(events.c.module == module)
     if search.strip():
         statement = statement.where((events.c.type + literal(" ") + events.c.message + literal(" ") + events.c.id).ilike("%" + search.strip() + "%"))
+    return statement
+
+
+def event_page(db, page, size, level, module, search, hours, recent_errors):
+    events = event_union(hours, recent_errors)
+    statement = filtered_events(events, level, module, search)
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     rows = db.execute(statement.order_by(events.c.time.desc(), events.c.id.desc()).offset((page-1)*size).limit(size)).mappings().all()
     return {"items": [{**r, "time": r["time"].isoformat()} for r in rows], "pagination": page_meta(total, page, size)}
