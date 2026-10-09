@@ -1,5 +1,6 @@
 """Atomic non-TTS batch admission, real statement/transaction budgets and replays."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from threading import Barrier
 
 import pytest
@@ -270,3 +271,108 @@ def test_receipt_lookup_preserves_mapping_and_owner_isolation(sessions):
         with pytest.raises(HTTPException) as error:
             submission_receipt("receipt-lookup", User(id="another"), db)
         assert error.value.status_code == 404
+
+
+def test_batch_rows_sort_by_created_at_in_submission_order(sessions):
+    # Claims and task lists order by (created_at, id); ids are random UUIDs.
+    # Rows of one batch must therefore sort exactly as they were submitted.
+    receipt = submit(sessions, kind="script.parse", count=50, key="ordering")
+    with sessions() as db:
+        ordered = db.scalars(select(Task.id).where(Task.id.in_(receipt["task_ids"]))
+                             .order_by(Task.created_at.asc(), Task.id.asc())).all()
+    assert list(ordered) == receipt["task_ids"]
+
+
+def test_consecutive_batches_at_same_instant_do_not_interleave(sessions, monkeypatch):
+    frozen = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(submission, "utcnow", lambda: frozen)
+    first = submit(sessions, kind="script.parse", count=5, key="first", request={"batch": 1})
+    second = submit(sessions, kind="script.parse", count=5, key="second", request={"batch": 2},
+                    prepare=lambda: (entries("script.parse", 10)[5:], {"generation": {"max_concurrency": 2}}))
+    with sessions() as db:
+        ordered = db.scalars(select(Task.id).where(Task.id.in_(first["task_ids"] + second["task_ids"]))
+                             .order_by(Task.created_at.asc(), Task.id.asc())).all()
+    assert list(ordered) == first["task_ids"] + second["task_ids"]
+
+
+def test_fair_claim_takes_batch_rows_in_submission_order(sessions, monkeypatch):
+    from backend.platform import task_worker
+    monkeypatch.setattr(task_worker, "SessionLocal", sessions)
+    claimed = []
+
+    def fake_claim(task_id, worker, **kwargs):
+        claimed.append(task_id)
+        with sessions.begin() as db:
+            db.get(Task, task_id).status = "running"
+        return None
+
+    monkeypatch.setattr(task_worker, "claim_task", fake_claim)
+    receipt = submit(sessions, kind="script.parse", count=5, key="claim")
+    for _ in receipt["task_ids"]:
+        task_worker.claim_fair_task("order-worker", task_types=("script.parse",))
+    assert claimed == receipt["task_ids"]
+
+
+def test_batch_creates_missing_quota_account_under_lock(sessions):
+    # Without an account row there is no lock to serialize on; admission must
+    # create it (as task_submission does) so every batch of the owner takes it.
+    with sessions.begin() as db:
+        db.query(UserQuotaAccount).filter(UserQuotaAccount.user_id == "owner").delete()
+    receipt = submit(sessions, kind="bgm.match", count=2, key="no-account")
+    assert len(receipt["task_ids"]) == 2
+    with sessions() as db:
+        assert db.get(UserQuotaAccount, "owner") is not None
+
+
+
+def test_lock_owner_account_creates_once_and_returns_existing(sessions):
+    # The helper is the batch path's only account lock; a second call must lock
+    # the row the first call created rather than insert a duplicate.
+    with sessions.begin() as db:
+        db.query(UserQuotaAccount).filter(UserQuotaAccount.user_id == "owner").delete()
+    with sessions() as db:
+        created = submission._lock_owner_account(db, "owner")
+        assert created.available_units == 0
+        db.commit()
+    with sessions() as db:
+        existing = submission._lock_owner_account(db, "owner")
+        assert existing.user_id == "owner"
+        assert db.scalar(select(func.count()).select_from(UserQuotaAccount).where(UserQuotaAccount.user_id == "owner")) == 1
+
+
+def test_lock_owner_account_conflict_branch_returns_winner_row(sessions, monkeypatch):
+    # Force the race: the first lookup misses, the insert hits the committed row
+    # (IntegrityError), and the re-select returns the winner. The sentinel proves
+    # the except branch produced the result. A real transaction is opened first
+    # so the savepoint nests inside it as on PostgreSQL.
+    winner = object()
+    with sessions() as db:
+        db.add(User(id="txn-opener", username="opener", email="opener@example.test", password_hash="unused"))
+        db.flush()
+        lookups = [None, winner]
+        monkeypatch.setattr(db, "scalar", lambda *a, **k: lookups.pop(0))
+        assert submission._lock_owner_account(db, "owner", use_savepoint=True) is winner
+        assert lookups == []
+        db.rollback()
+
+
+def test_lock_owner_account_raises_when_row_stays_invisible(sessions, monkeypatch):
+    with sessions() as db:
+        db.add(User(id="txn-opener", username="opener", email="opener@example.test", password_hash="unused"))
+        db.flush()
+        monkeypatch.setattr(db, "scalar", lambda *a, **k: None)
+        with pytest.raises(RuntimeError):
+            submission._lock_owner_account(db, "owner", use_savepoint=True)
+        db.rollback()
+
+
+def test_rejected_billable_batch_leaves_no_orphan_account(sessions):
+    # Zero units rejects a billable batch; the account created for it must roll
+    # back with the transaction rather than persist as a committed side effect.
+    with sessions.begin() as db:
+        db.query(UserQuotaAccount).filter(UserQuotaAccount.user_id == "owner").delete()
+    with pytest.raises(TaskSubmissionError) as rejected:
+        submit(sessions, kind="voices.foundation", count=2, key="orphan")
+    assert rejected.value.status_code == 409
+    with sessions() as db:
+        assert db.get(UserQuotaAccount, "owner") is None

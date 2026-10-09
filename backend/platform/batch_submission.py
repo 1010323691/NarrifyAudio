@@ -6,11 +6,12 @@ the durable request hash also binds the resolved inputs and configuration.
 from __future__ import annotations
 
 from contextlib import nullcontext
+from datetime import timedelta, timezone
 import hashlib
 import json
 import uuid
 
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from ..core.filenames import filename_aliases, workspace_audio_identity
@@ -101,6 +102,58 @@ def _validate_inputs_and_conflicts(db, user, project, kind, entries):
         raise TaskSubmissionError(409, "所选目标已有在途任务，请等待其结束")
 
 
+def _lock_owner_account(db, owner_id, *, use_savepoint=None):
+    """Return the owner's quota account row, locked until the transaction ends.
+
+    A missing row is created on PostgreSQL inside a savepoint: a concurrent
+    first admission that loses the primary-key race is rolled back to the
+    savepoint and then locks the row the winner committed. SQLite skips the
+    savepoint: pysqlite does not issue BEGIN before SAVEPOINT, so the savepoint
+    would become the outermost transaction and commit on release. Admissions on
+    SQLite are already serialized by ``host_lock``.
+    """
+    if use_savepoint is None:
+        use_savepoint = db.get_bind().dialect.name != "sqlite"
+    select_account = select(UserQuotaAccount).where(UserQuotaAccount.user_id == owner_id).with_for_update()
+    account = db.scalar(select_account)
+    if account is not None:
+        return account
+    if not use_savepoint:
+        account = UserQuotaAccount(user_id=owner_id, available_units=0)
+        db.add(account)
+        db.flush()
+        return account
+    try:
+        with db.begin_nested():
+            account = UserQuotaAccount(user_id=owner_id, available_units=0)
+            db.add(account)
+    except IntegrityError:
+        account = db.scalar(select_account)
+    if account is None:
+        raise RuntimeError("owner quota account is neither creatable nor visible")
+    return account
+
+
+def _batch_base_time(db, owner_id):
+    """Start after the owner's newest task so batches never interleave.
+
+    Rows inside one batch get ``base + index`` microseconds. Starting from the
+    wall clock alone would let two batches submitted in the same instant (or
+    within the batch's own span) sort by random ids. The owner's newest
+    ``created_at`` is the previous batch's last row. The caller holds the
+    owner's UserQuotaAccount row lock until commit, so batches of one owner
+    are admitted one at a time (across projects too) and the next batch always
+    begins after the previous one's last row.
+    """
+    now = utcnow()
+    latest = db.scalar(select(func.max(Task.created_at)).where(Task.owner_id == owner_id))
+    if latest is None:
+        return now
+    if latest.tzinfo is None:  # SQLite returns naive datetimes
+        latest = latest.replace(tzinfo=timezone.utc)
+    return max(now, latest + timedelta(microseconds=1))
+
+
 def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
                       idempotency_key=None, receipt_field=None):
     """Run preparation only for new intent, under the same admission transaction.
@@ -138,8 +191,10 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
             entries = [{**entry, "payload": {k: v for k, v in entry["payload"].items() if k != "config"}}
                        for entry in entries]
             _validate_inputs_and_conflicts(db, user, project, task_type, entries)
+            # Owner-wide row lock for every batch type: it serializes batch
+            # admissions across projects, which _batch_base_time relies on.
+            account = _lock_owner_account(db, user.id)
             if task_type in BILLABLE_TASK_TYPES and entries:
-                account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
                 if account is None or account.available_units <= 0:
                     raise TaskSubmissionError(409, "额度不足")
             config = dict(config)
@@ -155,8 +210,11 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
                 config={**config, "_batch_intent": intent, "_batch_receipt": response}, task_ids=ids)
             db.add(batch)
             db.flush()
-            now, rows, events = utcnow(), [], []
-            for tid, entry in zip(ids, entries):
+            now, rows, events = _batch_base_time(db, user.id), [], []
+            for index, (tid, entry) in enumerate(zip(ids, entries)):
+                # Claims and lists order by (created_at, id); ids are random UUIDs,
+                # so rows need distinct, entry-ordered timestamps (see _batch_base_time).
+                created = now + timedelta(microseconds=index)
                 payload = {k: v for k, v in entry["payload"].items() if k != "config"}
                 payload.update(label=entry["label"], _batch_config_id=batch_id, _request_hash=digest)
                 payload.pop("_audio_identity", None)
@@ -167,9 +225,9 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
                     payload["execution_batch"] = batch_id
                 rows.append(dict(id=tid, owner_id=user.id, project_id=project.id, task_type=task_type,
                     payload=payload, batch_id=batch_id, event_sequence=1, ui_state={}, admission_units=1,
-                    status="pending", progress=0, idempotency_key=f"batch:{batch_id}:{tid}", created_at=now, updated_at=now))
+                    status="pending", progress=0, idempotency_key=f"batch:{batch_id}:{tid}", created_at=created, updated_at=now))
                 events.append(dict(id=str(uuid.uuid4()), task_id=tid, sequence=1, event_type="submitted",
-                    payload={"status": "pending", "estimated_units": 0}, created_at=now))
+                    payload={"status": "pending", "estimated_units": 0}, created_at=created))
             for offset in range(0, len(rows), 100):
                 db.execute(insert(Task), rows[offset:offset + 100])
                 db.execute(insert(TaskEvent), events[offset:offset + 100])
