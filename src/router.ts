@@ -89,6 +89,10 @@ router.beforeEach(async (to) => {
       } catch {
         return '/dashboard'
       }
+      // select() returns quietly when another selection is still in flight —
+      // don't land on the workbench with the active scope still pointing
+      // elsewhere (every stage entry would sit disabled and do nothing).
+      if (project.current?.project_id !== projectId) return '/dashboard'
     }
     return true
   }
