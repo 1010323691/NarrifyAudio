@@ -244,7 +244,9 @@ def test_maintenance_keeps_scan_cursor_when_commit_fails(monkeypatch):
 
 
 def test_unresolvable_workspace_never_reports_pending_work(setup, tmp_path):
+    from backend.platform import delivery_index
     from backend.platform.delivery_index import backfill_pending_project
+    delivery_index._unresolvable_until.clear()
     factory, workspace = setup
     target = tmp_path / "elsewhere"
     workspace.rmdir()
@@ -253,11 +255,15 @@ def test_unresolvable_workspace_never_reports_pending_work(setup, tmp_path):
     with factory.begin() as db:
         assert backfill_pending_project(db) is False
     with factory.begin() as db:
-        state = db.get(DeliveryIndexState, "project")
-        assert state is not None and not state.complete
+        # Remembered in-process: the database is not written on its account.
+        assert db.get(DeliveryIndexState, "project") is None
+    assert "project" in delivery_index._unresolvable_until
+    with factory.begin() as db:
+        assert backfill_pending_project(db) is False
     # A resolvable project queued behind it is still served and reported.
     with factory.begin() as db:
         db.add(Project(id="good", owner_id="owner", name="Good", directory_key="owner/good"))
     (workspace.parent / "good").mkdir()
     with factory.begin() as db:
         assert backfill_pending_project(db) is True
+    delivery_index._unresolvable_until.clear()

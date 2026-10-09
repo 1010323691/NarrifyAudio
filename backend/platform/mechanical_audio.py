@@ -21,6 +21,10 @@ from .tts_resource_budget import memory_snapshot
 AUDIO_TASK_TYPES = ("tts.merge", "bgm.mix")
 _claim = ContextVar("mechanical_audio_claim", default=None)
 GIB = 1024 ** 3
+# A launch window whose owner died before registering the child cannot be
+# resolved by identity; after this long the slot is reclaimed rather than
+# blocking all audio admission until manual intervention.
+SPAWN_ORPHAN_SECONDS = 600
 
 
 def bind_claim(claim):
@@ -51,7 +55,19 @@ def _state(db):
     return state
 
 
-def _children_alive(process):
+def _live_groups():
+    groups = set()
+    for item in psutil.process_iter():
+        try:
+            if item.status() != psutil.STATUS_ZOMBIE:
+                groups.add(os.getpgid(item.pid))
+        except (ProcessLookupError, psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return groups
+
+
+def _children_alive(process, groups=None):
+    """``groups`` lets one reap pass scan the process table once, not per child."""
     for child in process.get("children", []):
         if child.get("finished"):
             continue
@@ -61,25 +77,31 @@ def _children_alive(process):
             if not child.get("job") or windows_job_alive(child["job"]):
                 return True
             continue
-        for item in psutil.process_iter():
-            try:
-                if os.getpgid(item.pid) == child["pid"] and item.status() != psutil.STATUS_ZOMBIE:
-                    return True
-            except (ProcessLookupError, psutil.NoSuchProcess):
-                continue
+        if groups is None:
+            groups = _live_groups()
+        if child["pid"] in groups:
+            return True
     return False
+
+
+def _orphaned_spawn(process, owner_alive):
+    started = process.get("spawning_at")
+    return bool(process.get("spawning") and not owner_alive and started
+                and time.time() - started > SPAWN_ORPHAN_SECONDS)
 
 
 def _reap(db, state):
     unresolved = False
-    for permit in db.scalars(select(MechanicalAudioPermit)):
+    groups = _live_groups() if os.name != "nt" else None
+    for permit in db.scalars(select(MechanicalAudioPermit)).all():
         try:
             owner_alive = identity_alive(permit.process.get("owner", {}))
-            children_alive = _children_alive(permit.process)
+            children_alive = _children_alive(permit.process, groups)
+            spawning = permit.process.get("spawning") and not _orphaned_spawn(permit.process, owner_alive)
             attempt = db.get(TaskAttempt, permit.attempt_id)
             task = db.get(Task, permit.task_id)
             terminal = not attempt or attempt.status != "running" or not task or task.status in {"succeeded", "failed", "cancelled", "timeout"}
-            if not children_alive and not permit.process.get("spawning") and (not owner_alive or terminal):
+            if not children_alive and not spawning and (not owner_alive or terminal):
                 db.delete(permit)
             elif not owner_alive:
                 unresolved = True
@@ -188,7 +210,7 @@ def spawn_registered(cmd, **kwargs):
         task, attempt = _attempt_is_current(db, claim)
         if task is None or attempt is None or task.status != "running":
             raise TaskExecutionError("audio_stale_attempt", "音频任务执行许可已失效")
-        permit.process = {**permit.process, "spawning": True}
+        permit.process = {**permit.process, "spawning": True, "spawning_at": time.time()}
     proc = None
     try:
         proc = spawn_owned(cmd, **kwargs)

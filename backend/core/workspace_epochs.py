@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 import json
 import os
+import threading
+import time
 from pathlib import Path
 import uuid
 
@@ -13,6 +15,11 @@ from .safe_filesystem import is_link_or_junction, file_identity
 MODULES = tuple(f'{index:02}_{name}' for index, name in enumerate(
     ('input', 'split_text', 'parsed_json', 'voice_profiles', 'audio_chunk', 'audio_merge', 'output', 'bgm'), 1))
 LIMIT = 65536
+RELEASE_RETRIES = 3
+# Writer tokens whose release failed in this (long-lived) process; the next
+# advance on the same workspace drops them so `busy` cannot stay true forever.
+_unreleased = {}
+_unreleased_guard = threading.Lock()
 
 
 def _paths(root):
@@ -87,6 +94,9 @@ def _advance(root, module, token, *, starting):
             data = {'versions': {}, 'writers': {}}
         data['writers'] = {key: value for key, value in data['writers'].items()
                            if isinstance(value, dict) and _alive(value.get('identity'))}
+        with _unreleased_guard:
+            for stale in _unreleased.pop(str(path), ()):
+                data['writers'].pop(stale, None)
         if starting:
             data['writers'][token] = {'module': module, 'identity': process_identity(os.getpid())}
         else:
@@ -119,4 +129,19 @@ def managed_mutation(path):
     try:
         yield
     finally:
-        _advance(root, module, token, starting=False)
+        _release(root, module, token)
+
+
+def _release(root, module, token):
+    error = None
+    for attempt in range(RELEASE_RETRIES):
+        try:
+            _advance(root, module, token, starting=False)
+            return
+        except Exception as caught:
+            error = caught
+            if attempt + 1 < RELEASE_RETRIES:
+                time.sleep(0.05 * (attempt + 1))
+    with _unreleased_guard:
+        _unreleased.setdefault(str(Path(root) / '00_temp' / 'workspace-epochs.json'), set()).add(token)
+    raise error

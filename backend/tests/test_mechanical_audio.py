@@ -249,3 +249,41 @@ def test_registered_probe_pause_stops_before_release_and_restarts(isolated, monk
         assert audio.release(current)
     finally:
         audio.reset_claim(token)
+
+
+def test_orphaned_spawning_permit_is_reclaimed_after_the_window(isolated, monkeypatch):
+    factory, _ = isolated
+    dead = {"pid": 2 ** 22 + 1, "create_time": 1.0}
+    with factory.begin() as db:
+        db.add(MechanicalAudioPermit(attempt_id="attempt-0", task_id="0", process={
+            "owner": dead, "children": [], "spawning": True, "spawning_at": 0}))
+    monkeypatch.setattr(audio, "identity_alive", lambda identity: False)
+    # Inside the window the launch is unresolved and blocks admission.
+    with factory.begin() as db:
+        db.get(MechanicalAudioPermit, "attempt-0").process = {
+            "owner": dead, "children": [], "spawning": True, "spawning_at": audio.time.time()}
+    assert audio.capacity_available() is False
+    with factory.begin() as db:
+        assert db.get(MechanicalAudioState, "local").error
+        assert db.scalar(select(func.count()).select_from(MechanicalAudioPermit)) == 1
+    # Past the window it is reaped instead of blocking forever.
+    with factory.begin() as db:
+        db.get(MechanicalAudioPermit, "attempt-0").process = {
+            "owner": dead, "children": [], "spawning": True,
+            "spawning_at": audio.time.time() - audio.SPAWN_ORPHAN_SECONDS - 1}
+    assert audio.capacity_available() is True
+    with factory.begin() as db:
+        assert db.scalar(select(func.count()).select_from(MechanicalAudioPermit)) == 0
+        assert not db.get(MechanicalAudioState, "local").error
+
+
+def test_claim_capacity_check_is_skipped_when_no_audio_task_is_claimable(monkeypatch):
+    from backend.platform import task_worker
+    calls = []
+    monkeypatch.setattr(audio, "capacity_available", lambda: calls.append(1) or True)
+    assert task_worker._audio_capacity_for(("script.parse",), ()) is True
+    assert task_worker._audio_capacity_for(None, audio.AUDIO_TASK_TYPES) is True
+    assert calls == []
+    assert task_worker._audio_capacity_for(None, ()) is True
+    assert task_worker._audio_capacity_for(("tts.merge",), ()) is True
+    assert calls == [1, 1]

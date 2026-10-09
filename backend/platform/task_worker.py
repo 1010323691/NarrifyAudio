@@ -270,6 +270,17 @@ def _reconcile_attempt_publication(db, task: Task, attempt: TaskAttempt) -> None
     PublicationJournal.reconcile(shared_root, shared_path, committed=task.status == "succeeded")
 
 
+def _audio_capacity_for(task_types, excluded):
+    """Host-wide permit check only when an audio task could be claimed at all."""
+    from . import mechanical_audio
+    audio = mechanical_audio.AUDIO_TASK_TYPES
+    if task_types is not None and not set(task_types) & set(audio):
+        return True
+    if set(audio) <= set(excluded):
+        return True
+    return mechanical_audio.capacity_available()
+
+
 @guarded_claim
 def claim_task(
     task_id: str,
@@ -283,7 +294,12 @@ def claim_task(
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
     from . import mechanical_audio
-    audio_capacity = mechanical_audio.capacity_available()
+    audio_capacity = True
+    if not set(mechanical_audio.AUDIO_TASK_TYPES) <= set(excluded_task_types):
+        with SessionLocal() as peek:
+            peeked = peek.scalar(select(Task.task_type).where(Task.id == task_id))
+        if peeked in mechanical_audio.AUDIO_TASK_TYPES:
+            audio_capacity = mechanical_audio.capacity_available()
     with SessionLocal() as db:
         if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
             db.rollback()
@@ -428,7 +444,7 @@ def claim_fair_task(
     lease_seconds = lease_seconds or settings.task_lease_seconds
     now = utcnow()
     from . import mechanical_audio
-    audio_capacity = mechanical_audio.capacity_available()
+    audio_capacity = _audio_capacity_for(task_types, excluded_task_types)
     with SessionLocal() as db:
         retry_ready = or_(Task.next_attempt_at.is_(None), Task.next_attempt_at <= now)
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
@@ -1856,9 +1872,13 @@ def recover_database_task_page(limit: int = 100, after_id: str = "") -> tuple[in
                 append_task_event(db, task.id, "dispatch_recovered", {"attempt_no": attempt_number})
                 recovered += 1
             elif (_as_utc(recovery_event.published_at) is not None
-                  and _as_utc(recovery_event.published_at) <= now - timedelta(seconds=10)):
+                  and _as_utc(recovery_event.published_at) <= now - timedelta(
+                      seconds=min(600, 10 * 2 ** int((recovery_event.payload or {}).get("replays", 0))))):
                 # Redis may lose the stream again before this task is claimed.
-                # Replay the same id, with a bounded cadence and no new DB row.
+                # Replay the same id with exponential backoff (10s..10min) so a
+                # long unclaimed backlog is not re-XADDed forever; no new DB row.
+                recovery_event.payload = {**(recovery_event.payload or {}),
+                                          "replays": int((recovery_event.payload or {}).get("replays", 0)) + 1}
                 recovery_event.published_at = None
                 recovery_event.available_at = task.next_attempt_at or now
                 recovered += 1

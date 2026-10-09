@@ -104,3 +104,30 @@ def test_linked_epoch_file_is_rejected_without_touching_target(tmp_path):
     with pytest.raises(ValueError):
         with managed_mutation(root / '03_parsed_json/a.json'): pass
     assert target.read_text() == 'untouched'
+
+
+def test_failed_release_does_not_leave_the_writer_busy_forever(tmp_path, monkeypatch):
+    from backend.core import workspace_epochs as epochs
+    (tmp_path / "00_temp").mkdir()
+    (tmp_path / "05_audio_chunk").mkdir()
+    target = tmp_path / "05_audio_chunk" / "a.mp3"
+    real, calls = epochs._advance, []
+
+    def flaky(root, module, token, *, starting):
+        calls.append(starting)
+        if not starting:
+            raise OSError("disk full")
+        return real(root, module, token, starting=starting)
+
+    monkeypatch.setattr(epochs, "_advance", flaky)
+    monkeypatch.setattr(epochs.time, "sleep", lambda _s: None)
+    with pytest.raises(OSError):
+        with epochs.managed_mutation(target):
+            pass
+    assert calls.count(False) == epochs.RELEASE_RETRIES
+    assert epochs.versions(tmp_path)[1] is True
+    # The next successful advance on the workspace drops the leaked writer.
+    monkeypatch.setattr(epochs, "_advance", real)
+    with epochs.managed_mutation(target):
+        pass
+    assert epochs.versions(tmp_path)[1] is False

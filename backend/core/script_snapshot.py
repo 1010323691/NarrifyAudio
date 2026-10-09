@@ -108,9 +108,11 @@ def prune_snapshots(directory, *, keep=PRUNE_KEEP, max_age=PRUNE_MAX_AGE_SECONDS
             if deleted >= limit or mtime > cutoff or index < keep:
                 continue
             try:
-                path.unlink()
+                # A holder of the version lock is validating/opening it right now.
+                with exclusive_file_lock(directory / (path.stem + ".lock"), timeout=0):
+                    path.unlink()
                 deleted += 1
-            except OSError:
+            except (OSError, TimeoutError):
                 continue
         for path in directory.glob(".*.sqlite"):
             if deleted >= limit:

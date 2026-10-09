@@ -155,3 +155,18 @@ def test_bands_tolerate_tiny_per_and_use_a_single_connection(tmp_path, monkeypat
     monkeypatch.setattr(script_snapshot, "_connect", lambda *a, **k: connects.append(1) or original(*a, **k))
     front, middle, back = pairs.bands(8)
     assert len(front) == len(middle) == len(back) == 8 and len(connects) <= 2
+
+
+def test_prune_skips_a_snapshot_whose_version_lock_is_held(tmp_path):
+    import os
+    from backend.core.file_lock import exclusive_file_lock
+    from backend.core.script_snapshot import prune_snapshots
+    names = [f"{index:064x}" for index in range(3)]
+    for index, name in enumerate(names):
+        path = tmp_path / f"{name}.sqlite"
+        path.write_bytes(b"x")
+        os.utime(path, (1000 + index, 1000 + index))
+    with exclusive_file_lock(tmp_path / f"{names[0]}.lock"):
+        assert prune_snapshots(tmp_path, keep=1, max_age=1, interval=0) == 1
+    assert (tmp_path / f"{names[0]}.sqlite").exists()
+    assert not (tmp_path / f"{names[1]}.sqlite").exists()
