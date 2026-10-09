@@ -514,10 +514,7 @@ def _prepare_mix(req, ctx, db):
         raise HTTPException(409, "以下章节已有混音任务在途：" + "、".join(conflicts))
     return ([{"label": f"{MIX_LABEL}：{stem}",
               "payload": _versioned_payload(layout, stem, {"stem": stem}, assignment=chapters[stem]),
-              "receipt": {"stem": stem}} for stem in stems],
-            # 不绑定 music_index.json：段落分析自身会登记新标签并写回该文件，
-            # 绑定后任务自己（及同批兄弟任务）一写就会因 input_changed 失败。
-            cfg.model_dump(mode="json"))
+              "receipt": {"stem": stem}} for stem in stems], _library_reference(cfg.model_dump(mode="json")))
 
 
 @router.post("/package")

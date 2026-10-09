@@ -152,6 +152,18 @@ def test_segment_analysis_submits_durable_tasks_and_checks_audio_conflicts(works
     assert exc.value.status_code == 409
 
 
+def test_segment_batch_does_not_bind_music_index_but_mix_does(workspace, monkeypatch):
+    """段落分析自身会登记标签并改写 music_index.json，绑定它会让任务自我失效。"""
+    _seed_scripts(workspace, ["ch1"])
+    created = _install_durable_mocks(monkeypatch)
+    api_bgm.run_analyze_segment(api_bgm.SegmentAnalyzeRequest(chapters=["ch1"]), _api_context(), object())
+    assert "_music_inputs" not in created[0]["payload"]["config"]
+
+    api_bgm.run_mix(api_bgm.MixRequest(chapters=["ch1"]), _api_context(), object())
+    mix = next(c for c in created if c["task_type"] == "bgm.mix")
+    assert mix["payload"]["config"]["_music_inputs"]
+
+
 def test_match_submits_durable_tasks_and_rejects_active_conflicts(workspace, monkeypatch):
     created = _install_durable_mocks(monkeypatch)
     result = api_bgm.run_match(api_bgm.MatchRequest(chapters=["ch1"], mode="random"), _api_context(), object())

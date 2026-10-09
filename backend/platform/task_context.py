@@ -287,7 +287,8 @@ class EngineExecutionContext:
         try:
             staged.parent.mkdir(parents=True, exist_ok=True)
             staged.write_bytes(data)
-            journal.publish(journal.add(final_path), staged)
+            # guard：回滚仅在文件仍是本任务所发布的字节时才还原，避免覆盖并发任务/手动编辑写入的标签。
+            journal.publish(journal.add(final_path, guard=True), staged)
         except BaseException:
             staged.unlink(missing_ok=True)
             raise
@@ -330,7 +331,10 @@ class EngineExecutionContext:
                 lock = factory(*args)
             self._publication_journal.rollback(guarded_lock=lock)
         if self._shared_publication_journal is not None:
-            self._shared_publication_journal.rollback()
+            from ..core.file_lock import exclusive_file_lock
+            library_root = self._shared_publication_journal.root
+            self._shared_publication_journal.rollback(
+                guarded_lock=exclusive_file_lock(library_root / ".music_index.lock"))
 
     def _paused(self) -> bool:
         with SessionLocal() as db:

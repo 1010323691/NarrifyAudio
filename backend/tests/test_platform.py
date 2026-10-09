@@ -63,6 +63,22 @@ def test_persistent_handle_journals_shared_music_file(monkeypatch, tmp_path):
     assert index_path.read_text("utf-8") == "old"
 
 
+def test_shared_music_rollback_keeps_concurrent_writer(monkeypatch, tmp_path):
+    library = tmp_path / "music_library"
+    library.mkdir()
+    index_path = library / "music_index.json"
+    index_path.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(core_paths, "MUSIC_LIBRARY_DIR", library)
+    monkeypatch.setattr("backend.platform.task_context.cancellation_requested", lambda _claim: False)
+    handle = PersistentTaskHandle(SimpleNamespace(task_id="task", attempt_id="attempt"))
+
+    handle.stage_shared_file(index_path, b"mine")
+    index_path.write_bytes(b"concurrent tags")  # 兄弟任务 / 手动编辑在本任务发布之后写入
+    handle.rollback_publications()
+
+    assert index_path.read_bytes() == b"concurrent tags"
+
+
 def test_session_cookie_and_project_scope(client: TestClient):
     first = _register(client, f"{uuid.uuid4()}@example.com")
     csrf = first["csrf_token"]
