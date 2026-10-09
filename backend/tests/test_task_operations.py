@@ -116,6 +116,16 @@ def test_retry_gate_allows_failed_zero_cost_task():
         assert check_retry_eligible(db, task) == 0
 
 
+def test_retry_gate_rejects_retired_task_type():
+    with SessionLocal.begin() as db:
+        owner, project = _fresh_owner(db)
+        task = Task(owner_id=owner.id, project_id=project.id, task_type="audio.cut", status="failed")
+        db.add(task)
+        db.flush()
+        with pytest.raises(RetryNotAllowedError, match="已下线"):
+            check_retry_eligible(db, task)
+
+
 def test_retry_gate_rejects_non_terminal_status():
     with SessionLocal.begin() as db:
         owner, project = _fresh_owner(db)

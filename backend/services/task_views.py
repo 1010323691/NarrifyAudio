@@ -35,6 +35,7 @@ from ..platform.models import TaskEvent
 from ..platform.security import session_is_valid_for_user
 from ..platform.task_identity import superseded_ids_hidden_by, superseded_task_ids
 from ..platform.task_lifecycle import TERMINAL_TASK_STATUSES
+from ..platform.task_registry import RETIRED_TASK_TYPES
 from .task_operations import task_module
 
 
@@ -65,6 +66,8 @@ def task_display_label(task_type: str, payload: dict | None) -> str:
     if payload.get("label"):
         return str(payload["label"])
     source = str(payload.get("source_name") or payload.get("output_name") or "")
+    if task_type in RETIRED_TASK_TYPES:
+        return RETIRED_TASK_TYPES[task_type]
     if task_type == 'project.progress':
         return '更新制作进度'
     if task_type == "script.parse":

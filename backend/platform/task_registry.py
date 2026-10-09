@@ -97,7 +97,18 @@ _WORKER_GROUPS = {
 }
 WORKER_GROUP_NAMES = ("llm", "tts", "audio", "system", "worker")
 
+# 已下线的任务类型（「音频分集」）：库里可能还留着历史行或升级时在途的行。
+# 不再有执行器，但要给出诚实的展示名、拒绝重试，并让在途行带着明确原因失败。
+RETIRED_TASK_TYPES = {
+    "audio.silences": "音频分集（停顿检测，已下线）",
+    "audio.cut": "音频分集（切分，已下线）",
+    "audio.zip": "音频分集（打包，已下线）",
+    "audio.export": "音频分集（导出，已下线）",
+}
+
 
 def task_worker_group(task_type: str) -> str:
     """Coarse worker group (llm/tts/audio/system/worker) for the admin console."""
+    if task_type in RETIRED_TASK_TYPES:
+        return "audio"
     return _WORKER_GROUPS.get(task_type.split(".", 1)[0], "worker")

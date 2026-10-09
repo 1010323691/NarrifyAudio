@@ -74,7 +74,7 @@ from .storage import (
     lock_storage_migration,
     storage_migration,
 )
-from .task_registry import TASK_TYPES
+from .task_registry import RETIRED_TASK_TYPES, TASK_TYPES
 from .task_admission import LLM_TASK_TYPES, llm_task_capacity_available
 from .task_validation import legacy_task_payload_error
 from .resource_tasks import _execute_resource_scan, _execute_resource_package, _execute_resource_cleanup
@@ -1011,6 +1011,8 @@ def execute_claim(claim: TaskClaim) -> TaskOutcome:
     if claim.payload.get("_load_simulation") is True:
         return _execute_load_simulation(claim)
     spec = TASK_TYPES.get(claim.task_type)
+    if spec is None and claim.task_type in RETIRED_TASK_TYPES:
+        raise TaskExecutionError("task_type_retired", f"{RETIRED_TASK_TYPES[claim.task_type]}：该功能已移除，请重新提交其他任务")
     if spec is None:
         raise TaskExecutionError("unsupported_task_type", f"不支持的任务类型：{claim.task_type}")
     if spec.legacy_engine:

@@ -62,3 +62,26 @@ def test_unsupported_type_still_rejected_by_execute_claim():
     with pytest.raises(TaskExecutionError) as ei:
         task_worker.execute_claim(_claim("bogus.type"))
     assert ei.value.code == "unsupported_task_type"
+
+
+def test_retired_audio_split_types_are_labelled_unretryable_and_fail_clearly():
+    import pytest
+
+    from backend.platform.task_contracts import TaskExecutionError
+    from backend.platform.task_registry import RETIRED_TASK_TYPES, TASK_TYPES, task_worker_group
+    from backend.platform.task_worker import execute_claim
+    from backend.services.task_views import task_display_label
+
+    assert set(RETIRED_TASK_TYPES) == {"audio.silences", "audio.cut", "audio.zip", "audio.export"}
+    assert not set(RETIRED_TASK_TYPES) & set(TASK_TYPES)
+    for task_type in RETIRED_TASK_TYPES:
+        assert "已下线" in task_display_label(task_type, {})
+        assert task_worker_group(task_type) == "audio"
+
+    class Claim:
+        task_type = "audio.cut"
+        payload: dict = {}
+
+    with pytest.raises(TaskExecutionError) as caught:
+        execute_claim(Claim())
+    assert caught.value.code == "task_type_retired"

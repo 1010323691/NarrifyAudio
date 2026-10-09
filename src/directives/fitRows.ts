@@ -19,6 +19,25 @@ export interface FitRowsOptions {
 
 const STEP = 64
 
+/**
+ * 收缩算法本体（不依赖 DOM，便于单测）：从 `max` 起，每轮把当前溢出量平摊到 `rows` 行上缩小行高，
+ * 最多 3 轮，不低于 `min`；`measure()` 返回在当前行高下母容器的最大溢出像素。
+ */
+export function solveRowHeight(
+  max: number,
+  min: number,
+  rows: number,
+  measure: (height: number) => number,
+): number {
+  let height = max
+  for (let i = 0; i < 3; i++) {
+    const overflow = measure(height)
+    if (overflow <= 0.5 || height <= min) break
+    height = Math.max(min, Math.floor((height - overflow / rows) * STEP) / STEP)
+  }
+  return height
+}
+
 function clippingAncestors(el: HTMLElement): HTMLElement[] {
   const out: HTMLElement[] = []
   for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
@@ -46,14 +65,14 @@ function fit(el: HTMLElement, options: FitRowsOptions) {
   const min = options.min ?? 32
   const max = options.max ?? declaredMax(el, options.prop, 40)
   const ancestors = clippingAncestors(el)
-  let height = max
-  el.style.setProperty(options.prop, `${height}px`)
-  for (let i = 0; i < 3; i++) {
-    const overflow = maxOverflow(ancestors)
-    if (overflow <= 0.5 || height <= min) break
-    height = Math.max(min, Math.floor((height - overflow / rows) * STEP) / STEP)
-    el.style.setProperty(options.prop, `${height}px`)
-  }
+  const apply = (height: number) => el.style.setProperty(options.prop, `${height}px`)
+  apply(solveRowHeight(max, min, rows, (height) => {
+    apply(height)
+    return maxOverflow(ancestors)
+  }))
+  // 祖先链可能在挂载之后变化（条件渲染的外层容器）：每次适配后补挂观察，observe 对同一节点幂等。
+  const state = bound.get(el)
+  if (state) for (const node of ancestors.slice(0, 2)) state.resize.observe(node)
 }
 
 interface Bound { frame: number; resize: ResizeObserver; onWindow: () => void; opts: FitRowsOptions }
@@ -75,6 +94,8 @@ export const vFitRows: Directive<HTMLElement, FitRowsOptions> = {
     const onWindow = () => schedule(el)
     bound.set(el, { frame: 0, resize, onWindow, opts: binding.value })
     for (const node of clippingAncestors(el).slice(0, 2)) resize.observe(node)
+    // 盒子自身从隐藏（display:none，尺寸为 0）变为可见时也要重新适配。
+    resize.observe(el)
     window.addEventListener('resize', onWindow)
     schedule(el)
   },

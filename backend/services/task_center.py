@@ -129,7 +129,7 @@ def items(db: Session, user_id: str, category: str, project_id: str, filter: str
     ).offset((page - 1) * page_size).limit(page_size)).mappings().all()
     progress = {}
     if rows:
-        # A correlated indexed top-one lookup for each of at most 50 tasks,
+        # A correlated indexed top-one lookup for each of one page of tasks,
         # all in one statement; old progress/log payloads never leave SQL.
         latest_progress = select(TaskEvent.payload).where(
             TaskEvent.task_id == Task.id, TaskEvent.event_type == "progress",

@@ -48,7 +48,11 @@ def event_page(db, page, size, level, module, search, hours, recent_errors):
 
 
 def user_usage_page(db, page, size):
-    """One page of users ordered by registered file bytes: (rows, total). Shared by the light and full inventories."""
+    """One page of users ordered by registered file bytes: (rows, total). Shared by the light and full inventories.
+
+    The order is by the *registered* bytes even in the full inventory, whose displayed
+    size_bytes comes from a disk scan and may differ; the UI labels the sort column accordingly.
+    """
     from ..platform.models import Project, ProjectFile, User
     project_counts = select(Project.owner_id, func.count().label("count")).where(Project.deleted_at.is_(None)).group_by(Project.owner_id).subquery()
     usage = select(ProjectFile.owner_id, func.count().label("count"), func.sum(ProjectFile.size_bytes).label("size")).join(Project, Project.id == ProjectFile.project_id).where(ProjectFile.deleted_at.is_(None), Project.deleted_at.is_(None)).group_by(ProjectFile.owner_id).subquery()

@@ -292,7 +292,7 @@ def _run_tts_reset(handle, claim: TaskClaim, payload: dict, side_effect_outputs,
     return {"engine": "tts.reset", "ok": True, "removed": removed}
 
 
-# S1：13 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
+# S1：11 个 legacy 引擎分支的显式绑定（注册表按名查表；不用装饰器隐式注册）。
 ENGINE_BRANCHES: dict[str, Callable] = {
     "voices.foundation": _run_voices_foundation,
     "voices.clone": _run_voices_clone,

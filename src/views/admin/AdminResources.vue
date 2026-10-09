@@ -111,7 +111,7 @@ async function cleanupTemp() {
         </ChartCard>
         <ChartCard title="用户明细" :subtitle="fullScan ? '完整盘点 · 当页用户目录实际大小' : '已登记文件大小'" :span="6">
           <AdminTable table-class="resource-users-table" :page-size="pageSize">
-            <thead><tr><th>用户</th><th>项目</th><th>文件数</th><th>{{ fullScan ? '实际占用' : '登记大小' }}</th><th>登记文件</th></tr></thead>
+            <thead><tr><th>用户</th><th>项目</th><th>文件数</th><th>{{ fullScan ? '实际占用' : '登记大小' }}</th><th title="用户表按登记容量降序分页">登记文件（排序依据）</th></tr></thead>
             <tbody><tr v-for="row in resources.users" :key="row.username"><td>{{ row.username }}</td><td>{{ row.project_count ?? '—' }}</td><td>{{ plain(row.file_count ?? 0) }}</td><td>{{ bytes(row.size_bytes) }}</td><td>{{ plain(row.registered_file_count ?? row.count ?? 0) }}<small v-if="row.registered_file_bytes != null">{{ bytes(row.registered_file_bytes) }}</small></td></tr><tr v-if="!resources.users.length"><td colspan="5" class="admin-empty-cell">暂无用户资源</td></tr></tbody>
           </AdminTable>
           <Pager v-if="resources.pagination" :page="page" :page-count="Math.max(1, Math.ceil(resources.pagination.total / pageSize))" :total="resources.pagination.total" :page-size="pageSize" unit="位用户" @update:page="page = $event" @update:page-size="changePageSize" />

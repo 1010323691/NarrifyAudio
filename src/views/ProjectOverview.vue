@@ -85,7 +85,6 @@ const stageDescriptions: Record<string, string> = {
   batch: '按章节生成台词音频',
   preview: '逐句试听，修订台词与声音',
   merge: '将台词音频合并为整章',
-  audio: '按时长切分发布音频',
   bgm: '匹配音乐，混音与试听',
 }
 const recentFailures = computed(() => taskSummary.value?.failures ?? [])
