@@ -868,11 +868,12 @@ def bulk_task_action(payload: BulkTaskAction, actor: User = Depends(require_admi
                 db.rollback()
                 results.append({"id": task_id, "ok": False, "reason": "任务已结束"})
                 continue
-            if cancel_task_record(db, task, admin=True, actor_user_id=actor.id):
+            changed = cancel_task_record(db, task, admin=True, actor_user_id=actor.id)
+            if changed:
                 db.add(AuditLog(actor_user_id=actor.id, action="admin.task_cancelled", target_type="task", target_id=task.id,
                                 metadata_json={"previous_status": previous_status, "bulk": True}))
             db.commit()
-            results.append({"id": task_id, "ok": True, "status": task.status})
+            results.append({"id": task_id, "ok": True, "changed": bool(changed), "status": task.status})
             continue
         try:
             attempts = check_retry_eligible(db, task)
@@ -885,7 +886,7 @@ def bulk_task_action(payload: BulkTaskAction, actor: User = Depends(require_admi
         db.add(AuditLog(actor_user_id=actor.id, action="admin.task_retried", target_type="task", target_id=task.id,
                         metadata_json={"previous_status": previous_status, "attempts": attempts, "bulk": True}))
         db.commit()
-        results.append({"id": task_id, "ok": True, "status": task.status})
+        results.append({"id": task_id, "ok": True, "changed": True, "status": task.status})
     return {"action": payload.action, "succeeded": sum(1 for row in results if row["ok"]), "results": results}
 
 
