@@ -393,7 +393,6 @@ def test_eight_foundations_overlap_and_preserve_every_checkpoint(audio_project, 
     from backend.core.concurrency import gate, set_concurrency
     previous_limit = gate().limit
     set_concurrency(32)  # the Worker's coordinator normally sizes the process gate
-    monkeypatch.setattr("backend.core.concurrency.set_concurrency", set_concurrency)
     submit, workspace = audio_project
     names = [f"role-{index}" for index in range(8)]
     script = workspace / "03_parsed_json" / "roles.json"
@@ -448,6 +447,32 @@ def test_foundation_row_dispatch_ignores_legacy_role_limit(audio_project):
                                     (third_id, claimed.attempt_id)):
             db.get(Task, task_id).status = "cancelled"
             db.get(TaskAttempt, attempt_id).status = "cancelled"
+
+
+def test_foundation_global_llm_capacity_gates_fair_claims(audio_project, monkeypatch):
+    """The fair-selection path used by parse slots must honour the host-wide LLM limit too."""
+    monkeypatch.setattr("backend.platform.task_admission.parse_worker_concurrency", lambda **_kwargs: 1)  # limit = 2
+    submit, _ = audio_project
+    payload = {"config": {"generation": {"max_concurrency": 8}}}
+    first = submit("voices.foundation", {**payload, "speakers": ["A"]})
+    second = submit("voices.foundation", {**payload, "speakers": ["B"]})
+    # submit() already admits both rows (running), filling the two-slot host-wide LLM limit.
+    assert first.task_id and second.task_id
+    with SessionLocal.begin() as db:
+        third = Task(owner_id=first.owner_id, project_id=first.project_id,
+                     task_type="voices.foundation", status="pending",
+                     payload={**payload, "speakers": ["C"]})
+        db.add(third)
+        db.flush()
+        third_id = third.id
+    try:
+        assert task_worker.claim_fair_task("fair-c", task_types=("voices.foundation",)) is None
+    finally:
+        with SessionLocal.begin() as db:
+            for task_id, attempt_id in ((first.task_id, first.attempt_id), (second.task_id, second.attempt_id)):
+                db.get(Task, task_id).status = "cancelled"
+                db.get(TaskAttempt, attempt_id).status = "cancelled"
+            db.get(Task, third_id).status = "cancelled"
 
 
 def test_match_claims_allow_disjoint_chapters_and_defer_overlapping_legacy_batches(audio_project, monkeypatch):

@@ -5,7 +5,7 @@ never share the GPU at once (each can then run at its own max concurrency):
 
 **Phase 1 — ``prepare_foundations`` (LLM only, no TTS).** Detects every speaker in
 the parsed script (in order of first appearance), keeps alias hints for display only
-without inferring character identity from names, then — in parallel, bounded by ``generation.max_concurrency`` —
+without inferring character identity from names, then — in parallel, bounded by the host-wide LLM concurrency limit —
 asks the LLM for each character's voice *foundation*: a ``description`` + a
 multi-sentence ``ref_text`` seed, reasoned from the character's own lines sampled
 across the book (front / middle / back), each carrying its ±window local context
