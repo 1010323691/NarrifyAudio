@@ -322,3 +322,18 @@ def test_batch_creates_missing_quota_account_under_lock(sessions):
     assert len(receipt["task_ids"]) == 2
     with sessions() as db:
         assert db.get(UserQuotaAccount, "owner") is not None
+
+
+def test_lock_owner_account_creates_once_and_returns_existing(sessions):
+    # The helper is the batch path's only account lock; a second call must lock
+    # the row the first call created rather than insert a duplicate.
+    with sessions.begin() as db:
+        db.query(UserQuotaAccount).filter(UserQuotaAccount.user_id == "owner").delete()
+    with sessions() as db:
+        created = submission._lock_owner_account(db, "owner")
+        assert created.available_units == 0
+        db.commit()
+    with sessions() as db:
+        existing = submission._lock_owner_account(db, "owner")
+        assert existing.user_id == "owner"
+        assert db.scalar(select(func.count()).select_from(UserQuotaAccount).where(UserQuotaAccount.user_id == "owner")) == 1

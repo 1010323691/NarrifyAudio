@@ -102,6 +102,25 @@ def _validate_inputs_and_conflicts(db, user, project, kind, entries):
         raise TaskSubmissionError(409, "所选目标已有在途任务，请等待其结束")
 
 
+def _lock_owner_account(db, owner_id):
+    """Return the owner's quota account row, locked until the transaction ends.
+
+    A missing row is created in a savepoint: a concurrent first admission that
+    loses the primary-key race is rolled back to the savepoint and then locks
+    the row the winner committed, instead of failing the whole batch.
+    """
+    select_account = select(UserQuotaAccount).where(UserQuotaAccount.user_id == owner_id).with_for_update()
+    account = db.scalar(select_account)
+    if account is None:
+        try:
+            with db.begin_nested():
+                account = UserQuotaAccount(user_id=owner_id, available_units=0)
+                db.add(account)
+        except IntegrityError:
+            account = db.scalar(select_account)
+    return account
+
+
 def _batch_base_time(db, owner_id):
     """Start after the owner's newest task so batches never interleave.
 
@@ -161,11 +180,7 @@ def submit_task_batch(*, db, user, project_id, task_type, request, prepare,
             _validate_inputs_and_conflicts(db, user, project, task_type, entries)
             # Owner-wide row lock for every batch type: it serializes batch
             # admissions across projects, which _batch_base_time relies on.
-            account = db.scalar(select(UserQuotaAccount).where(UserQuotaAccount.user_id == user.id).with_for_update())
-            if account is None:
-                account = UserQuotaAccount(user_id=user.id, available_units=0)
-                db.add(account)
-                db.flush()
+            account = _lock_owner_account(db, user.id)
             if task_type in BILLABLE_TASK_TYPES and entries:
                 if account is None or account.available_units <= 0:
                     raise TaskSubmissionError(409, "额度不足")
