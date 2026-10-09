@@ -77,10 +77,11 @@ function fit(el: HTMLElement, options: FitRowsOptions) {
   if (!el.isConnected || !el.offsetParent) return
   const rows = options.rows ?? 10
   const min = options.min ?? 24
+  // 必须在 declaredMax 清空行内变量之前读取上次行高，否则迟滞对未传 max 的调用方失效。
+  const previous = parseFloat(el.style.getPropertyValue(options.prop))
   const max = options.max ?? declaredMax(el, options.prop, 40)
   const ancestors = clippingAncestors(el)
   const apply = (height: number) => el.style.setProperty(options.prop, `${height}px`)
-  const previous = parseFloat(el.style.getPropertyValue(options.prop))
   const next = solveRowHeight(max, min, rows, (height) => {
     apply(height)
     return maxOverflow(ancestors)
@@ -106,10 +107,18 @@ const bound = new WeakMap<HTMLElement, Bound>()
 function schedule(el: HTMLElement) {
   const state = bound.get(el)
   if (!state || state.frame) return
-  // 断路器：1 秒内连续适配超过 8 次说明布局在自激振荡，停止观察触发的重排，待窗口缩放/更新再恢复。
+  // 断路器：1 秒内连续适配超过 8 次说明布局在自激振荡。跳闸后不再响应观察回调，
+  // 但在窗口结束时补一次适配，保证合法的连续变化（如侧栏过渡）结束后行高仍落在正确值上。
   const now = Date.now()
   state.burst = state.burst.filter((t) => now - t < 1000)
-  if (state.burst.length >= 8) return
+  if (state.burst.length >= 8) {
+    state.frame = window.setTimeout(() => {
+      state.frame = 0
+      state.burst = []
+      fit(el, state.opts)
+    }, 1000 - (now - state.burst[0]!))
+    return
+  }
   state.burst.push(now)
   // setTimeout 而非 rAF：后台/未绘制的标签页 rAF 不触发，行高会停在未适配状态。
   state.frame = window.setTimeout(() => {
