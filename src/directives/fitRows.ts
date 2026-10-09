@@ -12,7 +12,7 @@ export interface FitRowsOptions {
   prop: string
   /** 行高上限（缺省取 CSS 里该变量的声明值） */
   max?: number
-  /** 行高下限：再矮就让母容器滚动，保证行内容不被压坏 */
+  /** 行高下限（缺省 24px，18px 行高文字仍可容纳）：再矮就让母容器滚动，保证行内容不被压坏 */
   min?: number
   rows?: number
   /** 行高可放大到的上限：视口高于「默认行高」所需时，把父容器剩余高度平摊到各行，避免列表下方留白 */
@@ -83,8 +83,9 @@ function freeSpace(el: HTMLElement): number {
   return Math.max(0, inner - used)
 }
 
-function fit(el: HTMLElement, options: FitRowsOptions) {
-  if (!el.isConnected || !el.offsetParent) return
+/** 适配一次；返回行高是否相对上次发生了变化（断路器据此判断是否仍在振荡）。 */
+function fit(el: HTMLElement, options: FitRowsOptions): boolean {
+  if (!el.isConnected || !el.offsetParent) return false
   const rows = options.rows ?? 10
   const min = options.min ?? 24
   // 必须在 declaredMax 清空行内变量之前读取上次行高，否则迟滞对未传 max 的调用方失效。
@@ -105,28 +106,44 @@ function fit(el: HTMLElement, options: FitRowsOptions) {
     // 放大后若让祖先溢出（测量误差），回退到不放大。
     target = grown > max && maxOverflow(ancestors) <= 0.5 ? grown : max
   }
-  apply(settleHeight(previous, target))
+  // 迟滞结果若超过上限而目标未超过（上次行高为放大值、本次回退），必须落回目标，不能保留溢出值。
+  const settled = settleHeight(previous, target)
+  const final = settled > max && target <= max ? target : settled
+  apply(final)
   // 祖先链可能在挂载之后变化（条件渲染的外层容器）：每次适配后补挂观察，observe 对同一节点幂等。
   const state = bound.get(el)
   if (state) for (const node of ancestors.slice(0, 2)) state.resize.observe(node)
+  return final !== previous
 }
 
-interface Bound { frame: number; burst: number[]; resize: ResizeObserver; onWindow: () => void; opts: FitRowsOptions }
+interface Bound { frame: number; burst: number[]; frozen: boolean; resize: ResizeObserver; onWindow: () => void; opts: FitRowsOptions }
 const bound = new WeakMap<HTMLElement, Bound>()
+
+/**
+ * 断路器：1 秒内连续适配超过 8 次视为自激振荡，进入冻结——忽略观察回调，每秒只做一次适配。
+ * 若该次适配仍改变行高，继续冻结；行高稳定后解冻。合法的一次性变化（如侧栏过渡）由此在结束后收敛到正确行高，
+ * 而振荡期间的适配频率被压在约 1 次/秒，不会再出现持续抖动。
+ */
+function thaw(el: HTMLElement) {
+  const state = bound.get(el)
+  if (!state) return
+  state.frame = 0
+  if (fit(el, state.opts)) {
+    state.frame = window.setTimeout(() => thaw(el), 1000)
+  } else {
+    state.frozen = false
+    state.burst = []
+  }
+}
 
 function schedule(el: HTMLElement) {
   const state = bound.get(el)
-  if (!state || state.frame) return
-  // 断路器：1 秒内连续适配超过 8 次说明布局在自激振荡。跳闸后不再响应观察回调，
-  // 但在窗口结束时补一次适配，保证合法的连续变化（如侧栏过渡）结束后行高仍落在正确值上。
+  if (!state || state.frame || state.frozen) return
   const now = Date.now()
   state.burst = state.burst.filter((t) => now - t < 1000)
   if (state.burst.length >= 8) {
-    state.frame = window.setTimeout(() => {
-      state.frame = 0
-      state.burst = []
-      fit(el, state.opts)
-    }, 1000 - (now - state.burst[0]!))
+    state.frozen = true
+    state.frame = window.setTimeout(() => thaw(el), 1000)
     return
   }
   state.burst.push(now)
@@ -142,10 +159,10 @@ export const vFitRows: Directive<HTMLElement, FitRowsOptions> = {
     const resize = new ResizeObserver(() => schedule(el))
     const onWindow = () => {
       const state = bound.get(el)
-      if (state) state.burst = []
+      if (state && !state.frozen) state.burst = []
       schedule(el)
     }
-    bound.set(el, { frame: 0, burst: [], resize, onWindow, opts: binding.value })
+    bound.set(el, { frame: 0, burst: [], frozen: false, resize, onWindow, opts: binding.value })
     for (const node of clippingAncestors(el).slice(0, 2)) resize.observe(node)
     // 盒子自身从隐藏（display:none，尺寸为 0）变为可见时也要重新适配。
     resize.observe(el)
