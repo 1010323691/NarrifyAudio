@@ -40,17 +40,13 @@ export function solveRowHeight(
   return height
 }
 
-/** 迟滞：变化不足 1px 时沿用上次行高（不 NaN 时），抑制亚像素取整造成的来回跳动。 */
-export function settleHeight(previous: number, target: number): number {
-  return Number.isFinite(previous) && Math.abs(previous - target) < 1 ? previous : target
-}
-
 /**
- * 最终写入的行高（纯函数）：迟滞结果若超过上限而目标未超过（放大后回退），必须落回目标，不保留溢出的放大值。
+ * 迟滞：新值比上次大不足 1px 时沿用上次行高（不 NaN 时），抑制亚像素取整造成的来回跳动。
+ * 只在上次行高不大于目标时沿用：上次偏大会让十行累计溢出最多约 10px，把分页条挤出视口。
+ * 也因此放大后回退到上限时不会保留超过上限的残留值。
  */
-export function resolveFinal(previous: number, target: number, max: number): number {
-  const settled = settleHeight(previous, target)
-  return settled > max && target <= max ? target : settled
+export function settleHeight(previous: number, target: number): number {
+  return Number.isFinite(previous) && previous <= target && target - previous < 1 ? previous : target
 }
 
 /** 断路器计数（纯函数）：丢弃 1 秒前的记录，记入本次适配；窗口内已达 `limit` 次则判定为振荡、不再记入。 */
@@ -121,7 +117,7 @@ function fit(el: HTMLElement, options: FitRowsOptions): boolean {
     // 放大后若让祖先溢出（测量误差），回退到不放大。
     target = grown > max && maxOverflow(ancestors) <= 0.5 ? grown : max
   }
-  const final = resolveFinal(previous, target, max)
+  const final = settleHeight(previous, target)
   apply(final)
   // 祖先链可能在挂载之后变化（条件渲染的外层容器）：每次适配后补挂观察，observe 对同一节点幂等。
   const state = bound.get(el)

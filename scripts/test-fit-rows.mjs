@@ -6,7 +6,7 @@ import ts from 'typescript'
 // 真实 fitRows.ts 转译后加载；directive 部分只引用类型，solveRowHeight 不依赖 DOM。
 const source = readFileSync(new URL('../src/directives/fitRows.ts', import.meta.url), 'utf8')
 const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
-const { solveRowHeight, settleHeight, growHeight, tallyBurst, resolveFinal } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
+const { solveRowHeight, settleHeight, growHeight, tallyBurst } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 
 // 模拟母容器：盒子之外固定占 chrome 像素，盒子本身 = rows × 行高，容器可用高度 = avail。
 const overflowAt = (rows, chrome, avail) => (height) => Math.max(0, chrome + rows * height - avail)
@@ -37,6 +37,11 @@ test('迟滞：变化不足 1px 沿用上次行高，否则采用新值', () => 
   assert.equal(settleHeight(40, 41.5), 41.5)
 })
 
+test('迟滞：上次行高偏大时不沿用（否则十行累计溢出），直接采用目标', () => {
+  assert.equal(settleHeight(40, 39.5), 39.5)
+  assert.equal(settleHeight(52, 51.3), 51.3)
+})
+
 test('迟滞：上次行高缺失（NaN）时直接采用新值', () => {
   assert.equal(settleHeight(NaN, 44), 44)
 })
@@ -60,11 +65,11 @@ test('断路器：1 秒窗口内第 9 次适配触发跳闸，窗口外的记录
   assert.equal(tallyBurst(burst, 2100).burst.length, 1)
 })
 
-test('最终行高：放大后回退时，迟滞不得保留超过上限的残留值', () => {
+test('迟滞：放大后回退到上限时，不保留超过上限的残留值', () => {
   // 上次为放大值 40.4（超过上限 40 不足 1px），本次回退到 40：必须落回 40
-  assert.equal(resolveFinal(40.4, 40, 40), 40)
-  // 正常迟滞：变化不足 1px 且未超过上限，沿用上次值
-  assert.equal(resolveFinal(39.6, 40, 40), 39.6)
+  assert.equal(settleHeight(40.4, 40), 40)
+  // 上次偏小且差值不足 1px：沿用
+  assert.equal(settleHeight(39.6, 40), 39.6)
   // 变化超过 1px：采用目标值
-  assert.equal(resolveFinal(44, 40, 40), 40)
+  assert.equal(settleHeight(44, 40), 40)
 })
