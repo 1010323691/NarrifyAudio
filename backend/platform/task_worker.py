@@ -1602,10 +1602,38 @@ def recover_database_tasks(limit: int = 100) -> int:
     return recovered
 
 
+def fail_retired_type_tasks(limit: int = 100) -> int:
+    """Terminate unstarted rows of removed task types.
+
+    Both claim paths only admit types in ``TASK_TYPES``, so such rows would stay
+    ``queued`` forever; fail them with an explicit reason instead.
+    """
+    now = utcnow()
+    with SessionLocal.begin() as db:
+        tasks = db.scalars(
+            select(Task)
+            .where(Task.task_type.in_(list(RETIRED_TASK_TYPES)), Task.status.in_(["pending", "queued", "retrying"]))
+            .order_by(Task.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+        for task in tasks:
+            task.status = "failed"
+            task.error_code = "task_type_retired"
+            task.error_message = f"{RETIRED_TASK_TYPES[task.task_type]}：该功能已移除，请重新提交其他任务"
+            task.finished_at = now
+            task.next_attempt_at = None
+            suppress_pending_dispatch(db, task.id)
+            append_task_event(db, task.id, "failed", {"code": task.error_code})
+        return len(tasks)
+
+
 def recover_database_task_page(limit: int = 100, after_id: str = "") -> tuple[int, str]:
     """Bounded eligible page; advance past already-dispatched rows to avoid starvation."""
     if not 1 <= limit <= 100:
         raise ValueError("recovery page must contain 1..100 tasks")
+    if not after_id:
+        fail_retired_type_tasks()
     now = utcnow()
     recovered = 0
     live_attempt = select(TaskAttempt.id).where(

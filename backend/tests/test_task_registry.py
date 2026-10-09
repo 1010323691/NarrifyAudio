@@ -85,3 +85,21 @@ def test_retired_audio_split_types_are_labelled_unretryable_and_fail_clearly():
     with pytest.raises(TaskExecutionError) as caught:
         execute_claim(Claim())
     assert caught.value.code == "task_type_retired"
+
+
+def test_recovery_fails_unstarted_rows_of_retired_types():
+    from backend.platform.database import SessionLocal
+    from backend.platform.models import Task
+    from backend.platform.task_worker import recover_database_task_page
+    from backend.tests.test_task_operations import _fresh_owner
+
+    with SessionLocal.begin() as db:
+        owner, project = _fresh_owner(db)
+        task = Task(owner_id=owner.id, project_id=project.id, task_type="audio.cut", status="queued")
+        db.add(task)
+        db.flush()
+        task_id = task.id
+    recover_database_task_page()
+    with SessionLocal() as db:
+        row = db.get(Task, task_id)
+        assert row.status == "failed" and row.error_code == "task_type_retired" and row.finished_at is not None
