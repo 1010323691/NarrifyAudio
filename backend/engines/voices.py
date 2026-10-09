@@ -780,7 +780,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         description = (entry.get("description") or "").strip()
         ref_text = (entry.get("ref_text") or "").strip()
         if not ref_text:
-            ref_text = pick_ref_text(t for _i, t in samples.get(sp, [])) \
+            ref_text = pick_ref_text([t for _i, t in samples.get(sp, [])]) \
                 or f"{sp} speaks in a clear, natural voice."
         for k in range(1, _target(sp) + 1):
             final_out = layout.voice_profiles / "designed_voices" / safe_filename(f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav")
