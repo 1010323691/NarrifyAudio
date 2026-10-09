@@ -50,6 +50,8 @@ jobs:
         run: npm run test:resources
       - name: 管理控制台回归
         run: npm run test:admin-console
+      - name: 固定十行行高算法回归
+        run: npm run test:fit-rows
 
       # 三个工作台组合回归（node:test 沙箱跑真实 composable/view 代码，改其竞态逻辑的门禁，
       # 与 state-isolation 同款机制，见 scripts/test-*-workbench.mjs）
