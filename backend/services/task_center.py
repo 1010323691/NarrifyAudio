@@ -10,8 +10,8 @@ from ..platform.task_identity import current_entry_ids
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from .task_views import epoch, legacy_status, task_display_label
 
-GROUP_PAGE_SIZE = 5
-ITEM_PAGE_SIZE = 50
+GROUP_PAGE_SIZE = 10
+ITEM_PAGE_SIZE = 10
 PAUSABLE = ACTIVE_TASK_STATUSES - {"paused", "cancelling"}
 
 
@@ -73,7 +73,7 @@ def summary(db: Session, user_id: str) -> dict:
     }) for name in TASK_CATEGORIES]}
 
 
-def groups(db: Session, user_id: str, category: str, page: int = 1) -> dict:
+def groups(db: Session, user_id: str, category: str, page: int = 1, page_size: int = GROUP_PAGE_SIZE) -> dict:
     base = _base(user_id, category)
     grouped = select(
         base.c.project_id, base.c.project_name, *_counts(base),
@@ -85,7 +85,7 @@ def groups(db: Session, user_id: str, category: str, page: int = 1) -> dict:
     paged = select(grouped).order_by(
         case((grouped.c.active_count > 0, 0), else_=1),
         grouped.c.latest_at.desc(), grouped.c.project_id,
-    ).offset((page - 1) * GROUP_PAGE_SIZE).limit(GROUP_PAGE_SIZE).cte("project_page")
+    ).offset((page - 1) * page_size).limit(page_size).cte("project_page")
     latest_status = select(base.c.status).where(base.c.project_id == paged.c.project_id).order_by(
         base.c.created_at.desc(), base.c.id.desc(),
     ).limit(1).scalar_subquery()
@@ -98,10 +98,11 @@ def groups(db: Session, user_id: str, category: str, page: int = 1) -> dict:
         item["latest"] = epoch(item.pop("latest_at"))
         item["latest_status"] = legacy_status(item["latest_status"])
         result.append(item)
-    return {"items": result, "total": total, "page": page, "page_size": GROUP_PAGE_SIZE}
+    return {"items": result, "total": total, "page": page, "page_size": page_size}
 
 
-def items(db: Session, user_id: str, category: str, project_id: str, filter: str = "all", page: int = 1) -> dict:
+def items(db: Session, user_id: str, category: str, project_id: str, filter: str = "all", page: int = 1,
+          page_size: int = ITEM_PAGE_SIZE) -> dict:
     if filter not in {"all", "active", "completed"}:
         raise ValueError("无效的任务状态筛选")
     base = _base(user_id, category, project_id)
@@ -125,7 +126,7 @@ def items(db: Session, user_id: str, category: str, project_id: str, filter: str
         Task.payload["output_name"].as_string().label("output_name"),
     ).join(Project, Project.id == Task.project_id).where(Task.id.in_(filtered)).order_by(
         Task.created_at.desc(), Task.id.desc(),
-    ).offset((page - 1) * ITEM_PAGE_SIZE).limit(ITEM_PAGE_SIZE)).mappings().all()
+    ).offset((page - 1) * page_size).limit(page_size)).mappings().all()
     progress = {}
     if rows:
         # A correlated indexed top-one lookup for each of at most 50 tasks,
@@ -151,4 +152,4 @@ def items(db: Session, user_id: str, category: str, project_id: str, filter: str
             "error": row["error_message"] or "", "error_code": row["error_code"] or "",
             "created": epoch(row["created_at"]), "created_at": row["created_at"].isoformat(),
         })
-    return {"items": result, "total": total, "counts": counts, "page": page, "page_size": ITEM_PAGE_SIZE}
+    return {"items": result, "total": total, "counts": counts, "page": page, "page_size": page_size}

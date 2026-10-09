@@ -419,7 +419,7 @@ def get_runtime_settings(_: User = Depends(require_admin)) -> dict:
 
 @router.get("/users")
 def list_users(_: User = Depends(require_admin), db: Session = Depends(get_db),
-               page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+               page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10,
                search: str = "", role: str = "all", state: str = "all", sort: str = "default"):
     statement = select(User)
     if search.strip():
@@ -558,7 +558,7 @@ def user_detail(user_id: str, tz_offset_minutes: int = 0, _: User = Depends(requ
 
 @router.get("/users/{user_id}/quota-transactions")
 def user_quota_transactions(user_id: str, page: Annotated[int, Query(ge=1)] = 1,
-                            page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+                            page_size: Annotated[int, Query(ge=1, le=100)] = 10,
                             _: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     if db.get(User, user_id) is None:
         raise HTTPException(404, "用户不存在")
@@ -658,6 +658,7 @@ def adjust_user_quota(user_id: str, payload: QuotaAdjustment, actor: User = Depe
 
 @router.get("/tasks")
 def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
+                   page_size: Annotated[int | None, Query(ge=1, le=100)] = None,
                    page: Annotated[int | None, Query(ge=1)] = None, group: str = "all", task_type: str = "all",
                    _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict] | dict:
     query = select(Task).options(load_only(Task.id, Task.owner_id, Task.project_id, Task.task_type,
@@ -683,7 +684,7 @@ def list_all_tasks(status: str = "all", search: str = "", limit: int = 50,
         query = query.where(Task.id.ilike(term) | Task.task_type.ilike(term) | Task.project_id.ilike(term) |
                             Task.owner_id.in_(select(User.id).where(User.username.ilike(term))))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
-    size = max(1, min(limit, 100))
+    size = page_size or max(1, min(limit, 100))
     rows = db.scalars(query.order_by(Task.created_at.desc(), Task.id.desc()).offset(((page or 1)-1)*size).limit(size)).all()
     owners = {item.id: item.username for item in db.scalars(select(User)).all()}
     attempts = {}
@@ -891,19 +892,32 @@ def bulk_task_action(payload: BulkTaskAction, actor: User = Depends(require_admi
     return {"action": payload.action, "succeeded": sum(1 for row in results if row["ok"]), "results": results}
 
 
+def _worker_row(item: WorkerHeartbeat) -> dict:
+    return {
+        "worker_id": item.worker_id,
+        "status": "offline" if is_stale(item.last_seen_at) else item.status,
+        "capabilities": item.capabilities,
+        "current_task_id": item.current_task_id,
+        "started_at": item.started_at.isoformat(),
+        "last_seen_at": item.last_seen_at.isoformat(),
+    }
+
+
 def _list_workers(db: Session) -> list[dict]:
     rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc())).all()
-    return [
-        {
-            "worker_id": item.worker_id,
-            "status": "offline" if is_stale(item.last_seen_at) else item.status,
-            "capabilities": item.capabilities,
-            "current_task_id": item.current_task_id,
-            "started_at": item.started_at.isoformat(),
-            "last_seen_at": item.last_seen_at.isoformat(),
-        }
-        for item in rows
-    ]
+    return [_worker_row(item) for item in rows]
+
+
+@router.get("/workers")
+def worker_page(page: Annotated[int, Query(ge=1)] = 1, page_size: Annotated[int, Query(ge=1, le=100)] = 10,
+                _: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    """One page of worker heartbeats; the monitor table loads page by page instead of the whole registry."""
+    total = int(db.scalar(select(func.count()).select_from(WorkerHeartbeat)) or 0)
+    online = int(db.scalar(select(func.count()).select_from(WorkerHeartbeat)
+                           .where(WorkerHeartbeat.last_seen_at >= utcnow() - timedelta(seconds=30))) or 0)
+    rows = db.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.last_seen_at.desc(), WorkerHeartbeat.worker_id)
+                      .offset((page - 1) * page_size).limit(page_size)).all()
+    return {"items": [_worker_row(item) for item in rows], "pagination": page_meta(total, page, page_size, {"all": total, "online": online})}
 
 
 @router.get("/overview")
@@ -984,7 +998,7 @@ def overview(tz_offset_minutes: int = 0, _: User = Depends(require_admin), db: S
 @router.get("/performance")
 def performance(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
     return {"generated_at": utcnow().isoformat(), "system": host_metrics(configured_storage_root(db)), "gpu": gpu_status(),
-            "tasks": task_metrics(_, db), "workers": _list_workers(db), "queue": queue_status(include_info=True),
+            "tasks": task_metrics(_, db), "queue": queue_status(include_info=True),
             "api": api_snapshot(), "api_pool": pool_status(), "database": database_metrics(db),
             "llm_limit": parse_worker_concurrency(db=db), "llm_task_limit": llm_task_limit(db),
             "tts_batch": tts_batch_activity(db)}
@@ -996,9 +1010,10 @@ def _recent_api_errors(since_hours: int) -> list[dict]:
 
 @router.get("/events")
 def admin_events(level: str = "all", module: str = "all", search: str = "", limit: int = 50, since_hours: int = 24,
+                 page_size: Annotated[int | None, Query(ge=1, le=100)] = None,
                  page: Annotated[int | None, Query(ge=1)] = None,
                  _: User = Depends(require_admin), db: Session = Depends(get_db)) -> list[dict] | dict:
-    limit = max(1, min(limit, 100))
+    limit = page_size or max(1, min(limit, 100))
     if page is not None:
         return event_page(db, page, limit, level, module, search, since_hours, _recent_api_errors(since_hours))
     cutoff = utcnow() - timedelta(hours=max(1, min(since_hours, 24 * 30)))

@@ -47,15 +47,22 @@ def event_page(db, page, size, level, module, search, hours, recent_errors):
     return {"items": [{**r, "time": r["time"].isoformat()} for r in rows], "pagination": page_meta(total, page, size)}
 
 
-def resource_page(db, root, disk, music_dir, page, size):
-    """Catalog aggregates; an actual directory inventory is an explicit action."""
+def user_usage_page(db, page, size):
+    """One page of users ordered by registered file bytes: (rows, total). Shared by the light and full inventories."""
     from ..platform.models import Project, ProjectFile, User
-    files = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).join(Project, Project.id == ProjectFile.project_id).where(Project.deleted_at.is_(None), ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
     project_counts = select(Project.owner_id, func.count().label("count")).where(Project.deleted_at.is_(None)).group_by(Project.owner_id).subquery()
     usage = select(ProjectFile.owner_id, func.count().label("count"), func.sum(ProjectFile.size_bytes).label("size")).join(Project, Project.id == ProjectFile.project_id).where(ProjectFile.deleted_at.is_(None), Project.deleted_at.is_(None)).group_by(ProjectFile.owner_id).subquery()
     statement = select(User.username, func.coalesce(project_counts.c.count, 0), func.coalesce(usage.c.count, 0), func.coalesce(usage.c.size, 0)).outerjoin(project_counts, project_counts.c.owner_id == User.id).outerjoin(usage, usage.c.owner_id == User.id).order_by(func.coalesce(usage.c.size, 0).desc(), User.id)
     total = db.scalar(select(func.count()).select_from(User)) or 0
-    users = [{"username": username, "project_count": projects, "file_count": count, "size_bytes": size, "registered_file_count": count, "registered_file_bytes": size} for username, projects, count, size in db.execute(statement.offset((page-1)*size).limit(size)).all()]
+    return db.execute(statement.offset((page - 1) * size).limit(size)).all(), total
+
+
+def resource_page(db, root, disk, music_dir, page, size):
+    """Catalog aggregates; an actual directory inventory is an explicit action."""
+    from ..platform.models import Project, ProjectFile, User
+    files = db.execute(select(ProjectFile.kind, func.count(), func.coalesce(func.sum(ProjectFile.size_bytes), 0)).join(Project, Project.id == ProjectFile.project_id).where(Project.deleted_at.is_(None), ProjectFile.deleted_at.is_(None)).group_by(ProjectFile.kind)).all()
+    page_rows, total = user_usage_page(db, page, size)
+    users = [{"username": username, "project_count": projects, "file_count": count, "size_bytes": usage_bytes, "registered_file_count": count, "registered_file_bytes": usage_bytes} for username, projects, count, usage_bytes in page_rows]
     # Index metadata supplies the count without probing each audio file.
     from ..engines import music
     return {"light": True, "root_path": str(root), "disk_total_bytes": disk.total, "disk_used_bytes": disk.used, "disk_free_bytes": disk.free,

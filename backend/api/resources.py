@@ -29,7 +29,7 @@ def _translate(operation):
 
 @router.get("")
 def get_resources(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
-                  page: int | None = Query(None, ge=1), page_size: int = Query(12, ge=1, le=100),
+                  page: int | None = Query(None, ge=1), page_size: int = Query(10, ge=1, le=100),
                   q: str = "", sort: str = "recent", project_id: str | None = None, keys_only: bool = False) -> dict:
     if not isinstance(page, int): page = None
     if keys_only:
@@ -41,7 +41,7 @@ def get_resources(user: User = Depends(require_authenticated_user), db: Session 
 def get_entries(
     project_id: str | None = None, category: str = "all", path: str = "",
     query: str = Query("", max_length=1024), extension: str = Query("", max_length=20),
-    sort: str = "name", page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+    sort: str = "name", page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
     directory_mode: bool = False, role: str = "",
     user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
 ) -> dict:
@@ -51,7 +51,7 @@ def get_entries(
 
 @router.get("/cleanup-preview")
 def get_cleanup_preview(
-    project_ids: list[str] = Query(...), page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+    project_ids: list[str] = Query(...), page: int = Query(1, ge=1), page_size: int = Query(10, ge=1, le=100),
     user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
 ) -> dict:
     if len(project_ids) > 1000:

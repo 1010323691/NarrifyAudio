@@ -34,7 +34,7 @@ def get_quota(user: User = Depends(require_authenticated_user), db: Session = De
 
 @router.get("/transactions")
 def list_quota_transactions(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
-                            page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+                            page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10,
                             q: str = "", filter: str = "all", tz_offset: int = 0):
     if page is not None: return quota_page(db, user, page, page_size, q, filter, tz_offset)
     rows = db.scalars(

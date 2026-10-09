@@ -61,14 +61,14 @@ def _owned_project(db: Session, user: User, project_id: str, *, lock: bool = Fal
 
 @router.get("")
 def list_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
-                  page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 12, q: str = ""):
+                  page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10, q: str = ""):
     if page is not None: return project_page(db, user, page, page_size, q)
     return [_project_json(item, user) for item in db.scalars(select(Project).where(Project.owner_id == user.id, Project.deleted_at.is_(None)).order_by(Project.updated_at.desc())).all()]
 
 
 @router.get("/trash")
 def list_trashed_projects(user: User = Depends(require_authenticated_user), db: Session = Depends(get_db),
-                         page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 12, q: str = "", filter: str = "all"):
+                         page: Annotated[int | None, Query(ge=1)] = None, page_size: Annotated[int, Query(ge=1, le=100)] = 10, q: str = "", filter: str = "all"):
     if page is not None: return project_page(db, user, page, page_size, q, True, filter)
     items = db.scalars(select(Project).where(
         Project.owner_id == user.id, Project.deleted_at.is_not(None),

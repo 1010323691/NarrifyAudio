@@ -42,7 +42,7 @@ def _resolved_prompts() -> PromptsConfig:
 def _resolve_split_file(name: str) -> Path:
     """Resolve a ``02_split_text`` file name to an absolute path, rejecting traversal.
 
-    The frontend sends bare file names (from ``GET /api/files/list/02_split_text``);
+    The frontend sends bare file names (from the text-format chapter state);
     anything that resolves outside the ``02_split_text`` directory is refused.
     """
     base = get_or_prepare_layout().split_text

@@ -235,7 +235,7 @@ def test_inventory_searches_entire_workspace_with_natural_sort_and_no_fake_catal
     snapshot = _scan(client, workspace)
     assert snapshot["file_count"] == 345
     assert snapshot["complete"]
-    page = client.get("/api/v1/resources/entries", params={"project_id": workspace["project"], "category": "02_split_text"}).json()
+    page = client.get("/api/v1/resources/entries", params={"project_id": workspace["project"], "category": "02_split_text", "page_size": 50}).json()
     assert page["total"] == 344
     assert len(page["items"]) == 50
     assert [item["name"] for item in page["items"][:3]] == ["第1章.txt", "第2章.txt", "第3章.txt"]
@@ -481,7 +481,7 @@ def test_cross_project_search_deep_pages_have_stable_natural_order(client, works
     _run(task_id)
     items = []
     for page in (1, 2, 3):
-        result = client.get("/api/v1/resources/entries", params={"page": page}).json()
+        result = client.get("/api/v1/resources/entries", params={"page": page, "page_size": 50}).json()
         assert result["total"] == 128
         items.extend(result["items"])
     assert len({item["id"] for item in items}) == 128
