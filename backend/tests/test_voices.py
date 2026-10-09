@@ -1773,3 +1773,11 @@ def test_role_checkpoint_rechecks_inputs_before_durable_publication(clone_ws, mo
                 V.generate_voice_candidates(_Handle(), speakers=["Alice"], candidate_count=1)
     assert (clone_ws / "04_voice_profiles" / "voice_config.json").read_bytes() == before
     assert len(calls) == 2
+
+
+def test_alternating_roles_are_not_offered_as_aliases_in_voice_list(clone_ws):
+    entries = [{"speaker": "林黛玉" if i % 2 == 0 else "林宝玉", "text": f"line {i}"} for i in range(8)]
+    (clone_ws / "03_parsed_json" / "s.json").write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    _seed_foundations(clone_ws, ["林黛玉", "林宝玉"])
+    rows = {row["name"]: row for row in list_voices()["speakers"]}
+    assert rows["林宝玉"]["alias_of"] == "" and rows["林黛玉"]["alias_of"] == ""
