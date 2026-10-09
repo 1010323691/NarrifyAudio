@@ -132,14 +132,9 @@
 
   /* Admin CSS loads with its route; specificity keeps mobile dimensions stable. */
   .app-shell.app-shell.admin-shell .admin-page-header { gap: 10px; margin-bottom: 0; }
-  .app-shell.app-shell.admin-shell :is(.metric-grid, .task-summary, .admin-loading-metrics) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .app-shell.app-shell.admin-shell .metric { padding: 12px; }
-  .app-shell.app-shell.admin-shell .metric strong { font-size: 22px; }
-  .app-shell.app-shell.admin-shell .metric:nth-child(2n) { border-right: 0; }
-  .app-shell.app-shell.admin-shell .metric:nth-child(2n + 1) { border-right: 1px solid hsl(var(--border)); }
-  .app-shell.app-shell.admin-shell .metric:nth-child(n + 3) { border-top: 1px solid hsl(var(--border)); }
+  .app-shell.app-shell.admin-shell :is(.kpi-grid, .admin-loading-metrics) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app-shell.app-shell.admin-shell .controls :is(input, select) { flex: 1 1 130px; max-width: 100%; min-width: 0; }
-  .app-shell.app-shell.admin-shell .service-grid { grid-template-columns: minmax(0, 1fr); }
+  .app-shell.app-shell.admin-shell .admin-section { padding-top: 12px; }
   .app-shell.app-shell.admin-shell .admin-drawer header, .app-shell.app-shell.admin-shell .admin-drawer-content { padding: 16px; }
   .app-shell.app-shell.admin-shell .user-actions { position: static; }
   .app-shell.app-shell.admin-shell .glass-panel > .p-5 { padding: 12px; }

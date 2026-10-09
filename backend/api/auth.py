@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -10,14 +8,12 @@ from sqlalchemy.orm import Session
 from ..platform.platform_settings import settings
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context, require_csrf
-from ..platform.models import User, UserQuotaAccount
-from ..platform.system_config import initial_quota_units, registration_enabled
-from ..platform.security import create_session, hash_password, revoke_session, verify_password
-from ..platform.storage import project_workspace_path
-from ..services.projects import create_project
+from ..platform.models import User
+from ..platform.system_config import registration_enabled
+from ..platform.security import create_session, revoke_session, verify_password
+from ..services.user_provisioning import EMAIL_RE, ProvisioningError, provision_user
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class Credentials(BaseModel):
@@ -32,21 +28,6 @@ def _user_json(user: User) -> dict:
     return {"id": user.id, "email": user.email, "username": user.username, "display_name": user.display_name, "role": user.role, "is_active": user.is_active}
 
 
-def _username(value: str | None, email: str) -> str:
-    candidate = (value or email.split("@", 1)[0]).strip().lower()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{5,19}", candidate):
-        raise HTTPException(422, "用户名必须为 6–20 位小写字母、数字、点、下划线或连字符")
-    from ..core.filenames import safe_filename
-    if safe_filename(candidate) != candidate:
-        raise HTTPException(422, "用户名不能使用 Windows 保留名称或以点结尾")
-    return candidate
-
-
-def _validate_password(password: str) -> None:
-    if not 6 <= len(password) <= 20:
-        raise HTTPException(422, "密码必须为 6–20 个字符")
-
-
 def _set_cookies(response: Response, token: str, csrf: str) -> None:
     response.set_cookie(settings.session_cookie, token, httponly=True, secure=settings.cookie_secure, samesite="lax", max_age=settings.session_ttl_hours * 3600, path="/")
     response.set_cookie(settings.csrf_cookie, csrf, httponly=False, secure=settings.cookie_secure, samesite="lax", max_age=settings.session_ttl_hours * 3600, path="/")
@@ -56,26 +37,11 @@ def _set_cookies(response: Response, token: str, csrf: str) -> None:
 def register(payload: Credentials, response: Response, db: Session = Depends(get_db)) -> dict:
     if not registration_enabled(db):
         raise HTTPException(403, "当前已关闭注册")
-    email = (payload.email or "").strip().lower()
-    if not EMAIL_RE.match(email):
-        raise HTTPException(422, "邮箱格式不正确")
-    _validate_password(payload.password)
-    username = _username(payload.username, email)
-    if db.scalar(select(User).where(User.email == email)) is not None:
-        raise HTTPException(409, "邮箱已注册")
-    if db.scalar(select(User).where(User.username == username)) is not None:
-        raise HTTPException(409, "用户名已被占用")
-    from ..platform.storage import storage_username
-    if any(storage_username(existing) == storage_username(username) for existing in db.scalars(select(User.username))):
-        raise HTTPException(409, "用户名存储目录已被占用")
-    user = User(email=email, username=username, display_name=payload.display_name.strip(), password_hash=hash_password(payload.password), role="user")
-    db.add(user)
-    db.flush()
-    db.add(UserQuotaAccount(user_id=user.id, available_units=initial_quota_units(db)))
-    project = create_project(
-        db, owner_id=user.id, username=user.username, name="默认工作空间", description="默认工作空间",
-    )
-    project_workspace_path(db, user.username, project.id).mkdir(parents=True, exist_ok=True)
+    try:
+        user, project = provision_user(db, email=payload.email or "", username=payload.username,
+                                       password=payload.password, display_name=payload.display_name)
+    except ProvisioningError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
     token, csrf, session = create_session(db, user)
     session.active_project_id = project.id
     db.commit()

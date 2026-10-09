@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint, text, event
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Column, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, MetaData, String, Table, Text, UniqueConstraint, text, event
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -439,6 +439,19 @@ class WorkerHeartbeat(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class SystemMetricSample(Base):
+    """One 30-second frame of platform resource metrics for the admin console.
+
+    ``bucket`` (epoch // 30) is the primary key so every Worker process may
+    attempt a sample: the first insert wins and the rest are rejected.
+    """
+    __tablename__ = "system_metric_samples"
+
+    bucket: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True, nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 # Revision 0002 imports this table object to create/downgrade historical

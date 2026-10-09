@@ -1,5 +1,5 @@
 import { listQuery, type ListPagination } from '@/api/listPaging'
-import { http } from './client'
+import { API_BASE, http } from './client'
 
 export interface GpuSchedulerConfig {
   enabled: boolean
@@ -73,18 +73,36 @@ export interface AdminUser {
 export interface ServiceStatus { key: string; name: string; status: 'healthy' | 'warning' | 'error' | 'unknown'; detail: string }
 export interface GpuStatus { index: number; name: string; utilization_percent: number | null; memory_used_mb: number | null; memory_total_mb: number | null; temperature_c: number | null; power_w?: number | null }
 export interface AdminEvent { id: string; time: string; level: string; module: string; type: string; message: string }
+export interface DbConnections { active: number; idle: number; idle_in_transaction: number; total: number; max: number }
+export interface DbPool { size: number; checked_out: number; overflow: number; max_overflow: number }
 export interface AdminOverview {
-  generated_at: string; services: ServiceStatus[]; today: { completed: number; failed: number; active_users: number; api_requests: number; llm_tokens: number | null; tts_characters: number | null; api_requests_scope: string }
+  generated_at: string; services: ServiceStatus[]
+  today: { completed: number; failed: number; submitted: number; active_users: number; api_requests: number; tts_chars: number; llm_chars: number; api_requests_scope: string }
   tasks: { running: number; queued: number; failed: number }; workers: TaskMetrics['worker_pool']; queue: QueueStatus; api: ApiSnapshot
   system: { cpu_percent: number | null; ram_used_bytes: number | null; ram_total_bytes: number | null }
+  database: DbConnections | null
   gpu: GpuStatus[]; user_count: number; recent_errors: AdminEvent[]
+}
+export interface HostMetrics {
+  cpu_percent: number | null; ram_used_bytes: number | null; ram_total_bytes: number | null
+  disk_used_bytes: number | null; disk_total_bytes: number | null; disk_free_bytes: number | null
+  uptime_seconds: number | null; load_average_1m: number | null
 }
 export interface AdminPerformance {
   generated_at: string
-  system: { disk_total_bytes: number; disk_used_bytes: number; disk_free_bytes: number; cpu_percent: number | null; ram_used_bytes: number | null; ram_total_bytes: number | null; uptime_seconds: number | null; load_average_1m?: number }
-  gpu: GpuStatus[]; tasks: TaskMetrics; workers: WorkerStatus[]; queue: QueueStatus; api: ApiSnapshot; unavailable_metrics: string[]
+  system: HostMetrics
+  gpu: GpuStatus[]; tasks: TaskMetrics; workers: WorkerStatus[]; queue: QueueStatus; api: ApiSnapshot
+  api_pool: DbPool | null
+  database: { counters: Record<string, number>; size_bytes: number | null; connections: DbConnections } | null
+  /** LLM gate concurrency (configured). */
+  llm_limit: number
+  /** Whole LLM tasks admitted at once (gate x multiplier, covers mechanical stages). */
+  llm_task_limit: number
+  /** TTS batch pools in member tasks: one executing pool can hold hundreds of members. */
+  tts_batch: { pools: number; active_members: number; parked_pools: number; parked_members: number; queued_members: number }
 }
 export interface ApiSnapshot {
+  tts_stages?: { stage: string; count: number; p95_ms: number }[]
   window_seconds: number; request_count: number; server_error_count: number; error_rate: number
   average_ms: number | null; p95_ms: number | null; status_counts: Record<string, number>; scope: string
   endpoints: { route: string; requests: number; server_errors: number; error_rate: number; average_ms: number; p95_ms: number }[]
@@ -141,6 +159,7 @@ export interface AdminTask {
   finished_at?: string | null
   worker_id?: string | null
   attempt_no?: number
+  group?: string
 }
 
 export interface TaskTypeMetric {
@@ -160,7 +179,7 @@ export interface TaskMetrics {
     attention: number
   }
   throughput_60s: { window_seconds: number; submitted: number; started: number; completed: number; failed: number }
-  worker_pool: { online_workers: number; total_slots: number; active_slots: number; idle_slots: number }
+  worker_pool: { online_workers: number; total_slots: number; active_slots: number; idle_slots: number; llm_gate_active?: number }
   by_type: TaskTypeMetric[]
   generated_at: string
 }
@@ -179,10 +198,9 @@ export interface QueueStatus {
   length: number
   pending: number
   error?: string
-}
-
-export function listUsers(): Promise<AdminUser[]> {
-  return http.get('/api/v1/admin/users')
+  used_memory_bytes?: number
+  connected_clients?: number
+  ops_per_sec?: number
 }
 
 export function updateUser(id: string, payload: { is_active?: boolean; role?: 'user' | 'admin' }): Promise<{ id: string; is_active: boolean; role: 'user' | 'admin' }> {
@@ -237,19 +255,9 @@ export function adjustQuota(userId: string, amount: number, idempotency_key: str
   return http.post(`/api/v1/admin/users/${userId}/quota/adjust`, { amount, idempotency_key, note })
 }
 
-export function listTasks(status = 'all', search = '', limit = 50): Promise<AdminTask[]> {
-  const query = new URLSearchParams({ status, search, limit: String(limit) })
-  return http.get(`/api/v1/admin/tasks?${query}`)
-}
-
 export function getOverview(): Promise<AdminOverview> { return http.get(`/api/v1/admin/overview?tz_offset_minutes=${new Date().getTimezoneOffset()}`) }
 export function getPerformance(): Promise<AdminPerformance> { return http.get('/api/v1/admin/performance') }
 export function getResources(light = true, page = 1): Promise<AdminResources> { return http.get(`/api/v1/admin/resources?light=${light}&page=${page}`) }
-export function getEvents(level = 'all', module = 'all', search = '', sinceHours = 24): Promise<AdminEvent[]> {
-  const query = new URLSearchParams({ level, module, search, since_hours: String(sinceHours) })
-  return http.get(`/api/v1/admin/events?${query}`)
-}
-
 export function getTaskMetrics(): Promise<TaskMetrics> {
   return http.get('/api/v1/admin/task-metrics')
 }
@@ -269,9 +277,88 @@ export function cleanupStaleTemp(): Promise<{ deleted_count: number; deleted_byt
 export function userPage(options: { page: number; search: string; role: string; state: string; sort: string }, signal?: AbortSignal): Promise<{ items: AdminUser[]; pagination: ListPagination }> {
   return http.get(`/api/v1/admin/users?${listQuery(undefined, options)}`, { signal })
 }
-export function taskPage(status: string, search: string, page: number, signal?: AbortSignal): Promise<{ items: AdminTask[]; pagination: ListPagination }> {
-  return http.get(`/api/v1/admin/tasks?${listQuery(undefined, { status, search, page })}`, { signal })
+export interface TaskFilters { status: string; search: string; group: string; task_type: string }
+export function taskPage(filters: TaskFilters, page: number, signal?: AbortSignal): Promise<{ items: AdminTask[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/tasks?${listQuery(undefined, { ...filters, page })}`, { signal })
 }
 export function eventPage(level: string, module: string, search: string, since_hours: number, page: number, signal?: AbortSignal): Promise<{ items: AdminEvent[]; pagination: ListPagination }> {
   return http.get(`/api/v1/admin/events?${listQuery(undefined, { level, module, search, since_hours, page })}`, { signal })
+}
+
+const tz = () => new Date().getTimezoneOffset()
+
+export type HistoryRange = '1h' | '6h' | '24h' | '7d'
+export type ThroughputRange = '24h' | '7d' | '30d'
+/** Flat numeric keys per point (llm_running, db_inserted_ps, cpu_percent, gpu0_util …); absent = not sampled. */
+export type MetricPoint = { time: string } & Record<string, number | string | undefined>
+export interface MetricsHistory {
+  range: HistoryRange; step_seconds: number; points: MetricPoint[]; sample_count: number
+  latest_at: string | null; latest: Record<string, any> | null; scope: string
+}
+export interface ThroughputPoint {
+  time: string; submitted: number; succeeded: number; failed: number; tts_chars: number; llm_chars: number
+  [groupSubmitted: string]: number | string
+}
+export interface ThroughputTotals { submitted: number; succeeded: number; failed: number; tts_chars: number; llm_chars: number }
+export interface TaskTypeStats {
+  task_type: string; group: string; total: number; succeeded: number; failed: number; success_rate: number | null
+  duration_avg_s: number | null; duration_p50_s: number | null; duration_p95_s: number | null; wait_p50_s: number | null; wait_p95_s: number | null
+}
+export interface Throughput {
+  range: ThroughputRange; step_seconds: number; points: ThroughputPoint[]; totals: ThroughputTotals; previous_totals: ThroughputTotals
+  by_type: TaskTypeStats[]; top_errors: { code: string; count: number; sample: string }[]; heatmap: number[][]; generated_at: string
+}
+export interface ApiSeries {
+  minutes: number; step_minutes: number; scope: string
+  points: { time: string; requests: number; business_requests: number; errors: number; rps: number; average_ms: number | null; p95_ms: number | null }[]
+}
+export interface EventStats { step_seconds: number; points: { time: string; error: number; info: number }[]; modules: { module: string; count: number }[]; total: number }
+export interface AuditDetail { id: string; action: string; target_type: string; target_id: string; metadata: Record<string, unknown>; created_at: string; actor: { id: string; username: string } | null }
+export interface TaskDetail extends AdminTask {
+  owner_id: string; project_name: string | null; next_attempt_at: string | null; batch_id: string | null; group: string
+  attempts: { attempt_no: number; worker_id: string; status: string; started_at: string | null; finished_at: string | null; error_message: string }[]
+  events: { sequence: number; type: string; time: string; summary: string }[]
+}
+export interface UserDetail {
+  id: string
+  quota: { available_units: number; reserved_units: number; frozen_units: number; consumed_units: number } | null
+  sessions: { active: number; last_seen_at: string | null }
+  task_statuses: Record<string, number>
+  recent_tasks: { id: string; task_type: string; status: string; progress: number; created_at: string; finished_at: string | null }[]
+  daily_usage: { time: string; tts_chars: number; llm_chars: number; tasks: number }[]
+}
+export interface QuotaTransactionRow {
+  id: string; time: string; kind: string; amount: number; resource_type: string | null; operation_type: string | null
+  char_count: number | null; available_after: number | null; consumed_after: number | null; task_id: string | null; note: string
+}
+export interface NewUser { email: string; username: string; password: string; display_name: string; role: 'user' | 'admin' }
+export interface BulkResult { action: 'cancel' | 'retry'; succeeded: number; results: { id: string; ok: boolean; status?: string; reason?: string }[] }
+
+export function getMetricsHistory(range: HistoryRange, signal?: AbortSignal): Promise<MetricsHistory> {
+  return http.get(`/api/v1/admin/metrics/history?range=${range}`, { signal })
+}
+export function getThroughput(range: ThroughputRange, signal?: AbortSignal): Promise<Throughput> {
+  return http.get(`/api/v1/admin/analytics/throughput?range=${range}&tz_offset_minutes=${tz()}`, { signal })
+}
+export function getApiSeries(minutes: number, signal?: AbortSignal): Promise<ApiSeries> {
+  return http.get(`/api/v1/admin/analytics/api?minutes=${minutes}`, { signal })
+}
+export function getEventStats(level: string, module: string, search: string, since_hours: number, signal?: AbortSignal): Promise<EventStats> {
+  return http.get(`/api/v1/admin/events/stats?${listQuery(undefined, { level, module, search, since_hours, tz_offset_minutes: tz() })}`, { signal })
+}
+export function eventExportUrl(level: string, module: string, search: string, since_hours: number): string {
+  return `${API_BASE}/api/v1/admin/events/export?${listQuery(undefined, { level, module, search, since_hours })}`
+}
+export function getAuditDetail(id: string): Promise<AuditDetail> { return http.get(`/api/v1/admin/events/audit/${id}`) }
+export function getTaskDetail(id: string): Promise<TaskDetail> { return http.get(`/api/v1/admin/tasks/${id}`) }
+export function bulkTasks(action: 'cancel' | 'retry', ids: string[]): Promise<BulkResult> {
+  return http.post('/api/v1/admin/tasks/bulk', { action, ids })
+}
+export function createUser(payload: NewUser): Promise<AdminUser> { return http.post('/api/v1/admin/users', payload) }
+export function getUserDetail(id: string): Promise<UserDetail> { return http.get(`/api/v1/admin/users/${id}?tz_offset_minutes=${tz()}`) }
+export function userQuotaTransactions(id: string, page: number): Promise<{ items: QuotaTransactionRow[]; pagination: ListPagination }> {
+  return http.get(`/api/v1/admin/users/${id}/quota-transactions?page=${page}&page_size=20`)
+}
+export function revokeUserSessions(id: string): Promise<{ id: string; revoked: number }> {
+  return http.post(`/api/v1/admin/users/${id}/sessions/revoke`)
 }

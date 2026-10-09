@@ -86,3 +86,25 @@ SUPPORTED_TASK_TYPES = frozenset(TASK_TYPES)
 BILLABLE_TASK_TYPES = frozenset(spec.name for spec in _SPECS if spec.billable)
 ADMIN_ONLY_TASK_TYPES = frozenset(spec.name for spec in _SPECS if spec.admin_only)
 LEGACY_ENGINE_TASK_TYPES = frozenset(spec.name for spec in _SPECS if spec.legacy_engine)
+
+
+# Coarse execution group per task prefix for the admin console.
+# A different axis from the user task list's module label (group of workers,
+# not display label); the metrics sampler and admin analytics share it.
+_WORKER_GROUPS = {
+    "script": "llm",
+    "music": "llm",
+    "tts": "tts",
+    "voices": "tts",
+    "audio": "audio",
+    "bgm": "audio",
+    "book": "system",
+    "text": "system",
+    "resources": "system",
+}
+WORKER_GROUP_NAMES = ("llm", "tts", "audio", "system", "worker")
+
+
+def task_worker_group(task_type: str) -> str:
+    """Coarse worker group (llm/tts/audio/system/worker) for the admin console."""
+    return _WORKER_GROUPS.get(task_type.split(".", 1)[0], "worker")

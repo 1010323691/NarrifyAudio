@@ -2274,11 +2274,11 @@ def test_api_snapshot_p95_uses_request_durations():
 
 
 def test_admin_memory_metrics_use_container_cgroup_limit(tmp_path):
-    from backend.api.admin import _memory_usage
+    from backend.platform.system_probe import memory_usage
 
     (tmp_path / "memory.current").write_text("1500000")
     (tmp_path / "memory.max").write_text("2000000")
-    assert _memory_usage(8_000_000, tmp_path) == (1_500_000, 2_000_000)
+    assert memory_usage(8_000_000, tmp_path) == (1_500_000, 2_000_000)
 
 
 def test_admin_gpu_sample_is_ttl_cached(monkeypatch):
@@ -2286,7 +2286,7 @@ def test_admin_gpu_sample_is_ttl_cached(monkeypatch):
     and /performance, both on the same TTL-cached nvidia-smi sample — the
     spawn runs under the lock, so a stale window costs one spawn even for
     racing callers (and idle polls inside the TTL window cost none)."""
-    from backend.api import admin
+    from backend.platform import system_probe as probe
 
     samples: list[list[dict]] = []
 
@@ -2295,24 +2295,24 @@ def test_admin_gpu_sample_is_ttl_cached(monkeypatch):
         samples.append(rows)
         return rows
 
-    monkeypatch.setattr(admin, "_sample_gpus", fake_sample)
-    monkeypatch.setattr(admin, "_gpu_sample", None)
+    monkeypatch.setattr(probe, "sample_gpus", fake_sample)
+    monkeypatch.setattr(probe, "_gpu_sample", None)
 
     try:
         # Three refresh cycles — one spawn per TTL window, repeated reads
         # inside a window share the sample (no double spawn on racing
         # callers either: the spawn runs under the lock).
         for expected in (1, 2, 3):
-            if admin._gpu_sample is not None:
-                admin._gpu_sample = (
-                    admin._gpu_sample[0] - admin._GPU_SAMPLE_TTL_SECONDS - 1, admin._gpu_sample[1],
+            if probe._gpu_sample is not None:
+                probe._gpu_sample = (
+                    probe._gpu_sample[0] - probe.GPU_SAMPLE_TTL_SECONDS - 1, probe._gpu_sample[1],
                 )
-            admin._gpu_status()
+            probe.gpu_status()
             assert len(samples) == expected, f"cycle {expected} cost {len(samples)} spawns"
-            assert admin._gpu_status() == admin._gpu_sample[1]
+            assert probe.gpu_status() == probe._gpu_sample[1]
             assert len(samples) == expected
     finally:
-        admin._gpu_sample = None
+        probe._gpu_sample = None
 
 
 def test_task_stream_polls_on_event_loop_not_threadpool(client: TestClient):
