@@ -134,7 +134,7 @@ window.fetch = async (input, options) => {
     await new Promise((resolve) => setTimeout(resolve, 500))
   if (
     scenario.value === 'error' &&
-    (path.includes('/files/list') || path.includes('/bgm/chapters'))
+    path.includes('/bgm/chapters')
   )
     return json({ detail: '测试夹具：读取失败，请重试。' }, 503)
   const empty = scenario.value === 'empty'

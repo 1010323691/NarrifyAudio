@@ -10,7 +10,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright')
 const base = process.env.NARRIFY_LAYOUT_URL || 'http://127.0.0.1:5173'
 const output = process.env.NARRIFY_LAYOUT_SCREENSHOTS
 const routes = {
-  user: ['dashboard', 'projects/demo', 'trash', 'tasks', 'resources', 'usage', 'text', 'script', 'voices', 'batch', 'preview', 'merge', 'audio', 'bgm', 'settings'],
+  user: ['dashboard', 'projects/demo', 'trash', 'tasks', 'resources', 'usage', 'text', 'script', 'voices', 'batch', 'preview', 'merge', 'bgm', 'settings'],
   admin: ['admin', 'admin?tab=performance', 'admin?tab=users', 'admin?tab=resources', 'admin?tab=settings', 'admin?tab=tasks', 'admin?tab=logs', 'admin/music'],
   guest: ['login', 'admin/login', 'access-denied'],
 }

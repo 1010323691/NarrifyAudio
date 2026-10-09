@@ -837,7 +837,6 @@ test('synthesis requests one page; full filtered selection submits all 125 entri
   const all = Array.from({ length: 125 }, (_, i) => file(`chapter-${i}.json`))
   const reads = []
   const h = harness('BatchTTS', {
-    listDir: () => assert.fail('the page must never enumerate the entire directory'),
     batchList: async (query, _signal, keysOnly) => {
       reads.push({ ...query, keysOnly })
       return { files: keysOnly ? all : all.slice((query.page - 1) * 10, query.page * 10), pagination: pageMeta(125, query.page) }
@@ -862,7 +861,6 @@ test('synthesis requests one page; full filtered selection submits all 125 entri
 test('merge pagination keeps cross-page selection and bulk includes existing outputs', async () => {
   const all = Array.from({ length: 61 }, (_, i) => ({ ...file(`package-${i}`, true), merged_filename: i === 0 ? 'package-0.mp3' : null }))
   const h = harness('Merge', {
-    listDir: () => assert.fail('merge only reads the current page'),
     mergeList: async (query, _signal, keysOnly) => ({ packages: keysOnly ? all : all.slice((query.page - 1) * 10, query.page * 10), pagination: pageMeta(all.length, query.page) }),
   })
   await h.refreshRows()

@@ -265,14 +265,8 @@ test('pending/adjusted filters, search and page slicing; marks toggle and advanc
   assert.equal(wb.phase.value, 'ready')
   assert.equal(wb.pendingCount.value, 5)
 
-  assert.equal(wb.pageCount.value, 3) // 25 章 / 每页 10
-  assert.equal(wb.pagedChapters.value.length, 10)
-  wb.page.value = 2
-  assert.equal(wb.pagedChapters.value.length, 10)
-  assert.equal(wb.pagedChapters.value[0].key, 'c11')
-  wb.page.value = 3
-  assert.equal(wb.pagedChapters.value.length, 5)
-  assert.equal(wb.pagedChapters.value[0].key, 'c21')
+  // 分页完全由服务端完成：前端不再对已加载章节做切片（mock 未返回 pagination，则原样展示）。
+  assert.equal(wb.pagedChapters.value.length, 25)
 
   wb.filter.value = 'pending'
   await nextTick()

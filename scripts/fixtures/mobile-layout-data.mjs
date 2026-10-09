@@ -42,7 +42,7 @@ export function layoutResponse(path, role) {
   if(path==='/api/v1/tasks/overview')return {statuses:[],failures:[],failure_count:0};
   if(path==='/api/v1/tasks/history')return {items:[{id:'task',project_id:'demo',project_name:project.name,task_type:'script.parse',label:name,status:'succeeded',progress:1,current:'',error:'',created:1791244800,created_at:project.created_at}],next_cursor:null};
   if(path==='/api/v1/projects')return [project];
-  if(path==='/api/v1/projects/trash')return [{...project,deleted_at:project.created_at,expires_at:'2026-11-01T00:00:00Z'}];
+  if(path==='/api/v1/projects/trash')return {items:[{...project,deleted_at:project.created_at,expires_at:'2026-11-01T00:00:00Z'}],pagination:{total:1,page:1,page_size:10,counts:{all:1,active:1}}};
   if(path.endsWith('/summary'))return {project_id:'demo',name:project.name,updated_at:project.updated_at,file_count:24,size_bytes:72000,split_volume_count:24,stage_keys:[],stage_completion:{},categories:[],recent_files:[],recent_outputs:[],cleanup_candidates:{count:0,size_bytes:0,older_than_days:7,blocked_by_active_tasks:false}};
   if(path.endsWith('/text-format/state'))return {flow:{id:'flow',source_file_id:'input',source_file_name:'长篇小说.txt',config_snapshot:{},whole_book:false,force_by_length:false,status:'ready',manifest_count:24},version,next_task:null,active_tasks:[]};
   if(path.endsWith('/script-parse/summary'))return {total:125,done_count:0,active_task_ids:[]};
@@ -58,6 +58,7 @@ export function layoutResponse(path, role) {
   if(path==='/api/v1/resources')return {projects:[{project_id:'demo',name:project.name,delivery_count:24,delivery_bytes:72000,production_audio_count:0,production_categories:[],snapshot:{snapshot_id:'snapshot',scanned_at:project.updated_at,complete:true,errors:[],file_count:24,size_bytes:72000,categories:[],audio_count:0,latest_modified_at:project.updated_at},scan_task_id:null,scan_status:null,scan_error:null,stale:false}],categories:[],storage:{project_bytes:0,project_complete:true,trash_bytes:0,trash_complete:true,export_bytes:0},exports:[]};
   if(path.endsWith('/files/file/preview'))return {file:resourceEntry,content:'移动端长文本预览。'.repeat(500),truncated:false,warning:null};
   if(path.endsWith('/entries'))return {items:[resourceEntry],total:1,size_bytes:0,page:1,page_size:20,snapshots:[],complete:true,incomplete_projects:[]};
-  if(path.includes('/tasks')||path.endsWith('/transactions')||path.endsWith('/files'))return [];
+  if(path.endsWith('/transactions'))return {items:[],pagination:{total:0,page:1,page_size:10,counts:{all:0}},daily:[0,0,0,0,0,0,0],registered_storage_bytes:0};
+  if(path.includes('/tasks')||path.endsWith('/files'))return [];
  return null;
 }
