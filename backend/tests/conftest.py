@@ -131,6 +131,9 @@ _SHARD_WEIGHTS_FILE = Path(__file__).with_name("shard_weights.json")
 # 新增（权重表里还没有）的测试文件按每用例的平均耗时估算，下次更新权重表后即被实测值取代。
 _DEFAULT_SECONDS_PER_TEST = 0.07
 _file_seconds: dict[str, float] = {}
+_deselected_total = 0   # 本进程收集阶段被取消选择的用例总数（含 --shard 自己切掉的）
+_shard_deselected = 0   # 其中由 --shard 切掉的
+_worker_filtered = 0    # xdist 主控进程汇总各 worker 上“非 --shard”的取消选择数
 
 
 def pytest_addoption(parser):
@@ -140,7 +143,7 @@ def pytest_addoption(parser):
              "以 shard_weights.json 里的每文件实测耗时做贪心均衡。CI 用它做 matrix 并行。")
     parser.addoption(
         "--write-shard-weights", action="store_true", default=False,
-        help="跑完把每个测试文件的实测耗时（秒）写回 backend/tests/shard_weights.json，用于更新分片权重；仅在全部通过且无 -k/-m/-x/nodeid 筛选时才写盘，否则只告警。")
+        help="跑完把每个测试文件的实测耗时（秒）写回 backend/tests/shard_weights.json，用于更新分片权重；仅在全部通过且收集阶段无用例被筛选（-k/-m/--deselect/--lf/nodeid 等）时才写盘，否则只告警。")
 
 
 def pytest_configure(config):
@@ -154,25 +157,23 @@ def pytest_runtest_logreport(report):
         _file_seconds.get(report.nodeid.split("::", 1)[0], 0.0) + report.duration)
 
 
-def _shard_weights_unsafe_reason(config, exitstatus) -> str | None:
-    """部分耗时会把重文件的权重写小，下次分片无声失衡，所以只接受“完整、无筛选、全通过”的运行。"""
-    option = config.option
-    if exitstatus != 0:
-        return f"本次运行未全部通过（exitstatus={exitstatus}），耗时不具代表性"
-    if option.keyword or option.markexpr or getattr(option, "lf", False) or getattr(option, "failedfirst", False):
-        return "使用了 -k/-m/--lf 等筛选，同一文件只跑了一部分"
-    if any("::" in str(arg) for arg in config.args):
-        return "按用例 nodeid 选择了测试，同一文件只跑了一部分"
-    if getattr(option, "maxfail", 0):
-        return "设置了 --maxfail/-x，可能提前中止"
-    return None
+@pytest.hookimpl(optionalhook=True)
+def pytest_deselected(items):
+    global _deselected_total
+    _deselected_total += len(items)
 
 
 def pytest_sessionfinish(session, exitstatus):
+    global _worker_filtered
     config = session.config
-    if not config.getoption("--write-shard-weights") or hasattr(config, "workerinput"):
+    filtered_here = _deselected_total - _shard_deselected
+    workeroutput = getattr(config, "workeroutput", None)
+    if workeroutput is not None:  # xdist worker：收集在这里发生，把筛选数交给主控进程
+        workeroutput["filtered_deselected"] = filtered_here
         return
-    reason = _shard_weights_unsafe_reason(config, exitstatus)
+    if not config.getoption("--write-shard-weights"):
+        return
+    reason = _shard_weights_unsafe_reason(config, exitstatus, max(filtered_here, _worker_filtered))
     if reason:
         import warnings
         warnings.warn(f"--write-shard-weights 未写盘：{reason}。请在全量、无筛选、全部通过的运行下刷新权重表。")
@@ -182,6 +183,24 @@ def pytest_sessionfinish(session, exitstatus):
     merged = {**_load_shard_weights(), **{path: round(seconds, 2) for path, seconds in _file_seconds.items()}}
     ordered = dict(sorted(merged.items()))
     _SHARD_WEIGHTS_FILE.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    global _worker_filtered
+    _worker_filtered = max(_worker_filtered, (getattr(node, "workeroutput", None) or {}).get("filtered_deselected", 0))
+
+
+def _shard_weights_unsafe_reason(config, exitstatus, filtered) -> str | None:
+    """部分耗时会把重文件的权重写小，下次分片无声失衡，所以只接受“完整、无筛选、全通过”的运行。
+    “无筛选”用结构性判定（收集阶段除 --shard 外没有任何用例被取消选择），不枚举 -k/-m/--deselect/--lf 等选项。"""
+    if exitstatus != 0:
+        return f"本次运行未全部通过（exitstatus={exitstatus}），耗时不具代表性"
+    if filtered:
+        return f"收集阶段有 {filtered} 个用例被筛选掉（-k/-m/--deselect/--lf 等），同一文件只跑了一部分"
+    if any("::" in str(arg) for arg in config.args):
+        return "按用例 nodeid 选择了测试，同一文件只跑了一部分"
+    return None
 
 
 def _load_shard_weights() -> dict[str, float]:
@@ -216,5 +235,8 @@ def pytest_collection_modifyitems(config, items):
         loads[target] += weight(path)
     kept = [item for item in items if owner[item.nodeid.split("::", 1)[0]] == index - 1]
     kept_ids = {id(item) for item in kept}
-    config.hook.pytest_deselected(items=[item for item in items if id(item) not in kept_ids])
+    dropped = [item for item in items if id(item) not in kept_ids]
+    global _shard_deselected
+    _shard_deselected += len(dropped)
+    config.hook.pytest_deselected(items=dropped)
     items[:] = kept
