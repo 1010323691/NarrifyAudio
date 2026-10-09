@@ -90,6 +90,7 @@ def candidate_manifests(root, names):
             return [root / row[0] for row in db.execute(lookup, names)]
         previous = dict(db.execute("SELECT path, identity FROM manifests"))
         found = set()
+        unreadable = []  # kept as candidates, never indexed: retried next call
         for path in root.glob("*/manifest.json"):
             if path.is_symlink() or path.parent.is_symlink():
                 continue
@@ -101,17 +102,18 @@ def candidate_manifests(root, names):
                     continue
                 data = json.loads(path.read_text("utf-8"))
                 if json.dumps(file_identity(path.stat())) != identity:
-                    # An in-flight writer prevents a complete index. Fall back to
-                    # the normal manifest checks, including unrelated candidates.
-                    return list(root.glob("*/manifest.json"))
+                    # An in-flight writer: do not index a half-seen file.
+                    unreadable.append(path)
+                    continue
             except FileNotFoundError:
                 # Removed between glob and read: the chapter is really gone.
                 found.discard(relative)
                 continue
             except (OSError, ValueError):
-                # Unreadable now does not mean irrelevant: keep the old rows
-                # and let the normal manifest checks see every candidate.
-                return list(root.glob("*/manifest.json"))
+                # Unreadable now does not mean irrelevant: keep it as a
+                # candidate, but one bad file must not block indexing the rest.
+                unreadable.append(path)
+                continue
             db.execute("DELETE FROM speakers WHERE path=?", (relative,))
             roles = {str(entry.get("speaker") or "").strip() for entry in data if isinstance(entry, dict)} if isinstance(data, list) else set()
             db.executemany("INSERT INTO speakers VALUES (?, ?)", [(name, relative) for name in roles if name])
@@ -119,8 +121,11 @@ def candidate_manifests(root, names):
         for missing in previous.keys() - found:
             db.execute("DELETE FROM manifests WHERE path=?", (missing,))
             db.execute("DELETE FROM speakers WHERE path=?", (missing,))
-        db.execute("DELETE FROM meta")
-        db.execute("INSERT INTO meta VALUES ('epoch', ?)", ("" if epoch is None else epoch,))
-        db.execute("INSERT INTO meta VALUES ('checked_at', ?)", (str(time.time()),))
+        if not unreadable:
+            # Only a complete scan may arm the fresh fast path.
+            db.execute("DELETE FROM meta")
+            db.execute("INSERT INTO meta VALUES ('epoch', ?)", ("" if epoch is None else epoch,))
+            db.execute("INSERT INTO meta VALUES ('checked_at', ?)", (str(time.time()),))
         db.commit()
-        return [root / row[0] for row in db.execute(lookup, names) if row[0] in found]
+        indexed = [root / row[0] for row in db.execute(lookup, names) if row[0] in found]
+        return sorted({*indexed, *unreadable})

@@ -119,3 +119,47 @@ def test_repeated_stream_loss_replays_one_stable_recovery_event(isolated):
     with factory() as db:
         assert db.scalar(select(func.count()).select_from(OutboxEvent)) == 1
         assert db.get(OutboxEvent, original_id).published_at is None
+
+
+def test_replay_backoff_doubles_per_replay_and_caps(isolated):
+    factory, _ = isolated
+    with factory.begin() as db: add(db, 'pending')
+    assert task_worker.recover_database_tasks() == 1
+    with factory.begin() as db:
+        item = db.scalar(select(OutboxEvent))
+        original_id, item.published_at = item.id, utcnow()
+    for replays, wait in ((0, 11), (1, 21), (2, 41)):
+        # Younger than the doubled interval: not replayed yet.
+        with factory.begin() as db:
+            db.get(OutboxEvent, original_id).published_at = utcnow() - timedelta(seconds=wait // 2 + 1)
+        assert task_worker.recover_database_tasks() == (1 if replays == 0 and wait // 2 + 1 > 10 else 0)
+        with factory.begin() as db:
+            event = db.get(OutboxEvent, original_id)
+            event.published_at = utcnow() - timedelta(seconds=wait)
+            event.payload = {**event.payload, "replays": replays}
+        assert task_worker.recover_database_tasks() == 1
+        with factory.begin() as db:
+            event = db.get(OutboxEvent, original_id)
+            assert event.payload["replays"] == replays + 1
+            event.published_at = utcnow()
+    with factory.begin() as db:
+        event = db.get(OutboxEvent, original_id)
+        event.payload = {**event.payload, "replays": 30}
+        event.published_at = utcnow() - timedelta(seconds=599)
+    assert task_worker.recover_database_tasks() == 0
+    with factory.begin() as db:
+        db.get(OutboxEvent, original_id).published_at = utcnow() - timedelta(seconds=601)
+    assert task_worker.recover_database_tasks() == 1
+
+
+def test_claim_task_skips_the_audio_permit_check_for_other_task_types(isolated, monkeypatch):
+    from backend.platform import mechanical_audio
+    factory, _ = isolated
+    with factory.begin() as db: add(db, 'pending')
+    calls = []
+    monkeypatch.setattr(mechanical_audio, 'capacity_available', lambda: calls.append(1) or True)
+    try:
+        task_worker.claim_task('pending', 'worker')
+    except Exception:
+        pass  # only the admission pre-check is under test
+    assert calls == []

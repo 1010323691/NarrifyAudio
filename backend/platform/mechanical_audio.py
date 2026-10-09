@@ -56,13 +56,22 @@ def _state(db):
 
 
 def _live_groups():
+    """Process groups that may still hold members. A process whose state cannot
+    be read counts as alive: unknown must never free an occupied slot."""
     groups = set()
     for item in psutil.process_iter():
         try:
-            if item.status() != psutil.STATUS_ZOMBIE:
-                groups.add(os.getpgid(item.pid))
-        except (ProcessLookupError, psutil.NoSuchProcess, psutil.AccessDenied):
+            group = os.getpgid(item.pid)
+        except (ProcessLookupError, psutil.NoSuchProcess):
             continue
+        try:
+            if item.status() == psutil.STATUS_ZOMBIE:
+                continue
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.AccessDenied:
+            pass
+        groups.add(group)
     return groups
 
 

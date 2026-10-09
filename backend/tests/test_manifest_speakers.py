@@ -104,3 +104,17 @@ def test_transient_manifest_read_failure_keeps_candidate(tmp_path, monkeypatch):
     assert candidate_manifests(root, ["A"]) == [path]
     monkeypatch.undo()
     assert candidate_manifests(root, ["B"]) == [path]
+
+
+def test_corrupt_manifest_does_not_block_indexing_the_rest(tmp_path, monkeypatch):
+    root = tmp_path / "audio"
+    good, bad = root / "good" / "manifest.json", root / "bad" / "manifest.json"
+    for path in (good, bad):
+        path.parent.mkdir(parents=True)
+    good.write_text(json.dumps([{"speaker": "A"}]), encoding="utf-8")
+    bad.write_text("{not json", encoding="utf-8")
+    assert candidate_manifests(root, ["A"]) == sorted([bad, good])
+    # The good chapter is committed; the bad one is retried, never fast-pathed.
+    bad.write_text(json.dumps([{"speaker": "B"}]), encoding="utf-8")
+    assert candidate_manifests(root, ["B"]) == [bad]
+    assert candidate_manifests(root, ["A"]) == [good]

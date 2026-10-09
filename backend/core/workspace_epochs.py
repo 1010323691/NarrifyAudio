@@ -95,8 +95,9 @@ def _advance(root, module, token, *, starting):
         data['writers'] = {key: value for key, value in data['writers'].items()
                            if isinstance(value, dict) and _alive(value.get('identity'))}
         with _unreleased_guard:
-            for stale in _unreleased.pop(str(path), ()):
-                data['writers'].pop(stale, None)
+            stale_tokens = set(_unreleased.get(str(path), ()))
+        for stale in stale_tokens:
+            data['writers'].pop(stale, None)
         if starting:
             data['writers'][token] = {'module': module, 'identity': process_identity(os.getpid())}
         else:
@@ -114,6 +115,14 @@ def _advance(root, module, token, *, starting):
             os.replace(pending, path)
         finally:
             pending.unlink(missing_ok=True)
+        if stale_tokens:
+            # Forget them only once the cleaned file is actually on disk.
+            with _unreleased_guard:
+                remaining = _unreleased.get(str(path), set()) - stale_tokens
+                if remaining:
+                    _unreleased[str(path)] = remaining
+                else:
+                    _unreleased.pop(str(path), None)
 
 
 @contextmanager

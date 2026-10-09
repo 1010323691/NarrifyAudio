@@ -170,3 +170,21 @@ def test_prune_skips_a_snapshot_whose_version_lock_is_held(tmp_path):
         assert prune_snapshots(tmp_path, keep=1, max_age=1, interval=0) == 1
     assert (tmp_path / f"{names[0]}.sqlite").exists()
     assert not (tmp_path / f"{names[1]}.sqlite").exists()
+
+
+def test_reused_snapshot_is_refreshed_and_pruned_lock_is_removed(tmp_path):
+    import os
+    from backend.core.script_snapshot import open_snapshot, prune_snapshots
+    source = tmp_path / "03_parsed_json" / "a.json"
+    source.parent.mkdir()
+    source.write_text('[{"speaker": "A", "text": "hi"}]', encoding="utf-8")
+    cache = tmp_path / "cache"
+    snapshot = open_snapshot([source], cache)
+    sqlite = snapshot.path
+    os.utime(sqlite, (1000, 1000))
+    open_snapshot([source], cache)  # reuse refreshes the age gate
+    assert sqlite.stat().st_mtime > 1000
+    assert prune_snapshots(cache, keep=0, max_age=60, interval=0) == 0
+    os.utime(sqlite, (1000, 1000))
+    assert prune_snapshots(cache, keep=0, max_age=60, interval=0) == 1
+    assert not sqlite.exists() and not sqlite.with_suffix(".lock").exists()

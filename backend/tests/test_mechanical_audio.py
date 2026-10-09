@@ -287,3 +287,16 @@ def test_claim_capacity_check_is_skipped_when_no_audio_task_is_claimable(monkeyp
     assert task_worker._audio_capacity_for(None, ()) is True
     assert task_worker._audio_capacity_for(("tts.merge",), ()) is True
     assert calls == [1, 1]
+
+
+def test_unreadable_process_state_counts_as_a_live_group(monkeypatch):
+    class Hidden:
+        pid = 4242
+
+        def status(self):
+            raise audio.psutil.AccessDenied(4242)
+
+    monkeypatch.setattr(audio.psutil, "process_iter", lambda: [Hidden()])
+    monkeypatch.setattr(audio.os, "getpgid", lambda pid: 777)
+    assert 777 in audio._live_groups()
+

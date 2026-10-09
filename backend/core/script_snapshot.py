@@ -109,8 +109,10 @@ def prune_snapshots(directory, *, keep=PRUNE_KEEP, max_age=PRUNE_MAX_AGE_SECONDS
                 continue
             try:
                 # A holder of the version lock is validating/opening it right now.
-                with exclusive_file_lock(directory / (path.stem + ".lock"), timeout=0):
+                lock = directory / (path.stem + ".lock")
+                with exclusive_file_lock(lock, timeout=0):
                     path.unlink()
+                lock.unlink(missing_ok=True)
                 deleted += 1
             except (OSError, TimeoutError):
                 continue
@@ -159,6 +161,11 @@ def open_snapshot(paths, directory, *, check=lambda: None, log=lambda *_: None, 
                     valid = db.execute("SELECT value FROM metadata WHERE key='version'").fetchone() == (version,)
             except sqlite3.DatabaseError:
                 pass
+            if valid:
+                try:
+                    os.utime(path)  # in use: the age gate must keep protecting it
+                except OSError:
+                    pass
         if not valid:
             pending = directory / ("." + version + "." + uuid.uuid4().hex + ".sqlite")
             try:

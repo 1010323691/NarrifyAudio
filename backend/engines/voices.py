@@ -548,7 +548,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
         # alone updates the shared voice_config, so worker results cannot race on it.
         handle.log(f"[{sp}] 开始生成语音推理基础（LLM 推理）…")
         pairs = samples.get(sp, [])
-        lines = [t for _i, t in pairs]  # materialized once: reused by ref-text selection and the fallback
+        lines = pairs.texts() if hasattr(pairs, "texts") else [t for _i, t in pairs]  # texts only, for ref-text selection / fallback
         bands = _select_target_bands(pairs)
         # Description + ref text: an override wins, else the LLM, else a fallback.
         # ``gender`` (male/female/"") is a PRE-FILL only — the user's badge pick is the
