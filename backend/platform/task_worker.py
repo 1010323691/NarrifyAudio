@@ -14,7 +14,7 @@ from typing import Any, Callable
 from uuid import NAMESPACE_URL, uuid5
 
 import redis
-from sqlalchemy import String, case, cast, func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import aliased
 
 from ..core.config import TextConfig
@@ -164,21 +164,6 @@ def _workspace_claim_eligibility(now):
         ~func.coalesce(compatible, False),
     ).exists()
     return or_(Task.task_type.not_in(WORKSPACE_MUTATING_TASK_TYPES), ~conflict)
-
-
-def _foundation_claim_eligibility():
-    """The per-project role limit also applies after splitting a batch into rows."""
-    active = aliased(Task)
-    count = select(func.count()).select_from(active).where(
-        active.project_id == Task.project_id,
-        active.owner_id == Task.owner_id,
-        active.task_type == "voices.foundation",
-        active.status.in_(("running", "paused", "cancelling")),
-        active.id != Task.id,
-    ).correlate(Task).scalar_subquery()
-    configured = func.coalesce(Task.payload["config"]["generation"]["max_concurrency"].as_integer(), 3)
-    limit = case((configured < 1, 1), else_=configured)
-    return or_(~func.coalesce(_single_foundation(Task), False), count < limit)
 
 
 def _workspace_claim_available(db, task: Task, now) -> bool:
@@ -363,10 +348,6 @@ def claim_task(
             db.rollback()
             return None
 
-        if db.scalar(select(Task.id).where(Task.id == task.id, _foundation_claim_eligibility())) is None:
-            db.rollback()
-            return None
-
         if task.task_type in LLM_TASK_TYPES and not llm_task_capacity_available(db, exclude_task_id=task.id):
             db.rollback()
             return None
@@ -448,7 +429,6 @@ def claim_fair_task(
         eligible_tasks = Task.status.in_(["pending", "queued"]) | ((Task.status == "retrying") & retry_ready)
         eligible_tasks = eligible_tasks & Task.task_type.in_(allowed_task_types(db))
         eligible_tasks = eligible_tasks & _workspace_claim_eligibility(now)
-        eligible_tasks = eligible_tasks & _foundation_claim_eligibility()
         if not audio_capacity:
             eligible_tasks = eligible_tasks & Task.task_type.not_in(mechanical_audio.AUDIO_TASK_TYPES)
         from .tts_resource_budget import tts_capacity_available

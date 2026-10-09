@@ -332,6 +332,9 @@ def main() -> None:
     gpu_workers: list[threading.Thread] = []
     merge_workers: list[threading.Thread] = []
     scheduler_thread: threading.Thread | None = None
+    if args.once:
+        # The parse coordinator (which sizes the gate) does not run in one-shot mode.
+        set_concurrency(parse_worker_concurrency(maximum=PARSE_LLM_CONCURRENCY_MAX))
     if not args.once:
         # Every lane can take over maintenance; the host lock elects one owner.
         delivery_worker = threading.Thread(target=_host_maintenance_loop, args=(stop,),

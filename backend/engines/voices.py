@@ -5,7 +5,7 @@ never share the GPU at once (each can then run at its own max concurrency):
 
 **Phase 1 — ``prepare_foundations`` (LLM only, no TTS).** Detects every speaker in
 the parsed script (in order of first appearance), keeps alias hints for display only
-without inferring character identity from names, then — in parallel, bounded by ``generation.max_concurrency`` —
+without inferring character identity from names, then — in parallel, bounded by the host-wide LLM concurrency limit —
 asks the LLM for each character's voice *foundation*: a ``description`` + a
 multi-sentence ``ref_text`` seed, reasoned from the character's own lines sampled
 across the book (front / middle / back), each carrying its ±window local context
@@ -55,6 +55,7 @@ from contextvars import copy_context
 from pathlib import Path
 
 from ..core import pathio
+from ..core.concurrency import gate
 from ..core.config import get_config
 from ..core.file_lock import exclusive_file_lock
 from ..core.role_hints import suggest_role_hints
@@ -62,6 +63,7 @@ from ..core.filenames import safe_filename
 from ..core.task_control import TaskCancelled
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..platform.quota import QuotaInsufficientError
+from ..platform.system_config import parse_worker_concurrency
 from .persona_prompts import PERSONA_SYSTEM_PROMPT, PERSONA_USER_PROMPT
 from .tts import WorkerWatchdogTimeout, resolve_engine, run_tts_subprocess
 from .tts_batch import (
@@ -498,7 +500,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     yet; ``overrides`` maps a speaker → a user description (skips the LLM for that
     character); ``script_name`` selects which parsed JSON to read (None → most recent).
 
-    The persona LLM calls run in parallel (bounded by ``generation.max_concurrency``) so
+    The persona LLM calls run in parallel (bounded by the host-wide LLM concurrency limit) so
     the LLM runs at full concurrency on its own. **No TTS is started** — the VoiceDesign
     seed render is Phase 2 (``generate_voice_candidates``). A per-character failure is recorded; only a
     *fatal* error (no script) raises.
@@ -538,8 +540,10 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     unique_speakers = list(selected)
 
     n = len(unique_speakers)
-    max_workers = max(1, int(cfg.generation.max_concurrency or 1))
-    handle.log(f"LLM 并发 {max_workers}。")
+    # Bound by the host-wide LLM limit (the same admin setting every LLM task shares),
+    # not a per-feature knob; each call additionally takes a process gate permit below.
+    max_workers = parse_worker_concurrency()
+    handle.log(f"LLM 并发 {max_workers}（全机 LLM 并发上限）。")
     results = []
     done = 0
 
@@ -562,10 +566,15 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             ref_text = pick_ref_text(lines)
             gender = _gender_from_description(description)
         else:
+            if not gate().acquire(stop_check=lambda: handle.cancelled):
+                raise TaskCancelled()  # cancelled while queued — no permit taken
             try:
-                description, ref_text, gender = _llm_persona(
-                    handle, llm, persona_system, persona_user, sp, script, bands,
-                )
+                try:
+                    description, ref_text, gender = _llm_persona(
+                        handle, llm, persona_system, persona_user, sp, script, bands,
+                    )
+                finally:
+                    gate().release()
             except QuotaInsufficientError:
                 raise
             except Exception as e:  # noqa: BLE001
