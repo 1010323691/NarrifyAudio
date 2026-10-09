@@ -140,7 +140,7 @@ def pytest_addoption(parser):
              "以 shard_weights.json 里的每文件实测耗时做贪心均衡。CI 用它做 matrix 并行。")
     parser.addoption(
         "--write-shard-weights", action="store_true", default=False,
-        help="跑完把每个测试文件的实测耗时（秒）写回 backend/tests/shard_weights.json，用于更新分片权重。")
+        help="跑完把每个测试文件的实测耗时（秒）写回 backend/tests/shard_weights.json，用于更新分片权重；仅在全部通过且无 -k/-m/-x/nodeid 筛选时才写盘，否则只告警。")
 
 
 def pytest_configure(config):
@@ -154,11 +154,31 @@ def pytest_runtest_logreport(report):
         _file_seconds.get(report.nodeid.split("::", 1)[0], 0.0) + report.duration)
 
 
+def _shard_weights_unsafe_reason(config, exitstatus) -> str | None:
+    """部分耗时会把重文件的权重写小，下次分片无声失衡，所以只接受“完整、无筛选、全通过”的运行。"""
+    option = config.option
+    if exitstatus != 0:
+        return f"本次运行未全部通过（exitstatus={exitstatus}），耗时不具代表性"
+    if option.keyword or option.markexpr or getattr(option, "lf", False) or getattr(option, "failedfirst", False):
+        return "使用了 -k/-m/--lf 等筛选，同一文件只跑了一部分"
+    if any("::" in str(arg) for arg in config.args):
+        return "按用例 nodeid 选择了测试，同一文件只跑了一部分"
+    if getattr(option, "maxfail", 0):
+        return "设置了 --maxfail/-x，可能提前中止"
+    return None
+
+
 def pytest_sessionfinish(session, exitstatus):
-    if not session.config.getoption("--write-shard-weights") or hasattr(session.config, "workerinput"):
+    config = session.config
+    if not config.getoption("--write-shard-weights") or hasattr(config, "workerinput"):
+        return
+    reason = _shard_weights_unsafe_reason(config, exitstatus)
+    if reason:
+        import warnings
+        warnings.warn(f"--write-shard-weights 未写盘：{reason}。请在全量、无筛选、全部通过的运行下刷新权重表。")
         return
     import json
-    # 只更新这次实际跑到的文件，其余沿用旧值：单文件/-k 筛选时写回不会丢掉其他文件的权重。
+    # 只更新这次实际跑到的文件（可用 --shard 跑整片），其余沿用旧值。
     merged = {**_load_shard_weights(), **{path: round(seconds, 2) for path, seconds in _file_seconds.items()}}
     ordered = dict(sorted(merged.items()))
     _SHARD_WEIGHTS_FILE.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
