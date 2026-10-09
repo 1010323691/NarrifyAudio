@@ -467,12 +467,20 @@ def test_foundation_global_llm_capacity_gates_fair_claims(audio_project, monkeyp
         third_id = third.id
     try:
         assert task_worker.claim_fair_task("fair-c", task_types=("voices.foundation",)) is None
+        # Releasing one host-wide slot must let the waiting row through.
+        with SessionLocal.begin() as db:
+            db.get(Task, first.task_id).status = "cancelled"
+            db.get(TaskAttempt, first.attempt_id).status = "cancelled"
+        released = task_worker.claim_fair_task("fair-c2", task_types=("voices.foundation",))
+        assert released is not None and released.task_id == third_id
     finally:
         with SessionLocal.begin() as db:
             for task_id, attempt_id in ((first.task_id, first.attempt_id), (second.task_id, second.attempt_id)):
                 db.get(Task, task_id).status = "cancelled"
                 db.get(TaskAttempt, attempt_id).status = "cancelled"
             db.get(Task, third_id).status = "cancelled"
+            for attempt in db.query(TaskAttempt).filter(TaskAttempt.task_id == third_id, TaskAttempt.status == "running"):
+                attempt.status = "cancelled"
 
 
 def test_match_claims_allow_disjoint_chapters_and_defer_overlapping_legacy_batches(audio_project, monkeypatch):

@@ -147,9 +147,9 @@ class GenerationConfig(BaseModel):
     # Host-wide concurrent LLM task requests; retain the historical setting key.
     # Each worker can prepare twice this many script.parse tasks, but all model
     # calls share the admission limit across processes and task types.
-    # The voice-foundation setting below controls parallel requests within one voice job.
     parse_worker_concurrency: int = Field(default=4, ge=1, le=32)
-    # Max character-foundation LLM jobs generated in parallel by the voices engine.
+    # Deprecated: voice-foundation (阶段 1) concurrency now follows parse_worker_concurrency.
+    # No reader remains; the key is kept only so stored configs and legacy payloads still parse.
     max_concurrency: int = 3
     # 解析后的「归属抽样」比例：全量条目中重判 speaker 的抽样率（0 = 关闭）。
     # 分两桶（不相交）：~1/3 纯随机（整书错误率"仪表"——唯一可据以判断"采样率能不能
