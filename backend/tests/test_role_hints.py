@@ -116,3 +116,11 @@ def test_cache_key_follows_vetoing_cooccurrence(tmp_path):
     assert cached_role_hints(names, {}, counts, tmp_path) == {"黛玉": "林黛玉"}
     assert cached_role_hints(names, {}, counts, tmp_path, {("林黛玉", "黛玉"): 9}) == {}
     assert cached_role_hints(names, {}, counts, tmp_path, {("林黛玉", "黛玉"): 1}) == {"黛玉": "林黛玉"}
+
+
+def test_relatives_sharing_a_surname_or_differing_only_by_title_do_not_match():
+    assert _hints(["Mary Smith", "John Smith"]) == {}
+    assert _hints(["Mr. Smith", "Mrs. Smith"]) == {}
+    assert _hints(["王总", "王夫人"]) == {}
+    assert _hints(["John Smith", "John Q Smith"]) == {"John Q Smith": "John Smith"}
+    assert _hints(["Mr. Smith", "Smith"]) == {"Smith": "Mr. Smith"}

@@ -46,6 +46,9 @@ _GENERIC = frozenset("小大老阿先生小姐女士公子爷叔伯哥姐弟妹"
 COOCCUR_VETO = 2  # one scene handoff proves nothing; repeated turn-taking means a conversation
 COOCCUR_VETO_STRONG = 4  # near-identical names also alternate when the parser labels one person inconsistently
 _NARRATOR = {"narrator", "旁白"}
+# Latin honorifics: stripped from tokens, they imply a gender ("Mr. Smith" vs "Mrs. Smith" are spouses).
+_HONORIFICS = {"mr": "male", "sir": "male", "lord": "male", "mrs": "female", "ms": "female",
+               "miss": "female", "lady": "female", "madam": "female", "dr": "", "prof": ""}
 _KINSHIP = ("父亲", "母亲", "爸爸", "妈妈", "父", "母", "爹", "娘", "儿子", "女儿", "妻子", "丈夫", "哥哥",
             "姐姐", "弟弟", "妹妹", "兄", "妻", "夫", "爷爷", "奶奶", "祖父", "祖母", "朋友", "同学",
             "助手", "秘书", "管家", "仆人", "侍女", "丫鬟", "随从", "手下", "部下", "学生", "老师")
@@ -60,13 +63,14 @@ def veto_pairs(cooccur: dict | None, known) -> list[list]:
 
 
 def _info(name: str) -> tuple:
-    """Per-name facts, computed once: (normalized, core, implied gender, latin tokens, index marker)."""
+    """Per-name facts, computed once: (normalized, core, implied gender, latin tokens, index marker, decorated)."""
     text = _name(name)
     implied = ""
     core = text
+    decorated = False
     for suffix in _SUFFIX_ORDER:
         if core.endswith(suffix) and len(core) > len(suffix):
-            core, implied = core[:-len(suffix)], _SUFFIXES[suffix]
+            core, implied, decorated = core[:-len(suffix)], _SUFFIXES[suffix], True
             break
     if len(core) > 2 and core[0] in _PREFIXES:
         core = core[1:]
@@ -77,7 +81,10 @@ def _info(name: str) -> tuple:
     tokens = []
     if folded and all(c.isascii() and (c.isalpha() or c.isspace() or c in ".-'") for c in folded):
         tokens = [t for t in (re.sub(r"[^a-z]", "", w) for w in folded.split()) if t]
-    return text, core, implied, tokens, marker.group().strip() if marker else ""
+        while len(tokens) > 1 and tokens[0] in _HONORIFICS:
+            implied, decorated = implied or _HONORIFICS[tokens[0]], True
+            tokens = tokens[1:]
+    return text, core, implied, tokens, marker.group().strip() if marker else "", decorated
 
 
 def _is_relational(name: str) -> bool:
@@ -100,8 +107,8 @@ def _longest_common(a: str, b: str) -> int:
 
 def _name_match(left_info: tuple, right_info: tuple, gender: str, age, other_gender: str, other_age) -> tuple | None:
     """Rank how strongly two names suggest one person: (tier, shared length, demographic) or None."""
-    left, left_core, left_implied, left_tokens, left_marker = left_info
-    right, right_core, right_implied, right_tokens, right_marker = right_info
+    left, left_core, left_implied, left_tokens, left_marker, left_decorated = left_info
+    right, right_core, right_implied, right_tokens, right_marker, right_decorated = right_info
     if not left or not right:
         return None
     if left == right:
@@ -116,6 +123,8 @@ def _name_match(left_info: tuple, right_info: tuple, gender: str, age, other_gen
     if left_tokens and right_tokens:
         if set(left_tokens) == set(right_tokens):
             return 4, len(left_core), 0
+        if len(left_tokens) > 1 and len(right_tokens) > 1 and left_tokens[0] != right_tokens[0]:
+            return None  # different given names under one surname: relatives, not one person
         common = max((len(t) for t in set(left_tokens) & set(right_tokens)), default=0)
         if common >= 3:
             return 3, common, 0
@@ -127,6 +136,8 @@ def _name_match(left_info: tuple, right_info: tuple, gender: str, age, other_gen
                 return 3, len(short_token), 0
         return None
     if left_core == right_core:
+        if len(left_core) == 1 and left_decorated and right_decorated:
+            return None  # "王总" vs "王夫人": a bare surname with two different titles
         return 4, len(left_core), demographic
     short, long_ = sorted((left_core, right_core), key=len)
     if len(short) >= 2 and short in long_:
