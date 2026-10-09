@@ -158,7 +158,9 @@ def pytest_sessionfinish(session, exitstatus):
     if not session.config.getoption("--write-shard-weights") or hasattr(session.config, "workerinput"):
         return
     import json
-    ordered = {path: round(seconds, 2) for path, seconds in sorted(_file_seconds.items())}
+    # 只更新这次实际跑到的文件，其余沿用旧值：单文件/-k 筛选时写回不会丢掉其他文件的权重。
+    merged = {**_load_shard_weights(), **{path: round(seconds, 2) for path, seconds in _file_seconds.items()}}
+    ordered = dict(sorted(merged.items()))
     _SHARD_WEIGHTS_FILE.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
