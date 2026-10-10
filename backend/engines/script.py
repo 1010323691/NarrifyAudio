@@ -38,6 +38,7 @@ from .llm_transport import (
     cache_kwargs,
 )
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
+from .script_unit_prompts import DEFAULT_UNIT_SYSTEM_PROMPT, DEFAULT_UNIT_USER_PROMPT
 from .text import ends_sentence, is_chapter_title
 
 log = logging.getLogger("audiobook.script")
@@ -910,6 +911,164 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
     return entries
 
 
+# ---------------------------------------------------------------------------
+# Numbered-unit protocol (``generation.parse_protocol == "units"``)
+#
+# Code cuts the chunk into numbered units, the model answers with labels only, code stitches
+# the same ``{speaker, text, instruct}`` entries back (see :mod:`.script_units`). A chunk
+# whose labels stay unusable falls back to the legacy JSON protocol, so this path can never
+# make a chunk worse than before.
+# ---------------------------------------------------------------------------
+
+def _unit_context(chunk_num: int, total_chunks: int, previous_entries) -> str:
+    if chunk_num == 1:
+        parts = ["（全文开头）"]
+    elif chunk_num == total_chunks:
+        parts = ["（全文结尾）"]
+    else:
+        parts = [f"（第 {chunk_num} 段，共 {total_chunks} 段）"]
+    if previous_entries:
+        seen = sorted({
+            e.get("speaker", "") for e in previous_entries
+            if e.get("speaker", "") and e.get("speaker", "") != "NARRATOR"
+        })
+        if seen:
+            parts.append("本书已出现的角色：" + "、".join(seen))
+        parts.append("上一段结尾（已处理，仅供参考）：")
+        for e in previous_entries[-3:]:
+            text = (e.get("text") or "").replace("\n", " ")
+            parts.append(f"{e.get('speaker', '')}：{text[:100]}")
+    return "\n".join(parts)
+
+
+def _unit_plan_problem(plan, likely_dialogue: list, finish_reason=None) -> str | None:
+    """Why a parsed label reply must not be trusted, or ``None`` when it is usable.
+
+    The ``END`` line is the truncation sentinel, but models often just stop after the last
+    label: a natural stop (``finish_reason == "stop"``) without ``END`` is accepted unless
+    the labels end long before obvious dialogue (an early stop); a provider that reports no
+    finish reason (``None``) gets the same treatment; any other finish reason (``length``…)
+    without ``END`` is treated as a cut-off reply.
+    """
+    if not plan.ended:
+        if finish_reason not in ("stop", None):  # None = provider does not report it
+            return f"缺少 END 结束行且并非正常停笔（finish_reason={finish_reason}）"
+        last = max(plan.labels, default=0)
+        missed = [n for n in likely_dialogue if n > last]
+        if len(missed) >= 3:
+            return f"标签止于第 {last} 号，其后仍有 {len(missed)} 处整行引号台词（疑似提前停笔）"
+    if plan.bad_lines * 5 > plan.total_lines:  # more than 20% unreadable lines
+        return f"无法解析的行过多（{plan.bad_lines}/{plan.total_lines}）"
+    if not plan.labels and len(likely_dialogue) >= 3:
+        return f"整行引号台词（{len(likely_dialogue)} 处）一个都没有标注"
+    return None
+
+
+def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks, *,
+                        previous_entries, system_prompt, user_prompt_template,
+                        generation: GenerationConfig, stats: dict, fallback) -> list:
+    """Numbered-unit counterpart of :func:`process_chunk`: segment → label → assemble.
+
+    Up to three model calls per chunk (``finish_reason=length`` doubles ``max_tokens``
+    once, mirroring the legacy budget recovery); an unusable reply (see
+    :func:`_unit_plan_problem`) or a failed stitching self-check retries, and when every
+    attempt fails the chunk is parsed by ``fallback()`` (the legacy JSON protocol).
+    ``stats`` accumulates ``units`` / ``labels`` / ``edit_applied`` / ``edit_rejected`` /
+    ``fallback_chunks`` for the task result.
+    """
+    from . import script_units as su
+
+    units = su.segment_chunk(chunk, generation.unit_max_chars)
+    n_units = sum(1 for u in units if u.n)
+    likely = su.likely_dialogue_numbers(units)
+    narrator_instruct = (generation.narrator_instruct or "").strip() or "平稳中性的叙述语气。"
+    soft_max = min(150, max(10, int(generation.max_paragraph_chars or 200)))
+    user_prompt = (user_prompt_template
+                   .replace("{context}", _unit_context(chunk_num, total_chunks, previous_entries))
+                   .replace("{units}", su.render_units(units)))
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    max_tokens = generation.max_tokens
+    budget_doubled = False
+    for attempt in range(3):
+        handle.check()
+        mt = max_tokens * 2 if budget_doubled else max_tokens
+        kwargs = dict(
+            temperature=generation.temperature, top_p=generation.top_p,
+            presence_penalty=generation.presence_penalty, max_tokens=mt,
+            top_k=generation.top_k, min_p=generation.min_p,
+            banned_tokens=generation.banned_tokens, **cache_kwargs(llm),
+        )
+        try:
+            if llm.stream:
+                text, finish_reason, usage = request_chat_completion_stream(
+                    llm.base_url, llm.api_key, model_name, messages, handle=handle, **kwargs)
+            else:
+                text, finish_reason, usage = _llm_chat_completion(
+                    llm.base_url, llm.api_key, model_name, messages, **kwargs)
+        except TaskCancelled:
+            raise
+        except LLMUnavailableError:
+            raise
+        except LLMHTTPError:
+            if not budget_doubled:
+                raise
+            handle.log(f"chunk {chunk_num}/{total_chunks}: 翻倍 max_tokens（{mt}）被上游拒绝"
+                       f" → 回退原预算重试", "WARNING")
+            budget_doubled = False
+            continue
+        except Exception as e:  # noqa: BLE001 — a failed call retries, then falls back
+            handle.log(f"调用 LLM API 出错：{e}", "ERROR")
+            continue
+        pt = usage.get("prompt_tokens", "?") if usage else "?"
+        ct = usage.get("completion_tokens", "?") if usage else "?"
+        handle.log(f"chunk {chunk_num}/{total_chunks}: finish_reason={finish_reason} | "
+                   f"tokens prompt={pt} completion={ct}（单元 {n_units}）")
+        plan = su.parse_unit_reply(text, n_units)
+        problem = _unit_plan_problem(plan, likely, finish_reason)
+        if problem is None:
+            result = su.assemble(
+                units, plan, narrator_instruct, soft_max,
+                edit_enabled=generation.edit_enabled,
+                edit_max_delete=generation.edit_max_delete_chars,
+                delete_max_chars=generation.delete_max_chars,
+            )
+            if not result.ok:
+                problem = "拼合自检未通过（文字有丢失或多出）"
+            elif not result.entries:
+                problem = "拼合结果为空"
+        if problem is None:
+            from ..platform.quota import consume_llm_output
+            # Bill the assembled script, not the label reply: quota is charged by output
+            # characters, and the labels are ~5× shorter than the JSON the legacy protocol
+            # returned for the same text — billing them would silently cut the cost of a book.
+            consume_llm_output(json.dumps(result.entries, ensure_ascii=False), "script.parse")
+            stats["units"] += n_units
+            stats["labels"] += len(plan.labels)
+            stats["edit_applied"] += result.edit_applied
+            stats["edit_rejected"] += result.edit_rejected
+            stats["delete_rejected"] += result.delete_rejected
+            if result.delete_rejected:
+                handle.log(f"chunk {chunk_num}: {result.delete_rejected} 处 X 删除对象过长且无网址特征，已忽略并保留原文", "WARNING")
+            if result.edit_rejected:
+                handle.log(f"chunk {chunk_num}: {result.edit_rejected} 处 edit 不合规，已作废并保留原文", "WARNING")
+                for orig, new in result.edit_rejections[:3]:
+                    handle.log(f"  edit 被拒：原「{orig[:60]}」→ 模型给出「{new[:60]}」", "WARNING")
+            if attempt > 0:
+                handle.log(f"  Succeeded on retry {attempt + 1}")
+            return result.entries
+        handle.log(f"chunk {chunk_num}/{total_chunks}: 单元标签无效（{problem}）", "WARNING")
+        handle.log(f"Response preview: {text[:200]!r} … {text[-100:]!r}", "WARNING")
+        if finish_reason == "length" and not budget_doubled:
+            budget_doubled = True
+            handle.log(f"  响应被预算截断 → 重试时翻倍 max_tokens（{max_tokens} → {max_tokens * 2}）", "WARNING")
+    handle.log(f"chunk {chunk_num}/{total_chunks}: 单元协议未能得到可用标签 → 回退旧 JSON 协议解析本段", "WARNING")
+    stats["fallback_chunks"] += 1
+    return fallback()
+
+
 def merge_adjacent_same_speaker(entries, title_test, max_chars=100, short_cap=10):
     """机械合并**连续同 speaker** 条目（解析后的确定性后处理，不经 LLM；NARRATOR 与角色同规则）。
 
@@ -1526,7 +1685,7 @@ def _llm_call(llm: LLMConfig, generation: GenerationConfig, messages, handle=Non
 
 
 def _batch_user_prompt(template: str, context: str, size: int, n: int,
-                       roster: list[str] | None = None) -> str:
+                       roster: list[str] | None = None, windows: int = 1) -> str:
     """Fill the user template's ``{context}`` and append the roster + context-scope notes.
 
     ``replace`` (not ``format``) keeps a user-edited template containing other braces from
@@ -1539,10 +1698,17 @@ def _batch_user_prompt(template: str, context: str, size: int, n: int,
     extra = []
     if roster:
         extra.append("【本书角色】" + "、".join(roster))
-    extra.append(
-        f"【上下文范围】上方窗口含 {size} 个 target=true 的目标条目（请逐一给出 speaker），"
-        f"目标块前后各有 {n} 条未标记 target 的上下文条目，仅供理解、不得改动。"
-    )
+    if windows > 1:
+        extra.append(
+            f"【上下文范围】上方共 {windows} 个互不连续的窗口（index 是全书绝对下标），合计含 {size} 个 "
+            f"target=true 的目标条目（请逐一给出 speaker）；每个目标块前后各有 {n} 条未标记 target 的"
+            f"上下文条目，仅供理解、不得改动。各窗口独立判断，窗口之间没有连续关系。"
+        )
+    else:
+        extra.append(
+            f"【上下文范围】上方窗口含 {size} 个 target=true 的目标条目（请逐一给出 speaker），"
+            f"目标块前后各有 {n} 条未标记 target 的上下文条目，仅供理解、不得改动。"
+        )
     return body + "\n\n" + "\n".join(extra)
 
 
@@ -1638,6 +1804,69 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
     return parts_by_sig[winner]
 
 
+def revalidate_entries_packed(handle, llm, generation, sys_prompt, usr_template, items,
+                              roster, *, stage: str, header: str) -> list | None:
+    """One parse-LLM call that re-derives several flagged entries at once (``single_call``
+    semantics: a reply that does not pass the fidelity gate changes nothing).
+
+    ``items`` = ``[(entry, context_block), …]``. The entries' texts go into ``{chunk}`` in
+    order, separated by blank lines; ``header`` + each entry's context block go into
+    ``{context}``. The reply's entries are partitioned back onto the source entries by
+    cumulative word-character skeleton length — every source entry must end exactly where an
+    output entry ends — and each slice is then gated by :func:`_reparse_vote` against its own
+    entry, so one bad entry never blocks the others. Returns a list parallel to ``items``
+    (re-derived parts or ``None``), or ``None`` when the call failed or the reply cannot be
+    partitioned (the caller then re-asks entry by entry).
+    """
+    k = len(items)
+    context = header + "\n\n" + "\n\n".join(
+        f"【条目 {j}/{k}】\n{block}" for j, (_e, block) in enumerate(items, 1))
+    chunk = "\n\n".join((e.get("text") or "") for e, _b in items)
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": usr_template.format(context=context, chunk=chunk)},
+    ]
+    handle.check()
+    try:
+        reply = _llm_call(llm, generation, messages, handle)
+    except TaskCancelled:
+        raise
+    except LLMUnavailableError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a failed call re-asks entry by entry
+        handle.log(f"  {stage}打包调用失败，改为逐条重切：{e}", "WARNING")
+        return None
+    parts = _parse_entries_reply(reply)
+    if not parts or not all(isinstance(p, dict) and isinstance(p.get("text"), str) for p in parts):
+        handle.log(f"  {stage}打包响应无法解析为条目数组，改为逐条重切", "WARNING")
+        return None
+    need = [len(_skeleton(e.get("text") or "")) for e, _b in items]
+    groups: list = []
+    cur: list = []
+    acc = 0
+    for part in parts:
+        cur.append(part)
+        acc += len(_skeleton(part["text"]))
+        if acc == need[len(groups)]:
+            groups.append(cur)
+            cur, acc = [], 0
+            if len(groups) == k:
+                break
+        elif acc > need[len(groups)]:
+            break
+    if len(groups) != k or cur:
+        handle.log(f"  {stage}打包响应的条目边界与原文对不上，改为逐条重切", "WARNING")
+        return None
+    results = [
+        group if _reparse_vote(group, entry, roster) is not None else None
+        for group, (entry, _b) in zip(groups, items)
+    ]
+    if any(r is not None for r in results):
+        from ..platform.quota import consume_llm_output
+        consume_llm_output(reply, stage)
+    return results
+
+
 def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, entries,
                              context_window=4, *, budget_deferred=None) -> tuple:
     """Post-parse sentence-split validation (runs in ``generate_file`` BEFORE the
@@ -1728,13 +1957,15 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
     return (updated if updated is not None else entries), len(flagged), fixed
 
 
-INSTRUCT_MAX_WORDS = 35
-# 中文 instruct 的词数折算：每 2 个汉字计 1 词（35 词 ≈ 70 字；解析提示词要求 ≤60 字，留余量）。
-INSTRUCT_CJK_CHARS_PER_WORD = 2
+# instruct 长度上限（字）：与解析提示词「绝不超过 60 字」同口径，管理员可用
+# ``generation.instruct_max_chars`` 调整。
+INSTRUCT_MAX_CHARS = 60
+# 兼容旧的英文 instruct：不含汉字时按英文词数折算——35 个词 ≙ INSTRUCT_MAX_CHARS 字。
+INSTRUCT_LEGACY_MAX_WORDS = 35
 _INSTRUCT_CJK_RE = re.compile("[\\u3400-\\u9fff\\uf900-\\ufaff]")
 
 
-def _parse_instruct_batch(reply: str, targets: list[int], max_words: int) -> dict[int, str]:
+def _parse_instruct_batch(reply: str, targets: list[int], max_chars: int) -> dict[int, str]:
     """Parse a batch instruct response into validated ``index -> instruct`` values."""
     raw = clean_json_string(reply or "")
     if not raw:
@@ -1773,12 +2004,12 @@ def _parse_instruct_batch(reply: str, targets: list[int], max_words: int) -> dic
         if not isinstance(value, str):
             continue
         value = value.strip()
-        if idx not in conflicts and value and instruct_word_count(value) <= max_words:
+        if idx not in conflicts and value and instruct_length(value, max_chars) <= max_chars:
             result[idx] = value
     return result
 
 
-def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: int) -> str:
+def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_chars: int) -> str:
     """Build one compact prompt for every flagged entry in the whole book."""
     target_set = set(targets)
     context_indices = set()
@@ -1800,7 +2031,6 @@ def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: 
             row["target"] = True
         window.append(row)
     target_rows = [item for item in window if item.get("target")]
-    max_chars = max_words * INSTRUCT_CJK_CHARS_PER_WORD
     return (
         "你在为一整本有声书修复 TTS 语音指导（instruct）。为每个目标条目返回一个 JSON 对象："
         "{\"index\": 绝对下标, \"instruct\": 简洁的中文语音指导}，全部放在一个 JSON 数组里。"
@@ -1829,7 +2059,7 @@ def _narration_boundary(entry: dict) -> bool:
     return is_chapter_title(text) or bool(_SCENE_MARKER_RE.fullmatch(text))
 
 
-def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded=True):
+def _narrator_instruct_candidates(entries, index, flagged, max_chars, *, bounded=True):
     """The old contiguous run also supplies a ceiling for LLM repair eligibility."""
     if str(entries[index].get("speaker") or "").strip().upper() != "NARRATOR":
         return []
@@ -1851,7 +2081,8 @@ def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded
         value = entries[candidate].get("instruct")
         if not bounded:
             value = str(value or "").strip()
-        limit_ok = instruct_word_count(value) <= max_words if bounded else instruct_word_count(value) < max_words
+        limit_ok = (instruct_length(value, max_chars) <= max_chars if bounded
+                    else instruct_length(value, max_chars) < max_chars)
         if isinstance(value, str) and value.strip() and limit_ok:
             candidates.append((abs(candidate - index), candidate, value.strip()))
     if bounded and len({" ".join(value.split()).casefold() for _, _, value in candidates}) > 1:
@@ -1859,7 +2090,7 @@ def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded
     return candidates
 
 
-def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: int) -> tuple:
+def _inherit_narrator_instructs(entries: list, flagged: list[int], max_chars: int) -> tuple:
     """Repair flagged narrator entries from a nearby valid narrator direction.
 
     Stay within a narrator run, stop at headings/time markers and require
@@ -1869,7 +2100,7 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: in
     flagged_set = set(flagged)
     inherited = {}
     for index in flagged:
-        candidates = _narrator_instruct_candidates(entries, index, flagged_set, max_words)
+        candidates = _narrator_instruct_candidates(entries, index, flagged_set, max_chars)
         if not candidates:
             continue
         _, _, value = min(candidates, key=lambda item: (item[0], item[1]))
@@ -1880,26 +2111,26 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: in
 
 
 def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_template, entries,
-                                 context_window=4, max_words=INSTRUCT_MAX_WORDS,
+                                 context_window=4, max_chars=INSTRUCT_MAX_CHARS,
                                  *, budget_deferred=None) -> tuple:
     """Mechanically inherit narration directions, then repair remaining targets once."""
-    max_words = max(1, int(max_words))
-    flagged = instruct_entry_indices(entries, max_words)
+    max_chars = max(1, int(max_chars))
+    flagged = instruct_entry_indices(entries, max_chars)
     if not flagged:
         return entries, 0, 0
 
-    updated, inherited = _inherit_narrator_instructs(entries, flagged, max_words)
+    updated, inherited = _inherit_narrator_instructs(entries, flagged, max_chars)
     for index in flagged:
         if not isinstance(entries[index].get("instruct"), str) and index not in inherited:
             updated[index] = {**updated[index], "instruct": ""}
     legacy_flagged = {index for index, entry in enumerate(entries)
                       if not str(entry.get("instruct") or "").strip()
-                      or instruct_word_count(entry.get("instruct")) >= max_words}
+                      or instruct_length(entry.get("instruct"), max_chars) >= max_chars}
     # 收紧继承边界不能扩充旧版原本需要 LLM 的目标集合。
     targets = [index for index in flagged if index not in inherited and index in legacy_flagged
                and (budget_deferred is None or id(entries[index]) not in budget_deferred)
                and not _narrator_instruct_candidates(
-                   entries, index, legacy_flagged, max_words, bounded=False)]
+                   entries, index, legacy_flagged, max_chars, bounded=False)]
     deferred = [index for index in flagged if index not in inherited and index not in targets]
     if deferred:
         handle.log(f"语音指导待核对：{len(deferred)} 条无法安全继承，未追加 LLM 请求", "WARNING")
@@ -1914,7 +2145,7 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
                 "只修复目标条目的 instruct 字段，用中文书写。只输出 JSON。"
                 "每个目标下标返回一个对象。绝不改动 index、speaker 或 text。"
             )},
-            {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_words)},
+            {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_chars)},
         ]
         try:
             reply = _llm_call(llm, generation, messages, handle)
@@ -1926,7 +2157,7 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
             handle.log(f"instruct batch call failed: {e}", "WARNING")
             handle.log(f"语音指导待核对：{len(targets)} 条未修复，不追加请求", "WARNING")
             return updated, len(flagged), len(inherited)
-        replacement = _parse_instruct_batch(reply, targets, max_words)
+        replacement = _parse_instruct_batch(reply, targets, max_chars)
         for index, value in replacement.items():
             updated[index] = dict(updated[index])
             updated[index]["instruct"] = value
@@ -1945,32 +2176,29 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
     return updated, len(flagged), fixed
 
 
-def instruct_word_count(value) -> int:
-    """Count the words of an ``instruct`` value.
+def instruct_length(value, max_chars: int = INSTRUCT_MAX_CHARS) -> float:
+    """The length of an ``instruct`` value in 字, comparable with ``max_chars``.
 
-    Without CJK characters: whitespace-delimited words (the English口径). With CJK
-    characters: every ``INSTRUCT_CJK_CHARS_PER_WORD`` 汉字 count as one word (rounded
-    up), plus any whitespace-delimited non-CJK token carrying a letter/digit — so
-    Chinese punctuation never inflates the count and one ``max_words`` limit covers
-    both languages.
+    Text that contains Chinese is measured in characters: every CJK / letter / digit
+    counts one, punctuation and whitespace do not (so ``平稳中性的叙述语气。`` is 9). A value
+    without any Chinese (a legacy English direction) is measured in words and scaled so that
+    ``INSTRUCT_LEGACY_MAX_WORDS`` words equal ``max_chars``.
     """
     s = str(value or "").strip()
-    rest, cjk = _INSTRUCT_CJK_RE.subn(" ", s)
-    if not cjk:
-        return len(s.split())
-    latin = sum(1 for token in rest.split() if any(ch.isalnum() for ch in token))
-    return latin + -(-cjk // INSTRUCT_CJK_CHARS_PER_WORD)
+    if _INSTRUCT_CJK_RE.search(s):
+        return sum(1 for ch in s if ch.isalnum())
+    return len(s.split()) * max(1, int(max_chars)) / INSTRUCT_LEGACY_MAX_WORDS
 
 
-def instruct_entry_indices(entries: list, max_words: int = INSTRUCT_MAX_WORDS) -> list[int]:
-    """Return entries whose voice direction is missing or exceeds ``max_words``."""
-    limit = max(1, int(max_words))
+def instruct_entry_indices(entries: list, max_chars: int = INSTRUCT_MAX_CHARS) -> list[int]:
+    """Return entries whose voice direction is missing or longer than ``max_chars`` 字."""
+    limit = max(1, int(max_chars))
     return [
         i for i, e in enumerate(entries)
         if isinstance(e, dict)
         and (not isinstance(e.get("instruct"), str)
              or not e.get("instruct").strip()
-             or instruct_word_count(e.get("instruct")) > limit)
+             or instruct_length(e.get("instruct"), limit) > limit)
     ]
 
 
@@ -2013,19 +2241,27 @@ validate_instructs = _validate_instructs_one_call
 
 
 def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, entries,
-                           max_chars, context_window=4, *, budget_deferred=None) -> tuple:
+                           max_chars, context_window=4, *, budget_deferred=None,
+                           narrator_instruct=None) -> tuple:
     """超长条目的 LLM 重切（解析内，断句校验之后、归属抽样之前——重切可能
     产生新归属的台词条目，需要被抽样审计；受 ``generation.check_long_paragraphs``
     门控，由 ``generate_file`` 判断）。
 
     每条超过 ``max_chars`` 字的条目重跑解析 LLM（±n 上下文窗口，与断句失败校验
-    同一形态），经 :func:`revalidate_entry`（stage = 超长段落重切，
-    ``single_call=True``——**每条只重跑一次 LLM**）：过忠实性门即整体替换条目
+    同一形态），**每条只重跑一次**：过忠实性门（:func:`_reparse_vote`）即整体替换条目
     ——单条胜出 = 干净重写（条目可能仍超长，由机械分段兜底），多条胜出 = 语义重切；
     未过门保留原条目（**从不猜**），直接交由超长段落机械分段切割（结果没变
-    就不再消耗更多 LLM 调用）。全部窗口 + 花名册
-    按**原始**条目列表预建，胜出者按**降序下标**应用（重切 1→N 不移动更小下标
-    条目的窗口）。取消立即上抛、不落盘任何文件（基文件在全部阶段返回后才写）。
+    就不再消耗更多 LLM 调用）。重切的目的是拆开被揉在旁白里的角色台词。
+
+    ``generation.long_resplit_pack`` 把若干个超长条目打包进同一次调用
+    （:func:`revalidate_entries_packed`）：``0`` = 以章节（本文件）为单位一包，``N`` = 每包
+    最多 N 条，``1`` = 逐条调用（旧行为）；每包条目文字总量另受 ``max_tokens`` 的一半约束
+    （回复要整段重写成 JSON），回复对不上条目边界时该包退回逐条调用。
+    ``narrator_instruct``（单元协议传入管理员配置的固定文本）非空时，重切出的旁白条目统一
+    用它作 instruct——重切走的是 JSON 解析提示词，模型会自己写旁白 instruct，与单元协议
+    「旁白 instruct 不由模型输出」不一致。
+    全部窗口 + 花名册按**原始**条目列表预建，胜出者按**降序下标**应用（重切 1→N
+    不移动更小下标条目的窗口）。取消立即上抛、不落盘任何文件（基文件在全部阶段返回后才写）。
 
     返回 ``(entries, checked, fixed)`` —— 更新后的列表（无修改时原列表对象）、
     送 LLM 的超长条目数、被替换的条目数。
@@ -2044,19 +2280,14 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
 
     n = max(0, int(context_window))
     roster = frozenset({"NARRATOR", *build_roster(entries)})
+    roster_line = ("Characters in this book: " + ", ".join(sorted(roster - {"NARRATOR"}))
+                   if roster - {"NARRATOR"} else "")
     # All windows + context strings up front — from the pristine list.
-    contexts = {}
+    blocks = {}   # per-entry "entries before / after" lines (context only)
+    contexts = {}  # the single-entry {context}
     for i in flagged:
         window = build_batch_window(entries, i, 1, n)
-        lines = [
-            "(Re-check of one entry: the SOURCE TEXT below is a single entry's stored "
-            f"text that is LONGER than {max_chars} characters — likely a failed split "
-            "that left narration and dialogue (or several paragraphs) in one entry. "
-            "Re-derive its entries exactly as if it were source text, splitting at "
-            "every utterance / scene boundary.)",
-        ]
-        if roster:
-            lines.append("Characters in this book: " + ", ".join(sorted(roster - {"NARRATOR"})))
+        lines = []
         before = [it for it in window if it["index"] < i]
         after = [it for it in window if it["index"] > i]
         if before:
@@ -2065,28 +2296,89 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         if after:
             lines.append("Entries immediately after it (context only — never re-emit them):")
             lines.extend(json.dumps(it, ensure_ascii=False) for it in after)
-        contexts[i] = "\n".join(lines)
+        blocks[i] = "\n".join(lines)
+        head = [
+            "(Re-check of one entry: the SOURCE TEXT below is a single entry's stored "
+            f"text that is LONGER than {max_chars} characters — likely a failed split "
+            "that left narration and dialogue (or several paragraphs) in one entry. "
+            "Re-derive its entries exactly as if it were source text, splitting at "
+            "every utterance / scene boundary.)",
+        ]
+        if roster_line:
+            head.append(roster_line)
+        contexts[i] = "\n".join(head + ([blocks[i]] if blocks[i] else []))
+
+    def pack_header(count: int) -> str:
+        head = (
+            f"(Re-check of {count} separate entries: the SOURCE TEXT below holds the stored text of "
+            f"{count} entries, in order, separated by blank lines. Each is LONGER than {max_chars} "
+            "characters — likely a failed split that left narration and dialogue (or several "
+            "paragraphs) in one entry. Re-derive EACH entry exactly as if it were source text, "
+            "splitting at every utterance / scene boundary. Never merge or move text across two "
+            "entries: the entries you output for entry 1 must reproduce entry 1's text exactly, "
+            "then entry 2's, and so on. The per-entry context blocks are context only — never "
+            "re-emit them.)")
+        return head + ("\n" + roster_line if roster_line else "")
+
+    order = sorted(flagged, reverse=True)  # application order (see below)
+    # 0 = one pack per chapter (this file); the reply re-types every packed entry as JSON
+    # (~2 tokens per character), so a pack's entry text is capped by half of max_tokens.
+    configured = getattr(generation, "long_resplit_pack", 1)
+    pack_size = max(1, int(configured)) if configured != 0 else len(flagged)
+    pack_chars = max(200, int(getattr(generation, "max_tokens", 4096)) // 2)
+    packs: list = []
+    cur: list = []
+    cur_chars = 0
+    for i in sorted(flagged):  # reading order inside a pack: the prompt promises "in order"
+        cost = len((entries[i].get("text") or ""))
+        if cur and (len(cur) >= pack_size or cur_chars + cost > pack_chars):
+            packs.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(i)
+        cur_chars += cost
+    if cur:
+        packs.append(cur)
 
     handle.log(
-        f"超长段落检查：{len(flagged)} 条超过 {max_chars} 字条目，"
-        f"逐条带上下文窗口（±{n} 条）重跑 LLM 重切（每条仅 1 次，未过门交机械分段）…"
+        f"超长段落检查：{len(flagged)} 条超过 {max_chars} 字条目，带上下文窗口（±{n} 条）"
+        f"重跑 LLM 重切（每条仅 1 次，共 {len(packs)} 次调用，未过门交机械分段）…"
     )
     # The mechanical check stages share the [0.9, 1.0) progress band (see
     # generate_file): this stage owns [0.94, 0.96), after sentence-split validation
     # and before the speaker spot audit.
+    results: dict = {}
+    done = 0
+    for pack in packs:
+        handle.check()
+        handle.progress(0.94 + 0.02 * done / len(flagged), f"超长段落重切 {done}/{len(flagged)}")
+        for i in pack:
+            snippet = (entries[i].get("text") or "").replace("\n", " ")
+            text_len = len((entries[i].get("text") or "").strip())
+            handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
+        packed = None
+        if len(pack) > 1:
+            packed = revalidate_entries_packed(
+                handle, llm, generation, sys_prompt, usr_template,
+                [(entries[i], blocks[i]) for i in pack], roster,
+                stage="超长段落重切", header=pack_header(len(pack)))
+        if packed is not None:
+            for i, parts in zip(pack, packed):
+                results[i] = parts
+                if parts is None:
+                    handle.log(f"  条目 {i + 1} 单次重切未通过 → 条目保持原样（交由机械分段兜底）", "WARNING")
+        else:
+            for i in pack:
+                results[i] = revalidate_entry(
+                    handle, llm, generation, sys_prompt, usr_template,
+                    entries[i], contexts[i], roster, stage="超长段落重切", single_call=True)
+        done += len(pack)
+
     updated = None
     fixed = 0
     # Descending index order: applying a re-split (1 → N entries) never shifts the
     # index a LATER (lower) entry's already-built window refers to.
-    for seq, i in enumerate(sorted(flagged, reverse=True), 1):
-        handle.check()
-        handle.progress(0.94 + 0.02 * seq / len(flagged), f"超长段落重切 {seq}/{len(flagged)}")
-        snippet = (entries[i].get("text") or "").replace("\n", " ")
-        text_len = len((entries[i].get("text") or "").strip())
-        handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
-        parts = revalidate_entry(handle, llm, generation, sys_prompt, usr_template,
-                                 entries[i], contexts[i], roster, stage="超长段落重切",
-                                 single_call=True)
+    for i in order:
+        parts = results.get(i)
         if parts is None:
             continue  # 单次重切未过忠实性门 → 条目保持原样（机械分段兜底）
         if updated is None:
@@ -2095,7 +2387,9 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
             {
                 "speaker": (p.get("speaker") or "").strip(),
                 "text": p.get("text") or "",
-                "instruct": p.get("instruct") or "",
+                "instruct": (narrator_instruct
+                             if narrator_instruct and (p.get("speaker") or "").strip() == "NARRATOR"
+                             else p.get("instruct") or ""),
             }
             for p in parts
         ]
@@ -2365,7 +2659,8 @@ def select_boundary_targets(chunk_ends: list, n: int, total: int) -> list:
     return sorted(targets)
 
 
-def select_boundary_risk_targets(entries: list, chunk_ends: list, n: int) -> list:
+def select_boundary_risk_targets(entries: list, chunk_ends: list, n: int,
+                                 target_window: int = 0) -> list:
     """Return boundary windows only when local evidence makes them risky.
 
     Clean same-speaker boundaries with complete sentences do not spend an LLM
@@ -2394,7 +2689,16 @@ def select_boundary_risk_targets(entries: list, chunk_ends: list, n: int) -> lis
         if _quote_parity("".join((e.get("text") or "") for e in local))[-1] != 0:
             risky = True
         if risky:
-            targets.update(range(lo, hi))
+            if 0 < target_window < n:
+                # Narrowed: only ±target_window around the boundary, and of those only
+                # dialogue entries plus the two entries touching the boundary. The wider
+                # ±n window stays as context (and as the risk-detection range above).
+                targets.update(
+                    j for j in range(max(0, b - target_window), min(total, b + target_window))
+                    if j in (b - 1, b) or (entries[j].get("speaker") or "") != "NARRATOR"
+                )
+            else:
+                targets.update(range(lo, hi))
     return sorted(targets)
 
 
@@ -2421,7 +2725,8 @@ def boundary_check_speakers(handle, llm: LLMConfig, generation: GenerationConfig
     n = max(0, int(generation.check_context_window or 0))
     batch = max(1, int(generation.check_batch_size or 0))
     candidates = select_boundary_targets(chunk_ends, n, len(entries))
-    targets = select_boundary_risk_targets(entries, chunk_ends, n)
+    targets = select_boundary_risk_targets(
+        entries, chunk_ends, n, int(getattr(generation, "boundary_target_window", 0) or 0))
     if not targets:
         # 零命中也留一行日志：与断句校验同一理由——静默退出会被误读成阶段缺失。
         handle.log("角色匹配检查：0 条边界目标（无重判，零 LLM 调用）")
@@ -2692,6 +2997,50 @@ def _append_spot_history(handle, file_stem: str, stats: dict, path_override: Pat
         handle.log(f"归属抽样历史写入失败（不影响解析结果）：{e}", "WARNING")
 
 
+def merge_overlapping_groups(groups: list, n: int, batch: int) -> list:
+    """Merge neighbouring target groups whose ±``n`` context windows touch or overlap
+    (gap ≤ 2n) while the merged group stays within ``batch`` targets: such windows share
+    context entries, so one continuous window is cheaper and unambiguous than two
+    overlapping ones. Groups are ascending and disjoint, so merging only joins neighbours."""
+    merged: list = []
+    for grp in groups:
+        if merged and grp[0] - merged[-1][-1] <= 2 * max(n, 1) and len(merged[-1]) + len(grp) <= batch:
+            merged[-1] = merged[-1] + grp
+        else:
+            merged.append(list(grp))
+    return merged
+
+
+def plan_rejudge_packs(group_targets: list[int], group_chars: list[int], *,
+                       max_targets: int, max_chars: int, max_windows: int,
+                       group_spans: list | None = None, min_gap: int = 0) -> list[list[int]]:
+    """Greedily pack consecutive groups (by position) into LLM calls. A call closes when
+    adding the next group would exceed the target / character / window budget, or when the
+    next group's window would overlap the previous one's (``group_spans`` = ``(first, last)``
+    target index per group; windows overlap when the gap is ``<= min_gap`` = 2n — the same
+    entry must not be context in one window and a target in another of one prompt). Every
+    call holds at least one group. ``max_targets <= 0`` disables packing (one group per
+    call — the legacy behaviour)."""
+    if max_targets <= 0:
+        return [[i] for i in range(len(group_targets))]
+    packs: list[list[int]] = []
+    cur: list[int] = []
+    targets = chars = 0
+    for i, (t, c) in enumerate(zip(group_targets, group_chars)):
+        overlaps = bool(cur and group_spans
+                        and group_spans[i][0] - group_spans[cur[-1]][1] <= min_gap)
+        if cur and (overlaps or targets + t > max_targets or chars + c > max_chars
+                    or len(cur) >= max_windows):
+            packs.append(cur)
+            cur, targets, chars = [], 0, 0
+        cur.append(i)
+        targets += t
+        chars += c
+    if cur:
+        packs.append(cur)
+    return packs
+
+
 def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                         sys_prompt: str, usr_template: str,
                         entries: list, groups: list, n: int, roster, *,
@@ -2727,21 +3076,50 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
     fixed = 0
     unwrapped = 0
 
-    for seq, grp in enumerate(groups, 1):
-        handle.check()  # cooperative cancel / pause before the group
-        handle.progress(progress_base + progress_span * seq / len(groups),
-                        f"{stage} {seq}/{len(groups)} 组")
+    # 多窗口打包：目标稀疏时每个窗口单独一次调用太碎，把互不相邻的窗口装进同一次调用
+    # （窗口内容与单窗口时完全相同，只是共用一个提示词；窗口之间用「【窗口 k/m】」分隔，
+    # index 沿用全书绝对下标，所以回复解析不变）。check_pack_targets=0 = 不打包（旧行为）。
+    pack_targets = int(getattr(generation, "check_pack_targets", 0) or 0)
+    batch_cap = max(1, int(generation.check_batch_size or 0))
+    if pack_targets > 0:
+        groups = merge_overlapping_groups(groups, n, batch_cap)
+    window_json: list[str] = []
+    for grp in groups:
         grp_set = set(grp)
         start, size = grp[0], grp[-1] - grp[0] + 1
         span = set(range(start, start + size))
         skip = span - grp_set  # in-span non-targets → context, never re-judged
-        context = json.dumps(build_batch_window(original, start, size, n, skip=skip),
-                             ensure_ascii=False, indent=2)
-        messages = [
+        window_json.append(json.dumps(build_batch_window(original, start, size, n, skip=skip),
+                                      ensure_ascii=False, indent=2))
+    packs = plan_rejudge_packs(
+        [len(g) for g in groups], [len(w) for w in window_json],
+        max_targets=pack_targets,
+        max_chars=int(getattr(generation, "check_pack_max_chars", 6000)),
+        max_windows=int(getattr(generation, "check_pack_max_windows", 8)),
+        group_spans=[(g[0], g[-1]) for g in groups], min_gap=2 * max(n, 1),
+    )
+
+    def pack_messages(gids: list) -> list:
+        if len(gids) == 1:
+            context = window_json[gids[0]]
+        else:
+            context = "\n\n".join(f"【窗口 {k}/{len(gids)}】\n{window_json[g]}"
+                                  for k, g in enumerate(gids, 1))
+        size = sum(len(groups[g]) for g in gids)
+        return [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": _batch_user_prompt(usr_template, context, len(grp), n, roster)},
+            {"role": "user", "content": _batch_user_prompt(usr_template, context, size, n, roster,
+                                                         windows=len(gids))},
         ]
-        handle.log(f"{stage}第 {seq}/{len(groups)} 组（{len(grp)} 条目标）…")
+
+    for seq, gids in enumerate(packs, 1):
+        handle.check()  # cooperative cancel / pause before the call
+        handle.progress(progress_base + progress_span * seq / len(packs),
+                        f"{stage} {seq}/{len(packs)} 组")
+        grp = sorted(t for g in gids for t in groups[g])
+        messages = pack_messages(gids)
+        handle.log(f"{stage}第 {seq}/{len(packs)} 组（{len(grp)} 条目标"
+                   + (f"，{len(gids)} 个窗口" if len(gids) > 1 else "") + "）…")
 
         # -- First pass: re-judge the whole group in one call -------------------
         try:
@@ -2777,8 +3155,15 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                 strict majority. Optional ``text`` keys fold into ``text_sigs`` (first
                 wins)."""
                 handle.check()
+                # Only the windows that still hold an undecided target are re-sent
+                # (windows unchanged — the same text the first pass saw).
+                pending_set = set(pending)
+                sub_gids = [g for g in gids if pending_set & set(groups[g])]
+                retry_messages = messages if len(sub_gids) == len(gids) else pack_messages(sub_gids)
+                retry_targets = sorted(t for g in sub_gids for t in groups[g])
                 try:
-                    full = parse_speaker_map_full(_llm_call(llm, generation, messages, handle), grp)
+                    full = parse_speaker_map_full(
+                        _llm_call(llm, generation, retry_messages, handle), retry_targets)
                 except TaskCancelled:
                     raise
                 except LLMUnavailableError:
@@ -3088,7 +3473,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     is unaffected.
 
     After speaker auditing and tag/punctuation cleanup, entries with an empty
-    ``instruct`` or an ``instruct`` exceeding 35 words (中文按每 2 个汉字计 1 词) are
+    ``instruct`` or an ``instruct`` longer than ``generation.instruct_max_chars`` 字（默认 60，按汉字/字母/数字计、不含标点） are
     checked. Narrator inheritance stops at headings, time markers and incompatible
     directions. Only targets within the former request eligibility are repaired
     in one index-keyed LLM request with a
@@ -3147,6 +3532,17 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         if not generation.check_chunk_alignment:
             handle.log("chunk 忠实性校验已关闭（配置）——解析阶段跳过恢复重跑（JSON 重试仍生效）")
 
+        use_units = generation.parse_protocol == "units"
+        unit_stats = {"units": 0, "labels": 0, "edit_applied": 0, "edit_rejected": 0,
+                      "delete_rejected": 0, "fallback_chunks": 0}
+        unit_sys = prompts.unit_system_prompt or DEFAULT_UNIT_SYSTEM_PROMPT
+        unit_usr = prompts.unit_user_prompt or DEFAULT_UNIT_USER_PROMPT
+        if use_units:
+            handle.log(
+                "解析协议：编号单元（程序切分 + 模型打标签 + 程序拼合；"
+                "忠实性由构造保证，chunk 忠实性校验不适用，标签无效的 chunk 回退 JSON 协议）"
+            )
+
         all_entries = []
         chunk_ends = []  # 每段结束时的累计条目数——chunk 边界簿记（角色匹配检查用）
         for i, chunk in enumerate(chunks, 1):
@@ -3157,20 +3553,32 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # task never reads as 100% before it is actually done.
             handle.progress(0.9 * (i - 1) / total, f"处理第 {i}/{total} 段")
             previous = all_entries if all_entries else None
-            entries = process_chunk(
-                handle, llm, llm.model_name, chunk, i, total,
-                previous_entries=previous,
-                system_prompt=sys_prompt,
-                user_prompt_template=usr_template,
-                max_tokens=generation.max_tokens,
-                temperature=generation.temperature,
-                top_p=generation.top_p,
-                top_k=generation.top_k,
-                min_p=generation.min_p,
-                presence_penalty=generation.presence_penalty,
-                banned_tokens=generation.banned_tokens,
-                check_alignment=generation.check_chunk_alignment,
-            )
+
+            def legacy_chunk(chunk=chunk, i=i, previous=previous):
+                return process_chunk(
+                    handle, llm, llm.model_name, chunk, i, total,
+                    previous_entries=previous,
+                    system_prompt=sys_prompt,
+                    user_prompt_template=usr_template,
+                    max_tokens=generation.max_tokens,
+                    temperature=generation.temperature,
+                    top_p=generation.top_p,
+                    top_k=generation.top_k,
+                    min_p=generation.min_p,
+                    presence_penalty=generation.presence_penalty,
+                    banned_tokens=generation.banned_tokens,
+                    check_alignment=generation.check_chunk_alignment,
+                )
+
+            if use_units:
+                entries = process_chunk_units(
+                    handle, llm, llm.model_name, chunk, i, total,
+                    previous_entries=previous, system_prompt=unit_sys,
+                    user_prompt_template=unit_usr, generation=generation,
+                    stats=unit_stats, fallback=legacy_chunk,
+                )
+            else:
+                entries = legacy_chunk()
             all_entries.extend(entries)
             chunk_ends.append(len(all_entries))
             handle.log(f"  得到 {len(entries)} 条")
@@ -3234,11 +3642,16 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         # 重跑解析 LLM（每条仅 1 次，single_call 模式——结果没变不再多跑），
         # 过忠实性门者整体替换条目，未过门保留原样交机械分段（从不猜）。
         max_para = int(generation.max_paragraph_chars or 200)
+        # LLM 重切的触发阈值可低于机械分段的硬上限：100–200 字之间的条目只给 LLM 一次机会，
+        # 失败就保持原样；只有超过 max_para 的才会被机械切开。
+        resplit_chars = min(int(generation.long_resplit_chars or max_para), max_para)
         if generation.check_long_paragraphs:
             all_entries, long_checked, long_fixed = long_paragraph_resplit(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
-                max_para, context_window=int(generation.check_context_window or 0),
+                resplit_chars, context_window=int(generation.check_context_window or 0),
                 budget_deferred=budget_deferred,
+                narrator_instruct=((generation.narrator_instruct or "").strip() or None)
+                if use_units else None,
             )
         else:
             # 开关关闭：跳过 LLM 语义重切并留一行日志；机械分段兜底（长度硬上界
@@ -3326,6 +3739,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             all_entries, instruct_checked, instruct_fixed = validate_instructs(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 context_window=int(generation.check_context_window or 0),
+                max_chars=int(generation.instruct_max_chars or INSTRUCT_MAX_CHARS),
                 budget_deferred=budget_deferred,
             )
         else:
@@ -3438,6 +3852,13 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # Original (decoded, stripped, mojibake-fixed) input length in chars — kept in
             # the result for reference.
             "input_chars": len(body),
+            # 解析协议与单元协议读数（json 协议下 unit_* 恒为 0）
+            "parse_protocol": generation.parse_protocol,
+            "unit_labels": unit_stats["labels"],
+            "unit_edit_applied": unit_stats["edit_applied"],
+            "unit_edit_rejected": unit_stats["edit_rejected"],
+            "unit_delete_rejected": unit_stats["delete_rejected"],
+            "unit_fallback_chunks": unit_stats["fallback_chunks"],
         }
     finally:
         # Exactly one release per path: success path already released before the

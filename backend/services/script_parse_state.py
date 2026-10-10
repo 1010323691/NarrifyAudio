@@ -24,6 +24,7 @@ from ..core.config import get_config
 from ..engines.book import decode_buffer
 from ..engines.script import fix_mojibake
 from ..engines.script_prompts import load_default_prompts
+from ..engines.script_unit_prompts import load_default_unit_prompts
 from ..platform.models import Project, ProjectFile, Task, TaskResult, TextFormatFlow, User, new_id, utcnow
 from ..platform.storage import (
     configured_storage_root,
@@ -544,9 +545,12 @@ def _resolved_prompts():
     the task's config snapshot must never ship an empty prompt template."""
     prompts = get_config().prompts
     system_prompt, user_prompt = load_default_prompts()
+    unit_system_prompt, unit_user_prompt = load_default_unit_prompts()
     return prompts.model_copy(update={
         "system_prompt": prompts.system_prompt or system_prompt,
         "user_prompt": prompts.user_prompt or user_prompt,
+        "unit_system_prompt": prompts.unit_system_prompt or unit_system_prompt,
+        "unit_user_prompt": prompts.unit_user_prompt or unit_user_prompt,
     })
 
 

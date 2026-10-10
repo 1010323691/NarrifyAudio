@@ -23,7 +23,7 @@ import json
 import threading
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -137,6 +137,10 @@ class PromptsConfig(BaseModel):
     # (``backend/resources/default_prompts.txt``) at read time — see ``backend/api/config.py``.
     system_prompt: str = ""
     user_prompt: str = ""
+    # Same override rule for the numbered-unit parse protocol (``generation.parse_protocol``
+    # == "units"): empty falls back to ``backend/resources/default_unit_prompts.txt``.
+    unit_system_prompt: str = ""
+    unit_user_prompt: str = ""
 
 
 class GenerationConfig(BaseModel):
@@ -184,10 +188,12 @@ class GenerationConfig(BaseModel):
     # （boundary_checked / boundary_fixed 为 0）。
     check_boundary_speakers: bool = True
     # 解析内「instruct 检查」开关（用户解析页可切换，默认开 = 现有行为不变）：空
-    # instruct 或 ≥35 词（中文每 2 字计 1 词）的条目疑似声音指导生成失败/失控 → 先机械继承旁白段
-    # 内邻近有效值，剩余 target 一批一次 LLM 请求只修 instruct 字段。关 = 跳过该
-    # 阶段并留一行日志（instruct_checked / instruct_fixed 为 0）。
+    # instruct 或超过 instruct_max_chars 字（按汉字/字母/数字计，不含标点）的条目疑似
+    # 声音指导生成失败/失控 → 先机械继承旁白段内邻近有效值，剩余 target 一批一次 LLM 请求
+    # 只修 instruct 字段。关 = 跳过该阶段并留一行日志（instruct_checked / instruct_fixed 为 0）。
     validate_instructs: bool = True
+    # instruct 长度上限（字）：与解析提示词「绝不超过 60 字」同口径；管理员可调。
+    instruct_max_chars: int = Field(default=60, ge=10, le=300)
     # 解析内「chunk 忠实性校验」开关（用户解析页可切换，默认开 = 现有行为不变）：
     # 每个 chunk 解析后整体比对源文骨架，检出大段缺失（尾部截断 / 模型自停丢段）
     # 时按诊断恢复——预算截断翻倍 max_tokens 重跑一次，模型自停对半切开各重跑一次。
@@ -199,6 +205,17 @@ class GenerationConfig(BaseModel):
     # 断句失败校验只用 context_window。设置页不露出（config/setting.json 可编辑）。
     check_batch_size: int = 20
     check_context_window: int = 4
+    # 重判批多窗口打包（角色匹配检查 / 归属抽样共用）：把互不相邻的若干个窗口装进**同一次**
+    # LLM 调用，目标稀疏时调用数可降一个数量级。check_pack_targets = 每次调用最多目标数
+    # （0 = 不打包，每组一次调用，即旧行为）；check_pack_max_chars = 每次调用窗口文字总量上限；
+    # check_pack_max_windows = 每次调用最多窗口数。设置页不露出，管理员可在工作区配置中调整。
+    check_pack_targets: int = Field(default=30, ge=0, le=200)
+    check_pack_max_chars: int = Field(default=6000, ge=500, le=40000)
+    check_pack_max_windows: int = Field(default=8, ge=1, le=40)
+    # 角色匹配检查（chunk 边界复核）的目标收窄：只复核边界两侧 ±N 条范围内的台词条目
+    # （边界相邻的两条无论角色都复核），上下文窗口仍是 check_context_window。
+    # 0 = 不收窄（边界两侧各 check_context_window 条全部复核，即旧行为）。
+    boundary_target_window: int = Field(default=2, ge=0, le=20)
 
     # 超长段落检查开关（解析内第五阶段）：只控制 LLM 语义重切——超过
     # ``max_paragraph_chars`` 字的条目 = 疑似切割失败 → 带上下文窗口重跑 LLM 语义重切
@@ -209,6 +226,17 @@ class GenerationConfig(BaseModel):
     # 硬上限（字数 = strip 后 Unicode 码点数）：任何条目（含 LLM 重切后的单条）
     # 最终不得超过此值——机械分段兜底保证。
     max_paragraph_chars: int = 200
+    # LLM 语义重切的触发字数（解析内超长段落检查 LLM 阶段）：超过此字数的条目就带上下文
+    # 重跑一次 LLM 尝试拆开藏在里面的台词；重切没过忠实性校验则**保持原样、不做机械切分**——
+    # 机械分段兜底只在条目超过 ``max_paragraph_chars`` 时才介入。取值不超过 max_paragraph_chars
+    # （实际生效值 = min(两者)）。超过阈值的条目一律送重切——目的是拆开被揉在旁白里的
+    # 角色台词，不是缩短旁白。
+    long_resplit_chars: int = Field(default=130, ge=10, le=2000)
+    # 超长条目重切的打包数：每次 LLM 调用最多带几个超长条目。0 = 以章节为单位，一个文件
+    # 的全部超长条目一次调用（默认）；1 = 逐条一次调用（旧行为）；N = 每包最多 N 条。
+    # 无论取值，每包条目文字总量还受 max_tokens 约束（回复是整段 JSON，超出会被截断），
+    # 回复对不上条目边界时该包退回逐条调用。
+    long_resplit_pack: int = Field(default=0, ge=0, le=100)
     # 纯标点条目吸收（解析内第六阶段，确定性零 LLM 成本）：整条无任何词字符的条目
     # （独立「……」/「？」等）并入相邻 NARRATOR 条目（标题守卫），无 NARRATOR 邻接则删除。
     absorb_punct_entries: bool = True
@@ -217,6 +245,22 @@ class GenerationConfig(BaseModel):
     # 标点补「。」，instruct 取词字符多者，章标题两侧不合并。≤10 强制合并可造出 >
     # max_paragraph_chars 的块，由随后的机械分段切回（200 字硬保证不变）。
     merge_same_speaker: bool = True
+
+    # 解析协议（管理员配置）："json" = 模型把整段重写成 JSON（旧协议，也是单元协议
+    # 失败时逐 chunk 的回退路径）；"units" = 程序把 chunk 切成编号单元，模型只输出
+    # 标签，程序机械拼回同样的 {speaker,text,instruct}（输出 token 约降到 1/5～1/7）。
+    parse_protocol: Literal["json", "units"] = "units"
+    # 单元协议下旁白的固定 instruct（模型不再输出旁白 instruct）。
+    narrator_instruct: str = "平稳中性的叙述语气。"
+    # 单元协议的 edit 开关与上限：edit 只允许从单元里删去一段连续的说话动词短语；
+    # 关闭后带动作的说话标签保持原样（由后续机械阶段兜底）。
+    edit_enabled: bool = True
+    edit_max_delete_chars: int = Field(default=24, ge=1, le=200)
+    # 单元协议下 X（删除）能删的单元最长词字符数：超过的单元只有含网址 / 水印特征才允许
+    # 删除，其余（译者注、正文）一律保留，防止模型把正文误删。
+    delete_max_chars: int = Field(default=30, ge=1, le=400)
+    # 单元协议切分单元的目标上限（字）：超过则在句界 / 子句界再切。
+    unit_max_chars: int = Field(default=80, ge=20, le=400)
 
 
 class AppConfig(BaseModel):

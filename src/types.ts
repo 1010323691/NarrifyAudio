@@ -503,6 +503,9 @@ export interface AppConfig {
   prompts: {
     system_prompt: string
     user_prompt: string
+    /** 编号单元解析协议的提示词（system / user 模板，user 含 context / units 占位符）。 */
+    unit_system_prompt: string
+    unit_user_prompt: string
   }
   persona_prompts: {
     system_prompt: string
@@ -537,6 +540,8 @@ export interface AppConfig {
     check_boundary_speakers: boolean
     /** instruct 检查开关（解析内阶段；关闭 = 跳过该阶段并记录日志）。 */
     validate_instructs: boolean
+    /** instruct 长度上限（字，按汉字/字母/数字计、不含标点）；超过的条目由 instruct 检查修复。 */
+    instruct_max_chars: number
     /** chunk 忠实性校验开关（解析阶段：检出大段缺失时翻倍预算/对半切开重跑；
      *  关闭 = 跳过校验与恢复，JSON 可解析性重试不受影响）。 */
     check_chunk_alignment: boolean
@@ -544,6 +549,14 @@ export interface AppConfig {
     check_batch_size: number
     /** 解析内重判上下文窗口（角色匹配检查 / 断句失败校验 / 归属抽样共用）；不在设置页露出。 */
     check_context_window: number
+    /** 重判批多窗口打包：每次 LLM 调用最多装多少个目标（0 = 不打包，每组一次调用）；不在设置页露出。 */
+    check_pack_targets: number
+    /** 重判批打包：每次调用窗口文字总量上限（字符）；不在设置页露出。 */
+    check_pack_max_chars: number
+    /** 重判批打包：每次调用最多窗口数；不在设置页露出。 */
+    check_pack_max_windows: number
+    /** 角色匹配检查只复核边界两侧 ±N 条内的台词条目（边界相邻两条恒复核，0 = 不收窄）；不在设置页露出。 */
+    boundary_target_window: number
     /** 超长段落检查开关（解析内阶段 A）：只控制 LLM 语义重切——超长条目带上下文
      *  窗口重跑 LLM 重切；机械分段兜底（字数硬上界保证）恒生效、不受本开关控制，
      *  关闭时超限条目仍按句界 / 子句界 / 定宽切开。 */
@@ -551,6 +564,8 @@ export interface AppConfig {
     /** 段落硬上限（字数 = strip 后 Unicode 码点数）：任何条目最终不得超过此值，
      *  由超长段落检查的机械分段兜底保证。 */
     max_paragraph_chars: number
+    /** LLM 语义重切的触发字数（低于机械分段上限；重切没过校验则保持原样，不做机械切分）。 */
+    long_resplit_chars: number
     /** 纯标点条目吸收开关（解析内阶段 B，确定性零 LLM 成本）：无词字符条目并入相邻
      *  NARRATOR（标题守卫），无邻接则删除。 */
     absorb_punct_entries: boolean
@@ -559,6 +574,19 @@ export interface AppConfig {
      *  instruct 取词字符多者，章标题两侧不合并。置于超长机械分段**之前**——其 ≤10 强制
      *  合并可能造出超上限块，由随后的机械分段切回（段落上限硬保证不变）。 */
     merge_same_speaker: boolean
+    /** 解析协议：json = 模型重写整段为 JSON（旧协议，亦为回退路径）；units = 程序切编号单元、
+     *  模型只打标签、程序机械拼回同样的条目结构。 */
+    parse_protocol: 'json' | 'units'
+    /** 单元协议下旁白条目的固定 instruct（管理员配置，模型不再输出旁白 instruct）。 */
+    narrator_instruct: string
+    /** 单元协议的 edit（仅允许删去一段说话动词短语）总开关。 */
+    edit_enabled: boolean
+    /** 单个 edit 最多可删的词字符数。 */
+    edit_max_delete_chars: number
+    /** 单元协议下 X 删除的单元最长词字符数（含网址 / 水印特征的除外）。 */
+    delete_max_chars: number
+    /** 单元协议下切分单元的长度上限（字）。 */
+    unit_max_chars: number
   }
   ui: {
     theme: string

@@ -240,3 +240,29 @@ def pytest_collection_modifyitems(config, items):
     _shard_deselected += len(dropped)
     config.hook.pytest_deselected(items=dropped)
     items[:] = kept
+
+
+@pytest.fixture
+def legacy_json_protocol():
+    """Pin the parse defaults the older tests were written against.
+
+    The shipped defaults are the numbered-unit protocol and packed long-entry re-splits;
+    the older parse tests script the model's replies as JSON entries, one LLM call per
+    long entry, and build ``GenerationConfig()`` with defaults. Modules that exercise that
+    behaviour opt in with ``pytestmark = pytest.mark.usefixtures("legacy_json_protocol")``;
+    the unit protocol's own tests (``test_script_units.py``) set what they need explicitly.
+    """
+    from backend.core.config import GenerationConfig
+
+    pinned = {"parse_protocol": "json", "long_resplit_pack": 1}
+    fields = GenerationConfig.model_fields
+    originals = {name: fields[name].default for name in pinned}
+    for name, value in pinned.items():
+        fields[name].default = value
+    GenerationConfig.model_rebuild(force=True)
+    try:
+        yield
+    finally:
+        for name, value in originals.items():
+            fields[name].default = value
+        GenerationConfig.model_rebuild(force=True)

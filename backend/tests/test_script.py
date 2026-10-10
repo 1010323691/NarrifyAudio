@@ -31,8 +31,10 @@ from backend.engines.llm_transport import (
     llm_json_with_retry,
     request_chat_completion_stream,
 )
-from backend.engines.script import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, INSTRUCT_MAX_WORDS, adaptive_spot_rate, SPOT_CHECK_HISTORY_CAP, _ALIGN_FAIL_MIN, _ALIGN_SUSPICIOUS_MIN, _append_spot_history, _has_attribution_tag, _is_pure_saying_tag, _llm_chat_completion, _load_spot_history, _pick_majority, _quote_parity, _reparse_vote, _risk_tier, _strip_leading_saying_tag, _tag_in, absorb_punct_entries, boundary_check_speakers, build_batch_window, check_chunk_alignment, check_chunk_fidelity, clean_json_string, delete_pure_saying_tags, fix_mojibake, generate_file, group_retry_indices, is_suspicious_entry_text, instruct_entry_indices, instruct_word_count, long_entry_indices, long_paragraph_resplit, merge_adjacent_same_speaker, parse_speaker, parse_speaker_map_full, process_chunk, revalidate_entry, repair_json_array, salvage_json_entries, select_boundary_targets, select_boundary_risk_targets, select_spot_targets, spot_budget, spot_check_speakers, split_chunk_balanced, split_into_chunks, split_long_entries, split_long_text, strip_outer_quotes, suspicious_entry_indices, validate_sentence_splits, validate_instructs
+from backend.engines.script import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, INSTRUCT_MAX_CHARS, adaptive_spot_rate, SPOT_CHECK_HISTORY_CAP, _ALIGN_FAIL_MIN, _ALIGN_SUSPICIOUS_MIN, _append_spot_history, _has_attribution_tag, _is_pure_saying_tag, _llm_chat_completion, _load_spot_history, _pick_majority, _quote_parity, _reparse_vote, _risk_tier, _strip_leading_saying_tag, _tag_in, absorb_punct_entries, boundary_check_speakers, build_batch_window, check_chunk_alignment, check_chunk_fidelity, clean_json_string, delete_pure_saying_tags, fix_mojibake, generate_file, group_retry_indices, is_suspicious_entry_text, instruct_entry_indices, instruct_length, long_entry_indices, long_paragraph_resplit, merge_adjacent_same_speaker, parse_speaker, parse_speaker_map_full, process_chunk, revalidate_entry, repair_json_array, salvage_json_entries, select_boundary_targets, select_boundary_risk_targets, select_spot_targets, spot_budget, spot_check_speakers, split_chunk_balanced, split_into_chunks, split_long_entries, split_long_text, strip_outer_quotes, suspicious_entry_indices, validate_sentence_splits, validate_instructs
 from backend.engines.text import is_chapter_title
+
+pytestmark = pytest.mark.usefixtures("legacy_json_protocol")  # these tests script the JSON protocol
 
 BS = chr(92)  # backslash — built via chr() so no literal backslashes live in this file
 LQ, RQ = chr(0x201C), chr(0x201D)  # curly double quotes — via chr() (hand-typed quotes are unreliable)
@@ -1663,33 +1665,30 @@ def test_validate_no_consensus_keeps_entries_and_list(monkeypatch):
     assert calls["n"] == 4  # 基础 1 + 重试 2 无共识 → 再跑第 4 次
 
 
-def test_instruct_check_flags_empty_and_over_35_words():
-    exactly_34 = " ".join(f"word{i}" for i in range(34))
-    exactly_35 = " ".join(f"word{i}" for i in range(35))
-    exactly_36 = " ".join(f"word{i}" for i in range(36))
+def test_instruct_check_flags_empty_and_over_limit_chinese_chars():
+    # 中文口径：按字计（汉字/字母/数字各 1，标点和空白不计），上限 60 字（与解析提示词一致）。
     entries = [
         {"speaker": "NARRATOR", "text": "a", "instruct": ""},
-        {"speaker": "NARRATOR", "text": "b", "instruct": exactly_34},
-        {"speaker": "林某", "text": "c", "instruct": exactly_35},
+        {"speaker": "NARRATOR", "text": "b", "instruct": "字" * 59},
+        {"speaker": "林某", "text": "c", "instruct": "字" * 60},
         {"speaker": "林某", "text": "d"},
-        {"speaker": "林某", "text": "e", "instruct": exactly_36},
+        {"speaker": "林某", "text": "e", "instruct": "字" * 61},
+        {"speaker": "林某", "text": "f", "instruct": "，。" * 40 + "字" * 60},  # 标点不计
     ]
-
-    assert instruct_word_count(exactly_35) == 35
+    assert INSTRUCT_MAX_CHARS == 60
+    assert instruct_length("平稳中性的叙述语气。") == 9
     assert instruct_entry_indices(entries) == [0, 3, 4]
-    assert INSTRUCT_MAX_WORDS == 35
+    assert instruct_entry_indices(entries, 59) == [0, 2, 3, 4, 5]  # 上限可配（管理员）
 
 
-def test_instruct_word_count_chinese_two_chars_per_word():
-    # 中文口径：每 2 个汉字计 1 词（向上取整），中文标点不计，夹杂的英文词照常计。
-    assert instruct_word_count("平稳中性的叙述语气。") == 5
-    assert instruct_word_count("低声，耳语。") == 2
-    assert instruct_word_count("用 TTS 念，语速平稳") == 1 + 3
-    entries = [
-        {"speaker": "林某", "text": "a", "instruct": "字" * 70},
-        {"speaker": "林某", "text": "b", "instruct": "字" * 71},
-    ]
-    assert instruct_word_count("字" * 70) == 35
+def test_instruct_length_mixed_and_legacy_english_scaling():
+    assert instruct_length("低声，耳语。") == 4
+    assert instruct_length("用 TTS 念，语速平稳") == 9  # 汉字与字母数字逐个计，标点空白不计
+    # 不含汉字的旧英文 instruct 仍按词计：35 个词 ≙ 上限，36 个词超限。
+    thirty_five = " ".join(f"w{i}" for i in range(35))
+    assert instruct_length(thirty_five) == 60 and instruct_length(thirty_five + " x") > 60
+    entries = [{"speaker": "林某", "text": "a", "instruct": thirty_five},
+               {"speaker": "林某", "text": "b", "instruct": thirty_five + " x"}]
     assert instruct_entry_indices(entries) == [1]
 
 

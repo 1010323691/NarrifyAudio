@@ -106,6 +106,12 @@ async function save() {
   const generation: Record<string, unknown> = {
     ...config.generation,
     parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
+    edit_max_delete_chars: Math.max(1, Math.min(200, Math.trunc(Number(config.generation.edit_max_delete_chars) || 24))),
+    long_resplit_chars: Math.max(10, Math.min(2000, Math.trunc(Number(config.generation.long_resplit_chars) || 130))),
+    instruct_max_chars: Math.max(10, Math.min(300, Math.trunc(Number(config.generation.instruct_max_chars) || 60))),
+    delete_max_chars: Math.max(1, Math.min(400, Math.trunc(Number(config.generation.delete_max_chars) || 30))),
+    unit_max_chars: Math.max(20, Math.min(400, Math.trunc(Number(config.generation.unit_max_chars) || 80))),
+    narrator_instruct: String(config.generation.narrator_instruct || '').trim() || '平稳中性的叙述语气。',
   }
   // 用户解析页专属的 6 个检查开关不落平台默认（见上方 USER_OWNED_CHECKS 注释）。
   for (const key of USER_OWNED_CHECKS) delete generation[key]
@@ -128,7 +134,9 @@ async function save() {
     // edited so saving unrelated settings does not freeze today's defaults.
     if (!originalPrompts.value
       || config.prompts.system_prompt !== originalPrompts.value.system_prompt
-      || config.prompts.user_prompt !== originalPrompts.value.user_prompt) {
+      || config.prompts.user_prompt !== originalPrompts.value.user_prompt
+      || config.prompts.unit_system_prompt !== originalPrompts.value.unit_system_prompt
+      || config.prompts.unit_user_prompt !== originalPrompts.value.unit_user_prompt) {
       patch.prompts = config.prompts
     }
     ok = await settings.saveRoot(patch)
@@ -336,6 +344,24 @@ watch(
               </span>
             </div>
           </div>
+          <div class="space-y-1.5">
+            <Label for="admin-setting-resplit-chars">超长重切触发字数（LLM）</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input id="admin-setting-resplit-chars" v-model.number="draft.generation.long_resplit_chars" type="number" min="10" max="2000" step="10" class="max-w-[8rem]" />
+              <span class="text-xs text-muted-foreground">
+                超过此字数的条目会交给 LLM 尝试重切（默认 130）；重切未通过则保持原样，只有超过上方「段落硬上限」的条目才会被机械切开。
+              </span>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <Label for="admin-setting-instruct-max">instruct 长度上限（字）</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input id="admin-setting-instruct-max" v-model.number="draft.generation.instruct_max_chars" type="number" min="10" max="300" step="5" class="max-w-[8rem]" />
+              <span class="text-xs text-muted-foreground">
+                按汉字、字母、数字计，不含标点；超过的条目由「instruct 检查」修复，应与解析提示词里的字数要求一致（默认 60）。
+              </span>
+            </div>
+          </div>
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div class="flex items-center justify-between">
               <Label class="font-normal">纯归属标签删除</Label>
@@ -362,6 +388,48 @@ watch(
               <Switch aria-label="同人段落合并" v-model="draft.generation.merge_same_speaker" />
             </div>
           </div>
+          <div class="space-y-3 border-t pt-3">
+            <div class="space-y-1.5">
+              <Label for="admin-setting-unit-protocol">解析协议</Label>
+              <div class="flex flex-wrap items-center gap-3">
+                <Select id="admin-setting-unit-protocol" v-model="draft.generation.parse_protocol" class="max-w-[16rem]">
+                  <option value="json">JSON 重写（旧协议）</option>
+                  <option value="units">编号单元（程序切分 + 模型打标签）</option>
+                </Select>
+                <span class="text-xs text-muted-foreground">
+                  编号单元协议由程序把文本切成编号片段，模型只输出标签，程序机械拼回同样的脚本结构，输出量约为旧协议的 1/5～1/7；标签无效的分段会自动回退到旧协议。
+                </span>
+              </div>
+            </div>
+            <div v-if="draft.generation.parse_protocol === 'units'" class="space-y-3">
+              <div class="space-y-1.5">
+                <Label for="admin-setting-narrator-instruct">旁白固定 instruct</Label>
+                <Input id="admin-setting-narrator-instruct" v-model="draft.generation.narrator_instruct" placeholder="平稳中性的叙述语气。" />
+                <p class="text-xs text-muted-foreground">单元协议下模型不再为旁白输出 instruct，所有旁白条目统一使用这段文字。</p>
+              </div>
+              <div class="grid gap-4 sm:grid-cols-4">
+                <div class="space-y-1.5">
+                  <Label for="admin-setting-delete-max">删除片段最长（字）</Label>
+                  <Input id="admin-setting-delete-max" v-model.number="draft.generation.delete_max_chars" type="number" min="1" max="400" step="5" />
+                </div>
+                <div class="space-y-1.5">
+                  <Label for="admin-setting-unit-max">单元长度上限（字）</Label>
+                  <Input id="admin-setting-unit-max" v-model.number="draft.generation.unit_max_chars" type="number" min="20" max="400" step="10" />
+                </div>
+                <div class="space-y-1.5">
+                  <Label for="admin-setting-edit-max">单个编辑最多删除（字）</Label>
+                  <Input id="admin-setting-edit-max" v-model.number="draft.generation.edit_max_delete_chars" type="number" min="1" max="200" step="1" />
+                </div>
+                <div class="flex items-center justify-between sm:flex-col sm:items-start sm:justify-center sm:gap-2">
+                  <div class="flex flex-col">
+                    <Label class="font-normal">允许编辑说话标签</Label>
+                    <span class="text-xs text-muted-foreground">只能删去说话动词短语，其余原文逐字保留</span>
+                  </div>
+                  <Switch aria-label="允许编辑说话标签" v-model="draft.generation.edit_enabled" />
+                </div>
+              </div>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -379,6 +447,14 @@ watch(
           <div class="space-y-1.5">
             <Label for="admin-setting-12">User Prompt（模板，含 <code class="text-xs">context</code> / <code class="text-xs">chunk</code> 占位符）</Label>
             <Textarea id="admin-setting-12" v-model="draft.prompts.user_prompt" rows="8" class="font-mono text-xs" />
+          </div>
+          <div class="space-y-1.5 border-t pt-3">
+            <Label for="admin-setting-unit-system">编号单元协议 · System Prompt</Label>
+            <Textarea id="admin-setting-unit-system" v-model="draft.prompts.unit_system_prompt" rows="8" class="font-mono text-xs" />
+          </div>
+          <div class="space-y-1.5">
+            <Label for="admin-setting-unit-user">编号单元协议 · User Prompt（模板，含 <code class="text-xs">context</code> / <code class="text-xs">units</code> 占位符）</Label>
+            <Textarea id="admin-setting-unit-user" v-model="draft.prompts.unit_user_prompt" rows="6" class="font-mono text-xs" />
           </div>
         </CardContent>
       </Card>

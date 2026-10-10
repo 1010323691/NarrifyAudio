@@ -35,6 +35,7 @@ from ..core.observability import api_requests_today, api_snapshot
 from ..core import config as core_config
 from ..engines import llm_transport
 from ..engines.script_prompts import load_default_prompts
+from ..engines.script_unit_prompts import load_default_unit_prompts
 from ..services.admin_storage import (
     scan_project_directory,
     project_storage_path,
@@ -152,6 +153,11 @@ def _application_config_with_prompt_defaults() -> dict:
         prompts["system_prompt"] = system_prompt
     if not prompts.get("user_prompt"):
         prompts["user_prompt"] = user_prompt
+    unit_system_prompt, unit_user_prompt = load_default_unit_prompts()
+    if not prompts.get("unit_system_prompt"):
+        prompts["unit_system_prompt"] = unit_system_prompt
+    if not prompts.get("unit_user_prompt"):
+        prompts["unit_user_prompt"] = unit_user_prompt
     return config
 
 
