@@ -289,7 +289,7 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
     (unknown): the explicit ``gender`` key wins, else the description's own gender words
     (a prompt without the key still states it there).
     """
-    from .llm_transport import LLMUnavailableError, request_chat_completion as _llm_chat_completion
+    from .llm_transport import LLMUnavailableError, cache_kwargs, request_chat_completion as _llm_chat_completion
 
     if not (llm.model_name or "").strip():
         raise RuntimeError("未配置 LLM 模型名称（在「文本解析」页填写模型）。")
@@ -330,7 +330,7 @@ def _llm_persona(handle, llm, system, user_template, speaker, script, bands):
                 llm.base_url, llm.api_key, llm.model_name, messages,
                 temperature=0.3, top_p=gen.top_p, presence_penalty=gen.presence_penalty,
                 max_tokens=1024, top_k=gen.top_k, min_p=gen.min_p,
-                banned_tokens=gen.banned_tokens,
+                banned_tokens=gen.banned_tokens, **cache_kwargs(llm),
             )
         except LLMUnavailableError:
             raise

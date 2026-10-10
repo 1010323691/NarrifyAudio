@@ -35,6 +35,7 @@ from .llm_transport import (
     LLMUnavailableError,
     request_chat_completion as _llm_chat_completion,
     request_chat_completion_stream,
+    cache_kwargs,
 )
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 from .text import ends_sentence, is_chapter_title
@@ -704,7 +705,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                     temperature=temp, top_p=top_p,
                     presence_penalty=presence_penalty, max_tokens=mt,
                     top_k=top_k, min_p=min_p, banned_tokens=banned_tokens,
-                    handle=handle,
+                    handle=handle, **cache_kwargs(llm),
                 )
             else:
                 # Safety valve: some servers reject stream:true — fall back to the
@@ -714,6 +715,7 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
                     temperature=temp, top_p=top_p,
                     presence_penalty=presence_penalty, max_tokens=mt,
                     top_k=top_k, min_p=min_p, banned_tokens=banned_tokens,
+                    **cache_kwargs(llm),
                 )
             pt = usage.get("prompt_tokens", "?") if usage else "?"
             ct = usage.get("completion_tokens", "?") if usage else "?"
@@ -1509,7 +1511,7 @@ def _llm_call(llm: LLMConfig, generation: GenerationConfig, messages, handle=Non
             presence_penalty=generation.presence_penalty,
             max_tokens=generation.max_tokens, top_k=generation.top_k,
             min_p=generation.min_p, banned_tokens=generation.banned_tokens,
-            handle=handle,
+            handle=handle, **cache_kwargs(llm),
         )
     else:
         content, _fr, _usage = _llm_chat_completion(
@@ -1518,6 +1520,7 @@ def _llm_call(llm: LLMConfig, generation: GenerationConfig, messages, handle=Non
             presence_penalty=generation.presence_penalty,
             max_tokens=generation.max_tokens, top_k=generation.top_k,
             min_p=generation.min_p, banned_tokens=generation.banned_tokens,
+            **cache_kwargs(llm),
         )
     return content
 

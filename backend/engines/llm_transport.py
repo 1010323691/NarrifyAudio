@@ -143,12 +143,11 @@ def cache_system_messages(messages: list) -> list:
     return out
 
 
-def _cache_system_enabled() -> bool:
-    try:
-        from ..core.config import get_config
-        return bool(get_config().llm.prompt_cache_breakpoint)
-    except Exception:  # noqa: BLE001 — config unavailable → plain request
-        return False
+def cache_kwargs(llm) -> dict:
+    """``{"cache_system": True}`` when the caller's own ``llm`` config (the task snapshot, not
+    a live re-read) enables the NInfer prefix cache; ``{}`` otherwise so default calls stay
+    byte-identical."""
+    return {"cache_system": True} if getattr(llm, "prompt_cache_breakpoint", False) else {}
 
 
 def build_chat_body(model, messages, temperature, top_p, presence_penalty,
@@ -200,7 +199,7 @@ from ..platform.gpu_scheduler.admission import llm_admitted
 def request_chat_completion(base_url, api_key, model, messages,
                             temperature, top_p, presence_penalty, max_tokens,
                             top_k=0, min_p=0, banned_tokens=None,
-                            extra_body: dict | None = None):
+                            extra_body: dict | None = None, cache_system: bool = False):
     """Issue an OpenAI-compatible ``chat/completions`` POST with stdlib ``urllib``.
 
     Sends the same body/headers the ``openai`` SDK would for
@@ -217,12 +216,12 @@ def request_chat_completion(base_url, api_key, model, messages,
     that the actual answer needs. If the server rejects the request with HTTP 400/422
     while extra keys are in flight, the call is transparently re-issued ONCE without
     the extra keys — strict gateways (e.g. the real OpenAI API) reject unknown
-    parameters, and the plain request still works there.
+    parameters, and the plain request still works there. ``cache_system`` (NInfer prefix
+    cache) is dropped first, keeping ``extra_body``; only a further 400/422 drops that too.
     """
     from ..platform.quota import require_quota
     require_quota("LLM", "llm.operation")
     url = base_url.rstrip("/") + "/chat/completions"
-    cache_system = _cache_system_enabled()
     body = build_chat_body(
         model, messages, temperature, top_p, presence_penalty, max_tokens,
         top_k=top_k, min_p=min_p, banned_tokens=banned_tokens, extra_body=extra_body,
@@ -249,17 +248,28 @@ def request_chat_completion(base_url, api_key, model, messages,
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             raise LLMUnavailableError(f"LLM 服务连接失败：{e}") from e
 
-    try:
-        payload = _post(body)
-    except LLMHTTPError as e:
-        # Strict gateway rejected the extra keys → transparent one-shot retry
-        # WITHOUT them. No extra keys → nothing to fall back to.
-        if e.status not in (400, 422) or not (extra_body or cache_system):
-            raise
-        plain = build_chat_body(
+    def _fallback(**kw):
+        return build_chat_body(
             model, messages, temperature, top_p, presence_penalty, max_tokens,
-            top_k=top_k, min_p=min_p, banned_tokens=banned_tokens)
-        payload = _post(plain)
+            top_k=top_k, min_p=min_p, banned_tokens=banned_tokens, **kw)
+
+    # Strict gateway rejected the extra keys → transparent retries with fewer of them:
+    # first without the cache fields (keeping extra_body, e.g. enable_thinking), then
+    # plain. No extra keys → nothing to fall back to.
+    fallbacks = []
+    if cache_system and extra_body:
+        fallbacks.append(_fallback(extra_body=extra_body))
+    if cache_system or extra_body:
+        fallbacks.append(_fallback())
+    payload = None
+    bodies = [body, *fallbacks]
+    for i, attempt_body in enumerate(bodies):
+        try:
+            payload = _post(attempt_body)
+            break
+        except LLMHTTPError as e:
+            if e.status not in (400, 422) or i == len(bodies) - 1:
+                raise
 
     choices = payload.get("choices") or []
     if not choices:
@@ -277,7 +287,8 @@ def request_chat_completion(base_url, api_key, model, messages,
 @llm_admitted
 def request_chat_completion_stream(base_url, api_key, model, messages,
                                    temperature, top_p, presence_penalty, max_tokens,
-                                   top_k=0, min_p=0, banned_tokens=None, handle=None):
+                                   top_k=0, min_p=0, banned_tokens=None, handle=None,
+                                   cache_system: bool = False):
     """Streaming twin of :func:`request_chat_completion`; the body comes from the
     same :func:`build_chat_body` call (``stream=True`` adds only the legitimate
     ``stream``/``stream_options`` pair).
@@ -308,7 +319,6 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
     from ..platform.quota import require_quota
     require_quota("LLM", "llm.operation")
     url = base_url.rstrip("/") + "/chat/completions"
-    cache_system = _cache_system_enabled()
 
     def _open(cache: bool):
         body = build_chat_body(
@@ -369,6 +379,7 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
             # (same contract as the non-streaming verb); nothing was streamed yet.
             if not cache_system or e.code not in (400, 422):
                 raise
+            e.close()
             resp = _open(False)
         with resp:
             for raw in resp:
@@ -543,7 +554,7 @@ def llm_json_with_retry(llm_cfg, system: str, user: str, parse, *,
                  {"role": "user", "content": user}],
                 temperature=temperature, top_p=top_p,
                 presence_penalty=presence_penalty, max_tokens=max_tokens,
-                extra_body=extra_body,
+                extra_body=extra_body, **cache_kwargs(llm_cfg),
             )
         except TaskCancelled:
             raise

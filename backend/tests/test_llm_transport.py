@@ -137,8 +137,6 @@ def test_cache_system_marks_only_string_system_messages():
 
 
 def test_cache_system_flag_and_400_fallback(monkeypatch):
-    from backend.engines import llm_transport
-    monkeypatch.setattr(llm_transport, "_cache_system_enabled", lambda: True)
     sent = []
 
     def urlopen(req, *a, **k):
@@ -151,15 +149,44 @@ def test_cache_system_flag_and_400_fallback(monkeypatch):
     request_chat_completion(
         "http://x/v1", "key", "m",
         [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}],
-        temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10)
+        temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10,
+        cache_system=True)
     assert isinstance(sent[0]["messages"][0]["content"], list)
     assert sent[1]["messages"][0]["content"] == "SYS"
 
 
+def test_cache_rejection_keeps_extra_body_then_drops_it(monkeypatch):
+    sent = []
+    rejected = {"n": 2}  # reject the cache body and the cache-less body; accept the plain one
+
+    def urlopen(req, *a, **k):
+        sent.append(json.loads(req.data))
+        if len(sent) <= rejected["n"]:
+            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, io.BytesIO(b"bad"))
+        return _NonStreamResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    args = ("http://x/v1", "key", "m",
+            [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}])
+    kw = dict(temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10,
+              extra_body={"enable_thinking": False}, cache_system=True)
+    request_chat_completion(*args, **kw)
+    assert "prompt_cache_options" in sent[0] and sent[0]["enable_thinking"] is False
+    assert "prompt_cache_options" not in sent[1] and sent[1]["enable_thinking"] is False
+    assert "enable_thinking" not in sent[2]
+    assert len(sent) == 3
+
+
+def test_cache_kwargs_reads_caller_config():
+    from types import SimpleNamespace
+    from backend.engines.llm_transport import cache_kwargs
+    assert cache_kwargs(SimpleNamespace(prompt_cache_breakpoint=True)) == {"cache_system": True}
+    assert cache_kwargs(SimpleNamespace(prompt_cache_breakpoint=False)) == {}
+    assert cache_kwargs(SimpleNamespace()) == {}
+
+
 def test_cache_system_stream_400_fallback(monkeypatch):
-    from backend.engines import llm_transport
     from backend.engines.llm_transport import request_chat_completion_stream
-    monkeypatch.setattr(llm_transport, "_cache_system_enabled", lambda: True)
     sent = []
 
     def urlopen(req, *a, **k):
@@ -172,7 +199,8 @@ def test_cache_system_stream_400_fallback(monkeypatch):
     content, _, _ = request_chat_completion_stream(
         "http://x/v1", "key", "m",
         [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}],
-        temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10)
+        temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10,
+        cache_system=True)
     assert content == "ok"
     assert isinstance(sent[0]["messages"][0]["content"], list)
     assert sent[1]["messages"][0]["content"] == "SYS"
