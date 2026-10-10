@@ -12,11 +12,12 @@ MAX_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 32
 
 
-def cached_role_hints(names, config, counts, directory, cooccur=None):
+def cached_role_hints(names, config, counts, directory, cooccur=None, vetoes=None):
     relevant = [[name, counts.get(name, 0), (config.get(name) or {}).get("description"),
                  (config.get(name) or {}).get("gender")] for name in names]
     pairs = veto_pairs(cooccur, set(names))
-    version = hashlib.sha256(json.dumps([2, relevant, pairs], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    ruled_out = sorted(sorted(pair) for pair in (vetoes or ()))
+    version = hashlib.sha256(json.dumps([3, relevant, pairs, ruled_out], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     directory = Path(directory)
     if directory.is_symlink():
         raise ValueError("Role hint cache must not follow directory symlinks")
@@ -30,7 +31,7 @@ def cached_role_hints(names, config, counts, directory, cooccur=None):
                     return data["hints"]
             except (OSError, ValueError):
                 pass
-        hints = suggest_role_hints(names, config, counts, cooccur)
+        hints = suggest_role_hints(names, config, counts, cooccur, vetoes)
         payload = json.dumps({"version": version, "hints": hints}, ensure_ascii=False).encode()
         if len(payload) <= MAX_BYTES:
             pending = directory / ("." + version + "." + uuid.uuid4().hex + ".tmp")

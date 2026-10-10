@@ -154,46 +154,102 @@ def _name_match(left_info: tuple, right_info: tuple, gender: str, age, other_gen
     return None
 
 
+def match_basis(score: tuple, left_info: tuple, right_info: tuple) -> str:
+    """Human-readable rule behind a ``_name_match`` score (shown next to the hint in the UI)."""
+    tier, shared = score[0], score[1]
+    if tier == 5:
+        return "名字相同"
+    if tier == 4:
+        if left_info[3] and right_info[3]:
+            return "英文名词相同"
+        if left_info[1] == right_info[1]:
+            return "去称谓后同名"
+        return "名字包含"
+    if tier == 3:
+        return f"共有 {shared} 字" if not (left_info[3] and right_info[3]) else "英文名相近"
+    if tier == 2:
+        return "共有汉字且性别年龄相近"
+    return "单姓对应全名"
+
+
+def _pair_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+
+def _best_target(source: str, targets, infos: dict, profiles: dict, cooccur: dict,
+                 vetoed: set) -> tuple[str, str] | None:
+    """Best (target, basis) for ``source`` among ``targets``; None when nothing plausible."""
+    gender, age = profiles[source]
+    best = None
+    best_score: tuple | None = None
+    for target in targets:
+        if target == source or target.casefold() in _NARRATOR or _is_relational(target):
+            continue
+        if _pair_key(source, target) in vetoed:
+            continue
+        other_gender, other_age = profiles[target]
+        if gender and other_gender and gender != other_gender:
+            continue
+        if age is not None and other_age is not None and abs(age - other_age) > 1:
+            continue
+        score = _name_match(infos[source], infos[target], gender, age, other_gender, other_age)
+        if score is None:
+            continue
+        if score[0] < 5:
+            limit = COOCCUR_VETO_STRONG if score[0] == 4 else COOCCUR_VETO
+            if cooccur.get(_pair_key(source, target), 0) >= limit:
+                continue
+        if best_score is None or score > best_score:
+            best, best_score = target, score
+    if best is None or best_score is None:
+        return None
+    return best, match_basis(best_score, infos[source], infos[best])
+
+
+def suggest_role_links(names: list[str], config: dict, counts: dict | None = None,
+                       cooccur: dict | None = None, vetoes=None) -> dict[str, tuple[str, str]]:
+    """Like ``suggest_role_hints`` but also returns the matching rule: ``{source: (target, basis)}``.
+
+    ``vetoes`` is an iterable of name pairs the user ruled out ("not the same person").
+    """
+    counts = counts or {}
+    cooccur = cooccur or {}
+    vetoed = {_pair_key(a, b) for a, b in (vetoes or ())}
+    ordered = sorted(dict.fromkeys(names), key=lambda n: (-counts.get(n, 0), -len(_name(n)), n))
+    profiles = {n: _profile(config.get(n) or {}) for n in ordered}
+    infos = {n: _info(n) for n in ordered}
+    links = {}
+    for index, source in enumerate(ordered):
+        if source.casefold() in _NARRATOR or _is_relational(source):
+            continue
+        found = _best_target(source, ordered[:index], infos, profiles, cooccur, vetoed)
+        if found is not None:
+            links[source] = found
+    return links
+
+
+def rematch_one(source: str, candidates, config: dict, cooccur: dict | None = None,
+                vetoes=None) -> tuple[str, str] | None:
+    """Re-run the match for one orphaned role against any candidate (not only larger roles)."""
+    if source.casefold() in _NARRATOR or _is_relational(source):
+        return None
+    pool = [c for c in dict.fromkeys(candidates) if c != source]
+    names = [source, *pool]
+    profiles = {n: _profile(config.get(n) or {}) for n in names}
+    infos = {n: _info(n) for n in names}
+    vetoed = {_pair_key(a, b) for a, b in (vetoes or ())}
+    return _best_target(source, pool, infos, profiles, cooccur or {}, vetoed)
+
+
 def suggest_role_hints(names: list[str], config: dict, counts: dict | None = None,
-                       cooccur: dict | None = None) -> dict[str, str]:
+                       cooccur: dict | None = None, vetoes=None) -> dict[str, str]:
     """Suggest one earlier representative per role; never mutate config or infer identity.
 
     ``cooccur`` maps sorted ``(a, b)`` name pairs to how often they take turns on consecutive
     lines; repeated turn-taking means they are talking to one another, so such roles are
     never offered as the same person.
     """
-    counts = counts or {}
-    cooccur = cooccur or {}
-    ordered = sorted(dict.fromkeys(names), key=lambda n: (-counts.get(n, 0), -len(_name(n)), n))
-    profiles = {n: _profile(config.get(n) or {}) for n in ordered}
-    infos = {n: _info(n) for n in ordered}
-    hints = {}
-    for index, source in enumerate(ordered):
-        if source.casefold() in _NARRATOR or _is_relational(source):
-            continue
-        gender, age = profiles[source]
-        best = None
-        best_score: tuple | None = None
-        for target in ordered[:index]:
-            if target.casefold() in _NARRATOR or _is_relational(target):
-                continue
-            other_gender, other_age = profiles[target]
-            if gender and other_gender and gender != other_gender:
-                continue
-            if age is not None and other_age is not None and abs(age - other_age) > 1:
-                continue
-            score = _name_match(infos[source], infos[target], gender, age, other_gender, other_age)
-            if score is None:
-                continue
-            if score[0] < 5:
-                limit = COOCCUR_VETO_STRONG if score[0] == 4 else COOCCUR_VETO
-                if cooccur.get(tuple(sorted((source, target))), 0) >= limit:
-                    continue
-            if best_score is None or score > best_score:
-                best, best_score = target, score
-        if best is not None:
-            hints[source] = best
-    return hints
+    return {source: target for source, (target, _) in suggest_role_links(names, config, counts, cooccur, vetoes).items()}
 
 
 def collect_cooccurrence(speakers, pairs: dict) -> None:
@@ -206,3 +262,28 @@ def collect_cooccurrence(speakers, pairs: dict) -> None:
             key = (previous, speaker) if previous < speaker else (speaker, previous)
             pairs[key] = pairs.get(key, 0) + 1
         previous = speaker
+
+
+def fold_script(order: list[str], counts: dict[str, int], data, pairs: dict | None = None) -> bool:
+    """Fold one parsed script (a list of entries) into the shared ``order``/``counts``.
+
+    Dedupes by speaker name (falling back to ``type``), sums line counts, and keeps
+    first-appearance order — the same folding the single-file path did inline, now shared
+    with the whole-book aggregate. Returns True when the file held a non-empty list (the
+    ``has_script`` signal).
+    """
+    if not isinstance(data, list) or not data:
+        return False
+    sequence = []
+    for entry in data:
+        sp = (entry.get("speaker") or entry.get("type") or "").strip()
+        if not sp:
+            continue
+        if sp not in counts:
+            counts[sp] = 0
+            order.append(sp)
+        counts[sp] += 1
+        sequence.append(sp)
+    if pairs is not None:
+        collect_cooccurrence(sequence, pairs)
+    return True

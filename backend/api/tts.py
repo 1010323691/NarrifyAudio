@@ -42,8 +42,8 @@ from ..engines import bgm as Bgm
 from ..engines import tts as T
 from ..engines import tts_batch as Batch
 from ..engines import voices as V
-from ..core.role_hint_cache import cached_role_hints
-from ..core.role_hints import collect_cooccurrence
+from ..engines import role_merge as RM
+from ..core.role_hints import collect_cooccurrence, fold_script
 from ..core.script_snapshot import capture_reference, source_version
 from ..services.list_paging import entry_states, page_enriched, page_meta, page_slice
 from ..services.chapter_display import chapter_display_name, chapter_source_path
@@ -252,29 +252,7 @@ def _clone_status(entry: dict) -> str:
     return "none"
 
 
-def _fold_script(order: list[str], counts: dict[str, int], data, pairs: dict | None = None) -> bool:
-    """Fold one parsed script (a list of entries) into the shared ``order``/``counts``.
-
-    Dedupes by speaker name (falling back to ``type``), sums line counts, and keeps
-    first-appearance order — the same folding the single-file path did inline, now shared
-    with the whole-book aggregate. Returns True when the file held a non-empty list (the
-    ``has_script`` signal).
-    """
-    if not isinstance(data, list) or not data:
-        return False
-    sequence = []
-    for entry in data:
-        sp = (entry.get("speaker") or entry.get("type") or "").strip()
-        if not sp:
-            continue
-        if sp not in counts:
-            counts[sp] = 0
-            order.append(sp)
-        counts[sp] += 1
-        sequence.append(sp)
-    if pairs is not None:
-        collect_cooccurrence(sequence, pairs)
-    return True
+_fold_script = fold_script
 
 
 _SPEAKER_CACHE = BoundedCache(64 * 1024 * 1024, 2048)
@@ -402,7 +380,8 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
     # ties keep first-appearance (or voice_config) order.
     names = sorted(order if has_script else list(voice_config.keys()),
                    key=lambda sp: -counts.get(sp, 0))
-    hints = cached_role_hints(names, voice_config, counts, layout.temp / "role-hints", cooccur)
+    links = RM.link_hints(layout, script, names, voice_config, counts, cooccur)
+    hints = {n: link["target"] for n, link in links.items()}
 
     ready_names = {n for n in names if _voice_ready(n, voice_config)}
     counts_out = {"all": len(names), "ready": len(ready_names), "pending": len(names) - len(ready_names),
@@ -452,6 +431,7 @@ def list_voices(script: str | None = None, page: Annotated[int | None, Query(ge=
             "clone_status": _clone_status(entry),
             "type": vtype,
             "alias_of": alias_of,
+            "alias_basis": links.get(sp, {}).get("basis", ""),
             # Gender badge: "male" / "female" / "" (unknown). Pre-filled by Phase 1's
             # persona inference; the user's badge pick is the source of truth.
             "gender": entry.get("gender", ""),
@@ -606,121 +586,130 @@ class MergeSpeakersRequest(BaseModel):
     script: str | None = None
 
 
+def _merge_guard(ctx: AuthContext | None, db: Session | None, action: str) -> None:
+    _common.require_workspace()
+    if _phase_task_active(ctx, db):
+        raise HTTPException(409, f"配音任务进行中，请待其结束后再{action}。")
+
+
+def _merge_call(function, *args, **kwargs):
+    try:
+        return function(get_or_prepare_layout(), *args, **kwargs)
+    except RM.MergeError as exc:
+        raise HTTPException(exc.status, exc.message) from exc
+
+
 @router.post("/voices/merge-speakers")
 def merge_speakers(
     req: MergeSpeakersRequest,
     ctx: AuthContext = Depends(get_auth_context),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Merge one character into another by rewriting the parsed source data in place.
+    """Merge one character into another (the single-source case of ``merge-batch``).
 
-    Synchronous (no Task): pure deterministic JSON surgery — every entry whose identity
-    is ``source`` (``speaker`` first, ``type`` as fallback — the ``_fold_script`` rule)
-    is re-assigned to ``target`` directly in ``03_parsed_json/*.json`` (no LLM call), the
-    ``source`` entry is removed from ``voice_config.json`` (its candidate WAVs stay on
-    disk — user data is never deleted), and aliases pointing at ``source`` are
-    redirected to ``target``. Only files that actually changed are rewritten (a rewrite
-    refreshes mtime, which would perturb the most-recent-file / ``__all__`` ordering).
+    Synchronous (no Task): every entry whose identity is ``source`` (``speaker`` first,
+    ``type`` as fallback — the ``_fold_script`` rule) is re-assigned to ``target`` directly
+    in ``03_parsed_json/*.json`` (no LLM call), the ``source`` entry is removed from
+    ``voice_config.json`` (its candidate WAVs stay on disk), and a merge record is written
+    to the role-link table so the merge can be undone from the batch dialog.
     """
-    _common.require_workspace()
-    if _phase_task_active(ctx, db):
-        raise HTTPException(409, "配音任务进行中，请待其结束后再合并角色。")
+    _merge_guard(ctx, db, "合并角色")
     src = (req.source or "").strip()
     tgt = (req.target or "").strip()
     if not src or not tgt:
         raise HTTPException(400, "角色名不能为空。")
     if src == tgt:
         raise HTTPException(400, "源角色与目标角色相同。")
-    layout = get_or_prepare_layout()
+    result = _merge_call(RM.merge_batch, req.script, tgt, [src])
+    return {"ok": True, "source": src, "target": tgt, "replaced": result["replaced"], "files": result["files"]}
 
-    # Which script(s) to read/rewrite (mirrors list_voices' scope resolution).
-    if req.script == ALL_PARSED_JSON:
-        script_paths = [p for p in resolve_parsed_json_all() if p.exists()]
-    else:
-        script_paths = [resolve_parsed_json(req.script)]
 
-    # voice_config: absent is legal (nothing to clean up); corrupt is not.
-    vc_path = layout.voice_profiles / "voice_config.json"
-    voice_config: dict = {}
-    vc_exists = False
-    if vc_path.exists():
-        try:
-            loaded = json.loads(vc_path.read_text("utf-8"))
-            if isinstance(loaded, dict):
-                voice_config = loaded
-                vc_exists = True
-        except Exception:  # noqa: BLE001
-            raise HTTPException(400, "声音配置已损坏，无法合并角色。")
-        # Lazy migration of legacy absolute ref_audio values (same as the other paths).
-        _n, migrated = pathio.migrate_entries_in(vc_path, layout.workspace, "dict", ("ref_audio",))
-        if isinstance(migrated, dict):
-            voice_config = migrated
+class MergeBatchRequest(BaseModel):
+    script: str | None = None
+    target: str
+    sources: list[str] = Field(min_length=1, max_length=500)
+    # Optimistic lock: the ``version`` of the merge graph the user was looking at.
+    version: int | None = None
 
-    # Collect the identity set across the scope files. A corrupt file is a hard error on
-    # this write endpoint (silently skipping it would leave the file unmerged).
-    file_speakers: set[str] = set()
-    for sp in script_paths:
-        if not sp.exists():
-            continue
-        try:
-            data = json.loads(sp.read_text("utf-8"))
-            if not isinstance(data, list):
-                raise ValueError
-        except Exception:  # noqa: BLE001
-            raise HTTPException(400, f"解析文件已损坏，无法合并：{sp.name}")
-        for e in data:
-            if isinstance(e, dict):
-                name = (e.get("speaker") or e.get("type") or "").strip()
-                if name:
-                    file_speakers.add(name)
 
-    if src not in file_speakers and src not in voice_config:
-        raise HTTPException(404, f"未找到角色：{src}")
-    if tgt not in file_speakers and tgt not in voice_config:
-        raise HTTPException(400, f"目标角色不在当前范围：{tgt}")
+class MergeUndoRequest(BaseModel):
+    script: str | None = None
+    record_id: str
+    version: int | None = None
 
-    # Rewrite the parsed source data: replace the source identity file by file.
-    replaced = 0
-    changed_files: list[str] = []
-    for sp in script_paths:
-        if not sp.exists():
-            continue
-        data = json.loads(sp.read_text("utf-8"))  # validity already checked above
-        changed = 0
-        for e in data:
-            if not isinstance(e, dict):
-                continue
-            spk = (e.get("speaker") or "").strip()
-            tp = (e.get("type") or "").strip()
-            if spk == src:
-                e["speaker"] = tgt
-                changed += 1
-            elif not spk and tp == src:
-                # ``type`` only stands in for the identity when ``speaker`` is absent.
-                e["type"] = tgt
-                changed += 1
-        if changed:
-            pathio.rewrite_json_file(sp, data)
-            changed_files.append(sp.name)
-            replaced += changed
 
-    # Sync voice_config: drop the merged-away entry; re-point aliases at the target.
-    if vc_exists:
-        voice_config.pop(src, None)
-        for name, e in voice_config.items():
-            if not isinstance(e, dict):
-                continue
-            if e.get("alias_of") == src:
-                e["alias_of"] = tgt
-            if e.get("alias") == src:  # legacy field (still recognised downstream)
-                e["alias"] = tgt
-        pathio.rewrite_json_file(vc_path, voice_config)
+class LinkVetoRequest(BaseModel):
+    script: str | None = None
+    source: str
+    target: str
+    version: int | None = None
 
-    # The source lines now use the target voice.  Mark both identities stale so an
-    # already-complete package cannot silently retain audio rendered before this edit.
-    Batch.invalidate_speaker_outputs([src, tgt], layout)
 
-    return {"ok": True, "source": src, "target": tgt, "replaced": replaced, "files": changed_files}
+class ReviewSeenRequest(BaseModel):
+    script: str | None = None
+    target: str
+
+
+@router.get("/voices/merge-graph")
+def merge_graph(script: str | None = None) -> dict:
+    """Roles, suspected-link table, merge records, vetoes and unseen candidates of a scope."""
+    layout = resolve_layout()
+    if layout.parsed_json is None:
+        return {"version": 0, "script": script or "", "roles": [], "links": {}, "records": [], "vetoes": [],
+                "new_candidates": {}}
+    return _merge_call(RM.build_graph, script)
+
+
+@router.post("/voices/merge-batch")
+def merge_batch(
+    req: MergeBatchRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Merge several roles into one target atomically; orphans are rematched (see ``role_links``)."""
+    _merge_guard(ctx, db, "合并角色")
+    return _merge_call(RM.merge_batch, req.script, req.target, req.sources, req.version)
+
+
+@router.post("/voices/merge-undo")
+def merge_undo(
+    req: MergeUndoRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    _merge_guard(ctx, db, "撤销合并")
+    return _merge_call(RM.undo_merge, req.script, req.record_id, req.version)
+
+
+@router.post("/voices/link-veto")
+def link_veto(
+    req: LinkVetoRequest,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    """“不是同一人”: rule out source -> target; the source is rematched elsewhere."""
+    _merge_guard(ctx, db, "忽略提示")
+    return _merge_call(RM.add_veto, req.script, req.source, req.target, req.version)
+
+
+@router.delete("/voices/link-veto")
+def unlink_veto(
+    source: str,
+    target: str,
+    script: str | None = None,
+    version: int | None = None,
+    ctx: AuthContext = Depends(get_auth_context),
+    db: Session = Depends(get_db),
+) -> dict:
+    _merge_guard(ctx, db, "恢复提示")
+    return _merge_call(RM.remove_veto, script, source, target, version)
+
+
+@router.post("/voices/merge-review-seen")
+def merge_review_seen(req: ReviewSeenRequest) -> dict:
+    """The user looked at a target's unseen candidates; clear its “new” markers."""
+    _common.require_workspace()
+    return _merge_call(RM.mark_reviewed, req.script, req.target)
 
 
 # ---------------------------------------------------------------------------

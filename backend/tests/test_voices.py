@@ -1426,7 +1426,8 @@ def test_merge_speakers_zero_lines_removes_vc_entry(clone_ws):
     assert "A" not in _load_vc(clone_ws)
 
 
-def test_merge_speakers_redirects_aliases(clone_ws):
+def test_merge_speakers_leaves_legacy_alias_fields_alone(clone_ws):
+    # Links live in the role-link table now; stale voice_config alias fields are display-only.
     _seed_script(clone_ws, {"A": 1, "B": 1})
     _seed_foundations(clone_ws, ["A", "B", "C", "D"], extra={
         "C": {"alias_of": "A"},
@@ -1436,8 +1437,8 @@ def test_merge_speakers_redirects_aliases(clone_ws):
     assert out["replaced"] == 1
     vc = _load_vc(clone_ws)
     assert "A" not in vc
-    assert vc["C"]["alias_of"] == "B"
-    assert vc["D"]["alias"] == "B"
+    assert vc["C"]["alias_of"] == "A"
+    assert vc["D"]["alias"] == "A"
 
 
 def test_merge_speakers_type_fallback_only(clone_ws):
