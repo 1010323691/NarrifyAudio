@@ -1,12 +1,11 @@
 """Shared lifecycle rules for user-owned projects and their storage directories."""
 from __future__ import annotations
 
-import calendar
 import os
 import shutil
 import stat
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, select, update
@@ -69,16 +68,17 @@ def rename_project(db: Session, project: Project, name: str) -> None:
     project.name = name
 
 
-def add_calendar_month(value: datetime) -> datetime:
-    """Return the same time one calendar month later, clamping the day."""
-    month = value.month % 12 + 1
-    year = value.year + (1 if value.month == 12 else 0)
-    day = min(value.day, calendar.monthrange(year, month)[1])
-    return value.replace(year=year, month=month, day=day)
-
-
 def as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def trash_expires_at(deleted_at: datetime, trash_days: int) -> datetime:
+    return as_utc(deleted_at) + timedelta(days=trash_days)
+
+
+def project_expires_at(project: Project, project_ttl_days: int) -> datetime | None:
+    """Natural expiry of a live project (None = never expires)."""
+    return as_utc(project.created_at) + timedelta(days=project_ttl_days) if project_ttl_days > 0 else None
 
 
 def move_project_to_trash(db: Session, project: Project) -> None:
@@ -99,9 +99,16 @@ def move_project_to_trash(db: Session, project: Project) -> None:
 
 
 def restore_project(db: Session, project: Project) -> None:
-    """Restore a trashed project before its one-calendar-month expiry."""
-    if project.deleted_at is None or add_calendar_month(as_utc(project.deleted_at)) <= utcnow():
+    """Restore a trashed project before the administrator-set trash deadline."""
+    from ..platform.system_config import project_retention
+
+    retention = project_retention(db)
+    if project.deleted_at is None or trash_expires_at(project.deleted_at, retention["trash_days"]) <= utcnow():
         raise ValueError("项目已超过回收期限")
+    expiry = project_expires_at(project, retention["project_ttl_days"])
+    if expiry is not None and expiry <= utcnow():
+        # Restoring would hand the project straight to the next expiry pass.
+        raise ValueError("项目已超过保质期，无法恢复")
     occupied_names = {
         name.casefold() for name in db.scalars(select(Project.name).where(
             Project.owner_id == project.owner_id,
@@ -127,6 +134,27 @@ def restore_project(db: Session, project: Project) -> None:
     project.deleted_at = None
 
 
+def _project_resource_dirs(db: Session, project: Project) -> list[Path]:
+    """Platform-owned files outside the workspace: resource snapshots and export zips."""
+    from ..platform.resource_inventory import ResourceError, internal_path
+
+    export_ids = db.scalars(select(Task.id).where(
+        Task.owner_id == project.owner_id, Task.project_id == project.id, Task.task_type == "resources.package",
+    )).all()
+    found: list[Path] = []
+    try:
+        candidates = [internal_path(db, project.owner_id, project.id)]
+        candidates += [internal_path(db, project.owner_id, "exports", task_id) for task_id in export_ids]
+    except ResourceError as exc:
+        raise OSError(f"Resource storage is not safely accessible: {exc}") from exc
+    for path in candidates:
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise OSError("Resource directory is not a safe directory")
+        if path.exists():
+            found.append(path)
+    return found
+
+
 def permanently_delete_project(db: Session, project: Project, workspace_path: Path) -> None:
     """Permanently remove expired project data and its managed workspace.
 
@@ -150,6 +178,7 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
             raise OSError("Staged project workspace is not a safe directory")
 
     task_ids = select(Task.id).where(Task.owner_id == project.owner_id, Task.project_id == project.id)
+    resource_dirs = _project_resource_dirs(db, project)
     try:
         from ..platform.models import CurrentDelivery, DeliveryIndexState, ProjectProgress, ProjectProgressRefresh
         db.execute(delete(ProjectProgressRefresh).where(ProjectProgressRefresh.project_id == project.id))
@@ -185,6 +214,8 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
 
         for staged_path in staged_paths:
             shutil.rmtree(staged_path, onerror=_remove_readonly)
+        for resource_dir in resource_dirs:
+            shutil.rmtree(resource_dir, onerror=_remove_readonly)
         db.commit()
     except Exception:
         db.rollback()

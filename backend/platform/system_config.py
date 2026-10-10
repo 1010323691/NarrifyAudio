@@ -87,3 +87,30 @@ def client_logs_enabled(db: Session) -> bool:
     """One platform-wide display switch; legacy workspace preferences cannot enable it."""
     row = db.get(SystemConfig, "client.logs")
     return bool(row and isinstance(row.value, dict) and row.value.get("enabled") is True)
+
+
+PROJECT_RETENTION_KEY = "retention.projects"
+DEFAULT_TRASH_DAYS = 30
+MAX_RETENTION_DAYS = 3650
+
+
+def normalize_project_retention(value: Any) -> dict[str, int]:
+    """Clamp a stored/submitted retention record to its valid range.
+
+    ``project_ttl_days`` = 0 keeps projects forever (the default: expiring
+    existing projects must be an explicit administrator decision);
+    ``trash_days`` is how long a trashed project stays recoverable (>= 1)."""
+    raw = value if isinstance(value, dict) else {}
+
+    def number(key: str, default: int, low: int) -> int:
+        try:
+            return max(low, min(MAX_RETENTION_DAYS, int(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return {"project_ttl_days": number("project_ttl_days", 0, 0), "trash_days": number("trash_days", DEFAULT_TRASH_DAYS, 1)}
+
+
+def project_retention(db: Session) -> dict[str, int]:
+    row = db.get(SystemConfig, PROJECT_RETENTION_KEY)
+    return normalize_project_retention(row.value if row is not None else None)

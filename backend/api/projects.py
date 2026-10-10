@@ -15,14 +15,15 @@ from ..platform.deps import AuthContext, get_auth_context
 from ..services.list_paging import project_page
 from ..services.projects import (
     ActiveProjectTasksError,
-    add_calendar_month,
     as_utc,
+    trash_expires_at,
     create_project as create_project_record,
     move_project_to_trash,
     rename_project,
     restore_project,
 )
 from ..platform.storage import project_workspace_path
+from ..platform.system_config import project_retention
 from ..platform.workspace_layout import validate_project_name
 from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
 from ..core.request_context import bind_workspace
@@ -73,10 +74,11 @@ def list_trashed_projects(user: User = Depends(require_authenticated_user), db: 
     items = db.scalars(select(Project).where(
         Project.owner_id == user.id, Project.deleted_at.is_not(None),
     ).order_by(Project.deleted_at.desc())).all()
+    trash_days = project_retention(db)["trash_days"]
     return [{
         **_project_json(item, user),
         "deleted_at": as_utc(item.deleted_at).isoformat(),
-        "expires_at": add_calendar_month(as_utc(item.deleted_at)).isoformat(),
+        "expires_at": trash_expires_at(item.deleted_at, trash_days).isoformat(),
     } for item in items]
 
 
