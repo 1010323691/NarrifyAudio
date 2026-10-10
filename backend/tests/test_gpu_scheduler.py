@@ -1181,3 +1181,89 @@ def test_llm_slot_skips_a_head_waiter_that_is_blocked_by_a_paused_task(tmp_path,
             db.execute(delete(Project).where(Project.id == project))
             db.execute(delete(User).where(User.id == owner))
     assert not errors
+
+
+def test_llm_precheck_ranks_waiters_against_the_free_slots(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
+    base = utcnow()
+    ids = [new_id() for _ in range(7)]
+    with SessionLocal.begin() as db:
+        db.add(GPURequest(id=new_id(), service="LLM", status="running", owner_pid=os.getpid(), created_at=base))
+        for index, request_id in enumerate(ids):   # oldest first
+            db.add(GPURequest(id=request_id, service="LLM", status="waiting", owner_pid=os.getpid(),
+                              created_at=base + timedelta(seconds=index + 1)))
+    # limit 3, one running -> 2 free slots: ranks 0 and 1 may poll for real, the rest may not
+    verdicts = [admission._llm_precheck(request_id) for request_id in ids]
+    assert [skip for skip, _rank, _near in verdicts] == [False, False, True, True, True, True, True]
+    assert [rank for _skip, rank, _near in verdicts] == [0, 1, 2, 3, 4, 5, 6]
+    assert [near for _skip, _rank, near in verdicts] == [True] * 6 + [False]   # rank 6 is 4 places behind the free slots
+    with SessionLocal.begin() as db:                                          # no free slot at all: everyone skips
+        db.add_all(GPURequest(id=new_id(), service="LLM", status="running", owner_pid=os.getpid(), created_at=base)
+                   for _ in range(2))
+    assert all(admission._llm_precheck(request_id)[0] for request_id in ids)
+    assert admission._llm_precheck("missing-request") == (False, -1, True)   # unknown request: let the lock path decide
+
+
+def test_deep_queue_waiters_stay_out_of_the_locked_path_until_a_slot_frees(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    calls = 0
+    guard = threading.Lock()
+    real_transaction = admission.transaction
+
+    def counting_transaction():
+        nonlocal calls
+        with guard:
+            calls += 1
+        return real_transaction()
+
+    holding, release, done, errors = threading.Event(), threading.Event(), [], []
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def waiter(name):
+        try:
+            with gpu_permit("LLM"):
+                done.append(name)
+        except Exception as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    threads = [threading.Thread(target=waiter, args=(f"w{i}",)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.5)                                            # every waiter has registered its request
+    monkeypatch.setattr(admission, "transaction", counting_transaction)
+    time.sleep(1.5)
+    with guard:
+        idle_polls = calls
+    # 8 waiters x ~1.5 s: the old code polled the locked path a dozen+ times per second per waiter
+    assert idle_polls <= 2, idle_polls
+    release.set()
+    for thread in [first, *threads]:
+        thread.join(10)
+    assert sorted(done) == [f"w{i}" for i in range(8)] and not errors
+
+
+def test_llm_trace_reports_active_limit_and_rank(tmp_path, monkeypatch, caplog):
+    import logging
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 4)
+
+    @admission.llm_admitted
+    def call(*args, **kwargs):
+        return "ok"
+
+    with caplog.at_level(logging.INFO, logger="audiobook.llm_trace"):
+        call("http://x", "key", "model")
+    line = next(r.getMessage() for r in caplog.records if "llm_call" in r.getMessage())
+    assert "active=0" in line and "limit=4" in line and "rank=0" in line

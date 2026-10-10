@@ -10,9 +10,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
-from ..models import GPURequest, Task, TaskAttempt, new_id
+from ..database import SessionLocal
+from ..models import GPURequest, GPUSchedulerState, Task, TaskAttempt, new_id
 from ..task_context import EngineExecutionContext
 from ..system_config import parse_worker_concurrency
 from ..task_contracts import TaskClaim, TaskCancelledError
@@ -28,6 +29,47 @@ _trace = logging.getLogger("audiobook.llm_trace")
 # queue otherwise admits roughly one request per poll interval and starves the engine.
 _LLM_POLL_FIRST = 0.05
 _LLM_POLL_MAX = 1.0
+_LLM_NEAR_POLL_MAX = 0.25   # waiters close to the front keep a short backoff (a slot may free in another process)
+_LLM_NEAR_RANK = 4          # "close to the front" = fewer than this many places behind the free slots
+_admission_info = threading.local()   # per-thread: how the last LLM permit was admitted (for llm_trace)
+def _llm_precheck(request_id: str) -> tuple[bool, int, bool]:
+    """Lock-free, read-only look at whether this LLM request could be admitted right now:
+    ``(skip, rank, near)``. ``rank`` = runnable waiters queued before it. It skips the locked
+    admission transaction when no slot is free, the scheduler is not serving LLM, or its
+    rank lies beyond the free slots — the locked path stays the only place that admits, so a
+    stale read can only cost one extra sleep or one needless lock, never an over-admission.
+    Any failure answers "do not skip": admission must never depend on this shortcut."""
+    try:
+        with SessionLocal() as db:
+            mine = db.get(GPURequest, request_id)
+            if mine is None:
+                return False, -1, True   # the locked path raises the cancellation
+            limit = parse_worker_concurrency(db=db)
+            active = db.scalar(select(func.count()).select_from(GPURequest).where(
+                GPURequest.service == "LLM", GPURequest.status == "running")) or 0
+            rank = db.scalar(
+                select(func.count()).select_from(GPURequest).outerjoin(Task, Task.id == GPURequest.task_id).where(
+                    GPURequest.service == "LLM", GPURequest.status == "waiting",
+                    (GPURequest.task_id.is_(None)) | (Task.status == "running"),
+                    or_(GPURequest.created_at < mine.created_at,
+                        and_(GPURequest.created_at == mine.created_at, GPURequest.id < mine.id)))) or 0
+            free = limit - active
+            row = db.get(GPUSchedulerState, "local")
+            managed = load_config(db).enabled or bool(row and row.value.get("managed"))
+            serving = True
+            if managed:
+                value = row.value if row else {}
+                serving = value.get("state") == "LLM_ACTIVE" and value.get("current") == "LLM"
+            near = serving and rank - max(free, 0) < _LLM_NEAR_RANK
+            if free <= 0 or not serving:
+                return True, rank, near
+            if managed and rank >= free:
+                return True, rank, near
+            return False, rank, near
+    except Exception:
+        return False, -1, True
+
+
 class _Waiter:
     """One in-process LLM permit request. ``parked`` is true only while it sleeps in its
     backoff wait; a waiter that is blocked elsewhere (a paused task parked in ``check()``) or
@@ -116,6 +158,18 @@ def gpu_permit(service: str, handle=None):
     try:
         delay = _LLM_POLL_FIRST if wake is not None else 0.2
         extra_slots = 0   # slots still free after this admission: wake that many more waiters
+        first_rank = None   # queue position when the request first looked (for llm_trace)
+        admit_info = None
+
+        def park(timeout: float, was_woken: bool) -> None:
+            if was_woken:
+                _llm_wake_after(wake)   # woken for a slot we could not take: hand it on
+            wake.parked = True
+            try:
+                wake.event.wait(timeout)
+            finally:
+                wake.parked = False
+
         while True:
             was_woken = False
             if wake is not None:
@@ -125,6 +179,16 @@ def gpu_permit(service: str, handle=None):
                 handle.check()
             elif claim is not None:
                 EngineExecutionContext(claim).check()
+            if wake is not None:
+                skip, rank_now, near = _llm_precheck(request_id)
+                if first_rank is None:
+                    first_rank = rank_now
+                if skip:
+                    # Not this request's turn: sleep without touching the host lock. Waiters near
+                    # the front keep a short backoff, the rest sleep long and rely on wake-ups.
+                    delay = min(delay * 2, _LLM_NEAR_POLL_MAX) if near else _LLM_POLL_MAX
+                    park(delay, was_woken)
+                    continue
             # Read the current admin limit with the admission session, so a
             # different process's config cache cannot admit excess requests.
             with transaction() as (db, state):
@@ -163,19 +227,15 @@ def gpu_permit(service: str, handle=None):
                     allowed = request_id in first
                 if allowed:
                     extra_slots = free_slots - 1
+                    if service == "LLM":
+                        admit_info = {"active": active_llm, "limit": llm_limit, "rank": first_rank}
                     request.status = "running"
                     if managed and service == "LLM":
                         request.process = {**request.process, "llm_runtime": state.get("llm_runtime") or platform_llm(db).model_dump()}
                     state["served"] = True
                     break
             if wake is not None:
-                if was_woken:
-                    _llm_wake_after(wake)   # woken for a slot we could not take: hand it on
-                wake.parked = True
-                try:
-                    wake.event.wait(delay)
-                finally:
-                    wake.parked = False
+                park(delay, was_woken)
                 delay = min(delay * 2, _LLM_POLL_MAX)
             else:
                 time.sleep(delay)
@@ -183,6 +243,8 @@ def gpu_permit(service: str, handle=None):
                 # so a deep backlog must not turn the wait into constant 5 Hz polling.
                 delay = min(delay * 2, 2.0)
         _leave_llm_queue(wake)   # admitted: stop being a wake-up target while the call runs
+        if service == "LLM":
+            _admission_info.value = admit_info
         if wake is not None and extra_slots > 0:
             _llm_wake(extra_slots)   # more free slots than this one request: fill them now
         yield request_id
@@ -215,8 +277,10 @@ def llm_admitted(function):
     def wrapped(*args, **kwargs):
         queued_at = time.monotonic()
         claim = _claim.get()
+        _admission_info.value = None
         with gpu_permit("LLM", kwargs.get("handle")) as request_id:
             admitted_at = time.monotonic()
+            info = getattr(_admission_info, "value", None) or {}
             from ..database import SessionLocal
             from ...core.config import LLMConfig
             runtime = None
@@ -238,8 +302,10 @@ def llm_admitted(function):
                 return function(*args, **kwargs)
             finally:
                 # One line per model call: time spent waiting for a permit vs. in the call itself.
-                _trace.info("llm_call task=%s wait=%.3f run=%.3f", claim.task_id if claim else "-",
-                            admitted_at - queued_at, time.monotonic() - admitted_at)
+                _trace.info("llm_call task=%s wait=%.3f run=%.3f active=%s limit=%s rank=%s",
+                            claim.task_id if claim else "-", admitted_at - queued_at,
+                            time.monotonic() - admitted_at, info.get("active", "-"),
+                            info.get("limit", "-"), info.get("rank", "-"))
     return wrapped
 
 
