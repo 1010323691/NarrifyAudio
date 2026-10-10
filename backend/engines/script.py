@@ -3509,10 +3509,13 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         # 重跑解析 LLM（每条仅 1 次，single_call 模式——结果没变不再多跑），
         # 过忠实性门者整体替换条目，未过门保留原样交机械分段（从不猜）。
         max_para = int(generation.max_paragraph_chars or 200)
+        # LLM 重切的触发阈值可低于机械分段的硬上限：100–200 字之间的条目只给 LLM 一次机会，
+        # 失败就保持原样；只有超过 max_para 的才会被机械切开。
+        resplit_chars = min(int(generation.long_resplit_chars or max_para), max_para)
         if generation.check_long_paragraphs:
             all_entries, long_checked, long_fixed = long_paragraph_resplit(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
-                max_para, context_window=int(generation.check_context_window or 0),
+                resplit_chars, context_window=int(generation.check_context_window or 0),
                 budget_deferred=budget_deferred,
             )
         else:

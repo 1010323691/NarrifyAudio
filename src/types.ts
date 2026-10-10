@@ -564,6 +564,8 @@ export interface AppConfig {
     /** 段落硬上限（字数 = strip 后 Unicode 码点数）：任何条目最终不得超过此值，
      *  由超长段落检查的机械分段兜底保证。 */
     max_paragraph_chars: number
+    /** LLM 语义重切的触发字数（低于机械分段上限；重切没过校验则保持原样，不做机械切分）。 */
+    long_resplit_chars: number
     /** 纯标点条目吸收开关（解析内阶段 B，确定性零 LLM 成本）：无词字符条目并入相邻
      *  NARRATOR（标题守卫），无邻接则删除。 */
     absorb_punct_entries: boolean

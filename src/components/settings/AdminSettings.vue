@@ -107,6 +107,7 @@ async function save() {
     ...config.generation,
     parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
     edit_max_delete_chars: Math.max(1, Math.min(200, Math.trunc(Number(config.generation.edit_max_delete_chars) || 24))),
+    long_resplit_chars: Math.max(10, Math.min(2000, Math.trunc(Number(config.generation.long_resplit_chars) || 130))),
     instruct_max_chars: Math.max(10, Math.min(300, Math.trunc(Number(config.generation.instruct_max_chars) || 60))),
     delete_max_chars: Math.max(1, Math.min(400, Math.trunc(Number(config.generation.delete_max_chars) || 30))),
     unit_max_chars: Math.max(20, Math.min(400, Math.trunc(Number(config.generation.unit_max_chars) || 80))),
@@ -340,6 +341,15 @@ watch(
               <Input id="admin-setting-10" v-model.number="draft.generation.spot_check_rate" type="number" step="0.01" min="0" max="0.5" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
                 设置解析结果的抽样复核比例；0 表示关闭。归属抽样的总开关在用户「文本解析」页。
+              </span>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <Label for="admin-setting-resplit-chars">超长重切触发字数（LLM）</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input id="admin-setting-resplit-chars" v-model.number="draft.generation.long_resplit_chars" type="number" min="10" max="2000" step="10" class="max-w-[8rem]" />
+              <span class="text-xs text-muted-foreground">
+                超过此字数的条目会交给 LLM 尝试重切（默认 130）；重切未通过则保持原样，只有超过上方「段落硬上限」的条目才会被机械切开。
               </span>
             </div>
           </div>

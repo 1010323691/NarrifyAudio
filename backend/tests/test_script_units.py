@@ -428,3 +428,34 @@ def test_shipped_default_is_units_protocol_and_admin_can_switch_back():
     assert GenerationConfig().parse_protocol == "units"
     assert GenerationConfig().chunk_size == 3000
     assert GenerationConfig(parse_protocol="json").parse_protocol == "json"
+
+
+def test_long_resplit_threshold_is_independent_of_mechanical_cap(workspace, monkeypatch):
+    from backend.engines import script as script_engine
+
+    seen = []
+
+    def fake_resplit(handle, llm, generation, sys_prompt, usr_template, entries, max_chars, **kw):
+        seen.append(max_chars)
+        return entries, 0, 0
+
+    monkeypatch.setattr(script_engine, "long_paragraph_resplit", fake_resplit)
+    quiet = {**_QUIET, "check_long_paragraphs": True}
+    for gen, expected in (({}, 130), ({"long_resplit_chars": 100}, 100),
+                          ({"max_paragraph_chars": 90}, 90)):  # never above the hard cap
+        seen.clear()
+        _run_with(workspace, monkeypatch, quiet, gen)
+        assert seen == [expected], (gen, seen)
+    assert GenerationConfig().long_resplit_chars == 130 and GenerationConfig().max_paragraph_chars == 200
+
+
+def _run_with(workspace, monkeypatch, base, extra):
+    import shutil
+
+    shutil.rmtree(workspace, ignore_errors=True)
+    (workspace / "02_split_text").mkdir(parents=True)
+    (workspace / "02_split_text" / "ch.txt").write_bytes(SAMPLE.encode("utf-8"))
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, *a, **k: _BodyResp(_chat_payload(GOOD_REPLY, "stop")))
+    return generate_file(_LogHandle(), str(workspace / "02_split_text" / "ch.txt"), _LLM,
+                         PromptsConfig(), GenerationConfig(**{**base, **extra}))

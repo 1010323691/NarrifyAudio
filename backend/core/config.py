@@ -226,6 +226,11 @@ class GenerationConfig(BaseModel):
     # 硬上限（字数 = strip 后 Unicode 码点数）：任何条目（含 LLM 重切后的单条）
     # 最终不得超过此值——机械分段兜底保证。
     max_paragraph_chars: int = 200
+    # LLM 语义重切的触发字数（解析内超长段落检查 LLM 阶段）：超过此字数的条目就带上下文
+    # 重跑一次 LLM 尝试拆开藏在里面的台词；重切没过忠实性校验则**保持原样、不做机械切分**——
+    # 机械分段兜底只在条目超过 ``max_paragraph_chars`` 时才介入。取值不超过 max_paragraph_chars
+    # （实际生效值 = min(两者)）。
+    long_resplit_chars: int = Field(default=130, ge=10, le=2000)
     # 纯标点条目吸收（解析内第六阶段，确定性零 LLM 成本）：整条无任何词字符的条目
     # （独立「……」/「？」等）并入相邻 NARRATOR 条目（标题守卫），无 NARRATOR 邻接则删除。
     absorb_punct_entries: bool = True
