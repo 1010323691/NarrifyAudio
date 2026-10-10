@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Callable
 
 import redis
@@ -211,13 +212,40 @@ def _project_retention_loop(stop: threading.Event) -> None:
         stop.wait(24 * 60 * 60)
 
 
+_retention_state = {"done_on": ""}
+
+
 def _retention_pass():
-    # Single-round work budget per cleanup kind: a large backlog continues on
-    # the coordinator's next pass (60s) instead of blocking the dispatch loop.
+    """Daily cleanup at local midnight (or on the first pass after a missed one).
+
+    The coordinator polls this every 60 s while it reports ``incomplete``; "not
+    due yet" is reported that way on purpose, so the cheap date check below is
+    what keeps the heavy work to once per local day. A bounded round that hit its
+    work budget also stays incomplete and continues on the next pass."""
+    from .platform.models import SystemConfig
+    from .services.project_purge_audit import verify_purged_projects
+
+    today = datetime.now().astimezone().date().isoformat()
+    if _retention_state["done_on"] == today:
+        return 0, True
+    with SessionLocal() as db:
+        row = db.get(SystemConfig, "retention.last_run")
+        if row is not None and isinstance(row.value, dict) and row.value.get("date") == today:
+            _retention_state["done_on"] = today
+            return 0, True
     projects = purge_expired_projects(limit=20)
     resources = purge_resource_artifacts(limit=200)
-    incomplete = projects >= 20 or resources >= 200
-    return projects + resources, incomplete
+    verified = verify_purged_projects(limit=50)
+    if projects >= 20 or resources >= 200 or verified >= 50:
+        return projects + resources + verified, True
+    with SessionLocal.begin() as db:
+        row = db.get(SystemConfig, "retention.last_run")
+        if row is None:
+            db.add(SystemConfig(key="retention.last_run", value={"date": today}))
+        else:
+            row.value = {"date": today}
+    _retention_state["done_on"] = today
+    return projects + resources + verified, True
 
 
 def _host_maintenance_loop(stop):

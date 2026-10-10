@@ -24,7 +24,8 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _reset_retention():
+def _reset_retention(monkeypatch):
+    monkeypatch.setattr("backend.services.project_retention.CANCEL_GRACE_SECONDS", 0.0)
     yield
     with SessionLocal.begin() as db:
         row = db.get(SystemConfig, PROJECT_RETENTION_KEY)
@@ -105,7 +106,7 @@ def test_live_project_past_its_lifetime_is_removed_with_files_logs_rows_and_expo
         assert db.scalar(select(TaskEvent.id).where(TaskEvent.task_id == task_id)) is None
 
 
-def test_expiry_cancels_unfinished_tasks_then_deletes_anyway_and_spares_the_default_workspace(client):
+def test_expiry_cancels_unfinished_tasks_and_deletes_in_the_same_pass_and_spares_the_default_workspace(client):
     user_id, username, csrf = _account(client)
     busy = _project(client, csrf)
     with SessionLocal.begin() as db:
@@ -117,11 +118,7 @@ def test_expiry_cancels_unfinished_tasks_then_deletes_anyway_and_spares_the_defa
     _age(busy["id"], created_days=10)
     if default_id:
         _age(default_id, created_days=10)
-    purge_expired_projects()  # first pass: cancel request only
-    assert _exists(busy["id"])
-    with SessionLocal() as db:
-        assert db.scalar(select(Task.status).where(Task.id == running_id)) in {"cancelling", "cancelled"}
-    purge_expired_projects()  # second pass: deleted although the cancel has not been acknowledged
+    purge_expired_projects()  # cancel is requested, then the project is deleted although no worker acknowledged it
     assert not _exists(busy["id"])
     with SessionLocal() as db:
         assert db.get(Task, running_id) is None
@@ -175,3 +172,94 @@ def test_admin_can_read_and_change_retention_and_listings_follow(client):
     assert client.delete(f"/api/v1/projects/{project['id']}", headers=headers).status_code == 200
     trashed = client.get("/api/v1/projects/trash").json()[0]
     assert trashed["expires_at"][:10] == (utcnow() + timedelta(days=14)).date().isoformat()
+
+
+def _receipts(project_id):
+    from backend.platform.models import ProjectPurgeRecord
+    with SessionLocal() as db:
+        return list(db.scalars(select(ProjectPurgeRecord).where(ProjectPurgeRecord.project_id == project_id)).all())
+
+
+def _backdate_receipt(project_id, days=1):
+    from backend.platform.models import ProjectPurgeRecord
+    with SessionLocal.begin() as db:
+        for record in db.scalars(select(ProjectPurgeRecord).where(ProjectPurgeRecord.project_id == project_id)):
+            record.purged_at = utcnow() - timedelta(days=days)
+
+
+def test_purge_leaves_a_receipt_and_the_next_day_check_marks_it_clean(client):
+    from backend.services.project_purge_audit import verify_purged_projects
+
+    user_id, username, csrf = _account(client)
+    project = _project(client, csrf)
+    _trash(client, csrf, project["id"])
+    _age(project["id"], trashed_days=40)
+    purge_expired_projects()
+    (record,) = _receipts(project["id"])
+    assert record.reason == "trash" and record.owner_id == user_id and record.verified_at is None
+
+    verify_purged_projects()
+    assert _receipts(project["id"])[0].verified_at is None  # same day: not due yet
+
+    _backdate_receipt(project["id"])
+    verify_purged_projects()
+    record = _receipts(project["id"])[0]
+    assert record.verified_at is not None and record.leftovers is None
+
+
+def test_next_day_check_removes_files_and_rows_written_after_the_deletion(client):
+    from backend.services.project_purge_audit import find_traces, verify_purged_projects
+
+    user_id, username, csrf = _account(client)
+    project = _project(client, csrf)
+    root = _workspace(username, project["id"])
+    resources = None
+    with SessionLocal() as db:
+        resources = internal_path(db, user_id, project["id"])
+    _set_retention(ttl=1)
+    _age(project["id"], created_days=5)
+    purge_expired_projects()
+    assert not _exists(project["id"]) and not root.exists()
+
+    # a lingering worker recreates output after the deletion
+    (root / "07_output").mkdir(parents=True)
+    (root / "07_output" / "late.wav").write_bytes(b"x")
+    resources.mkdir(parents=True)
+    (resources / "current.json").write_text("{}")
+    from backend.platform.models import TextFormatFlow
+    with SessionLocal.begin() as db:  # a straggler row (sqlite test DB does not enforce the foreign key)
+        db.add(TextFormatFlow(project_id=project["id"], owner_id=user_id, source_file_id=str(uuid.uuid4())))
+    _backdate_receipt(project["id"])
+    verify_purged_projects()
+
+    record = _receipts(project["id"])[0]
+    assert record.leftovers["rows"] == {"text_format_flows": 1}
+    assert not root.exists() and not resources.exists()
+    assert record.verified_at is not None
+    assert record.leftovers and len(record.leftovers["paths"]) == 2
+    with SessionLocal() as db:
+        assert find_traces(db, record) == {"paths": [], "rows": {}}
+
+
+def test_daily_retention_pass_runs_once_per_local_day(monkeypatch):
+    from backend import worker
+
+    calls = []
+    monkeypatch.setattr(worker, "purge_expired_projects", lambda limit: calls.append("p") or 0)
+    monkeypatch.setattr(worker, "purge_resource_artifacts", lambda limit: 0)
+    monkeypatch.setattr("backend.services.project_purge_audit.verify_purged_projects", lambda limit: 0)
+    with SessionLocal.begin() as db:
+        row = db.get(SystemConfig, "retention.last_run")
+        if row is not None:
+            db.delete(row)
+    worker._retention_state["done_on"] = ""
+    assert worker._retention_pass() == (0, True) and calls == ["p"]
+    assert worker._retention_pass() == (0, True) and calls == ["p"]   # same day: cheap no-op
+    worker._retention_state["done_on"] = ""                            # restart the same day: DB marker blocks it
+    worker._retention_pass()
+    assert calls == ["p"]
+    with SessionLocal.begin() as db:
+        db.get(SystemConfig, "retention.last_run").value = {"date": "2000-01-01"}
+    worker._retention_state["done_on"] = ""
+    worker._retention_pass()                                           # a later day: runs again
+    assert calls == ["p", "p"]

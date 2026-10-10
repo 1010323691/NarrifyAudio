@@ -12,7 +12,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ..platform.models import (
-    ChapterReviewMark, OutboxEvent, Project, ProjectFile, QuotaHold, QuotaTransaction,
+    ChapterReviewMark, OutboxEvent, Project, ProjectFile, ProjectPurgeRecord, QuotaHold, QuotaTransaction,
     Task, TaskAttempt, TaskEvent, TaskResult, TextFormatFlow, UserSession,
     WorkerHeartbeat, new_id, utcnow,
 )
@@ -155,7 +155,36 @@ def _project_resource_dirs(db: Session, project: Project) -> list[Path]:
     return found
 
 
-def permanently_delete_project(db: Session, project: Project, workspace_path: Path, *, force: bool = False) -> None:
+def purge_project_rows(db: Session, owner_id: str, project_id: str) -> None:
+    """Delete every database row that hangs off a project (not the project row itself)."""
+    from ..platform.models import (
+        CurrentDelivery, DeliveryIndexState, ProjectProgress, ProjectProgressRefresh, TaskBatch,
+    )
+
+    task_ids = select(Task.id).where(Task.owner_id == owner_id, Task.project_id == project_id)
+    db.execute(delete(ProjectProgressRefresh).where(ProjectProgressRefresh.project_id == project_id))
+    db.execute(delete(ProjectProgress).where(ProjectProgress.project_id == project_id))
+    db.execute(delete(CurrentDelivery).where(CurrentDelivery.project_id == project_id))
+    db.execute(delete(DeliveryIndexState).where(DeliveryIndexState.project_id == project_id))
+    db.execute(delete(QuotaHold).where(QuotaHold.task_id.in_(task_ids)))
+    db.execute(delete(QuotaTransaction).where(QuotaTransaction.task_id.in_(task_ids)))
+    db.execute(delete(OutboxEvent).where(OutboxEvent.aggregate_type == "task", OutboxEvent.aggregate_id.in_(task_ids)))
+    db.execute(update(WorkerHeartbeat).where(WorkerHeartbeat.current_task_id.in_(task_ids)).values(current_task_id=None))
+    db.execute(delete(TaskResult).where(TaskResult.task_id.in_(task_ids)))
+    db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
+    db.execute(delete(TaskAttempt).where(TaskAttempt.task_id.in_(task_ids)))
+    db.execute(delete(Task).where(Task.id.in_(task_ids)))
+    db.execute(delete(TaskBatch).where(TaskBatch.owner_id == owner_id, TaskBatch.project_id == project_id))
+    db.execute(delete(ProjectFile).where(ProjectFile.project_id == project_id, ProjectFile.owner_id == owner_id))
+    # These workflow records point directly at the project and have no
+    # database-level cascade. Remove them before deleting the project row.
+    db.execute(delete(ChapterReviewMark).where(ChapterReviewMark.project_id == project_id, ChapterReviewMark.owner_id == owner_id))
+    db.execute(delete(TextFormatFlow).where(TextFormatFlow.project_id == project_id, TextFormatFlow.owner_id == owner_id))
+    db.execute(update(UserSession).where(UserSession.active_project_id == project_id).values(active_project_id=None))
+
+
+def permanently_delete_project(db: Session, project: Project, workspace_path: Path, *, force: bool = False,
+                              reason: str = "manual") -> None:
     """Permanently remove expired project data and its managed workspace.
 
     Failed or interrupted directory removals remain in a deterministic staging
@@ -178,39 +207,15 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
         if staged_path.is_symlink() or not staged_path.is_dir():
             raise OSError("Staged project workspace is not a safe directory")
 
-    task_ids = select(Task.id).where(Task.owner_id == project.owner_id, Task.project_id == project.id)
     resource_dirs = _project_resource_dirs(db, project)
+    export_ids = list(db.scalars(select(Task.id).where(
+        Task.owner_id == project.owner_id, Task.project_id == project.id, Task.task_type == "resources.package",
+    )).all())
     try:
-        from ..platform.models import CurrentDelivery, DeliveryIndexState, ProjectProgress, ProjectProgressRefresh
-        db.execute(delete(ProjectProgressRefresh).where(ProjectProgressRefresh.project_id == project.id))
-        db.execute(delete(ProjectProgress).where(ProjectProgress.project_id == project.id))
-        db.execute(delete(CurrentDelivery).where(CurrentDelivery.project_id == project.id))
-        db.execute(delete(DeliveryIndexState).where(DeliveryIndexState.project_id == project.id))
-        db.execute(delete(QuotaHold).where(QuotaHold.task_id.in_(task_ids)))
-        db.execute(delete(QuotaTransaction).where(QuotaTransaction.task_id.in_(task_ids)))
-        db.execute(delete(OutboxEvent).where(
-            OutboxEvent.aggregate_type == "task", OutboxEvent.aggregate_id.in_(task_ids),
-        ))
-        db.execute(update(WorkerHeartbeat).where(WorkerHeartbeat.current_task_id.in_(task_ids)).values(current_task_id=None))
-        db.execute(delete(TaskResult).where(TaskResult.task_id.in_(task_ids)))
-        db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
-        db.execute(delete(TaskAttempt).where(TaskAttempt.task_id.in_(task_ids)))
-        db.execute(delete(Task).where(Task.id.in_(task_ids)))
-        from ..platform.models import TaskBatch
-        db.execute(delete(TaskBatch).where(TaskBatch.owner_id == project.owner_id, TaskBatch.project_id == project.id))
-        db.execute(delete(ProjectFile).where(
-            ProjectFile.project_id == project.id, ProjectFile.owner_id == project.owner_id,
-        ))
-        # These workflow records point directly at the project and have no
-        # database-level cascade. Remove them before deleting the project row.
-        db.execute(delete(ChapterReviewMark).where(
-            ChapterReviewMark.project_id == project.id, ChapterReviewMark.owner_id == project.owner_id,
-        ))
-        db.execute(delete(TextFormatFlow).where(
-            TextFormatFlow.project_id == project.id, TextFormatFlow.owner_id == project.owner_id,
-        ))
-        db.execute(update(UserSession).where(UserSession.active_project_id == project.id).values(active_project_id=None))
+        purge_project_rows(db, project.owner_id, project.id)
         db.delete(project)
+        db.add(ProjectPurgeRecord(project_id=project.id, owner_id=project.owner_id, directory_key=project.directory_key,
+                                  reason=reason, export_task_ids=export_ids))
         db.flush()
 
         for staged_path in staged_paths:

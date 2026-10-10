@@ -121,6 +121,25 @@ class Project(TimestampMixin, Base):
     )
 
 
+class ProjectPurgeRecord(Base):
+    """Receipt of a permanently deleted project, kept to re-verify a day later that nothing was left behind.
+
+    Holds ids and storage keys only (no name or content); ``export_task_ids`` are
+    the resource-export directories that were removed outside the workspace."""
+    __tablename__ = "project_purge_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    directory_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(String(20), nullable=False)  # trash | expired | manual
+    export_task_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    purged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leftovers: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # what the verification had to clean up
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
 class ProjectProgress(Base):
     __tablename__ = "project_progress"
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)

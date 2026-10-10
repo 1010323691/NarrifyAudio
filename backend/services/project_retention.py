@@ -6,7 +6,7 @@ are purged ``project_ttl_days`` after creation (0 = never)."""
 from __future__ import annotations
 
 import logging
-
+import time
 from datetime import timedelta
 
 from sqlalchemy import select, text
@@ -74,7 +74,7 @@ def _purge_expired_with_session(db: Session, limit: int) -> int:
             logger.error("Skipping expired project with unsafe storage path: %s", project.id)
             continue
         try:
-            permanently_delete_project(db, project, workspace_path)
+            permanently_delete_project(db, project, workspace_path, reason="trash")
             purged += 1
         except Exception:
             db.rollback()
@@ -84,8 +84,37 @@ def _purge_expired_with_session(db: Session, limit: int) -> int:
     return purged
 
 
+CANCEL_GRACE_SECONDS = 30.0   # how long running tasks get to notice their cancel before the project is deleted
+_CANCEL_POLL_SECONDS = 1.0
+
+
+def _cancel_unfinished(db: Session, project: Project) -> int:
+    running = db.scalars(select(Task).where(
+        Task.owner_id == project.owner_id, Task.project_id == project.id,
+        Task.status.in_(ACTIVE_TASK_STATUSES - {"cancelling"}),
+    ).with_for_update()).all()
+    for task in running:
+        cancel_task_record(db, task)
+    db.commit()
+    return len(running)
+
+
+def _wait_for_cancellation(db: Session, project_ids: list[str]) -> None:
+    """Give running tasks a bounded grace period to stop; deletion proceeds regardless."""
+    deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        db.rollback()
+        if not db.scalar(select(Task.id).where(Task.project_id.in_(project_ids), Task.status == "running").limit(1)):
+            return
+        time.sleep(_CANCEL_POLL_SECONDS)
+
+
 def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int:
-    """Permanently delete live projects older than ``ttl_days`` (unfinished tasks are cancelled first)."""
+    """Permanently delete live projects older than ``ttl_days``, even with unfinished tasks.
+
+    Unfinished tasks are asked to cancel first, given a short grace to stop, and
+    the project is then deleted regardless; the next day's verification
+    (``project_purge_audit``) sweeps whatever a lingering worker wrote after that."""
     if ttl_days <= 0:
         return 0
     cutoff = now - timedelta(days=ttl_days)
@@ -94,28 +123,22 @@ def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int
         .join(User, User.id == Project.owner_id)
         .where(Project.deleted_at.is_(None), Project.created_at < cutoff, Project.name != DEFAULT_WORKSPACE_NAME)
         .order_by(Project.created_at.asc())
-        .limit(limit * 3)  # busy projects are skipped, so look past them
+        .limit(limit)
     ).all()
+    cancelled = 0
+    for project_id, _username in rows:
+        project = db.scalar(select(Project).where(Project.id == project_id, Project.deleted_at.is_(None)).with_for_update(skip_locked=True))
+        if project is not None:
+            cancelled += _cancel_unfinished(db, project)
+    if cancelled:
+        logger.info("Expired projects: cancelled %d unfinished tasks before deletion", cancelled)
+        _wait_for_cancellation(db, [project_id for project_id, _ in rows])
     purged = 0
     for project_id, username in rows:
-        if purged >= limit:
-            break
         project = db.scalar(select(Project).where(
             Project.id == project_id, Project.deleted_at.is_(None),
         ).with_for_update(skip_locked=True))
         if project is None:
-            continue
-        # Unfinished work does not postpone expiry: first pass asks every task to cancel (workers stop
-        # cooperatively and treat a vanished task row as cancelled), the next pass deletes regardless.
-        running = db.scalars(select(Task).where(
-            Task.owner_id == project.owner_id, Task.project_id == project.id,
-            Task.status.in_(ACTIVE_TASK_STATUSES - {"cancelling"}),
-        ).with_for_update()).all()
-        if running:
-            for task in running:
-                cancel_task_record(db, task)
-            db.commit()
-            logger.info("Expired project %s: cancelled %d unfinished tasks before deletion", project.id, len(running))
             continue
         workspace_path = safe_project_workspace_path(db, username, project.id)
         if workspace_path is None:
@@ -123,7 +146,7 @@ def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int
             db.rollback()
             continue
         try:
-            permanently_delete_project(db, project, workspace_path, force=True)
+            permanently_delete_project(db, project, workspace_path, force=True, reason="expired")
             purged += 1
             logger.info("Purged expired project %s (older than %s days)", project.id, ttl_days)
         except Exception:
