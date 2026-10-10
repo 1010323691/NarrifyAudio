@@ -618,12 +618,220 @@ def test_long_resplit_pack_zero_is_one_call_per_chapter_until_the_output_cap(mon
     monkeypatch.setattr(script, "_llm_call", fake_call)
     handle = Handle()
     script.long_paragraph_resplit(handle, LLMConfig(), GenerationConfig(long_resplit_pack=0,
-                                  max_tokens=100000), "sys", "{context}\n{chunk}", rows, 130)
+                                  max_tokens=100000, chunk_size=20000), "sys", "{context}\n{chunk}", rows, 130)
     assert calls[0].count("【条目 ") == 6 and "6/6" in calls[0]   # 6 entries, ONE packed call
     assert any("共 1 次调用" in m for _l, m in handle.logs)
     calls.clear()
     handle = Handle()
     script.long_paragraph_resplit(handle, LLMConfig(), GenerationConfig(long_resplit_pack=0,
-                                  max_tokens=1000), "sys", "{context}\n{chunk}", rows, 130)
-    # max_tokens=1000 → 500 chars of entry text per pack; each entry is 168 chars → 2 per pack
-    assert any("共 3 次调用" in m for _l, m in handle.logs)
+                                  max_tokens=1000, chunk_size=20000), "sys", "{context}\n{chunk}", rows, 130)
+    # max_tokens no longer limits a pack: only chunk_size does (20000 → still one pack)
+    assert any("共 1 次调用" in m for _l, m in handle.logs)
+
+
+def test_long_resplit_pack_never_exceeds_the_chunk_budget(monkeypatch):
+    rows = [entry("NARRATOR", f"第{k}段长旁白，" * 24) for k in range(6)]   # 168 chars each
+    monkeypatch.setattr(script, "_llm_call", lambda *a, **k: json.dumps([{"speaker": "NARRATOR", "text": "x"}]))
+    handle = Handle()
+    script.long_paragraph_resplit(handle, LLMConfig(), GenerationConfig(long_resplit_pack=0, max_tokens=100000,
+                                  chunk_size=1000), "sys", "{context}\n{chunk}", rows, 130)
+    # 1000 chars of text per pack (2000 with context): only part of the chapter fits the one allowed pack
+    assert any("装不进一个 chunk" in m for _l, m in handle.logs)
+
+
+def test_long_resplit_pack_raises_max_tokens_for_the_pack_reply(monkeypatch):
+    rows = [entry("NARRATOR", f"第{k}段长旁白，" * 24) for k in range(6)]   # ~1000 chars
+    seen = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        seen.append(generation.max_tokens)
+        return json.dumps([{"speaker": "NARRATOR", "text": "x"}])
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    script.long_paragraph_resplit(Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0, max_tokens=1000, chunk_size=20000),
+                                  "sys", "{context}\n{chunk}", rows, 130)
+    assert seen[0] >= 2 * 1000   # the packed call; later singles use the configured value
+
+
+# --- 单元协议下的断句校验 / 超长重切（rederive_entries_units） ---
+
+_LQ, _RQ = chr(0x201C), chr(0x201D)
+
+
+def _label_quotes_fake(speaker, calls, drop_prefix=None):
+    """Fake LLM for the unit protocol: label every whole-quote unit as ``speaker`` (and
+    optionally delete the plain unit starting with ``drop_prefix``) by reading the numbers
+    out of the prompt."""
+    import re
+
+    def fake_call(llm, generation, messages, handle=None):
+        prompt = messages[1]["content"]
+        calls.append(prompt)
+        lines = []
+        for n, text in re.findall(r"^\[(\d+)\] (.*)$", prompt, re.M):
+            if text.startswith(_LQ):
+                lines.append(f"{n} {speaker} | 自然的对话语气。")
+            elif drop_prefix and text.startswith(drop_prefix):
+                lines.append(f"{n} X")
+        return "\n".join(lines + ["END"])
+
+    return fake_call
+
+
+def _long_narration(tag, quoted):
+    return ("夜色笼罩着整座城市，" * 8) + f"{_LQ}{quoted}{_RQ}" + ("他转身离开了巷口，" * 6) + tag
+
+
+def test_units_long_resplit_labels_dialogue_out_of_narration(monkeypatch):
+    rows = [entry("姜维", "走吧。"), entry("NARRATOR", _long_narration("。", "我先走了。"))]
+    calls = []
+    monkeypatch.setattr(script, "_llm_call", _label_quotes_fake("姜维", calls))
+    out, checked, fixed = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0), "sys", "{context}\n{chunk}", rows, 130,
+        narrator_instruct="平稳中性的叙述语气。", unit_prompts=("usys", "{context}\n{units}"))
+    assert (checked, fixed) == (1, 1) and len(calls) == 1
+    assert "[1] " in calls[0] and "【条目" not in calls[0]       # numbered units, not a JSON rewrite
+    assert [e["speaker"] for e in out] == ["姜维", "NARRATOR", "姜维", "NARRATOR"]
+    assert out[2]["text"] == "我先走了。"                      # outer quotes stripped mechanically
+    assert out[1]["instruct"] == out[3]["instruct"] == "平稳中性的叙述语气。"
+    assert script._skeleton("".join(e["text"] for e in out[1:])) == \
+        script._skeleton(_long_narration("。", "我先走了。"))   # no word character lost or invented
+
+
+def test_units_long_resplit_packs_a_chapter_into_one_call(monkeypatch):
+    rows = [entry("姜维", "走吧。"), entry("NARRATOR", _long_narration("。", "第一句。")),
+            entry("NARRATOR", "短旁白。"), entry("NARRATOR", _long_narration("。", "第二句。"))]
+    calls = []
+    monkeypatch.setattr(script, "_llm_call", _label_quotes_fake("姜维", calls))
+    out, checked, fixed = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0), "sys", "{context}\n{chunk}", rows, 130,
+        narrator_instruct="平稳中性的叙述语气。", unit_prompts=("usys", "{context}\n{units}"))
+    assert (checked, fixed, len(calls)) == (2, 2, 1)            # both flagged entries, ONE call
+    assert "【条目 1/2】" in calls[0] and "【条目 2/2】" in calls[0]
+    assert [e["text"] for e in out if e["speaker"] == "姜维"] == ["走吧。", "第一句。", "第二句。"]
+
+
+def test_units_long_resplit_without_labels_changes_nothing(monkeypatch):
+    rows = [entry("姜维", "走吧。"), entry("NARRATOR", "没有台词的长旁白，" * 20)]
+    monkeypatch.setattr(script, "_llm_call", lambda *a, **k: "END")
+    out, checked, fixed = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0), "sys", "{context}\n{chunk}", rows, 130,
+        narrator_instruct="平稳中性的叙述语气。", unit_prompts=("usys", "{context}\n{units}"))
+    assert (checked, fixed) == (1, 0) and out is rows           # a cut-at-soft-max narration is no split
+
+
+def test_units_rederive_strips_a_tag_between_two_quotes_into_one_entry(monkeypatch):
+    item = entry("姜维", f"{_LQ}走吧，{_RQ}姜维说道，{_LQ}快点。{_RQ}")
+    calls = []
+    monkeypatch.setattr(script, "_llm_call", _label_quotes_fake("姜维", calls, drop_prefix="姜维说道"))
+    got = script.rederive_entries_units(
+        Handle(), LLMConfig(), GenerationConfig(), ("usys", "{context}\n{units}"), [(item, "")],
+        frozenset({"NARRATOR", "姜维"}), stage="断句校验", head="")
+    assert got is not None and len(got) == 1
+    assert [(p["speaker"], p["text"]) for p in got[0]] == [("姜维", "走吧，快点。")]
+
+
+def test_units_rederive_rejects_names_outside_the_roster(monkeypatch):
+    item = entry("NARRATOR", _long_narration("。", "我先走了。"))
+    monkeypatch.setattr(script, "_llm_call", _label_quotes_fake("路人乙", []))
+    got = script.rederive_entries_units(
+        Handle(), LLMConfig(), GenerationConfig(), ("usys", "{context}\n{units}"), [(item, "")],
+        frozenset({"NARRATOR", "姜维"}), stage="超长段落重切", head="")
+    assert got == [None]                                        # invented speaker → entry untouched
+
+
+def test_long_resplit_sends_at_most_one_chunk_per_chapter_longest_first(monkeypatch):
+    rows = []
+    for k in range(12):   # 12 long entries; lengths grow with k, so the longest are the last ones
+        rows.append(entry("NARRATOR", f"第{k}段长旁白，" * (24 + 4 * k)))
+    calls = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        calls.append(messages[1]["content"])
+        return json.dumps([{"speaker": "NARRATOR", "text": "x"}])
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    handle = Handle()
+    out, checked, fixed = script.long_paragraph_resplit(
+        handle, LLMConfig(), GenerationConfig(long_resplit_pack=0, chunk_size=3000, max_tokens=100000),
+        "sys", "{context}\n{chunk}", rows, 130)
+    packed_first = calls[0]
+    assert checked < 12 and packed_first.count("【条目 ") == checked   # one pack, a subset of the chapter
+    assert any("装不进一个 chunk" in m for _l, m in handle.logs)
+    assert "第11段长旁白" in packed_first and "第0段长旁白" not in packed_first   # longest kept, shortest dropped
+    first_pack_calls = [c for c in calls if "【条目 " in c]
+    assert len(first_pack_calls) == 1                        # never a second packed call
+
+
+def test_long_resplit_whole_chapter_that_fits_one_chunk_is_unchanged(monkeypatch):
+    rows = [entry("NARRATOR", f"第{k}段长旁白，" * 24) for k in range(3)]
+    calls = []
+    monkeypatch.setattr(script, "_llm_call",
+                        lambda l, g, m, handle=None: calls.append(m[1]["content"]) or json.dumps(
+                            [{"speaker": "NARRATOR", "text": "x"}]))
+    handle = Handle()
+    _o, checked, _f = script.long_paragraph_resplit(
+        handle, LLMConfig(), GenerationConfig(long_resplit_pack=0, chunk_size=20000, max_tokens=100000),
+        "sys", "{context}\n{chunk}", rows, 130)
+    assert checked == 3 and not any("装不进一个 chunk" in m for _l, m in handle.logs)
+
+
+def test_instruct_targets_are_split_into_bounded_batches():
+    rows = [entry("甲", "一句话。" * 20) for _ in range(40)]
+    one = script._instruct_target_batches(rows, [5], 4, 6000)
+    assert one == [[5]]
+    many = script._instruct_target_batches(rows, list(range(0, 40, 4)), 4, 3000)
+    assert len(many) > 1 and sorted(i for b in many for i in b) == list(range(0, 40, 4))
+    assert script._instruct_target_batches(rows, [3, 20], 4, 10) == [[3], [20]]   # each target alone fits no cap
+
+
+def test_rejudge_window_over_the_chunk_budget_is_halved(monkeypatch):
+    rows = [entry("甲" if k % 2 else "乙", "很长的一句话，" * 25) for k in range(30)]   # 175 chars each
+    asked = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        asked.append(messages[1]["content"])
+        return json.dumps([])
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    gen = GenerationConfig(check_pack_targets=0, chunk_size=1000)   # 2000-char window cap
+    script._run_rejudge_groups(Handle(), LLMConfig(), gen, "sys", "{context}", rows,
+                               [list(range(10, 20))], 1, frozenset({"甲", "乙"}),
+                               stage="归属抽样", progress_base=0.9, progress_span=0.01)
+    assert len(asked) > 1   # one 10-target group would not fit 2000 chars of window text
+    assert all(len(p) < 4000 for p in asked)
+
+
+def test_units_rederive_unlabeled_reply_never_demotes_a_character_entry(monkeypatch):
+    item = entry("姜维", f"{_LQ}我先走了，{_RQ}他说。" * 3)
+    monkeypatch.setattr(script, "_llm_call", lambda *a, **k: "END")   # the model labels nothing
+    got = script.rederive_entries_units(
+        Handle(), LLMConfig(), GenerationConfig(), ("usys", "{context}\n{units}"), [(item, "")],
+        frozenset({"NARRATOR", "姜维"}), stage="断句校验", head="")
+    assert got == [None]
+
+
+def test_long_resplit_longest_entry_always_gets_the_pack_even_over_the_budget(monkeypatch):
+    huge = entry("NARRATOR", "超长的一整段旁白，" * 400)                  # 3600 chars: alone over a 3000 budget
+    rows = [huge] + [entry("NARRATOR", f"第{k}段长旁白，" * 24) for k in range(3)]
+    calls = []
+    monkeypatch.setattr(script, "_llm_call", lambda l, g, m, handle=None: calls.append(m[1]["content"]) or "[]")
+    _o, checked, _f = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0, chunk_size=3000, max_tokens=100000),
+        "sys", "{context}\n{chunk}", rows, 130)
+    assert checked == 1 and "超长的一整段旁白" in calls[0]        # the longest, not a shorter neighbour
+
+
+def test_units_long_resplit_single_entry_pack_is_not_asked_twice(monkeypatch):
+    rows = [entry("姜维", "走吧。"), entry("NARRATOR", _long_narration("。", "我先走了。"))]
+    calls = []
+
+    def boom(llm, generation, messages, handle=None):
+        calls.append(1)
+        raise RuntimeError("HTTP 400 context_length_exceeded")
+
+    monkeypatch.setattr(script, "_llm_call", boom)
+    _o, checked, fixed = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0), "sys", "{context}\n{chunk}", rows, 130,
+        narrator_instruct="平稳中性的叙述语气。", unit_prompts=("usys", "{context}\n{units}"))
+    assert (checked, fixed, len(calls)) == (1, 0, 1)
