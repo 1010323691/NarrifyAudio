@@ -263,3 +263,39 @@ def test_daily_retention_pass_runs_once_per_local_day(monkeypatch):
     worker._retention_state["done_on"] = ""
     worker._retention_pass()                                           # a later day: runs again
     assert calls == ["p", "p"]
+
+
+def test_check_never_touches_a_live_project_that_reuses_the_deleted_directory_key(client):
+    from backend.services.project_purge_audit import verify_purged_projects
+
+    user_id, username, csrf = _account(client)
+    old = _project(client, csrf, "同名书")
+    _set_retention(ttl=1)
+    _age(old["id"], created_days=5)
+    purge_expired_projects()
+    assert not _exists(old["id"])
+    _set_retention(ttl=30)
+    new = _project(client, csrf, "同名书")           # same name -> same name-based directory
+    root = _workspace(username, new["id"])
+    (root / "07_output").mkdir(parents=True, exist_ok=True)
+    (root / "07_output" / "keep.wav").write_bytes(b"live")
+    _backdate_receipt(old["id"])
+    verify_purged_projects()
+    assert (root / "07_output" / "keep.wav").read_bytes() == b"live"
+    assert _receipts(old["id"])[0].verified_at is not None
+
+
+def test_daily_pass_is_not_marked_done_while_storage_is_migrating(monkeypatch):
+    from backend import worker
+
+    calls = []
+    monkeypatch.setattr(worker, "purge_expired_projects", lambda limit: calls.append("p") or 0)
+    monkeypatch.setattr(worker, "purge_resource_artifacts", lambda limit: 0)
+    monkeypatch.setattr("backend.platform.storage.storage_migration", lambda db: object())
+    with SessionLocal.begin() as db:
+        row = db.get(SystemConfig, "retention.last_run")
+        if row is not None:
+            db.delete(row)
+    worker._retention_state["done_on"] = ""
+    worker._retention_pass()
+    assert calls == [] and worker._retention_state["done_on"] == ""

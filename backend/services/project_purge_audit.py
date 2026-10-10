@@ -49,7 +49,11 @@ def local_midnight(now: datetime | None = None) -> datetime:
 def _candidate_paths(db: Session, record: ProjectPurgeRecord) -> list[Path]:
     root = configured_storage_root(db)
     workspace = root / record.directory_key
-    paths = [workspace, *workspace.parent.glob(f".{record.project_id}.deleting-*")]
+    # Directory keys are name-based: a project created (or trashed) later may now own this very
+    # directory, and it must never be mistaken for the deleted project's leftovers.
+    key_in_use = db.scalar(select(Project.id).where(Project.directory_key == record.directory_key).limit(1)) is not None
+    paths = [] if key_in_use else [workspace]
+    paths += workspace.parent.glob(f".{record.project_id}.deleting-*")
     try:
         paths.append(internal_path(db, record.owner_id, record.project_id))
         paths += [internal_path(db, record.owner_id, "exports", task_id) for task_id in record.export_task_ids or []]

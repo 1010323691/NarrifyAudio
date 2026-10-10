@@ -228,10 +228,15 @@ def _retention_pass():
     today = datetime.now().astimezone().date().isoformat()
     if _retention_state["done_on"] == today:
         return 0, True
+    from .platform.storage import lock_storage_migration, storage_migration
+
     with SessionLocal() as db:
         row = db.get(SystemConfig, "retention.last_run")
         if row is not None and isinstance(row.value, dict) and row.value.get("date") == today:
             _retention_state["done_on"] = today
+            return 0, True
+        # The cleanups silently do nothing while storage is migrating; do not count that as today's run.
+        if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
             return 0, True
     projects = purge_expired_projects(limit=20)
     resources = purge_resource_artifacts(limit=200)
