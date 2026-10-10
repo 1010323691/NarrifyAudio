@@ -1681,7 +1681,7 @@ def _llm_call(llm: LLMConfig, generation: GenerationConfig, messages, handle=Non
 
 
 def _batch_user_prompt(template: str, context: str, size: int, n: int,
-                       roster: list[str] | None = None) -> str:
+                       roster: list[str] | None = None, windows: int = 1) -> str:
     """Fill the user template's ``{context}`` and append the roster + context-scope notes.
 
     ``replace`` (not ``format``) keeps a user-edited template containing other braces from
@@ -1694,10 +1694,17 @@ def _batch_user_prompt(template: str, context: str, size: int, n: int,
     extra = []
     if roster:
         extra.append("【本书角色】" + "、".join(roster))
-    extra.append(
-        f"【上下文范围】上方窗口含 {size} 个 target=true 的目标条目（请逐一给出 speaker），"
-        f"目标块前后各有 {n} 条未标记 target 的上下文条目，仅供理解、不得改动。"
-    )
+    if windows > 1:
+        extra.append(
+            f"【上下文范围】上方共 {windows} 个互不连续的窗口（index 是全书绝对下标），合计含 {size} 个 "
+            f"target=true 的目标条目（请逐一给出 speaker）；每个目标块前后各有 {n} 条未标记 target 的"
+            f"上下文条目，仅供理解、不得改动。各窗口独立判断，窗口之间没有连续关系。"
+        )
+    else:
+        extra.append(
+            f"【上下文范围】上方窗口含 {size} 个 target=true 的目标条目（请逐一给出 speaker），"
+            f"目标块前后各有 {n} 条未标记 target 的上下文条目，仅供理解、不得改动。"
+        )
     return body + "\n\n" + "\n".join(extra)
 
 
@@ -2520,7 +2527,8 @@ def select_boundary_targets(chunk_ends: list, n: int, total: int) -> list:
     return sorted(targets)
 
 
-def select_boundary_risk_targets(entries: list, chunk_ends: list, n: int) -> list:
+def select_boundary_risk_targets(entries: list, chunk_ends: list, n: int,
+                                 target_window: int = 0) -> list:
     """Return boundary windows only when local evidence makes them risky.
 
     Clean same-speaker boundaries with complete sentences do not spend an LLM
@@ -2549,7 +2557,16 @@ def select_boundary_risk_targets(entries: list, chunk_ends: list, n: int) -> lis
         if _quote_parity("".join((e.get("text") or "") for e in local))[-1] != 0:
             risky = True
         if risky:
-            targets.update(range(lo, hi))
+            if 0 < target_window < n:
+                # Narrowed: only ±target_window around the boundary, and of those only
+                # dialogue entries plus the two entries touching the boundary. The wider
+                # ±n window stays as context (and as the risk-detection range above).
+                targets.update(
+                    j for j in range(max(0, b - target_window), min(total, b + target_window))
+                    if j in (b - 1, b) or (entries[j].get("speaker") or "") != "NARRATOR"
+                )
+            else:
+                targets.update(range(lo, hi))
     return sorted(targets)
 
 
@@ -2576,7 +2593,8 @@ def boundary_check_speakers(handle, llm: LLMConfig, generation: GenerationConfig
     n = max(0, int(generation.check_context_window or 0))
     batch = max(1, int(generation.check_batch_size or 0))
     candidates = select_boundary_targets(chunk_ends, n, len(entries))
-    targets = select_boundary_risk_targets(entries, chunk_ends, n)
+    targets = select_boundary_risk_targets(
+        entries, chunk_ends, n, int(getattr(generation, "boundary_target_window", 0) or 0))
     if not targets:
         # 零命中也留一行日志：与断句校验同一理由——静默退出会被误读成阶段缺失。
         handle.log("角色匹配检查：0 条边界目标（无重判，零 LLM 调用）")
@@ -2847,6 +2865,50 @@ def _append_spot_history(handle, file_stem: str, stats: dict, path_override: Pat
         handle.log(f"归属抽样历史写入失败（不影响解析结果）：{e}", "WARNING")
 
 
+def merge_overlapping_groups(groups: list, n: int, batch: int) -> list:
+    """Merge neighbouring target groups whose ±``n`` context windows touch or overlap
+    (gap ≤ 2n) while the merged group stays within ``batch`` targets: such windows share
+    context entries, so one continuous window is cheaper and unambiguous than two
+    overlapping ones. Groups are ascending and disjoint, so merging only joins neighbours."""
+    merged: list = []
+    for grp in groups:
+        if merged and grp[0] - merged[-1][-1] <= 2 * max(n, 1) and len(merged[-1]) + len(grp) <= batch:
+            merged[-1] = merged[-1] + grp
+        else:
+            merged.append(list(grp))
+    return merged
+
+
+def plan_rejudge_packs(group_targets: list[int], group_chars: list[int], *,
+                       max_targets: int, max_chars: int, max_windows: int,
+                       group_spans: list | None = None, min_gap: int = 0) -> list[list[int]]:
+    """Greedily pack consecutive groups (by position) into LLM calls. A call closes when
+    adding the next group would exceed the target / character / window budget, or when the
+    next group's window would overlap the previous one's (``group_spans`` = ``(first, last)``
+    target index per group; windows overlap when the gap is ``<= min_gap`` = 2n — the same
+    entry must not be context in one window and a target in another of one prompt). Every
+    call holds at least one group. ``max_targets <= 0`` disables packing (one group per
+    call — the legacy behaviour)."""
+    if max_targets <= 0:
+        return [[i] for i in range(len(group_targets))]
+    packs: list[list[int]] = []
+    cur: list[int] = []
+    targets = chars = 0
+    for i, (t, c) in enumerate(zip(group_targets, group_chars)):
+        overlaps = bool(cur and group_spans
+                        and group_spans[i][0] - group_spans[cur[-1]][1] <= min_gap)
+        if cur and (overlaps or targets + t > max_targets or chars + c > max_chars
+                    or len(cur) >= max_windows):
+            packs.append(cur)
+            cur, targets, chars = [], 0, 0
+        cur.append(i)
+        targets += t
+        chars += c
+    if cur:
+        packs.append(cur)
+    return packs
+
+
 def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                         sys_prompt: str, usr_template: str,
                         entries: list, groups: list, n: int, roster, *,
@@ -2882,21 +2944,50 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
     fixed = 0
     unwrapped = 0
 
-    for seq, grp in enumerate(groups, 1):
-        handle.check()  # cooperative cancel / pause before the group
-        handle.progress(progress_base + progress_span * seq / len(groups),
-                        f"{stage} {seq}/{len(groups)} 组")
+    # 多窗口打包：目标稀疏时每个窗口单独一次调用太碎，把互不相邻的窗口装进同一次调用
+    # （窗口内容与单窗口时完全相同，只是共用一个提示词；窗口之间用「【窗口 k/m】」分隔，
+    # index 沿用全书绝对下标，所以回复解析不变）。check_pack_targets=0 = 不打包（旧行为）。
+    pack_targets = int(getattr(generation, "check_pack_targets", 0) or 0)
+    batch_cap = max(1, int(generation.check_batch_size or 0))
+    if pack_targets > 0:
+        groups = merge_overlapping_groups(groups, n, batch_cap)
+    window_json: list[str] = []
+    for grp in groups:
         grp_set = set(grp)
         start, size = grp[0], grp[-1] - grp[0] + 1
         span = set(range(start, start + size))
         skip = span - grp_set  # in-span non-targets → context, never re-judged
-        context = json.dumps(build_batch_window(original, start, size, n, skip=skip),
-                             ensure_ascii=False, indent=2)
-        messages = [
+        window_json.append(json.dumps(build_batch_window(original, start, size, n, skip=skip),
+                                      ensure_ascii=False, indent=2))
+    packs = plan_rejudge_packs(
+        [len(g) for g in groups], [len(w) for w in window_json],
+        max_targets=pack_targets,
+        max_chars=int(getattr(generation, "check_pack_max_chars", 6000)),
+        max_windows=int(getattr(generation, "check_pack_max_windows", 8)),
+        group_spans=[(g[0], g[-1]) for g in groups], min_gap=2 * max(n, 1),
+    )
+
+    def pack_messages(gids: list) -> list:
+        if len(gids) == 1:
+            context = window_json[gids[0]]
+        else:
+            context = "\n\n".join(f"【窗口 {k}/{len(gids)}】\n{window_json[g]}"
+                                  for k, g in enumerate(gids, 1))
+        size = sum(len(groups[g]) for g in gids)
+        return [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": _batch_user_prompt(usr_template, context, len(grp), n, roster)},
+            {"role": "user", "content": _batch_user_prompt(usr_template, context, size, n, roster,
+                                                         windows=len(gids))},
         ]
-        handle.log(f"{stage}第 {seq}/{len(groups)} 组（{len(grp)} 条目标）…")
+
+    for seq, gids in enumerate(packs, 1):
+        handle.check()  # cooperative cancel / pause before the call
+        handle.progress(progress_base + progress_span * seq / len(packs),
+                        f"{stage} {seq}/{len(packs)} 组")
+        grp = sorted(t for g in gids for t in groups[g])
+        messages = pack_messages(gids)
+        handle.log(f"{stage}第 {seq}/{len(packs)} 组（{len(grp)} 条目标"
+                   + (f"，{len(gids)} 个窗口" if len(gids) > 1 else "") + "）…")
 
         # -- First pass: re-judge the whole group in one call -------------------
         try:
@@ -2932,8 +3023,15 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
                 strict majority. Optional ``text`` keys fold into ``text_sigs`` (first
                 wins)."""
                 handle.check()
+                # Only the windows that still hold an undecided target are re-sent
+                # (windows unchanged — the same text the first pass saw).
+                pending_set = set(pending)
+                sub_gids = [g for g in gids if pending_set & set(groups[g])]
+                retry_messages = messages if len(sub_gids) == len(gids) else pack_messages(sub_gids)
+                retry_targets = sorted(t for g in sub_gids for t in groups[g])
                 try:
-                    full = parse_speaker_map_full(_llm_call(llm, generation, messages, handle), grp)
+                    full = parse_speaker_map_full(
+                        _llm_call(llm, generation, retry_messages, handle), retry_targets)
                 except TaskCancelled:
                     raise
                 except LLMUnavailableError:

@@ -385,3 +385,124 @@ def test_alignment_skeleton_equality_fast_path_keeps_decisions(monkeypatch):
     unit = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥一二三四五六七八九十"
     small = script.check_chunk_alignment(unit * 3, [{"speaker": "A", "text": unit * 2 + "甲乙丙丁"}])
     assert small["ok"] is True and not small["missing"]
+
+
+# ---------------------------------------------------------------------------
+# Re-judgment batch packing (several windows in one LLM call) and boundary narrowing
+# ---------------------------------------------------------------------------
+
+def test_plan_rejudge_packs_budgets_overlap_and_disabled():
+    plan = script.plan_rejudge_packs
+    spans = [(3, 3), (20, 20), (40, 41), (60, 60)]
+    assert plan([1, 1, 2, 1], [100] * 4, max_targets=0, max_chars=9999, max_windows=9) == [[0], [1], [2], [3]]
+    assert plan([1, 1, 2, 1], [100] * 4, max_targets=30, max_chars=9999, max_windows=9) == [[0, 1, 2, 3]]
+    assert plan([1, 1, 2, 1], [100] * 4, max_targets=3, max_chars=9999, max_windows=9) == [[0, 1], [2, 3]]
+    assert plan([1, 1, 2, 1], [400] * 4, max_targets=30, max_chars=900, max_windows=9) == [[0, 1], [2, 3]]
+    assert plan([1, 1, 2, 1], [100] * 4, max_targets=30, max_chars=9999, max_windows=2) == [[0, 1], [2, 3]]
+    # Neighbouring windows that would overlap (gap <= 2n) are never put in one prompt.
+    assert plan([1, 1, 1], [100] * 3, max_targets=30, max_chars=9999, max_windows=9,
+                group_spans=[(10, 10), (13, 13), (30, 30)], min_gap=4) == [[0], [1, 2]]
+    assert plan([1], [10 ** 6], max_targets=30, max_chars=100, max_windows=9) == [[0]]  # never empty
+
+
+def test_merge_overlapping_groups_respects_batch_cap():
+    merge = script.merge_overlapping_groups
+    assert merge([[3], [6], [30]], n=2, batch=20) == [[3, 6], [30]]      # gap 3 <= 2n
+    assert merge([[3], [8]], n=2, batch=20) == [[3], [8]]                  # gap 5 > 2n
+    assert merge([[3], [6]], n=2, batch=1) == [[3], [6]]                   # cap holds
+
+
+def test_batch_user_prompt_describes_multiple_windows():
+    single = script._batch_user_prompt("{context}", "W", 2, 4)
+    multi = script._batch_user_prompt("{context}", "W", 5, 4, windows=3)
+    assert "上方窗口含 2 个" in single and "互不连续" not in single
+    assert "共 3 个互不连续的窗口" in multi and "合计含 5 个" in multi
+
+
+def _rejudge_entries(count=40):
+    return [entry("NARRATOR" if i % 2 else "甲", f"第{i}条文字。") for i in range(count)]
+
+
+def _run_rejudge(monkeypatch, entries, groups, replies, **gen):
+    seen = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        seen.append(messages[1]["content"])
+        return replies(len(seen), messages[1]["content"])
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    result, stats = script._run_rejudge_groups(
+        Handle(), LLMConfig(), GenerationConfig(**gen), "sys", "{context}", entries, groups, 2,
+        script.build_roster(entries), stage="测试", progress_base=0.0, progress_span=0.1,
+    )
+    return result, stats, seen
+
+
+def _targets_in(prompt):
+    """Indices flagged ``"target": true`` anywhere in a (possibly multi-window) prompt."""
+    return [it["index"] for part in prompt.split("【窗口")[1:] or [prompt]
+            for it in json.loads(part[part.index("["):part.rindex("]") + 1]) if it.get("target")]
+
+
+def test_run_rejudge_packs_sparse_windows_into_one_call_and_retries_only_undecided(monkeypatch):
+    entries = _rejudge_entries()
+    groups = [[3], [15], [27]]
+
+    def replies(call_no, prompt):
+        # 15 settles on 乙 at the first retry; 27 keeps changing its mind (no majority).
+        flip = {1: {15: "乙", 27: "丙"}, 2: {15: "乙", 27: "丁"}}.get(call_no, {27: f"新{call_no}"})
+        return json.dumps({"results": [
+            {"index": t, "speaker": flip.get(t, entries[t]["speaker"])} for t in _targets_in(prompt)]},
+            ensure_ascii=False)
+
+    result, stats, seen = _run_rejudge(monkeypatch, entries, groups, replies)
+    assert len(seen) == 4  # 1 packed first pass + 3 retry rounds (the last two only for target 27)
+    assert "【窗口 1/3】" in seen[0] and "【窗口 3/3】" in seen[0]
+    assert sorted(_targets_in(seen[0])) == [3, 15, 27]
+    # Retry 1 re-sends only the windows holding a target without a majority yet.
+    assert sorted(_targets_in(seen[1])) == [15, 27]
+    assert _targets_in(seen[2]) == [27] and _targets_in(seen[3]) == [27]  # decided windows drop out
+    assert "【窗口" not in seen[2]  # a single window is sent without the multi-window header
+    # 15 reached 乙:乙 + original → adopted; 27 never repeated → original kept.
+    assert result[15]["speaker"] == "乙" and result[27]["speaker"] == entries[27]["speaker"]
+    assert stats == {"checked": 3, "fixed": 1, "unwrapped": 0}
+    # Only targets may change: every other entry is byte-identical to the input.
+    assert [e for i, e in enumerate(result) if i != 15] == [e for i, e in enumerate(entries) if i != 15]
+
+
+def test_run_rejudge_without_packing_is_one_call_per_group(monkeypatch):
+    entries = _rejudge_entries()
+
+    def replies(call_no, prompt):
+        return json.dumps({"results": [
+            {"index": t, "speaker": entries[t]["speaker"]} for t in _targets_in(prompt)]})
+
+    _result, stats, seen = _run_rejudge(monkeypatch, entries, [[3], [15], [27]], replies,
+                                        check_pack_targets=0)
+    assert len(seen) == 3 and all("【窗口" not in p for p in seen) and stats["checked"] == 3
+
+
+def test_run_rejudge_cancel_propagates_from_packed_call(monkeypatch):
+    from backend.core.task_control import TaskCancelled
+
+    def replies(call_no, prompt):
+        raise TaskCancelled("cancel")
+
+    with pytest.raises(TaskCancelled):
+        _run_rejudge(monkeypatch, _rejudge_entries(), [[3], [15]], replies)
+
+
+def test_boundary_risk_targets_narrow_to_dialogue_near_boundary():
+    # Boundary at 6 (chunk_ends 6 | 12); the two sides alternate NARRATOR / character and
+    # carry a speaker turn, so the boundary is risky.
+    rows = [entry("NARRATOR", "他走进房间。") for _ in range(12)]
+    for i in (2, 4, 5, 7):
+        rows[i] = entry("甲", "好的，我知道了。")
+    wide = script.select_boundary_risk_targets(rows, [6, 12], 4)
+    narrow = script.select_boundary_risk_targets(rows, [6, 12], 4, target_window=2)
+    assert wide == list(range(2, 10))
+    # ±2 around the boundary = {4,5,6,7}; the narrator at 6 survives only because it touches
+    # the boundary, 4/5/7 survive because they are dialogue.
+    assert narrow == [4, 5, 6, 7]
+    assert script.select_boundary_risk_targets(rows, [6, 12], 4, target_window=0) == wide
+    assert script.select_boundary_risk_targets(rows, [6, 12], 4, target_window=4) == wide

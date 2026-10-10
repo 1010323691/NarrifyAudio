@@ -160,6 +160,8 @@ def run_one(protocol: str, path: Path, llm, gen_kwargs: dict, out_dir: Path) -> 
         "completion_tokens": handle.completion_tokens(),
         "chunks": sum(1 for _lv, m in handle.logs if re.match(r"处理第 \d+/\d+ 段", m)),
         "edit_log": [m for _lv, m in handle.logs if "edit 被拒" in m],
+        "rejudge_calls": sum(1 for _lv, m in handle.logs
+                             if re.match(r"(角色匹配检查|归属抽样)第 \d+/\d+ 组", m)),
     }
 
 
@@ -184,6 +186,8 @@ def main() -> int:
                     help="a previous run's --out directory: reuse its json-protocol outputs and "
                          "aggregates instead of re-running them (use with --only-protocol units)")
     ap.add_argument("--chunk-size", type=int, default=0, help="generation.chunk_size override (0 = default)")
+    ap.add_argument("--gen", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra GenerationConfig override (repeatable), e.g. --gen check_pack_targets=0")
     ap.add_argument("--only-protocol", choices=("json", "units"), default="")
     args = ap.parse_args()
 
@@ -207,6 +211,9 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     set_concurrency(max(1, args.concurrency))
     gen_kwargs = dict(spot_check_rate=args.spot_rate, spot_check_adaptive=False)
+    for item in args.gen:
+        key, _, raw = item.partition("=")
+        gen_kwargs[key] = json.loads(raw) if raw[:1] in "0123456789-[{\"tf" else raw
     if args.chunk_size:
         gen_kwargs["chunk_size"] = args.chunk_size
     if args.no_checks:
@@ -269,6 +276,11 @@ def summarize(rows: dict, files: list[Path]) -> dict:
             "edit_applied": applied,
             "edit_rejected": rejected,
             "unit_labels": sum(r["result"].get("unit_labels", 0) for r in ok),
+            "rejudge_calls": sum(r["rejudge_calls"] for r in ok),
+            "boundary_checked": sum(r["result"].get("boundary_checked", 0) for r in ok),
+            "boundary_fixed": sum(r["result"].get("boundary_fixed", 0) for r in ok),
+            "spot_checked": sum(r["result"].get("spot_checked", 0) for r in ok),
+            "spot_fixed": sum(r["result"].get("spot_fixed", 0) for r in ok),
         }
     if len(rows) == 2:
         common = set(rows["json"]) & set(rows["units"])
@@ -352,7 +364,9 @@ def render(report: dict) -> str:
             f"[{protocol}] ok={p['chapters_ok']} failed={len(p['chapters_failed'])} chars={p['chars']} "
             f"entries={p['entries']} parse={p['parse_seconds']}s total={p['total_seconds']}s "
             f"completion_tokens={p['completion_tokens']} random_bucket={p['random_errors']}/{p['random_n']} ({rate}) "
-            f"chunks={p['chunks']} fallback={p['fallback_chunks']} edits={p['edit_applied']}+{p['edit_rejected']}rej")
+            f"chunks={p['chunks']} fallback={p['fallback_chunks']} edits={p['edit_applied']}+{p['edit_rejected']}rej "
+            f"rejudge_calls={p['rejudge_calls']} boundary={p['boundary_fixed']}/{p['boundary_checked']} "
+            f"spot={p['spot_fixed']}/{p['spot_checked']}")
     if "agreement" in report:
         a = report["agreement"]
         if a["speaker_match"] is not None:

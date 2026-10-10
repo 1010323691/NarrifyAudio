@@ -203,6 +203,17 @@ class GenerationConfig(BaseModel):
     # 断句失败校验只用 context_window。设置页不露出（config/setting.json 可编辑）。
     check_batch_size: int = 20
     check_context_window: int = 4
+    # 重判批多窗口打包（角色匹配检查 / 归属抽样共用）：把互不相邻的若干个窗口装进**同一次**
+    # LLM 调用，目标稀疏时调用数可降一个数量级。check_pack_targets = 每次调用最多目标数
+    # （0 = 不打包，每组一次调用，即旧行为）；check_pack_max_chars = 每次调用窗口文字总量上限；
+    # check_pack_max_windows = 每次调用最多窗口数。设置页不露出，管理员可在工作区配置中调整。
+    check_pack_targets: int = Field(default=30, ge=0, le=200)
+    check_pack_max_chars: int = Field(default=6000, ge=500, le=40000)
+    check_pack_max_windows: int = Field(default=8, ge=1, le=40)
+    # 角色匹配检查（chunk 边界复核）的目标收窄：只复核边界两侧 ±N 条范围内的台词条目
+    # （边界相邻的两条无论角色都复核），上下文窗口仍是 check_context_window。
+    # 0 = 不收窄（边界两侧各 check_context_window 条全部复核，即旧行为）。
+    boundary_target_window: int = Field(default=2, ge=0, le=20)
 
     # 超长段落检查开关（解析内第五阶段）：只控制 LLM 语义重切——超过
     # ``max_paragraph_chars`` 字的条目 = 疑似切割失败 → 带上下文窗口重跑 LLM 语义重切

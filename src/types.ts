@@ -547,6 +547,14 @@ export interface AppConfig {
     check_batch_size: number
     /** 解析内重判上下文窗口（角色匹配检查 / 断句失败校验 / 归属抽样共用）；不在设置页露出。 */
     check_context_window: number
+    /** 重判批多窗口打包：每次 LLM 调用最多装多少个目标（0 = 不打包，每组一次调用）；不在设置页露出。 */
+    check_pack_targets: number
+    /** 重判批打包：每次调用窗口文字总量上限（字符）；不在设置页露出。 */
+    check_pack_max_chars: number
+    /** 重判批打包：每次调用最多窗口数；不在设置页露出。 */
+    check_pack_max_windows: number
+    /** 角色匹配检查只复核边界两侧 ±N 条内的台词条目（边界相邻两条恒复核，0 = 不收窄）；不在设置页露出。 */
+    boundary_target_window: number
     /** 超长段落检查开关（解析内阶段 A）：只控制 LLM 语义重切——超长条目带上下文
      *  窗口重跑 LLM 重切；机械分段兜底（字数硬上界保证）恒生效、不受本开关控制，
      *  关闭时超限条目仍按句界 / 子句界 / 定宽切开。 */
