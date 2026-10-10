@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import timedelta
 from typing import Any
 
 from .database import SessionLocal
 from .models import WorkerHeartbeat, utcnow
+
+
+# An unchanged status/task is rewritten at most this often. Idle slots beat every
+# ~0.5 s, which made the registry the largest source of writes (is_stale() allows 30 s).
+HEARTBEAT_MIN_INTERVAL_SECONDS = 5.0
+STALE_ROW_RETENTION = timedelta(days=1)
+_last_beat: dict[str, tuple[str, str | None, float]] = {}
+_last_beat_lock = threading.Lock()
 
 
 def heartbeat(
@@ -13,6 +23,23 @@ def heartbeat(
     status: str,
     capabilities: dict[str, Any] | None = None,
     current_task_id: str | None = None,
+) -> None:
+    mono = time.monotonic()
+    with _last_beat_lock:
+        last = _last_beat.get(worker_id)
+    if last and last[0] == status and last[1] == current_task_id and mono - last[2] < HEARTBEAT_MIN_INTERVAL_SECONDS:
+        return
+    _write_heartbeat(worker_id, status=status, capabilities=capabilities, current_task_id=current_task_id)
+    with _last_beat_lock:
+        _last_beat[worker_id] = (status, current_task_id, mono)
+
+
+def _write_heartbeat(
+    worker_id: str,
+    *,
+    status: str,
+    capabilities: dict[str, Any] | None,
+    current_task_id: str | None,
 ) -> None:
     now = utcnow()
     with SessionLocal.begin() as db:
@@ -38,7 +65,19 @@ def heartbeat(
             row.updated_at = now
 
 
+def prune_stale(now=None, keep: timedelta = STALE_ROW_RETENTION) -> int:
+    """Drop rows of workers that have not beaten for ``keep`` (every restart adds new pool ids)."""
+    from sqlalchemy import delete
+
+    cutoff = (now or utcnow()) - keep
+    with SessionLocal.begin() as db:
+        result = db.execute(delete(WorkerHeartbeat).where(WorkerHeartbeat.last_seen_at < cutoff))
+        return int(result.rowcount or 0)
+
+
 def mark_offline(worker_id: str) -> None:
+    with _last_beat_lock:
+        _last_beat.pop(worker_id, None)
     with SessionLocal.begin() as db:
         row = db.get(WorkerHeartbeat, worker_id)
         if row is not None:

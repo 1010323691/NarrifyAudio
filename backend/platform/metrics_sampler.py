@@ -15,17 +15,20 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import SystemMetricSample, Task, utcnow
+from .models import SystemMetricSample, Task, TaskEvent, utcnow
 from .storage import configured_storage_root
 from .system_config import parse_worker_concurrency
 from .task_admission import llm_task_limit
 from .system_probe import database_metrics, gpu_status, host_metrics, queue_status
 from .tts_resource_budget import tts_batch_activity
 from .task_registry import WORKER_GROUP_NAMES, task_worker_group
-from .worker_registry import live_worker_pool
+from .task_lifecycle import TERMINAL_TASK_STATUSES
+from .worker_registry import live_worker_pool, prune_stale
 
 SAMPLE_INTERVAL_SECONDS = 30
 RETENTION_DAYS = 7
+TASK_EVENT_RETENTION_DAYS = 30
+_EVENT_PRUNE_BATCH = 5000
 _RUNNING = ("running", "cancelling")
 _QUEUED = ("pending", "queued", "retrying")
 
@@ -87,6 +90,20 @@ def prune(now: datetime | None = None, keep_days: int = RETENTION_DAYS) -> int:
         return int(result.rowcount or 0)
 
 
+def prune_task_events(now: datetime | None = None, keep_days: int = TASK_EVENT_RETENTION_DAYS) -> int:
+    """Delete event rows of tasks that ended more than ``keep_days`` ago, in short batches."""
+    cutoff = (now or utcnow()) - timedelta(days=keep_days)
+    old_tasks = select(Task.id).where(Task.status.in_(TERMINAL_TASK_STATUSES), Task.finished_at < cutoff)
+    total = 0
+    while True:
+        with SessionLocal.begin() as db:
+            ids = db.scalars(select(TaskEvent.id).where(TaskEvent.task_id.in_(old_tasks)).limit(_EVENT_PRUNE_BATCH)).all()
+            if not ids:
+                return total
+            db.execute(delete(TaskEvent).where(TaskEvent.id.in_(ids)))
+            total += len(ids)
+
+
 def run(stop) -> None:
     """Sampler loop for the Worker entry point: sample every 30 s, prune hourly."""
     last_prune = 0.0
@@ -95,6 +112,8 @@ def run(stop) -> None:
             sample_once()
             if time.monotonic() - last_prune > 3600:
                 prune()
+                prune_stale()
+                prune_task_events()
                 last_prune = time.monotonic()
         except SQLAlchemyError:
             logger.warning("Metrics sample skipped: database unavailable", exc_info=True)
