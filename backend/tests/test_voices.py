@@ -360,9 +360,33 @@ def test_reference_text_selection():
 
 def test_fallback_persona_shape():
     desc, ref, gender = _fallback_persona("Bob", ["a long enough line here"])
-    assert desc == "Bob has a clear, natural audiobook voice."
+    assert desc == "音色清晰自然，音高适中，语速平稳，适合有声书朗读。"
     assert ref == "a long enough line here"
     assert gender == ""  # the fallback carries no gender (the badge stays 未定)
+
+
+def test_fallback_ref_text_is_speakable_chinese():
+    from backend.engines.voices import _fallback_ref_text
+    assert _fallback_ref_text("林某").startswith("你好，我是林某。")
+    assert "NARRATOR" not in _fallback_ref_text("NARRATOR")
+    # Latin / digit / over-long names are not read out, and every variant stays in budget.
+    for odd in ("Agent-007", "一二三四五六七八九十"):
+        text = _fallback_ref_text(odd)
+        assert odd not in text and text.startswith("你好，今天天气不错")
+    assert all(35 <= len(_fallback_ref_text(sp)) <= 60
+               for sp in ("林某", "NARRATOR", "Agent-007", "一二三四五六"))
+
+
+def test_persona_prompt_defaults_contract():
+    # The text file is editable: pin the placeholders _llm_persona fills and the
+    # gender words _gender_from_description relies on.
+    from backend.engines.persona_prompts import load_persona_prompts
+    system, user = load_persona_prompts()
+    assert system.strip()
+    assert user.count("{line_windows}") == 1 and "{speaker}" in user
+    assert "男性" in user and "女性" in user
+    # The NARRATOR clause must not embed {speaker} (it is substituted per character).
+    assert "「{speaker}」是 NARRATOR" not in user
 
 
 # --------------------------------------------------------------------------- #

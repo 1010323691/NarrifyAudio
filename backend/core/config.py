@@ -96,7 +96,7 @@ class BGMConfig(BaseModel):
 
 class PersonaPromptsConfig(BaseModel):
     # Voice-design (persona) prompts for the "角色配音" stage. Empty values fall back
-    # to the bundled defaults in ``backend/engines/persona_prompts.py``.
+    # to the bundled defaults in ``backend/resources/persona_prompts.txt``.
     system_prompt: str = ""
     user_prompt: str = ""
 
@@ -180,7 +180,7 @@ class GenerationConfig(BaseModel):
     # （boundary_checked / boundary_fixed 为 0）。
     check_boundary_speakers: bool = True
     # 解析内「instruct 检查」开关（用户解析页可切换，默认开 = 现有行为不变）：空
-    # instruct 或 ≥35 words 的条目疑似声音指导生成失败/失控 → 先机械继承旁白段
+    # instruct 或 ≥35 词（中文每 2 字计 1 词）的条目疑似声音指导生成失败/失控 → 先机械继承旁白段
     # 内邻近有效值，剩余 target 一批一次 LLM 请求只修 instruct 字段。关 = 跳过该
     # 阶段并留一行日志（instruct_checked / instruct_fixed 为 0）。
     validate_instructs: bool = True

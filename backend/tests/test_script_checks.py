@@ -175,8 +175,8 @@ def test_budgeted_instruct_request_excludes_newly_blocked_inheritance(monkeypatc
     def llm(llm, generation, messages, handle):
         calls.append(messages)
         user = messages[1]["content"]
-        targets = json.loads(user.split("TARGETS (only these may be changed):\n", 1)[1]
-                             .split("\n\nCONTEXT", 1)[0])
+        targets = json.loads(user.split("【目标条目】（只有这些可以修改）：\n", 1)[1]
+                             .split("\n\n【上下文】", 1)[0])
         assert [target["index"] for target in targets] == [0]
         return '[{"index": 0, "instruct": "Clear speech."}]'
 
