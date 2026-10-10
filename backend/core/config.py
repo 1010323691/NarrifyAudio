@@ -23,7 +23,7 @@ import json
 import threading
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -137,6 +137,10 @@ class PromptsConfig(BaseModel):
     # (``backend/resources/default_prompts.txt``) at read time — see ``backend/api/config.py``.
     system_prompt: str = ""
     user_prompt: str = ""
+    # Same override rule for the numbered-unit parse protocol (``generation.parse_protocol``
+    # == "units"): empty falls back to ``backend/resources/default_unit_prompts.txt``.
+    unit_system_prompt: str = ""
+    unit_user_prompt: str = ""
 
 
 class GenerationConfig(BaseModel):
@@ -217,6 +221,19 @@ class GenerationConfig(BaseModel):
     # 标点补「。」，instruct 取词字符多者，章标题两侧不合并。≤10 强制合并可造出 >
     # max_paragraph_chars 的块，由随后的机械分段切回（200 字硬保证不变）。
     merge_same_speaker: bool = True
+
+    # 解析协议（管理员配置）："json" = 模型把整段重写成 JSON（旧协议，也是单元协议
+    # 失败时逐 chunk 的回退路径）；"units" = 程序把 chunk 切成编号单元，模型只输出
+    # 标签，程序机械拼回同样的 {speaker,text,instruct}（输出 token 约降到 1/5～1/7）。
+    parse_protocol: Literal["json", "units"] = "json"
+    # 单元协议下旁白的固定 instruct（模型不再输出旁白 instruct）。
+    narrator_instruct: str = "平稳中性的叙述语气。"
+    # 单元协议的 edit 开关与上限：edit 只允许从单元里删去一段连续的说话动词短语；
+    # 关闭后带动作的说话标签保持原样（由后续机械阶段兜底）。
+    edit_enabled: bool = True
+    edit_max_delete_chars: int = Field(default=24, ge=1, le=200)
+    # 单元协议切分单元的目标上限（字）：超过则在句界 / 子句界再切。
+    unit_max_chars: int = Field(default=80, ge=20, le=400)
 
 
 class AppConfig(BaseModel):

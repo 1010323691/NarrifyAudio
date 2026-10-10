@@ -38,6 +38,7 @@ from .llm_transport import (
     cache_kwargs,
 )
 from .script_prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
+from .script_unit_prompts import DEFAULT_UNIT_SYSTEM_PROMPT, DEFAULT_UNIT_USER_PROMPT
 from .text import ends_sentence, is_chapter_title
 
 log = logging.getLogger("audiobook.script")
@@ -908,6 +909,142 @@ def process_chunk(handle, llm, model_name, chunk, chunk_num, total_chunks,
 
     handle.log(f"chunk {chunk_num} 缺失内容无法恢复，保留现有 {len(entries)} 条", "WARNING")
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Numbered-unit protocol (``generation.parse_protocol == "units"``)
+#
+# Code cuts the chunk into numbered units, the model answers with labels only, code stitches
+# the same ``{speaker, text, instruct}`` entries back (see :mod:`.script_units`). A chunk
+# whose labels stay unusable falls back to the legacy JSON protocol, so this path can never
+# make a chunk worse than before.
+# ---------------------------------------------------------------------------
+
+def _unit_context(chunk_num: int, total_chunks: int, previous_entries) -> str:
+    if chunk_num == 1:
+        parts = ["（全文开头）"]
+    elif chunk_num == total_chunks:
+        parts = ["（全文结尾）"]
+    else:
+        parts = [f"（第 {chunk_num} 段，共 {total_chunks} 段）"]
+    if previous_entries:
+        seen = sorted({
+            e.get("speaker", "") for e in previous_entries
+            if e.get("speaker", "") and e.get("speaker", "") != "NARRATOR"
+        })
+        if seen:
+            parts.append("本书已出现的角色：" + "、".join(seen))
+        parts.append("上一段结尾（已处理，仅供参考）：")
+        for e in previous_entries[-3:]:
+            text = (e.get("text") or "").replace("\n", " ")
+            parts.append(f"{e.get('speaker', '')}：{text[:100]}")
+    return "\n".join(parts)
+
+
+def _unit_plan_problem(plan, likely_dialogue: list) -> str | None:
+    """Why a parsed label reply must not be trusted, or ``None`` when it is usable."""
+    if not plan.ended:
+        return "缺少 END 结束行（疑似被截断）"
+    if plan.bad_lines > max(2, int(plan.total_lines * 0.2)):
+        return f"无法解析的行过多（{plan.bad_lines}/{plan.total_lines}）"
+    if not plan.labels and len(likely_dialogue) >= 3:
+        return f"整行引号台词（{len(likely_dialogue)} 处）一个都没有标注"
+    return None
+
+
+def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks, *,
+                        previous_entries, system_prompt, user_prompt_template,
+                        generation: GenerationConfig, stats: dict, fallback) -> list:
+    """Numbered-unit counterpart of :func:`process_chunk`: segment → label → assemble.
+
+    Up to three model calls per chunk (``finish_reason=length`` doubles ``max_tokens``
+    once, mirroring the legacy budget recovery); an unusable reply (see
+    :func:`_unit_plan_problem`) or a failed stitching self-check retries, and when every
+    attempt fails the chunk is parsed by ``fallback()`` (the legacy JSON protocol).
+    ``stats`` accumulates ``units`` / ``labels`` / ``edit_applied`` / ``edit_rejected`` /
+    ``fallback_chunks`` for the task result.
+    """
+    from . import script_units as su
+
+    units = su.segment_chunk(chunk, generation.unit_max_chars)
+    n_units = sum(1 for u in units if u.n)
+    likely = su.likely_dialogue_numbers(units)
+    narrator_instruct = (generation.narrator_instruct or "").strip() or "平稳中性的叙述语气。"
+    soft_max = min(150, max(10, int(generation.max_paragraph_chars or 200)))
+    user_prompt = (user_prompt_template
+                   .replace("{context}", _unit_context(chunk_num, total_chunks, previous_entries))
+                   .replace("{units}", su.render_units(units)))
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    max_tokens = generation.max_tokens
+    budget_doubled = False
+    for attempt in range(3):
+        handle.check()
+        mt = max_tokens * 2 if budget_doubled else max_tokens
+        kwargs = dict(
+            temperature=generation.temperature, top_p=generation.top_p,
+            presence_penalty=generation.presence_penalty, max_tokens=mt,
+            top_k=generation.top_k, min_p=generation.min_p,
+            banned_tokens=generation.banned_tokens, **cache_kwargs(llm),
+        )
+        try:
+            if llm.stream:
+                text, finish_reason, usage = request_chat_completion_stream(
+                    llm.base_url, llm.api_key, model_name, messages, handle=handle, **kwargs)
+            else:
+                text, finish_reason, usage = _llm_chat_completion(
+                    llm.base_url, llm.api_key, model_name, messages, **kwargs)
+        except TaskCancelled:
+            raise
+        except LLMUnavailableError:
+            raise
+        except LLMHTTPError:
+            if not budget_doubled:
+                raise
+            handle.log(f"chunk {chunk_num}/{total_chunks}: 翻倍 max_tokens（{mt}）被上游拒绝"
+                       f" → 回退原预算重试", "WARNING")
+            budget_doubled = False
+            continue
+        except Exception as e:  # noqa: BLE001 — a failed call retries, then falls back
+            handle.log(f"调用 LLM API 出错：{e}", "ERROR")
+            continue
+        pt = usage.get("prompt_tokens", "?") if usage else "?"
+        ct = usage.get("completion_tokens", "?") if usage else "?"
+        handle.log(f"chunk {chunk_num}/{total_chunks}: finish_reason={finish_reason} | "
+                   f"tokens prompt={pt} completion={ct}（单元 {n_units}）")
+        plan = su.parse_unit_reply(text, n_units)
+        problem = _unit_plan_problem(plan, likely)
+        if problem is None:
+            result = su.assemble(
+                units, plan, narrator_instruct, soft_max,
+                edit_enabled=generation.edit_enabled,
+                edit_max_delete=generation.edit_max_delete_chars,
+            )
+            if not result.ok:
+                problem = "拼合自检未通过（文字有丢失或多出）"
+            elif not result.entries:
+                problem = "拼合结果为空"
+        if problem is None:
+            from ..platform.quota import consume_llm_output
+            consume_llm_output(text, "script.parse")
+            stats["units"] += n_units
+            stats["labels"] += len(plan.labels)
+            stats["edit_applied"] += result.edit_applied
+            stats["edit_rejected"] += result.edit_rejected
+            if result.edit_rejected:
+                handle.log(f"chunk {chunk_num}: {result.edit_rejected} 处 edit 不合规，已作废并保留原文", "WARNING")
+            if attempt > 0:
+                handle.log(f"  Succeeded on retry {attempt + 1}")
+            return result.entries
+        handle.log(f"chunk {chunk_num}/{total_chunks}: 单元标签无效（{problem}）", "WARNING")
+        if finish_reason == "length" and not budget_doubled:
+            budget_doubled = True
+            handle.log(f"  响应被预算截断 → 重试时翻倍 max_tokens（{max_tokens} → {max_tokens * 2}）", "WARNING")
+    handle.log(f"chunk {chunk_num}/{total_chunks}: 单元协议未能得到可用标签 → 回退旧 JSON 协议解析本段", "WARNING")
+    stats["fallback_chunks"] += 1
+    return fallback()
 
 
 def merge_adjacent_same_speaker(entries, title_test, max_chars=100, short_cap=10):
@@ -3147,6 +3284,17 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         if not generation.check_chunk_alignment:
             handle.log("chunk 忠实性校验已关闭（配置）——解析阶段跳过恢复重跑（JSON 重试仍生效）")
 
+        use_units = generation.parse_protocol == "units"
+        unit_stats = {"units": 0, "labels": 0, "edit_applied": 0, "edit_rejected": 0,
+                      "fallback_chunks": 0}
+        unit_sys = prompts.unit_system_prompt or DEFAULT_UNIT_SYSTEM_PROMPT
+        unit_usr = prompts.unit_user_prompt or DEFAULT_UNIT_USER_PROMPT
+        if use_units:
+            handle.log(
+                "解析协议：编号单元（程序切分 + 模型打标签 + 程序拼合；"
+                "忠实性由构造保证，chunk 忠实性校验不适用，标签无效的 chunk 回退 JSON 协议）"
+            )
+
         all_entries = []
         chunk_ends = []  # 每段结束时的累计条目数——chunk 边界簿记（角色匹配检查用）
         for i, chunk in enumerate(chunks, 1):
@@ -3157,20 +3305,32 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # task never reads as 100% before it is actually done.
             handle.progress(0.9 * (i - 1) / total, f"处理第 {i}/{total} 段")
             previous = all_entries if all_entries else None
-            entries = process_chunk(
-                handle, llm, llm.model_name, chunk, i, total,
-                previous_entries=previous,
-                system_prompt=sys_prompt,
-                user_prompt_template=usr_template,
-                max_tokens=generation.max_tokens,
-                temperature=generation.temperature,
-                top_p=generation.top_p,
-                top_k=generation.top_k,
-                min_p=generation.min_p,
-                presence_penalty=generation.presence_penalty,
-                banned_tokens=generation.banned_tokens,
-                check_alignment=generation.check_chunk_alignment,
-            )
+
+            def legacy_chunk(chunk=chunk, i=i, previous=previous):
+                return process_chunk(
+                    handle, llm, llm.model_name, chunk, i, total,
+                    previous_entries=previous,
+                    system_prompt=sys_prompt,
+                    user_prompt_template=usr_template,
+                    max_tokens=generation.max_tokens,
+                    temperature=generation.temperature,
+                    top_p=generation.top_p,
+                    top_k=generation.top_k,
+                    min_p=generation.min_p,
+                    presence_penalty=generation.presence_penalty,
+                    banned_tokens=generation.banned_tokens,
+                    check_alignment=generation.check_chunk_alignment,
+                )
+
+            if use_units:
+                entries = process_chunk_units(
+                    handle, llm, llm.model_name, chunk, i, total,
+                    previous_entries=previous, system_prompt=unit_sys,
+                    user_prompt_template=unit_usr, generation=generation,
+                    stats=unit_stats, fallback=legacy_chunk,
+                )
+            else:
+                entries = legacy_chunk()
             all_entries.extend(entries)
             chunk_ends.append(len(all_entries))
             handle.log(f"  得到 {len(entries)} 条")
@@ -3438,6 +3598,12 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             # Original (decoded, stripped, mojibake-fixed) input length in chars — kept in
             # the result for reference.
             "input_chars": len(body),
+            # 解析协议与单元协议读数（json 协议下 unit_* 恒为 0）
+            "parse_protocol": generation.parse_protocol,
+            "unit_labels": unit_stats["labels"],
+            "unit_edit_applied": unit_stats["edit_applied"],
+            "unit_edit_rejected": unit_stats["edit_rejected"],
+            "unit_fallback_chunks": unit_stats["fallback_chunks"],
         }
     finally:
         # Exactly one release per path: success path already released before the

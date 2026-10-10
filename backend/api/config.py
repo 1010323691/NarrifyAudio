@@ -8,6 +8,7 @@ from ..platform.system_config import client_logs_enabled
 
 from ..core import config as core_config
 from ..engines.script_prompts import load_default_prompts
+from ..engines.script_unit_prompts import load_default_unit_prompts
 from . import _common
 
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -51,6 +52,10 @@ def get_config() -> dict:
         prompts["system_prompt"] = load_default_prompts()[0]
     if not prompts.get("user_prompt"):
         prompts["user_prompt"] = load_default_prompts()[1]
+    if not prompts.get("unit_system_prompt"):
+        prompts["unit_system_prompt"] = load_default_unit_prompts()[0]
+    if not prompts.get("unit_user_prompt"):
+        prompts["unit_user_prompt"] = load_default_unit_prompts()[1]
     return data
 
 

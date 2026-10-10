@@ -278,3 +278,93 @@ def test_assemble_property_skeleton_preserved_for_any_labelling():
         dropped = sum(len(_skeleton(units[int(l.split()[0]) - 1].text))
                       for l in lines if l.endswith(" X"))
         assert len(kept) + dropped == len(_skeleton(SAMPLE))
+
+
+# ---------------------------------------------------------------------------
+# End-to-end through generate_file (fake HTTP): units protocol, retry, fallback
+# ---------------------------------------------------------------------------
+import json
+import urllib.request
+
+from backend.core.config import GenerationConfig, PromptsConfig
+from backend.engines.script import generate_file
+from backend.tests.test_script import _LLM, _BodyResp, _chat_payload, _LogHandle, workspace  # noqa: F401
+
+GOOD_REPLY = (
+    "4 姜维 | 随意放松的聊天语气\n5 任昊 | 懒洋洋地拖长语调\n8 董雪 | 压抑的低声呻吟\n"
+    "9 姜维 | 紧张的低声耳语\n10 X\n11 姜维 | 紧张的低声耳语\nEND"
+)
+# Every mechanical check stage off: only the parse stage talks to the (fake) model.
+_QUIET = dict(
+    spot_check_enabled=False, check_boundary_speakers=False, revalidate_splits=False,
+    validate_instructs=False, check_long_paragraphs=False, parse_protocol="units",
+)
+
+
+def _run(workspace, monkeypatch, replies, **gen):
+    seen = []
+
+    def urlopen(req, *a, **k):
+        seen.append(json.loads(req.data.decode("utf-8")))
+        reply, finish = replies[min(len(seen), len(replies)) - 1]
+        return _BodyResp(_chat_payload(reply, finish))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    (workspace / "02_split_text").mkdir(parents=True)
+    src = workspace / "02_split_text" / "ch.txt"
+    src.write_bytes(SAMPLE.encode("utf-8"))
+    handle = _LogHandle()
+    result = generate_file(handle, str(src), _LLM, PromptsConfig(),
+                           GenerationConfig(**{**_QUIET, **gen}))
+    out = json.loads((workspace / "03_parsed_json" / "ch.json").read_text("utf-8"))
+    return result, out, seen, handle
+
+
+def test_generate_file_units_protocol_end_to_end(workspace, monkeypatch):
+    result, out, seen, handle = _run(workspace, monkeypatch, [(GOOD_REPLY, "stop")],
+                                     narrator_instruct="管理员固定旁白语气。",
+                                     merge_same_speaker=False)
+    assert len(seen) == 1
+    prompt = seen[0]["messages"][1]["content"]
+    assert "[4] " + LQ + "耗子" in prompt and "【原文单元】" in prompt
+    assert [(e["speaker"], e["text"]) for e in out] == [
+        (NARRATOR, "第十二章 夜雨"),
+        (NARRATOR, "雨下了一整夜。姜维把车停在巷口，回头看了一眼。"),
+        ("姜维", "耗子，我跟小雪去买点东西，你跟车里等会儿吧。"),
+        ("任昊", "行，快去快回。"),
+        (NARRATOR, "任昊打了个哈欠。董雪捂着手臂，疼得直吸气。"),
+        ("董雪", "嗯……疼……"),
+        ("姜维", "别出声，有人。"),
+        (NARRATOR, f"他心想：{LQ}这下麻烦了。{RQ}"),
+    ]
+    assert all(e["instruct"] == "管理员固定旁白语气。" for e in out if e["speaker"] == NARRATOR)
+    assert result["parse_protocol"] == "units" and result["unit_fallback_chunks"] == 0
+    assert result["unit_labels"] == 6
+    assert any("解析协议：编号单元" in msg for _lv, msg in handle.logs)
+
+
+def test_generate_file_units_retries_reply_without_end(workspace, monkeypatch):
+    truncated = GOOD_REPLY.rsplit("\nEND", 1)[0]
+    result, out, seen, _ = _run(workspace, monkeypatch,
+                                [(truncated, "length"), (GOOD_REPLY, "stop")])
+    assert len(seen) == 2 and result["unit_fallback_chunks"] == 0
+    assert seen[0]["max_tokens"] == 4096 and seen[1]["max_tokens"] == 8192  # budget doubled
+    assert {e["speaker"] for e in out} >= {"姜维", "任昊", "董雪"}
+
+
+def test_generate_file_units_falls_back_to_json_protocol(workspace, monkeypatch):
+    legacy = json.dumps([{"speaker": NARRATOR, "text": SAMPLE.replace("\n\n", ""),
+                          "instruct": "旧协议"}], ensure_ascii=False)
+    replies = [("没有标签，只有闲聊", "stop")] * 3 + [(legacy, "stop")]
+    result, out, seen, handle = _run(workspace, monkeypatch, replies)
+    assert len(seen) == 4 and result["unit_fallback_chunks"] == 1
+    assert any("回退旧 JSON 协议" in msg for _lv, msg in handle.logs)
+    assert out and all(e["instruct"] for e in out)
+
+
+def test_generate_file_units_rejects_bad_edit_and_keeps_text(workspace, monkeypatch):
+    reply = "4 姜维\n12 E N | - | 他胡乱改写了这句话。\nEND"
+    result, out, seen, handle = _run(workspace, monkeypatch, [(reply, "stop")])
+    assert result["unit_edit_rejected"] == 1 and result["unit_edit_applied"] == 0
+    assert any("edit 不合规" in msg for _lv, msg in handle.logs)
+    assert "".join(e["text"] for e in out).count("他心想") == 1

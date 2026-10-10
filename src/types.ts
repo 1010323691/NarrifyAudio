@@ -503,6 +503,9 @@ export interface AppConfig {
   prompts: {
     system_prompt: string
     user_prompt: string
+    /** 编号单元解析协议的提示词（system / user 模板，user 含 context / units 占位符）。 */
+    unit_system_prompt: string
+    unit_user_prompt: string
   }
   persona_prompts: {
     system_prompt: string
@@ -559,6 +562,17 @@ export interface AppConfig {
      *  instruct 取词字符多者，章标题两侧不合并。置于超长机械分段**之前**——其 ≤10 强制
      *  合并可能造出超上限块，由随后的机械分段切回（段落上限硬保证不变）。 */
     merge_same_speaker: boolean
+    /** 解析协议：json = 模型重写整段为 JSON（旧协议，亦为回退路径）；units = 程序切编号单元、
+     *  模型只打标签、程序机械拼回同样的条目结构。 */
+    parse_protocol: 'json' | 'units'
+    /** 单元协议下旁白条目的固定 instruct（管理员配置，模型不再输出旁白 instruct）。 */
+    narrator_instruct: string
+    /** 单元协议的 edit（仅允许删去一段说话动词短语）总开关。 */
+    edit_enabled: boolean
+    /** 单个 edit 最多可删的词字符数。 */
+    edit_max_delete_chars: number
+    /** 单元协议下切分单元的长度上限（字）。 */
+    unit_max_chars: number
   }
   ui: {
     theme: string

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..core.config import PromptsConfig, get_config
 from ..core.paths import get_or_prepare_layout
 from ..engines.script_prompts import load_default_prompts
+from ..engines.script_unit_prompts import load_default_unit_prompts
 from ..platform.database import get_db
 from ..platform.deps import AuthContext, get_auth_context
 from ..platform.project_context import active_project
@@ -33,9 +34,12 @@ def _resolved_prompts() -> PromptsConfig:
     """
     prompts = get_config().prompts
     system_prompt, user_prompt = load_default_prompts()
+    unit_system_prompt, unit_user_prompt = load_default_unit_prompts()
     return prompts.model_copy(update={
         "system_prompt": prompts.system_prompt or system_prompt,
         "user_prompt": prompts.user_prompt or user_prompt,
+        "unit_system_prompt": prompts.unit_system_prompt or unit_system_prompt,
+        "unit_user_prompt": prompts.unit_user_prompt or unit_user_prompt,
     })
 
 
