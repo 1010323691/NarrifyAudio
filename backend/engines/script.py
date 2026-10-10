@@ -1890,13 +1890,15 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
     return (updated if updated is not None else entries), len(flagged), fixed
 
 
-INSTRUCT_MAX_WORDS = 35
-# 中文 instruct 的词数折算：每 2 个汉字计 1 词（35 词 ≈ 70 字；解析提示词要求 ≤60 字，留余量）。
-INSTRUCT_CJK_CHARS_PER_WORD = 2
+# instruct 长度上限（字）：与解析提示词「绝不超过 60 字」同口径，管理员可用
+# ``generation.instruct_max_chars`` 调整。
+INSTRUCT_MAX_CHARS = 60
+# 兼容旧的英文 instruct：不含汉字时按英文词数折算——35 个词 ≙ INSTRUCT_MAX_CHARS 字。
+INSTRUCT_LEGACY_MAX_WORDS = 35
 _INSTRUCT_CJK_RE = re.compile("[\\u3400-\\u9fff\\uf900-\\ufaff]")
 
 
-def _parse_instruct_batch(reply: str, targets: list[int], max_words: int) -> dict[int, str]:
+def _parse_instruct_batch(reply: str, targets: list[int], max_chars: int) -> dict[int, str]:
     """Parse a batch instruct response into validated ``index -> instruct`` values."""
     raw = clean_json_string(reply or "")
     if not raw:
@@ -1935,12 +1937,12 @@ def _parse_instruct_batch(reply: str, targets: list[int], max_words: int) -> dic
         if not isinstance(value, str):
             continue
         value = value.strip()
-        if idx not in conflicts and value and instruct_word_count(value) <= max_words:
+        if idx not in conflicts and value and instruct_length(value, max_chars) <= max_chars:
             result[idx] = value
     return result
 
 
-def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: int) -> str:
+def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_chars: int) -> str:
     """Build one compact prompt for every flagged entry in the whole book."""
     target_set = set(targets)
     context_indices = set()
@@ -1962,7 +1964,6 @@ def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: 
             row["target"] = True
         window.append(row)
     target_rows = [item for item in window if item.get("target")]
-    max_chars = max_words * INSTRUCT_CJK_CHARS_PER_WORD
     return (
         "你在为一整本有声书修复 TTS 语音指导（instruct）。为每个目标条目返回一个 JSON 对象："
         "{\"index\": 绝对下标, \"instruct\": 简洁的中文语音指导}，全部放在一个 JSON 数组里。"
@@ -1991,7 +1992,7 @@ def _narration_boundary(entry: dict) -> bool:
     return is_chapter_title(text) or bool(_SCENE_MARKER_RE.fullmatch(text))
 
 
-def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded=True):
+def _narrator_instruct_candidates(entries, index, flagged, max_chars, *, bounded=True):
     """The old contiguous run also supplies a ceiling for LLM repair eligibility."""
     if str(entries[index].get("speaker") or "").strip().upper() != "NARRATOR":
         return []
@@ -2013,7 +2014,8 @@ def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded
         value = entries[candidate].get("instruct")
         if not bounded:
             value = str(value or "").strip()
-        limit_ok = instruct_word_count(value) <= max_words if bounded else instruct_word_count(value) < max_words
+        limit_ok = (instruct_length(value, max_chars) <= max_chars if bounded
+                    else instruct_length(value, max_chars) < max_chars)
         if isinstance(value, str) and value.strip() and limit_ok:
             candidates.append((abs(candidate - index), candidate, value.strip()))
     if bounded and len({" ".join(value.split()).casefold() for _, _, value in candidates}) > 1:
@@ -2021,7 +2023,7 @@ def _narrator_instruct_candidates(entries, index, flagged, max_words, *, bounded
     return candidates
 
 
-def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: int) -> tuple:
+def _inherit_narrator_instructs(entries: list, flagged: list[int], max_chars: int) -> tuple:
     """Repair flagged narrator entries from a nearby valid narrator direction.
 
     Stay within a narrator run, stop at headings/time markers and require
@@ -2031,7 +2033,7 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: in
     flagged_set = set(flagged)
     inherited = {}
     for index in flagged:
-        candidates = _narrator_instruct_candidates(entries, index, flagged_set, max_words)
+        candidates = _narrator_instruct_candidates(entries, index, flagged_set, max_chars)
         if not candidates:
             continue
         _, _, value = min(candidates, key=lambda item: (item[0], item[1]))
@@ -2042,26 +2044,26 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_words: in
 
 
 def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_template, entries,
-                                 context_window=4, max_words=INSTRUCT_MAX_WORDS,
+                                 context_window=4, max_chars=INSTRUCT_MAX_CHARS,
                                  *, budget_deferred=None) -> tuple:
     """Mechanically inherit narration directions, then repair remaining targets once."""
-    max_words = max(1, int(max_words))
-    flagged = instruct_entry_indices(entries, max_words)
+    max_chars = max(1, int(max_chars))
+    flagged = instruct_entry_indices(entries, max_chars)
     if not flagged:
         return entries, 0, 0
 
-    updated, inherited = _inherit_narrator_instructs(entries, flagged, max_words)
+    updated, inherited = _inherit_narrator_instructs(entries, flagged, max_chars)
     for index in flagged:
         if not isinstance(entries[index].get("instruct"), str) and index not in inherited:
             updated[index] = {**updated[index], "instruct": ""}
     legacy_flagged = {index for index, entry in enumerate(entries)
                       if not str(entry.get("instruct") or "").strip()
-                      or instruct_word_count(entry.get("instruct")) >= max_words}
+                      or instruct_length(entry.get("instruct"), max_chars) >= max_chars}
     # 收紧继承边界不能扩充旧版原本需要 LLM 的目标集合。
     targets = [index for index in flagged if index not in inherited and index in legacy_flagged
                and (budget_deferred is None or id(entries[index]) not in budget_deferred)
                and not _narrator_instruct_candidates(
-                   entries, index, legacy_flagged, max_words, bounded=False)]
+                   entries, index, legacy_flagged, max_chars, bounded=False)]
     deferred = [index for index in flagged if index not in inherited and index not in targets]
     if deferred:
         handle.log(f"语音指导待核对：{len(deferred)} 条无法安全继承，未追加 LLM 请求", "WARNING")
@@ -2076,7 +2078,7 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
                 "只修复目标条目的 instruct 字段，用中文书写。只输出 JSON。"
                 "每个目标下标返回一个对象。绝不改动 index、speaker 或 text。"
             )},
-            {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_words)},
+            {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_chars)},
         ]
         try:
             reply = _llm_call(llm, generation, messages, handle)
@@ -2088,7 +2090,7 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
             handle.log(f"instruct batch call failed: {e}", "WARNING")
             handle.log(f"语音指导待核对：{len(targets)} 条未修复，不追加请求", "WARNING")
             return updated, len(flagged), len(inherited)
-        replacement = _parse_instruct_batch(reply, targets, max_words)
+        replacement = _parse_instruct_batch(reply, targets, max_chars)
         for index, value in replacement.items():
             updated[index] = dict(updated[index])
             updated[index]["instruct"] = value
@@ -2107,32 +2109,29 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
     return updated, len(flagged), fixed
 
 
-def instruct_word_count(value) -> int:
-    """Count the words of an ``instruct`` value.
+def instruct_length(value, max_chars: int = INSTRUCT_MAX_CHARS) -> float:
+    """The length of an ``instruct`` value in 字, comparable with ``max_chars``.
 
-    Without CJK characters: whitespace-delimited words (the English口径). With CJK
-    characters: every ``INSTRUCT_CJK_CHARS_PER_WORD`` 汉字 count as one word (rounded
-    up), plus any whitespace-delimited non-CJK token carrying a letter/digit — so
-    Chinese punctuation never inflates the count and one ``max_words`` limit covers
-    both languages.
+    Text that contains Chinese is measured in characters: every CJK / letter / digit
+    counts one, punctuation and whitespace do not (so ``平稳中性的叙述语气。`` is 9). A value
+    without any Chinese (a legacy English direction) is measured in words and scaled so that
+    ``INSTRUCT_LEGACY_MAX_WORDS`` words equal ``max_chars``.
     """
     s = str(value or "").strip()
-    rest, cjk = _INSTRUCT_CJK_RE.subn(" ", s)
-    if not cjk:
-        return len(s.split())
-    latin = sum(1 for token in rest.split() if any(ch.isalnum() for ch in token))
-    return latin + -(-cjk // INSTRUCT_CJK_CHARS_PER_WORD)
+    if _INSTRUCT_CJK_RE.search(s):
+        return sum(1 for ch in s if ch.isalnum())
+    return len(s.split()) * max(1, int(max_chars)) / INSTRUCT_LEGACY_MAX_WORDS
 
 
-def instruct_entry_indices(entries: list, max_words: int = INSTRUCT_MAX_WORDS) -> list[int]:
-    """Return entries whose voice direction is missing or exceeds ``max_words``."""
-    limit = max(1, int(max_words))
+def instruct_entry_indices(entries: list, max_chars: int = INSTRUCT_MAX_CHARS) -> list[int]:
+    """Return entries whose voice direction is missing or longer than ``max_chars`` 字."""
+    limit = max(1, int(max_chars))
     return [
         i for i, e in enumerate(entries)
         if isinstance(e, dict)
         and (not isinstance(e.get("instruct"), str)
              or not e.get("instruct").strip()
-             or instruct_word_count(e.get("instruct")) > limit)
+             or instruct_length(e.get("instruct"), limit) > limit)
     ]
 
 
@@ -3341,7 +3340,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     is unaffected.
 
     After speaker auditing and tag/punctuation cleanup, entries with an empty
-    ``instruct`` or an ``instruct`` exceeding 35 words (中文按每 2 个汉字计 1 词) are
+    ``instruct`` or an ``instruct`` longer than ``generation.instruct_max_chars`` 字（默认 60，按汉字/字母/数字计、不含标点） are
     checked. Narrator inheritance stops at headings, time markers and incompatible
     directions. Only targets within the former request eligibility are repaired
     in one index-keyed LLM request with a
@@ -3602,6 +3601,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             all_entries, instruct_checked, instruct_fixed = validate_instructs(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 context_window=int(generation.check_context_window or 0),
+                max_chars=int(generation.instruct_max_chars or INSTRUCT_MAX_CHARS),
                 budget_deferred=budget_deferred,
             )
         else:

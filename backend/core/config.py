@@ -188,10 +188,12 @@ class GenerationConfig(BaseModel):
     # （boundary_checked / boundary_fixed 为 0）。
     check_boundary_speakers: bool = True
     # 解析内「instruct 检查」开关（用户解析页可切换，默认开 = 现有行为不变）：空
-    # instruct 或 ≥35 词（中文每 2 字计 1 词）的条目疑似声音指导生成失败/失控 → 先机械继承旁白段
-    # 内邻近有效值，剩余 target 一批一次 LLM 请求只修 instruct 字段。关 = 跳过该
-    # 阶段并留一行日志（instruct_checked / instruct_fixed 为 0）。
+    # instruct 或超过 instruct_max_chars 字（按汉字/字母/数字计，不含标点）的条目疑似
+    # 声音指导生成失败/失控 → 先机械继承旁白段内邻近有效值，剩余 target 一批一次 LLM 请求
+    # 只修 instruct 字段。关 = 跳过该阶段并留一行日志（instruct_checked / instruct_fixed 为 0）。
     validate_instructs: bool = True
+    # instruct 长度上限（字）：与解析提示词「绝不超过 60 字」同口径；管理员可调。
+    instruct_max_chars: int = Field(default=60, ge=10, le=300)
     # 解析内「chunk 忠实性校验」开关（用户解析页可切换，默认开 = 现有行为不变）：
     # 每个 chunk 解析后整体比对源文骨架，检出大段缺失（尾部截断 / 模型自停丢段）
     # 时按诊断恢复——预算截断翻倍 max_tokens 重跑一次，模型自停对半切开各重跑一次。

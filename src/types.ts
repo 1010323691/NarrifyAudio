@@ -540,6 +540,8 @@ export interface AppConfig {
     check_boundary_speakers: boolean
     /** instruct 检查开关（解析内阶段；关闭 = 跳过该阶段并记录日志）。 */
     validate_instructs: boolean
+    /** instruct 长度上限（字，按汉字/字母/数字计、不含标点）；超过的条目由 instruct 检查修复。 */
+    instruct_max_chars: number
     /** chunk 忠实性校验开关（解析阶段：检出大段缺失时翻倍预算/对半切开重跑；
      *  关闭 = 跳过校验与恢复，JSON 可解析性重试不受影响）。 */
     check_chunk_alignment: boolean

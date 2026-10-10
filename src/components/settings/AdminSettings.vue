@@ -107,6 +107,7 @@ async function save() {
     ...config.generation,
     parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
     edit_max_delete_chars: Math.max(1, Math.min(200, Math.trunc(Number(config.generation.edit_max_delete_chars) || 24))),
+    instruct_max_chars: Math.max(10, Math.min(300, Math.trunc(Number(config.generation.instruct_max_chars) || 60))),
     delete_max_chars: Math.max(1, Math.min(400, Math.trunc(Number(config.generation.delete_max_chars) || 30))),
     unit_max_chars: Math.max(20, Math.min(400, Math.trunc(Number(config.generation.unit_max_chars) || 80))),
     narrator_instruct: String(config.generation.narrator_instruct || '').trim() || '平稳中性的叙述语气。',
@@ -339,6 +340,15 @@ watch(
               <Input id="admin-setting-10" v-model.number="draft.generation.spot_check_rate" type="number" step="0.01" min="0" max="0.5" class="max-w-[8rem]" />
               <span class="text-xs text-muted-foreground">
                 设置解析结果的抽样复核比例；0 表示关闭。归属抽样的总开关在用户「文本解析」页。
+              </span>
+            </div>
+          </div>
+          <div class="space-y-1.5">
+            <Label for="admin-setting-instruct-max">instruct 长度上限（字）</Label>
+            <div class="flex flex-wrap items-center gap-3">
+              <Input id="admin-setting-instruct-max" v-model.number="draft.generation.instruct_max_chars" type="number" min="10" max="300" step="5" class="max-w-[8rem]" />
+              <span class="text-xs text-muted-foreground">
+                按汉字、字母、数字计，不含标点；超过的条目由「instruct 检查」修复，应与解析提示词里的字数要求一致（默认 60）。
               </span>
             </div>
           </div>
