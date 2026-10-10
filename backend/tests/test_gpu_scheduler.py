@@ -928,3 +928,360 @@ def test_concurrent_admission_reuses_connections_without_waiting_on_cache(tmp_pa
             assert claim_allowed("text.format", db)
     finally:
         engine.dispose()
+
+
+def test_llm_waiter_is_woken_by_a_release_instead_of_sleeping_out_its_backoff(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    monkeypatch.setattr(admission, "_LLM_NEAR_POLL_MAX", 10.0)   # only a real wake-up can be prompt
+    holding, release, admitted = threading.Event(), threading.Event(), {}
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def waiter():
+        with gpu_permit("LLM"):
+            admitted["at"] = time.monotonic()
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    second = threading.Thread(target=waiter)
+    second.start()
+    time.sleep(2.0)                                            # its next un-woken poll would be at ~3.15 s
+    released_at = time.monotonic()
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert "at" in admitted and admitted["at"] - released_at < 0.5
+
+
+def test_llm_permits_are_admitted_oldest_first(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    holding, release, order = threading.Event(), threading.Event(), []
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def waiter(name):
+        with gpu_permit("LLM"):
+            order.append(name)
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    threads = []
+    for name in ("a", "b", "c"):
+        thread = threading.Thread(target=waiter, args=(name,))
+        thread.start()
+        threads.append(thread)
+        time.sleep(0.15)                                       # fix the arrival order
+    release.set()
+    for thread in [first, *threads]:
+        thread.join(8)
+    assert order == ["a", "b", "c"]
+
+
+def test_llm_admission_logs_wait_and_run_time(tmp_path, monkeypatch, caplog):
+    import logging
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 4)
+
+    @admission.llm_admitted
+    def call(*args, **kwargs):
+        return "ok"
+
+    with caplog.at_level(logging.INFO, logger="audiobook.llm_trace"):
+        assert call("http://x", "key", "model") == "ok"
+    assert any("llm_call" in r.getMessage() and "wait=" in r.getMessage() and "run=" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_llm_free_slots_are_filled_in_one_round_without_exceeding_the_limit(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    monkeypatch.setattr(admission, "_LLM_NEAR_POLL_MAX", 10.0)   # only a real wake-up can be prompt
+    guard = threading.Lock()
+    running = peak = 0
+    release_holders, release_waiters = threading.Event(), threading.Event()
+    held = threading.Semaphore(0)
+    admitted_at, order, errors = {}, [], []
+
+    def enter():
+        nonlocal running, peak
+        with guard:
+            running += 1
+            peak = max(peak, running)
+
+    def leave():
+        nonlocal running
+        with guard:
+            running -= 1
+
+    def holder():
+        try:
+            with gpu_permit("LLM"):
+                enter()
+                held.release()
+                release_holders.wait(10)
+                leave()
+        except Exception as exc:
+            errors.append(exc)
+
+    def waiter(name):
+        try:
+            with gpu_permit("LLM"):
+                enter()
+                admitted_at[name] = time.monotonic()
+                order.append(name)
+                release_waiters.wait(10)
+                leave()
+        except Exception as exc:
+            errors.append(exc)
+
+    holders = [threading.Thread(target=holder) for _ in range(3)]
+    for thread in holders:
+        thread.start()
+    for _ in range(3):
+        assert held.acquire(timeout=3)
+    waiters = []
+    for index in range(6):
+        thread = threading.Thread(target=waiter, args=(f"w{index + 1}",))
+        thread.start()
+        waiters.append(thread)
+        time.sleep(0.1)                                        # fix the arrival order
+    time.sleep(1.5)                                            # every waiter is deep into its backoff
+    released_at = time.monotonic()
+    release_holders.set()                                      # all three slots free up together
+    deadline = time.monotonic() + 3
+    while len(admitted_at) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        assert set(order[:3]) == {"w1", "w2", "w3"}            # the three OLDEST, not later arrivals
+        assert max(admitted_at.values()) - released_at < 0.6   # one wake chain, not three backoff rounds
+        assert len(admitted_at) == 3                           # the limit still holds: w4..w6 keep waiting
+    finally:
+        release_waiters.set()
+        for thread in [*holders, *waiters]:
+            thread.join(8)
+    assert peak <= 3 and not errors
+    assert set(order) == {f"w{i}" for i in range(1, 7)}
+
+
+def test_llm_wake_budget_is_spent_only_on_parked_waiters():
+    from backend.platform.gpu_scheduler import admission
+    a, b, c = (admission._Waiter() for _ in range(3))
+    with admission._llm_waiters_lock:
+        admission._llm_waiters.extend([a, b, c])
+    try:
+        for waiter in (a, b, c):
+            waiter.parked = True
+        admission._llm_wake(1)
+        assert a.event.is_set() and not b.event.is_set()
+        for waiter in (a, b, c):
+            waiter.event.clear()
+        a.parked = False                                       # head is blocked elsewhere (paused / polling)
+        admission._llm_wake(1)
+        assert a.event.is_set() and b.event.is_set() and not c.event.is_set()   # a flagged, budget spent on b
+    finally:
+        with admission._llm_waiters_lock:
+            for waiter in (a, b, c):
+                if waiter in admission._llm_waiters:
+                    admission._llm_waiters.remove(waiter)
+
+
+def test_llm_slot_skips_a_head_waiter_that_is_blocked_by_a_paused_task(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    from backend.platform.models import Project, TaskAttempt, User
+    from backend.platform.task_contracts import TaskClaim
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    monkeypatch.setattr(admission, "_LLM_NEAR_POLL_MAX", 10.0)   # only a real wake-up can be prompt
+    owner, project, task, attempt = new_id(), new_id(), new_id(), new_id()
+    with SessionLocal.begin() as db:
+        db.add(User(id=owner, username="gpu" + owner[:8], email=f"{owner}@example.test", password_hash="unused-test-hash"))
+        db.flush()
+        db.add(Project(id=project, owner_id=owner, name="paused head", directory_key=project))
+        db.flush()
+        db.add(Task(id=task, owner_id=owner, project_id=project, task_type="script.parse", status="paused"))
+        db.flush()
+        db.add(TaskAttempt(id=attempt, task_id=task, attempt_no=1, status="running"))
+    claim = TaskClaim(task_id=task, attempt_id=attempt, attempt_no=1, lease_token="t", worker_id="w",
+                      owner_id=owner, project_id=project, task_type="script.parse", payload={})
+
+    class ParkedHandle:
+        """A paused task: check() blocks (like the real pause) until the task is resumed."""
+        def __init__(self):
+            self.resumed = threading.Event()
+        def check(self):
+            self.resumed.wait(30)
+            if self.cancelled:
+                raise RuntimeError("cancelled")
+        cancelled = False
+
+    pause = ParkedHandle()
+    holding, release, admitted, errors = threading.Event(), threading.Event(), {}, []
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def paused_head():
+        admission.bind_claim(claim)
+        try:
+            with gpu_permit("LLM", pause):
+                errors.append("a paused task must not be admitted")
+        except Exception:
+            pass
+
+    def runnable():
+        with gpu_permit("LLM"):
+            admitted["at"] = time.monotonic()
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    head = threading.Thread(target=paused_head)
+    head.start()
+    time.sleep(0.3)                        # the paused waiter is registered FIRST (queue head)
+    second = threading.Thread(target=runnable)
+    second.start()
+    try:
+        time.sleep(2.0)                    # the runnable waiter is deep into its backoff
+        assert head.is_alive() and not errors
+        released_at = time.monotonic()
+        release.set()
+        second.join(5)
+        # the head is stuck in check() and cannot use the wake-up: it must go to the next waiter
+        assert "at" in admitted and admitted["at"] - released_at < 0.5
+    finally:
+        release.set()
+        pause.cancelled = True
+        pause.resumed.set()
+        for thread in (first, head, second):
+            thread.join(8)
+        with SessionLocal.begin() as db:
+            db.execute(delete(GPURequest).where(GPURequest.task_id == task))
+            db.execute(delete(TaskAttempt).where(TaskAttempt.task_id == task))
+            db.execute(delete(Task).where(Task.id == task))
+            db.execute(delete(Project).where(Project.id == project))
+            db.execute(delete(User).where(User.id == owner))
+    assert not errors
+
+
+def test_llm_precheck_ranks_waiters_against_the_free_slots(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
+    base = utcnow()
+    ids = [new_id() for _ in range(7)]
+    with SessionLocal.begin() as db:
+        db.add(GPURequest(id=new_id(), service="LLM", status="running", owner_pid=os.getpid(), created_at=base))
+        for index, request_id in enumerate(ids):   # oldest first
+            db.add(GPURequest(id=request_id, service="LLM", status="waiting", owner_pid=os.getpid(),
+                              created_at=base + timedelta(seconds=index + 1)))
+    # limit 3, one running -> 2 free slots: ranks 0 and 1 may poll for real, the rest may not
+    verdicts = [admission._llm_precheck(request_id) for request_id in ids]
+    assert [skip for skip, _rank, _near in verdicts] == [False, False, True, True, True, True, True]
+    assert [rank for _skip, rank, _near in verdicts] == [0, 1, 2, 3, 4, 5, 6]
+    assert [near for _skip, _rank, near in verdicts] == [True] * 6 + [False]   # rank 6 is 4 places behind the free slots
+    with SessionLocal.begin() as db:                                          # no free slot at all: everyone skips
+        db.add_all(GPURequest(id=new_id(), service="LLM", status="running", owner_pid=os.getpid(), created_at=base)
+                   for _ in range(2))
+    assert all(admission._llm_precheck(request_id)[0] for request_id in ids)
+    assert admission._llm_precheck("missing-request") == (False, -1, True)   # unknown request: let the lock path decide
+
+
+def test_deep_queue_waiters_stay_out_of_the_locked_path_until_a_slot_frees(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    calls = 0
+    guard = threading.Lock()
+    real_transaction = admission.transaction
+
+    def counting_transaction():
+        nonlocal calls
+        with guard:
+            calls += 1
+        return real_transaction()
+
+    holding, release, done, errors = threading.Event(), threading.Event(), [], []
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def waiter(name):
+        try:
+            with gpu_permit("LLM"):
+                done.append(name)
+        except Exception as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    threads = [threading.Thread(target=waiter, args=(f"w{i}",)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    time.sleep(0.5)                                            # every waiter has registered its request
+    monkeypatch.setattr(admission, "transaction", counting_transaction)
+    time.sleep(1.5)
+    with guard:
+        idle_polls = calls
+    # 8 waiters x ~1.5 s: the old code polled the locked path a dozen+ times per second per waiter
+    assert idle_polls <= 2, idle_polls
+    release.set()
+    for thread in [first, *threads]:
+        thread.join(10)
+    assert sorted(done) == [f"w{i}" for i in range(8)] and not errors
+
+
+def test_llm_trace_reports_active_limit_and_rank(tmp_path, monkeypatch, caplog):
+    import logging
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 4)
+
+    @admission.llm_admitted
+    def call(*args, **kwargs):
+        return "ok"
+
+    with caplog.at_level(logging.INFO, logger="audiobook.llm_trace"):
+        call("http://x", "key", "model")
+    line = next(r.getMessage() for r in caplog.records if "llm_call" in r.getMessage())
+    assert "active=0" in line and "limit=4" in line and "rank=0" in line
+
+
+def test_llm_admission_wakes_one_more_waiter_per_slot_still_free(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
+    wakes = []
+    real_wake = admission._llm_wake
+    monkeypatch.setattr(admission, "_llm_wake", lambda count=1: (wakes.append(count), real_wake(count))[1])
+    with gpu_permit("LLM"):
+        # 3 slots, nothing else running: after taking one, two are still free -> two more waiters are woken
+        assert wakes == [2]
+    assert wakes == [2, 1]        # and leaving hands the freed slot to the next waiter
+    wakes.clear()
+    with SessionLocal.begin() as db:                           # two other calls already running: no slot left over
+        for _ in range(2):
+            db.add(GPURequest(id=new_id(), service="LLM", status="running", owner_pid=os.getpid(), created_at=utcnow()))
+    with gpu_permit("LLM"):
+        assert wakes == []
