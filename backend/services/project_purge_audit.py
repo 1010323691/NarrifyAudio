@@ -95,39 +95,43 @@ def _clear_traces(db: Session, record: ProjectPurgeRecord, traces: dict) -> None
 
 
 def verify_purged_projects(limit: int = 50, *, now: datetime | None = None) -> int:
-    """Verify receipts from before today; return how many were handled (bounded round)."""
+    """Verify receipts from before today; return how many became verified (bounded round).
+
+    Receipts that could not be cleaned count an attempt and sort behind the untried ones,
+    so a pile of stuck receipts can neither starve the rest nor keep a caller looping."""
     moment = now or utcnow()
     boundary = local_midnight(moment).astimezone(timezone.utc)  # compare in UTC (sqlite stores naive UTC)
-    handled = 0
+    verified = 0
     with SessionLocal() as db:
         if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
             return 0
         records = db.scalars(select(ProjectPurgeRecord).where(
             ProjectPurgeRecord.verified_at.is_(None), ProjectPurgeRecord.purged_at < boundary,
-        ).order_by(ProjectPurgeRecord.purged_at).limit(limit)).all()
+        ).order_by(ProjectPurgeRecord.attempts, ProjectPurgeRecord.purged_at).limit(limit)).all()
         for record in records:
-            handled += 1
-            record.attempts += 1
+            record_id, tries = record.id, record.attempts + 1
             traces = find_traces(db, record)
+            leftovers = None
             if traces["paths"] or traces["rows"]:
                 logger.warning("Deleted project %s left traces behind: %s; removing them", record.project_id, traces)
+                leftovers = traces
                 try:
                     _clear_traces(db, record, traces)
                 except Exception:
-                    db.rollback()
+                    db.rollback()   # also discards unsaved changes: the attempt is re-recorded below
                     logger.exception("Could not clean traces of deleted project %s; will retry tomorrow", record.project_id)
-                    record = db.merge(record)
-                    record.leftovers = traces
-                    db.commit()
-                    continue
-                record = db.merge(record)
-                record.leftovers = traces
-                traces = find_traces(db, record)
+                    traces = {"paths": ["unclean"], "rows": {}}
+                else:
+                    traces = find_traces(db, record)
+            record = db.get(ProjectPurgeRecord, record_id)
+            record.attempts = tries
+            record.leftovers = leftovers
             if not (traces["paths"] or traces["rows"]):
                 record.verified_at = moment
+                verified += 1
             db.commit()
         db.execute(delete(ProjectPurgeRecord).where(
             ProjectPurgeRecord.verified_at.is_not(None), ProjectPurgeRecord.verified_at < moment - VERIFIED_RECORD_KEEP,
         ))
         db.commit()
-    return handled
+    return verified

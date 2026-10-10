@@ -401,3 +401,34 @@ def test_default_workspace_name_is_reserved(client):
     listed = client.get("/api/v1/projects?page=1&page_size=50").json()["items"]
     default = next(item for item in listed if item["name"] == "默认工作空间")
     assert client.patch(f"/api/v1/projects/{default['id']}", headers=headers, json={"name": "改名了"}).status_code == 422
+
+
+def test_stuck_receipts_neither_starve_the_rest_nor_make_callers_loop(client, monkeypatch):
+    from backend.platform.models import ProjectPurgeRecord
+    from backend.platform.storage import configured_storage_root
+    from backend.services import project_purge_audit as audit
+
+    ids = []
+    with SessionLocal.begin() as db:
+        root = configured_storage_root(db)
+        for n in range(3):
+            project_id = str(uuid.uuid4())
+            key = f"stuckuser/{project_id}"
+            (root / key).mkdir(parents=True, exist_ok=True)       # a leftover that cannot be cleaned (below)
+            db.add(ProjectPurgeRecord(project_id=project_id, owner_id=str(uuid.uuid4()), directory_key=key,
+                                      reason="expired", export_task_ids=[], purged_at=utcnow() - timedelta(days=2 + n)))
+            ids.append(project_id)
+    monkeypatch.setattr(audit, "_clear_traces", lambda *a, **k: (_ for _ in ()).throw(OSError("stuck")))
+    try:
+        assert audit.verify_purged_projects(limit=2) == 0           # nothing verified -> a caller's loop ends
+        assert audit.verify_purged_projects(limit=2) == 0           # the untried third receipt goes first now
+        with SessionLocal() as db:
+            attempts = {p: db.scalar(select(ProjectPurgeRecord.attempts).where(ProjectPurgeRecord.project_id == p)) for p in ids}
+        assert sorted(attempts.values()) == [1, 1, 2]                # the third receipt got its turn in round two
+    finally:
+        with SessionLocal.begin() as db:
+            db.query(ProjectPurgeRecord).filter(ProjectPurgeRecord.project_id.in_(ids)).delete(synchronize_session=False)
+        import shutil
+        with SessionLocal() as db:
+            root = configured_storage_root(db)
+        shutil.rmtree(root / "stuckuser", ignore_errors=True)
