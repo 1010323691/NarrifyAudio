@@ -1,53 +1,31 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch, type WatchStopHandle } from 'vue'
-import { echarts, type EChartsCoreOption } from './echarts'
+import { computed } from 'vue'
+import type { ChartSpec } from './options'
 import { chartTokens, type ChartTokens } from './tokens'
+import TimeSeriesChart from './TimeSeriesChart.vue'
+import BarChart from './BarChart.vue'
+import DonutChart from './DonutChart.vue'
+import GaugeChart from './GaugeChart.vue'
+import HeatmapChart from './HeatmapChart.vue'
+import Sparkline from './Sparkline.vue'
 
 const props = withDefaults(defineProps<{
-  /** Builds the option from the current light/dark tokens, so a theme switch re-colours in place. */
-  option: (tokens: ChartTokens) => EChartsCoreOption
+  /** Builds the chart spec from the colour tokens; re-evaluated when the view's data changes. */
+  option: (tokens: ChartTokens) => ChartSpec
   label: string
   height?: number
 }>(), { height: 240 })
 
-const el = ref<HTMLDivElement | null>(null)
-const chart = shallowRef<ReturnType<typeof echarts.init> | null>(null)
-const dark = ref(typeof document !== 'undefined' && document.documentElement.classList.contains('dark'))
-const reducedMotion = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-let resizeObserver: ResizeObserver | null = null
-let themeObserver: MutationObserver | null = null
-let stopRender: WatchStopHandle | null = null
-
-// The option is built inside the watcher's getter, so every reactive value the
-// builder reads (the view's data, the theme) re-renders the chart; setOption
-// itself runs untracked in the callback.
-function build() {
-  return props.option(chartTokens(dark.value)) as Record<string, unknown>
-}
-function render(option: Record<string, unknown>) {
-  chart.value?.setOption({ ...option, backgroundColor: 'transparent', animation: reducedMotion ? false : (option.animation as boolean | undefined) ?? true }, { notMerge: true })
-}
-
-onMounted(() => {
-  if (!el.value) return
-  chart.value = echarts.init(el.value, undefined, { renderer: 'canvas' })
-  stopRender = watch(build, render, { immediate: true })
-  resizeObserver = new ResizeObserver(() => chart.value?.resize())
-  resizeObserver.observe(el.value)
-  themeObserver = new MutationObserver(() => {
-    dark.value = document.documentElement.classList.contains('dark')
-  })
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
-})
-onBeforeUnmount(() => {
-  stopRender?.()
-  resizeObserver?.disconnect()
-  themeObserver?.disconnect()
-  chart.value?.dispose()
-  chart.value = null
-})
+const spec = computed(() => props.option(chartTokens()))
 </script>
 
 <template>
-  <div ref="el" class="admin-chart" role="img" :aria-label="label" :style="{ height: `${height}px` }" />
+  <div class="admin-chart" role="img" :aria-label="label" :style="{ height: `${height}px` }">
+    <TimeSeriesChart v-if="spec.kind === 'time'" :spec="spec" />
+    <BarChart v-else-if="spec.kind === 'bar'" :spec="spec" />
+    <DonutChart v-else-if="spec.kind === 'donut'" :spec="spec" />
+    <GaugeChart v-else-if="spec.kind === 'gauge'" :spec="spec" />
+    <HeatmapChart v-else-if="spec.kind === 'heatmap'" :spec="spec" />
+    <Sparkline v-else :data="spec.data" :color="spec.color" />
+  </div>
 </template>

@@ -44,16 +44,5 @@ export default defineConfig({
     target: 'es2020',
     outDir: 'dist',
     sourcemap: false,
-    // ECharts is only reachable from the lazily loaded admin console; keeping
-    // it in its own vendor chunk lets console updates reuse the cached library.
-    // That chunk (~620 kB, ~210 kB gzip) is the only one past Vite's 500 kB hint.
-    chunkSizeWarningLimit: 650,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (/node_modules[\\/](echarts|zrender)[\\/]/.test(id)) return 'vendor-echarts'
-        },
-      },
-    },
   },
 })
