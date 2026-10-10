@@ -1077,21 +1077,107 @@ def test_llm_free_slots_are_filled_in_one_round_without_exceeding_the_limit(tmp_
     assert set(order) == {f"w{i}" for i in range(1, 7)}
 
 
-def test_llm_wake_is_handed_to_the_next_waiter_in_line():
+def test_llm_wake_goes_to_parked_waiters_and_is_handed_on():
     from backend.platform.gpu_scheduler import admission
-    a, b, c = threading.Event(), threading.Event(), threading.Event()
+    a, b, c = (admission._Waiter() for _ in range(3))
     with admission._llm_waiters_lock:
         admission._llm_waiters.extend([a, b, c])
     try:
+        for waiter in (a, b, c):
+            waiter.parked = True
         admission._llm_wake(1)
-        assert a.is_set() and not b.is_set()
+        assert a.event.is_set() and not b.event.is_set()
         admission._llm_wake_after(a)                           # a was woken but could not take the slot
-        assert b.is_set() and not c.is_set()
+        assert b.event.is_set() and not c.event.is_set()
+        for waiter in (a, b, c):
+            waiter.event.clear()
+        a.parked = False                                       # head is blocked elsewhere (paused / polling)
+        admission._llm_wake(1)
+        assert a.event.is_set() and b.event.is_set() and not c.event.is_set()   # a flagged, budget spent on b
         admission._llm_wake_after(c)                           # nobody behind the last one: no error
-        assert not c.is_set()
-        admission._llm_wake_after(threading.Event())           # not in the queue: no error
+        admission._llm_wake_after(admission._Waiter())         # not in the queue: no error
     finally:
         with admission._llm_waiters_lock:
-            for event in (a, b, c):
-                if event in admission._llm_waiters:
-                    admission._llm_waiters.remove(event)
+            for waiter in (a, b, c):
+                if waiter in admission._llm_waiters:
+                    admission._llm_waiters.remove(waiter)
+
+
+def test_llm_slot_skips_a_head_waiter_that_is_blocked_by_a_paused_task(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    from backend.platform.models import Project, TaskAttempt, User
+    from backend.platform.task_contracts import TaskClaim
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    owner, project, task, attempt = new_id(), new_id(), new_id(), new_id()
+    with SessionLocal.begin() as db:
+        db.add(User(id=owner, username="gpu" + owner[:8], email=f"{owner}@example.test", password_hash="unused-test-hash"))
+        db.flush()
+        db.add(Project(id=project, owner_id=owner, name="paused head", directory_key=project))
+        db.flush()
+        db.add(Task(id=task, owner_id=owner, project_id=project, task_type="script.parse", status="paused"))
+        db.flush()
+        db.add(TaskAttempt(id=attempt, task_id=task, attempt_no=1, status="running"))
+    claim = TaskClaim(task_id=task, attempt_id=attempt, attempt_no=1, lease_token="t", worker_id="w",
+                      owner_id=owner, project_id=project, task_type="script.parse", payload={})
+
+    class ParkedHandle:
+        """A paused task: check() blocks (like the real pause) until the task is resumed."""
+        def __init__(self):
+            self.resumed = threading.Event()
+        def check(self):
+            self.resumed.wait(30)
+            if self.cancelled:
+                raise RuntimeError("cancelled")
+        cancelled = False
+
+    pause = ParkedHandle()
+    holding, release, admitted, errors = threading.Event(), threading.Event(), {}, []
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def paused_head():
+        admission.bind_claim(claim)
+        try:
+            with gpu_permit("LLM", pause):
+                errors.append("a paused task must not be admitted")
+        except Exception:
+            pass
+
+    def runnable():
+        with gpu_permit("LLM"):
+            admitted["at"] = time.monotonic()
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    head = threading.Thread(target=paused_head)
+    head.start()
+    time.sleep(0.3)                        # the paused waiter is registered FIRST (queue head)
+    second = threading.Thread(target=runnable)
+    second.start()
+    try:
+        time.sleep(2.0)                    # the runnable waiter is deep into its backoff
+        assert head.is_alive() and not errors
+        released_at = time.monotonic()
+        release.set()
+        second.join(5)
+        # the head is stuck in check() and cannot use the wake-up: it must go to the next waiter
+        assert "at" in admitted and admitted["at"] - released_at < 0.5
+    finally:
+        release.set()
+        pause.cancelled = True
+        pause.resumed.set()
+        for thread in (first, head, second):
+            thread.join(8)
+        with SessionLocal.begin() as db:
+            db.execute(delete(GPURequest).where(GPURequest.task_id == task))
+            db.execute(delete(TaskAttempt).where(TaskAttempt.task_id == task))
+            db.execute(delete(Task).where(Task.id == task))
+            db.execute(delete(Project).where(Project.id == project))
+            db.execute(delete(User).where(User.id == owner))
+    assert not errors

@@ -28,40 +28,58 @@ _trace = logging.getLogger("audiobook.llm_trace")
 # queue otherwise admits roughly one request per poll interval and starves the engine.
 _LLM_POLL_FIRST = 0.05
 _LLM_POLL_MAX = 1.0
-_llm_waiters: "collections.deque[threading.Event]" = collections.deque()
+class _Waiter:
+    """One in-process LLM permit request. ``parked`` is true only while it sleeps in its
+    backoff wait; a waiter that is blocked elsewhere (a paused task parked in ``check()``) or
+    busy polling cannot use a wake-up, so wake-ups must not be spent on it."""
+
+    __slots__ = ("event", "parked")
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.parked = False
+
+
+_llm_waiters: "collections.deque[_Waiter]" = collections.deque()
 _llm_waiters_lock = threading.Lock()
 
 
-def _leave_llm_queue(event) -> None:
-    if event is None:
+def _leave_llm_queue(waiter) -> None:
+    if waiter is None:
         return
     with _llm_waiters_lock:
         try:
-            _llm_waiters.remove(event)
+            _llm_waiters.remove(waiter)
         except ValueError:
             pass
 
 
-def _llm_wake_after(event) -> None:
-    """Pass the wake-up on: ``event``'s owner was woken but could not be admitted (its task is
-    paused, or an older waiter lives in another process), so the slot goes to the next in line."""
+def _llm_wake_after(waiter) -> None:
+    """Pass the wake-up on: ``waiter`` was woken but could not be admitted (an older waiter
+    lives in another process), so the slot goes to the next parked waiter in line."""
     with _llm_waiters_lock:
         queue = list(_llm_waiters)
         try:
-            index = queue.index(event)
+            index = queue.index(waiter)
         except ValueError:
             return
-        if index + 1 < len(queue):
-            queue[index + 1].set()
+        for other in queue[index + 1:]:
+            other.event.set()          # never lose a wake-up for a waiter about to park
+            if other.parked:
+                return
 
 
 def _llm_wake(count: int = 1) -> None:
-    """Wake the ``count`` longest-waiting LLM permit requests of this process."""
+    """Wake the ``count`` longest-waiting parked LLM waiters of this process. Waiters that are
+    not parked still get their event set (so a wake-up arriving just before they park is not
+    lost) but do not use up the budget."""
     with _llm_waiters_lock:
-        for index, event in enumerate(_llm_waiters):
-            if index >= count:
+        for waiter in _llm_waiters:
+            if count <= 0:
                 break
-            event.set()
+            waiter.event.set()
+            if waiter.parked:
+                count -= 1
 
 
 def bind_claim(claim):
@@ -92,7 +110,7 @@ def gpu_permit(service: str, handle=None):
         return
     wake = None
     if service == "LLM":
-        wake = threading.Event()
+        wake = _Waiter()
         with _llm_waiters_lock:
             _llm_waiters.append(wake)
     try:
@@ -101,8 +119,8 @@ def gpu_permit(service: str, handle=None):
         while True:
             was_woken = False
             if wake is not None:
-                was_woken = wake.is_set()
-                wake.clear()   # before polling: a wake-up arriving mid-poll must not be lost
+                was_woken = wake.event.is_set()
+                wake.event.clear()   # before polling: a wake-up arriving mid-poll must not be lost
             if handle is not None:
                 handle.check()
             elif claim is not None:
@@ -153,7 +171,11 @@ def gpu_permit(service: str, handle=None):
             if wake is not None:
                 if was_woken:
                     _llm_wake_after(wake)   # woken for a slot we could not take: hand it on
-                wake.wait(delay)
+                wake.parked = True
+                try:
+                    wake.event.wait(delay)
+                finally:
+                    wake.parked = False
                 delay = min(delay * 2, _LLM_POLL_MAX)
             else:
                 time.sleep(delay)
