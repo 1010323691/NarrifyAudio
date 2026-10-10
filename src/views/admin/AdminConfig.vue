@@ -31,8 +31,8 @@ const quotaDraft = ref('0')
 const savingToggle = ref<'logs' | 'registration' | null>(null)
 const savingQuota = ref(false)
 const retention = ref<api.ProjectRetentionSettings | null>(null)
-const ttlDraft = ref('0')
-const trashDraft = ref('30')
+const ttlDraft = ref('30')
+const trashDraft = ref('7')
 const savingRetention = ref(false)
 
 const loader = useAdminLoader(async () => {
@@ -125,11 +125,11 @@ async function saveRoot() {
           <div class="controls"><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="w-28" /><Button variant="outline" size="sm" class="admin-quota-save" :disabled="!quota || actionBusy" @click="submitQuota">{{ savingQuota ? '保存中…' : '保存' }}</Button></div>
         </div>
         <div class="admin-setting-row">
-          <div><label for="project-ttl">项目自然保质期（天）</label><p>项目创建满该天数后整体永久删除：工作空间文件、音频、日志、资源导出与全部数据库记录。0 表示不过期；「默认工作空间」不受影响；仍有未完成任务的项目等任务结束后再清理。</p></div>
+          <div><label for="project-ttl">项目自然保质期（天）</label><p>项目创建满该天数后整体永久删除：工作空间文件、音频、日志、资源导出与全部数据库记录。默认 30，0 表示不过期；「默认工作空间」不受影响；仍有未完成任务的项目等任务结束后再清理。</p></div>
           <div class="controls"><Input id="project-ttl" v-model="ttlDraft" type="number" min="0" max="3650" class="w-28" /></div>
         </div>
         <div class="admin-setting-row">
-          <div><label for="trash-days">回收站保留（天）</label><p>项目移入回收站后可恢复的天数，到期自动永久删除。</p></div>
+          <div><label for="trash-days">回收站保留（天）</label><p>项目移入回收站后可恢复的天数，到期自动永久删除，默认 7。</p></div>
           <div class="controls"><Input id="trash-days" v-model="trashDraft" type="number" min="1" max="3650" class="w-28" /><Button variant="outline" size="sm" :disabled="!retention || actionBusy" @click="submitRetention">{{ savingRetention ? '保存中…' : '保存' }}</Button></div>
         </div>
       </CardContent></Card>

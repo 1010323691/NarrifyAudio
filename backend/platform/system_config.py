@@ -90,16 +90,17 @@ def client_logs_enabled(db: Session) -> bool:
 
 
 PROJECT_RETENTION_KEY = "retention.projects"
-DEFAULT_TRASH_DAYS = 30
+DEFAULT_PROJECT_TTL_DAYS = 30
+DEFAULT_TRASH_DAYS = 7
 MAX_RETENTION_DAYS = 3650
 
 
 def normalize_project_retention(value: Any) -> dict[str, int]:
     """Clamp a stored/submitted retention record to its valid range.
 
-    ``project_ttl_days`` = 0 keeps projects forever (the default: expiring
-    existing projects must be an explicit administrator decision);
-    ``trash_days`` is how long a trashed project stays recoverable (>= 1)."""
+    ``project_ttl_days`` is a live project's lifetime from creation (0 keeps
+    projects forever); ``trash_days`` is how long a trashed project stays
+    recoverable (>= 1)."""
     raw = value if isinstance(value, dict) else {}
 
     def number(key: str, default: int, low: int) -> int:
@@ -108,7 +109,7 @@ def normalize_project_retention(value: Any) -> dict[str, int]:
         except (TypeError, ValueError):
             return default
 
-    return {"project_ttl_days": number("project_ttl_days", 0, 0), "trash_days": number("trash_days", DEFAULT_TRASH_DAYS, 1)}
+    return {"project_ttl_days": number("project_ttl_days", DEFAULT_PROJECT_TTL_DAYS, 0), "trash_days": number("trash_days", DEFAULT_TRASH_DAYS, 1)}
 
 
 def project_retention(db: Session) -> dict[str, int]:

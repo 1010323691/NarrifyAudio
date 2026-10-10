@@ -55,10 +55,11 @@ def _exists(project_id: str) -> bool:
         return db.get(Project, project_id) is not None
 
 
-def test_defaults_never_expire_live_projects(client):
-    assert project_retention_defaults() == {"project_ttl_days": 0, "trash_days": 30}
+def test_defaults_are_30_day_projects_7_day_trash_and_zero_disables_expiry(client):
+    assert project_retention_defaults() == {"project_ttl_days": 30, "trash_days": 7}
     _, _, csrf = _account(client)
     project = _project(client, csrf)
+    _set_retention(ttl=0)
     _age(project["id"], created_days=3000)
     purge_expired_projects()
     assert _exists(project["id"])
@@ -152,7 +153,7 @@ def test_admin_can_read_and_change_retention_and_listings_follow(client):
     with SessionLocal.begin() as db:
         db.get(User, reg["user"]["id"]).role = "admin"
     headers = {"X-CSRF-Token": reg["csrf_token"]}
-    assert client.get("/api/v1/admin/settings/retention").json() == {"project_ttl_days": 0, "trash_days": 30}
+    assert client.get("/api/v1/admin/settings/retention").json() == {"project_ttl_days": 30, "trash_days": 7}
     bad = client.patch("/api/v1/admin/settings/retention", headers=headers, json={"project_ttl_days": -1, "trash_days": 30})
     assert bad.status_code == 422
     assert client.patch("/api/v1/admin/settings/retention", headers=headers,
