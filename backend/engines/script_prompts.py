@@ -1,7 +1,7 @@
 """Default LLM prompts — port of the source ``app/default_prompts.py``.
 
-Reads the bundled ``backend/resources/default_prompts.txt`` (a verbatim copy of the
-source project's file) and splits it on ``---SEPARATOR---`` into a
+Reads the bundled ``backend/resources/default_prompts.txt`` (Chinese rules and
+Chinese ``instruct`` output) and splits it on ``---SEPARATOR---`` into a
 ``(system_prompt, user_prompt_template)`` pair. An mtime cache picks up edits to the
 file without a restart. Config-supplied prompts (``config.prompts``) override these
 defaults when non-empty — see ``backend/api/config.py`` / ``backend/api/script.py``.

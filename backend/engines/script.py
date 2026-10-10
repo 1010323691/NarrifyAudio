@@ -1726,6 +1726,9 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
 
 
 INSTRUCT_MAX_WORDS = 35
+# 中文 instruct 的词数折算：每 2 个汉字计 1 词（35 词 ≈ 70 字；解析提示词要求 ≤60 字，留余量）。
+INSTRUCT_CJK_CHARS_PER_WORD = 2
+_INSTRUCT_CJK_RE = re.compile("[\\u3400-\\u9fff\\uf900-\\ufaff]")
 
 
 def _parse_instruct_batch(reply: str, targets: list[int], max_words: int) -> dict[int, str]:
@@ -1794,16 +1797,18 @@ def _instruct_book_prompt(entries: list, targets: list[int], n: int, max_words: 
             row["target"] = True
         window.append(row)
     target_rows = [item for item in window if item.get("target")]
+    max_chars = max_words * INSTRUCT_CJK_CHARS_PER_WORD
     return (
-        "You are repairing TTS voice directions for one complete book. Return exactly "
-        "one JSON object per target: {\"index\": absolute_index, "
-        "\"instruct\": concise_direction}. Keep every index, speaker, and text value "
-        "unchanged; do not split, merge, delete, reorder, or repeat entries. Use "
-        "nearby directions only for style continuity. "
-        f"Each direction must be non-empty and at most {max_words} whitespace words.\n\n"
-        "TARGETS (only these may be changed):\n"
+        "你在为一整本有声书修复 TTS 语音指导（instruct）。为每个目标条目返回一个 JSON 对象："
+        "{\"index\": 绝对下标, \"instruct\": 简洁的中文语音指导}，全部放在一个 JSON 数组里。"
+        "index、speaker、text 一律不改；不得拆分、合并、删除、调序或重复条目。"
+        "instruct 只写听得见的演绎（语气、音量、语速节奏、停顿、呼吸、音高、情绪强度），"
+        "不写音色、年龄、性别、身份或肢体动作；旁白默认「平稳中性的叙述语气。」，"
+        "普通对白用自然的对话语气，强烈发声要写具体。邻近条目的指导只用于保持风格连贯。"
+        f"每条指导必须非空，用中文书写，不超过 {max_chars} 个汉字。\n\n"
+        "【目标条目】（只有这些可以修改）：\n"
         + json.dumps(target_rows, ensure_ascii=False, indent=2)
-        + "\n\nCONTEXT (read-only):\n"
+        + "\n\n【上下文】（只读）：\n"
         + json.dumps(window, ensure_ascii=False, indent=2)
         + "\n\nSOURCE TEXT:\n"
         + "\n".join(item.get("text") or "" for item in target_rows)
@@ -1903,8 +1908,8 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
         handle.check()
         messages = [
             {"role": "system", "content": (
-                "Repair only the instruct field of target entries. Output JSON only. "
-                "Return one object for every target index. Never alter index, speaker, or text."
+                "只修复目标条目的 instruct 字段，用中文书写。只输出 JSON。"
+                "每个目标下标返回一个对象。绝不改动 index、speaker 或 text。"
             )},
             {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_words)},
         ]
@@ -1938,8 +1943,21 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
 
 
 def instruct_word_count(value) -> int:
-    """Count whitespace-delimited words in an ``instruct`` value."""
-    return len(str(value or "").strip().split())
+    """Count the words of an ``instruct`` value.
+
+    Without CJK characters: whitespace-delimited words (the English口径). With CJK
+    characters: every ``INSTRUCT_CJK_CHARS_PER_WORD`` 汉字 count as one word (rounded
+    up), plus any whitespace-delimited non-CJK token carrying a letter/digit — so
+    Chinese punctuation never inflates the count and one ``max_words`` limit covers
+    both languages.
+    """
+    s = str(value or "").strip()
+    cjk = len(_INSTRUCT_CJK_RE.findall(s))
+    if not cjk:
+        return len(s.split())
+    rest = _INSTRUCT_CJK_RE.sub(" ", s).split()
+    latin = sum(1 for token in rest if any(ch.isalnum() for ch in token))
+    return latin + -(-cjk // INSTRUCT_CJK_CHARS_PER_WORD)
 
 
 def instruct_entry_indices(entries: list, max_words: int = INSTRUCT_MAX_WORDS) -> list[int]:
@@ -3068,7 +3086,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
     is unaffected.
 
     After speaker auditing and tag/punctuation cleanup, entries with an empty
-    ``instruct`` or an ``instruct`` exceeding 35 whitespace-delimited words are
+    ``instruct`` or an ``instruct`` exceeding 35 words (中文按每 2 个汉字计 1 词) are
     checked. Narrator inheritance stops at headings, time markers and incompatible
     directions. Only targets within the former request eligibility are repaired
     in one index-keyed LLM request with a

@@ -1680,6 +1680,19 @@ def test_instruct_check_flags_empty_and_over_35_words():
     assert INSTRUCT_MAX_WORDS == 35
 
 
+def test_instruct_word_count_chinese_two_chars_per_word():
+    # 中文口径：每 2 个汉字计 1 词（向上取整），中文标点不计，夹杂的英文词照常计。
+    assert instruct_word_count("平稳中性的叙述语气。") == 5
+    assert instruct_word_count("低声，耳语。") == 2
+    assert instruct_word_count("用 TTS 念，语速平稳") == 1 + 3
+    entries = [
+        {"speaker": "林某", "text": "a", "instruct": "字" * 70},
+        {"speaker": "林某", "text": "b", "instruct": "字" * 71},
+    ]
+    assert instruct_word_count("字" * 70) == 35
+    assert instruct_entry_indices(entries) == [1]
+
+
 def test_validate_instructs_reparses_with_context_and_preserves_clean_entries(monkeypatch):
     entries = [
         {"speaker": "NARRATOR", "text": "夜色渐深。", "instruct": ""},
@@ -2918,8 +2931,9 @@ def test_generate_file_cancel_mid_spot_writes_nothing(tmp_path, monkeypatch, wor
 
 def _window_from(user: str, end_marker: str) -> list:
     """Extract the context-window JSON array at the head of a re-judgment / re-parse
-    user prompt (the window precedes the trailing instruction block)."""
-    return json.loads(user[:user.index(end_marker)])
+    user prompt (the window — after an optional label line — precedes the trailing
+    instruction block)."""
+    return json.loads(user[user.index("["):user.index(end_marker)])
 
 
 def _two_para_source() -> str:
@@ -3084,7 +3098,7 @@ def test_boundary_window_crosses_chunks_context_untouched(tmp_path, monkeypatch,
 
     def rejudge(user, state):
         users.append(user)
-        win = _window_from(user, "\n\nRe-judge")
+        win = _window_from(user, "\n\n重判上方窗口")
         return json.dumps({"results": [
             {"index": it["index"], "speaker": it["speaker"]}
             for it in win if it.get("target")
@@ -3095,7 +3109,7 @@ def test_boundary_window_crosses_chunks_context_untouched(tmp_path, monkeypatch,
     assert calls["n"] == 3  # 2 解析 + 1 重判（无分歧 → 无重试）
     assert result["boundary_checked"] == 2 and result["boundary_fixed"] == 0
 
-    win = _window_from(users[0], "\n\nRe-judge")
+    win = _window_from(users[0], "\n\n重判上方窗口")
     assert [it["index"] for it in win] == [1, 2, 3, 4]
     assert [it["index"] for it in win if it.get("target")] == [2, 3]
     # 窗口首 = chunk 1 的边界侧条目、尾 = chunk 2 的边界侧条目（均未标 target 的上下文）
@@ -3110,7 +3124,7 @@ def test_boundary_majority_adoption(tmp_path, monkeypatch, workspace):
     # 2:1 严格多数 → 修正生效：目标条目 speaker 被改写并随基文件落盘
     # （context 条目保持原样）
     def rejudge(user, state):
-        win = _window_from(user, "\n\nRe-judge")
+        win = _window_from(user, "\n\n重判上方窗口")
         return json.dumps({"results": [
             {"index": it["index"],
              "speaker": "李四" if it["index"] == 2 else it["speaker"]}
@@ -3134,7 +3148,7 @@ def test_boundary_no_consensus_keeps_original(tmp_path, monkeypatch, workspace):
     flips = {3: "李四", 4: "NARRATOR", 5: "杜尘", 6: "王五"}
 
     def rejudge(user, state):
-        win = _window_from(user, "\n\nRe-judge")
+        win = _window_from(user, "\n\n重判上方窗口")
         return json.dumps({"results": [
             {"index": it["index"],
              "speaker": flips[state["n"]] if it["index"] == 2 else it["speaker"]}
@@ -3169,7 +3183,7 @@ def test_boundary_groups_use_pristine_windows(tmp_path, monkeypatch, workspace):
     windows = []
 
     def rejudge(user, state):
-        win = _window_from(user, "\n\nRe-judge")
+        win = _window_from(user, "\n\n重判上方窗口")
         windows.append(win)
         return json.dumps({"results": [
             {"index": it["index"],
@@ -3213,7 +3227,7 @@ def test_boundary_stage_ordering_before_revalidate(tmp_path, monkeypatch, worksp
     boundary_users, revalidate_users, instruct_users = [], [], []
 
     def rejudge(user, state):
-        if "TARGETS (only these may be changed):" in user:
+        if "【目标条目】（只有这些可以修改）：" in user:
             instruct_users.append(user)
             return json.dumps([
                 {"index": 2, "instruct": "Calm spoken delivery."},
@@ -3223,7 +3237,7 @@ def test_boundary_stage_ordering_before_revalidate(tmp_path, monkeypatch, worksp
             revalidate_users.append(user)
             return rederive
         boundary_users.append(user)
-        win = _window_from(user, "\n\nRe-judge")
+        win = _window_from(user, "\n\n重判上方窗口")
         return json.dumps({"results": [
             {"index": it["index"],
              "speaker": "林某" if it["index"] == 1 else it["speaker"]}
@@ -3243,7 +3257,7 @@ def test_boundary_stage_ordering_before_revalidate(tmp_path, monkeypatch, worksp
     assert result["count"] == 6 and result["merged_same_speaker"] == 0
 
     # 边界窗口（pristine）：E1 仍是原始 NARRATOR
-    b_items = {it["index"]: it for it in _window_from(boundary_users[0], "\n\nRe-judge")}
+    b_items = {it["index"]: it for it in _window_from(boundary_users[0], "\n\n重判上方窗口")}
     assert set(b_items) == {0, 1, 2, 3, 4, 5}
     assert b_items[1]["speaker"] == "NARRATOR"
     assert {i for i, it in b_items.items() if it.get("target")} == {1, 2, 3, 4}
@@ -3605,16 +3619,16 @@ def test_generate_file_resplit_tags_audited_then_cleaned_before_instructs(
 
     def urlopen(req, *a, **k):
         user = json.loads(req.data.decode("utf-8"))["messages"][1]["content"]
-        if "TARGETS (only these may be changed):" in user:
+        if "【目标条目】（只有这些可以修改）：" in user:
             stages.append("instruct")
-            targets = json.loads(user.split("TARGETS (only these may be changed):\n", 1)[1]
-                                 .split("\n\nCONTEXT", 1)[0])
+            targets = json.loads(user.split("【目标条目】（只有这些可以修改）：\n", 1)[1]
+                                 .split("\n\n【上下文】", 1)[0])
             repaired.extend(targets)
             reply = [{"index": item["index"], "instruct": "Calm clear delivery."}
                      for item in targets]
         elif "SOURCE TEXT:" not in user:
             stages.append("spot")
-            window = _window_from(user, "\n\nRe-judge")
+            window = _window_from(user, "\n\n重判上方窗口")
             audited.extend(window)
             reply = {"results": [
                 {"index": item["index"], "speaker": item["speaker"]}
