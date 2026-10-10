@@ -1958,7 +1958,8 @@ def revalidate_entries_packed(handle, llm, generation, sys_prompt, usr_template,
     ]
     handle.check()
     # The reply re-types every packed entry as JSON (~2 tokens per character): never let the
-    # configured max_tokens truncate a pack that chunk_size allowed.
+    # configured max_tokens truncate a pack that chunk_size allowed. This deliberately raises
+    # max_tokens for THIS call only (documented on GenerationConfig.long_resplit_pack).
     need_tokens = 2 * len(chunk) + 512
     if getattr(generation, "max_tokens", 0) < need_tokens:
         generation = generation.model_copy(update={"max_tokens": need_tokens})
@@ -2253,10 +2254,11 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_chars: in
 
 
 def _instruct_target_batches(entries: list, targets: list[int], n: int, max_prompt_chars: int) -> list:
-    """Split ``targets`` (ascending) into consecutive batches whose prompt stays within
-    ``max_prompt_chars`` of entry text: a target costs its own text twice (target row + source
-    text) plus its ±n context rows (counted once even when neighbouring targets share them),
-    each row with ~100 chars of JSON overhead. A single target always forms a batch."""
+    """Split ``targets`` (ascending) into consecutive batches whose prompt stays within about
+    ``max_prompt_chars`` of entry text: ``_instruct_book_prompt`` prints a target's text three
+    times (target row, its row in the context window, source text), and each context row once
+    (counted once even when neighbouring targets share it), every row with ~100 chars of JSON
+    overhead. A single target always forms a batch."""
     def row(i: int) -> int:
         return len(entries[i].get("text") or "") + 100
 
@@ -2266,11 +2268,12 @@ def _instruct_target_batches(entries: list, targets: list[int], n: int, max_prom
     cost = 0
     for index in sorted(targets):
         window = set(range(max(0, index - n), min(len(entries), index + n + 1)))
-        add = row(index) + sum(row(j) for j in window - seen)
+        extra = row(index) + len(entries[index].get("text") or "")   # target row + source text
+        add = extra + sum(row(j) for j in window - seen)
         if cur and cost + add > max_prompt_chars:
             batches.append(cur)
             cur, seen, cost = [], set(), 0
-            add = row(index) + sum(row(j) for j in window)
+            add = extra + sum(row(j) for j in window)
         cur.append(index)
         seen |= window
         cost += add
@@ -2521,15 +2524,15 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         ranked = sorted(flagged, key=lambda i: (-len(entries[i].get("text") or ""), i))
         chosen: list = []
         used_text = used_total = 0
-        for i in ranked:
+        for rank, i in enumerate(ranked):
             text_len = len(entries[i].get("text") or "")
             cost = text_len + len(blocks[i])
-            if used_text + text_len <= text_cap and used_total + cost <= total_cap:
+            # The longest entry always goes first (even when it alone exceeds the budget — it
+            # gets its one call, as it would on its own); the rest fill what budget is left.
+            if rank == 0 or (used_text + text_len <= text_cap and used_total + cost <= total_cap):
                 chosen.append(i)
                 used_text += text_len
                 used_total += cost
-        if not chosen:
-            chosen = ranked[:1]   # a single oversized entry still gets its one call
         if len(chosen) < len(flagged):
             handle.log(f"超长段落检查：本章 {len(flagged)} 条超长条目装不进一个 chunk，只重切最长的 "
                        f"{len(chosen)} 条，其余 {len(flagged) - len(chosen)} 条交机械分段（每章最多 1 次重切调用）")
@@ -2591,6 +2594,10 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
                 results[i] = parts
                 if parts is None:
                     handle.log(f"  条目 {i + 1} 单次重切未通过 → 条目保持原样（交由机械分段兜底）", "WARNING")
+        elif unit_prompts is not None and len(pack) == 1:
+            # A one-entry unit pack already WAS the single-entry request: re-asking it would
+            # send the identical prompt again (and double the cost of a failing call).
+            results[pack[0]] = None
         else:
             for i in pack:
                 results[i] = revalidate_entry(

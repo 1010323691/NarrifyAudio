@@ -809,3 +809,29 @@ def test_units_rederive_unlabeled_reply_never_demotes_a_character_entry(monkeypa
         Handle(), LLMConfig(), GenerationConfig(), ("usys", "{context}\n{units}"), [(item, "")],
         frozenset({"NARRATOR", "姜维"}), stage="断句校验", head="")
     assert got == [None]
+
+
+def test_long_resplit_longest_entry_always_gets_the_pack_even_over_the_budget(monkeypatch):
+    huge = entry("NARRATOR", "超长的一整段旁白，" * 400)                  # 3600 chars: alone over a 3000 budget
+    rows = [huge] + [entry("NARRATOR", f"第{k}段长旁白，" * 24) for k in range(3)]
+    calls = []
+    monkeypatch.setattr(script, "_llm_call", lambda l, g, m, handle=None: calls.append(m[1]["content"]) or "[]")
+    _o, checked, _f = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0, chunk_size=3000, max_tokens=100000),
+        "sys", "{context}\n{chunk}", rows, 130)
+    assert checked == 1 and "超长的一整段旁白" in calls[0]        # the longest, not a shorter neighbour
+
+
+def test_units_long_resplit_single_entry_pack_is_not_asked_twice(monkeypatch):
+    rows = [entry("姜维", "走吧。"), entry("NARRATOR", _long_narration("。", "我先走了。"))]
+    calls = []
+
+    def boom(llm, generation, messages, handle=None):
+        calls.append(1)
+        raise RuntimeError("HTTP 400 context_length_exceeded")
+
+    monkeypatch.setattr(script, "_llm_call", boom)
+    _o, checked, fixed = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=0), "sys", "{context}\n{chunk}", rows, 130,
+        narrator_instruct="平稳中性的叙述语气。", unit_prompts=("usys", "{context}\n{units}"))
+    assert (checked, fixed, len(calls)) == (1, 0, 1)
