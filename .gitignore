@@ -50,5 +50,9 @@ install_tts_env.log
 # 运行时日志目录（本机产物；launch/dev-all.ps1 写入 logs/dev/）
 logs/
 
+# design/ 目录保留在仓库中，但内部内容（计划/开发目标文档）不提交
+design/*
+!design/.gitkeep
+
 # --- 系统 / 编辑器 ---
 .DS_Store

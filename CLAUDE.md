@@ -91,6 +91,10 @@ TTS 引擎（`tts-engine/tts_worker.py`，约 2300 行）是 one-shot 子进程�
 - 管理控制台：`views/Admin.vue` 只按 `?tab=` 分发到 `views/admin/*.vue`（各页一个 `useAdminLoader` 实例，承载竞态/失效/轮询语义，由 `scripts/test-admin-console.mjs` 钉住）；图表统一走 `components/admin/charts/`（手写 SVG 组件，零图表库依赖；视图只产出 spec，`AdminChart.vue` 按 `kind` 分发到 TimeSeries/Bar/Donut/Gauge/Heatmap/Sparkline；配色是引用 `admin.css` 中 `--viz-*`/`--status-*` 的 CSS 变量，亮暗随 `.dark` 自动切换；纯几何函数在 `scale.ts`，由 `scripts/test-admin-charts.mjs` 钉住）。趋势数据来自 Worker 每 30 秒写入的 `system_metric_samples`（`platform/metrics_sampler.py`，保留 7 天）与任务表 / 额度账本聚合（`services/admin_analytics.py`）；API 延迟序列是 API 进程内存口径。
 - `dist/` 是构建产物，不手改。
 
+## design 目录（计划与开发目标文档）
+
+所有计划文档、开发目标文档一律在仓库根目录的 `design/` 下创建（不要放进 `docs/`）。该目录本身存在于 git 仓库，但仅 `design/.gitkeep` 入库，其余内容均被 gitignore，属本机文档，不提交、不推送。
+
 ## 运行时数据与配置
 
 - `storage/`、`config/`、`logs/`、`.narrify/`、`music_library/`、`.backups/` 均为本机运行时/用户数据，已 gitignore——不当源码清理，也不提交。`music_library/` 是跨工程共享的全局音乐库。
