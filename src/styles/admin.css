@@ -1,5 +1,5 @@
 /* Admin-only system: opaque surfaces, semantic colours, 4px spacing scale.
-   Chart colours mirror components/admin/charts/tokens.ts (validated palette). */
+   Chart colours (--viz-*, --status-*) are consumed by components/admin/charts via tokens.ts. */
 .admin-shell {
   display: flex; height: 100dvh; overflow: hidden;
   --background: 220 23% 97%; --foreground: 222 24% 16%; --card: 0 0% 100%;
@@ -399,3 +399,56 @@
   .admin-shell .bulk-bar { width: 100%; flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { .admin-shell *, .admin-shell *::before { transition: none !important; animation: none !important; } }
+
+/* ---------- SVG charts (components/admin/charts) ---------- */
+.admin-shell .admin-chart { position: relative; }
+.admin-shell .vc { display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; }
+.admin-shell .vc-plot { position: relative; flex: 1; min-height: 0; width: 100%; height: 100%; min-width: 0; font-variant-numeric: tabular-nums; }
+.admin-shell .vc-plot svg { display: block; overflow: visible; }
+.admin-shell .vc-legend { display: flex; flex-wrap: wrap; gap: 4px var(--space-4); padding: 0 0 var(--space-2); font-size: 12px; color: hsl(var(--muted-foreground)); }
+.admin-shell .vc-legend button { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; transition: opacity 160ms; }
+.admin-shell .vc-legend button.is-off { opacity: .4; text-decoration: line-through; }
+.admin-shell .vc-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.admin-shell .vc-legend i, .admin-shell .vc-donut__legend i, .admin-shell .vc-tip i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+:where(.admin-shell .vc, .admin-shell .vc-plot) text { font-size: 11px; fill: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.admin-shell .vc-grid line { stroke: hsl(var(--border)); stroke-width: 1; shape-rendering: crispEdges; }
+.admin-shell .vc-grid line.is-base { stroke: hsl(var(--input)); }
+.admin-shell .vc-xaxis text.is-cat { fill: color-mix(in srgb, hsl(var(--foreground)) 75%, hsl(var(--card))); }
+.admin-shell .vc-xaxis text.is-small { font-size: 10px; }
+.admin-shell .vc-line { stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.admin-shell .vc-bar--sep { stroke: hsl(var(--card)); stroke-width: 1; }
+.admin-shell .vc-band rect, .admin-shell .vc-band-rect { fill: hsl(var(--foreground) / .05); }
+.admin-shell .vc-cross { stroke: hsl(var(--input)); stroke-width: 1; }
+.admin-shell .vc-dot { stroke: hsl(var(--card)); stroke-width: 2; }
+.admin-shell .vc-mark line { stroke: var(--status-critical); stroke-width: 1; }
+.admin-shell .vc-mark text, .admin-shell .vc-value { fill: color-mix(in srgb, hsl(var(--foreground)) 75%, hsl(var(--card))); }
+.admin-shell .vc-hit { fill: transparent; cursor: crosshair; touch-action: pan-y; }
+.admin-shell .vc-empty { position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: hsl(var(--muted-foreground)); pointer-events: none; }
+.admin-shell .vc-track { stroke: hsl(var(--muted)); }
+.admin-shell .vc-cell { transition: opacity 160ms; }
+.admin-shell .vc-cell.is-active { stroke: hsl(var(--foreground)); stroke-width: 1; }
+.admin-shell .vc-heat-legend text { font-size: 10px; }
+.admin-shell .vc-tip { position: absolute; z-index: 5; pointer-events: none; transform: translate(14px, -50%); min-width: 120px; padding: 8px 12px; font-size: 12px; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: var(--radius-md); box-shadow: 0 8px 24px hsl(222 30% 10% / .14); white-space: nowrap; }
+.admin-shell .vc-tip.is-flip { transform: translate(calc(-100% - 14px), -50%); }
+.admin-shell .vc-tip__title { margin-bottom: 4px; color: hsl(var(--muted-foreground)); }
+.admin-shell .vc-tip__row { display: flex; align-items: center; gap: 8px; line-height: 22px; }
+.admin-shell .vc-tip__row span { flex: 1; color: color-mix(in srgb, hsl(var(--foreground)) 75%, hsl(var(--card))); }
+.admin-shell .vc-tip__row strong { margin-left: var(--space-4); font-weight: 600; color: hsl(var(--foreground)); }
+.admin-shell .vc-spark { display: block; width: 100%; height: 100%; overflow: visible; }
+.admin-shell .vc-donut { display: flex; align-items: center; gap: var(--space-4); }
+.admin-shell .vc-donut__ring { flex: none; }
+.admin-shell .vc-seg { transition: opacity 160ms; cursor: default; }
+.admin-shell .vc-donut__total { font-size: 17px; font-weight: 700; fill: hsl(var(--foreground)); }
+.admin-shell .vc-donut__sub { font-size: 7px; }
+.admin-shell .vc-donut__legend { flex: 1; min-width: 0; margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.admin-shell .vc-donut__legend li { display: flex; align-items: center; gap: 8px; min-width: 0; transition: opacity 160ms; }
+.admin-shell .vc-donut__legend li.is-dim { opacity: .4; }
+.admin-shell .vc-donut__legend span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, hsl(var(--foreground)) 75%, hsl(var(--card))); }
+.admin-shell .vc-donut__legend strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.admin-shell .vc-gauge svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.admin-shell .vc-gauge__fill { transition: stroke-dasharray 400ms cubic-bezier(.2, .7, .2, 1), stroke 160ms; }
+.admin-shell .vc-gauge__value { font-size: 20px; font-weight: 800; fill: hsl(var(--foreground)); }
+.admin-shell .vc-gauge__label { font-size: 9px; }
+@media (prefers-reduced-motion: reduce) {
+  .admin-shell .vc-gauge__fill, .admin-shell .vc-seg, .admin-shell .vc-cell { transition: none; }
+}
