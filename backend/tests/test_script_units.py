@@ -476,3 +476,13 @@ def test_segment_nested_unterminated_quote_has_no_trail():
     assert all(u.trail != CR for u in units)
     open_nested = segment_chunk(f"{CL}外层{CL}内层没有闭合{CR}")
     assert open_nested[0].trail == ""  # depth never returned to 0 → not a closed span
+
+
+def test_unit_plan_accepts_unreported_finish_reason_without_end():
+    from backend.engines.script import _unit_plan_problem
+
+    plan = parse_unit_reply("4 甲\n5 乙", 13)
+    assert _unit_plan_problem(plan, [4, 5], None) is None       # provider reports no reason
+    assert _unit_plan_problem(plan, [4, 5], "stop") is None
+    assert "并非正常停笔" in _unit_plan_problem(plan, [4, 5], "length")
+    assert "疑似提前停笔" in _unit_plan_problem(parse_unit_reply("1 甲", 13), [3, 4, 5], None)

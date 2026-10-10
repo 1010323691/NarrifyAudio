@@ -506,3 +506,27 @@ def test_boundary_risk_targets_narrow_to_dialogue_near_boundary():
     assert narrow == [4, 5, 6, 7]
     assert script.select_boundary_risk_targets(rows, [6, 12], 4, target_window=0) == wide
     assert script.select_boundary_risk_targets(rows, [6, 12], 4, target_window=4) == wide
+
+
+def test_long_resplit_band_skips_plain_narration_but_not_quoted_or_dialogue(monkeypatch):
+    asked = []
+
+    def fake_revalidate(handle, llm, generation, sys_prompt, usr_template, entry, context,
+                        roster, **kw):
+        asked.append(entry["text"])
+        return None
+
+    monkeypatch.setattr(script, "revalidate_entry", fake_revalidate)
+    plain = entry("NARRATOR", "他走在路上，" * 24)               # 144 chars, no quotes
+    quoted = entry("NARRATOR", "他说：" + "“好”" + "，走吧。" * 36)   # in the band, has quote chars
+    spoken = entry("甲", "我们走吧。" * 28)                         # a character line in the band
+    over = entry("NARRATOR", "她看着远处，" * 40)                     # > 200: always asked
+    rows = [plain, quoted, spoken, over]
+    gen = GenerationConfig()
+    script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys", "{chunk}", rows, 130,
+                                  hard_chars=200)
+    assert plain["text"] not in asked
+    assert {quoted["text"], spoken["text"], over["text"]} <= set(asked)
+    asked.clear()
+    script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys", "{chunk}", rows, 130)
+    assert plain["text"] in asked  # without hard_chars every entry above the trigger is asked

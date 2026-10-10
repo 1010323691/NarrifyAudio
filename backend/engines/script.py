@@ -946,11 +946,12 @@ def _unit_plan_problem(plan, likely_dialogue: list, finish_reason=None) -> str |
 
     The ``END`` line is the truncation sentinel, but models often just stop after the last
     label: a natural stop (``finish_reason == "stop"``) without ``END`` is accepted unless
-    the labels end long before obvious dialogue (an early stop); any other finish reason
+    the labels end long before obvious dialogue (an early stop); a provider that reports no
+    finish reason (``None``) gets the same treatment; any other finish reason (``length``…)
     without ``END`` is treated as a cut-off reply.
     """
     if not plan.ended:
-        if finish_reason != "stop":
+        if finish_reason not in ("stop", None):  # None = provider does not report it
             return f"缺少 END 结束行且并非正常停笔（finish_reason={finish_reason}）"
         last = max(plan.labels, default=0)
         missed = [n for n in likely_dialogue if n > last]
@@ -2177,7 +2178,8 @@ validate_instructs = _validate_instructs_one_call
 
 
 def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, entries,
-                           max_chars, context_window=4, *, budget_deferred=None) -> tuple:
+                           max_chars, context_window=4, *, budget_deferred=None,
+                           hard_chars=None) -> tuple:
     """超长条目的 LLM 重切（解析内，断句校验之后、归属抽样之前——重切可能
     产生新归属的台词条目，需要被抽样审计；受 ``generation.check_long_paragraphs``
     门控，由 ``generate_file`` 判断）。
@@ -2196,6 +2198,18 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     """
     max_chars = max(10, int(max_chars))
     flagged = long_entry_indices(entries, max_chars)
+    if hard_chars is not None:
+        # The trigger sits below the mechanical hard cap: in the band (max_chars, hard_chars]
+        # only entries that can actually hide dialogue are worth an LLM call — a character
+        # line, or narration carrying quote characters. Plain narration there has nothing to
+        # split (the unit protocol already labelled every quote span), so skip it.
+        hard = int(hard_chars)
+        flagged = [
+            i for i in flagged
+            if len((entries[i].get("text") or "").strip()) > hard
+            or (entries[i].get("speaker") or "") != "NARRATOR"
+            or any(ch in _QUOTE_CHARS for ch in (entries[i].get("text") or ""))
+        ]
     if budget_deferred:
         skipped = [i for i in flagged if id(entries[i]) in budget_deferred]
         if skipped:
@@ -3519,7 +3533,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             all_entries, long_checked, long_fixed = long_paragraph_resplit(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 resplit_chars, context_window=int(generation.check_context_window or 0),
-                budget_deferred=budget_deferred,
+                budget_deferred=budget_deferred, hard_chars=max_para,
             )
         else:
             # 开关关闭：跳过 LLM 语义重切并留一行日志；机械分段兜底（长度硬上界
