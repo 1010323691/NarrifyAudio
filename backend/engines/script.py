@@ -1050,6 +1050,8 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
                 handle.log(f"chunk {chunk_num}: {result.delete_rejected} 处 X 删除对象过长且无网址特征，已忽略并保留原文", "WARNING")
             if result.edit_rejected:
                 handle.log(f"chunk {chunk_num}: {result.edit_rejected} 处 edit 不合规，已作废并保留原文", "WARNING")
+                for orig, new in result.edit_rejections[:3]:
+                    handle.log(f"  edit 被拒：原「{orig[:60]}」→ 模型给出「{new[:60]}」", "WARNING")
             if attempt > 0:
                 handle.log(f"  Succeeded on retry {attempt + 1}")
             return result.entries

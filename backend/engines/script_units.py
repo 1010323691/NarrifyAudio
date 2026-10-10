@@ -55,6 +55,7 @@ _CLAUSE_TAIL_RE = re.compile(r"[^，、；：,;:]*[，、；：,;:]+|[^，、；
 _EDIT_PUNCT = "。，、！？…；：——"
 # A deleted span must contain a speech verb: the edit exists only to drop speech tags.
 _EDIT_VERB_CHARS = "说道问答喊叫吼喝笑哭叹嚷骂呼"
+_EDIT_VERB_PHRASES = ("表示", "回应", "开口", "出声", "嘟囔", "喃喃", "低语", "咕哝", "嘀咕", "念叨")
 
 
 @dataclass
@@ -345,7 +346,8 @@ def validate_edit(orig: str, new: str, max_delete: int = 24) -> bool:
         prefix += 1
     if sk_orig[prefix + deleted:] != sk_new[prefix:]:
         return False
-    if not any(ch in _EDIT_VERB_CHARS for ch in sk_orig[prefix:prefix + deleted]):
+    gone = sk_orig[prefix:prefix + deleted]
+    if not (any(ch in _EDIT_VERB_CHARS for ch in gone) or any(w in gone for w in _EDIT_VERB_PHRASES)):
         return False
     allowed = set(orig) | set(_EDIT_PUNCT)
     return all(ch.isalnum() or ch.isspace() or ch in allowed for ch in new)
@@ -371,6 +373,7 @@ class AssembleResult:
     edit_applied: int = 0
     edit_rejected: int = 0
     delete_rejected: int = 0
+    edit_rejections: list = field(default_factory=list)   # (unit text, proposed text)
     deleted: int = 0
     ok: bool = True      # skeleton self-check: no text lost or invented by the stitching
 
@@ -457,13 +460,18 @@ def assemble(units: list[Unit], plan: UnitPlan, narrator_instruct: str, soft_max
             speaker = label.speaker
             instruct = label.instruct
             text = unit.text
-            if label.kind == "E":
+            if label.kind == "E" and _skeleton(label.text) == _skeleton(unit.text):
+                pass  # nothing was deleted: not an edit, keep the unit as is
+            elif label.kind == "E":
                 if edit_enabled and validate_edit(unit.text, label.text, edit_max_delete):
                     text = label.text
                     result.edit_applied += 1
                 else:
                     result.edit_rejected += 1
+                    result.edit_rejections.append((unit.text, label.text))
             text = _strip_quote_chars(text, unit.lead, unit.trail)
+        elif label is not None and label.kind == "E" and _skeleton(label.text) == _skeleton(unit.text):
+            pass  # no-op edit: keep the unit as is
         elif label is not None and label.kind == "E":
             # Narration edit (typically "action, then a speech tag" → keep the action).
             if edit_enabled and validate_edit(unit.text, label.text, edit_max_delete):
@@ -471,6 +479,7 @@ def assemble(units: list[Unit], plan: UnitPlan, narrator_instruct: str, soft_max
                 result.edit_applied += 1
             else:
                 result.edit_rejected += 1
+                result.edit_rejections.append((unit.text, label.text))
 
         removed_skeleton += len(_skeleton(unit.text)) - len(_skeleton(text))
         joinable = (

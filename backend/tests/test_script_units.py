@@ -194,6 +194,18 @@ def test_assemble_matches_legacy_example():
     assert res.entries[6]["instruct"] == "紧张的低声耳语。"  # the non-empty one survives the merge
 
 
+def test_validate_edit_accepts_non_char_speech_phrases():
+    assert validate_edit("艾基尔点了点头表示", "艾基尔点了点头。")
+    assert validate_edit("贝尔库利短短叹了口气，低声说了句", "贝尔库利短短叹了口气。")
+
+
+def test_assemble_noop_edit_is_neither_applied_nor_rejected():
+    units = segment_chunk("贝尔库利在参杂叹息声当中回答了一句")
+    res = assemble(units, parse_unit_reply("1 E N | - | 贝尔库利在参杂叹息声当中回答了一句\nEND", 1), NARR)
+    assert res.edit_applied == 0 and res.edit_rejected == 0
+    assert res.entries[0]["text"] == "贝尔库利在参杂叹息声当中回答了一句"
+
+
 def test_assemble_edit_applied_and_rejected():
     text = f"史蒂夫猛地抓住杜尘的衣领，吼道：{LQ}放手！{RQ}"
     units = segment_chunk(text)
