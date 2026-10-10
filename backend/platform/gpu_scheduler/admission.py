@@ -1,7 +1,10 @@
 """Permits cover a model call, never the whole mixed-stage business task."""
 from __future__ import annotations
 
+import collections
+import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,6 +21,34 @@ from .config import load_config, platform_llm, service_fingerprint
 from .store import transaction
 
 _claim: ContextVar[TaskClaim | None] = ContextVar("gpu_claim", default=None)
+_trace = logging.getLogger("audiobook.llm_trace")
+
+# LLM permits poll the database, but a request that just ended in THIS process wakes the
+# next waiters directly instead of leaving them asleep until their backoff expires: a deep
+# queue otherwise admits roughly one request per poll interval and starves the engine.
+_LLM_POLL_FIRST = 0.05
+_LLM_POLL_MAX = 1.0
+_llm_waiters: "collections.deque[threading.Event]" = collections.deque()
+_llm_waiters_lock = threading.Lock()
+
+
+def _leave_llm_queue(event) -> None:
+    if event is None:
+        return
+    with _llm_waiters_lock:
+        try:
+            _llm_waiters.remove(event)
+        except ValueError:
+            pass
+
+
+def _llm_wake(count: int = 1) -> None:
+    """Wake the ``count`` longest-waiting LLM permit requests of this process."""
+    with _llm_waiters_lock:
+        for index, event in enumerate(_llm_waiters):
+            if index >= count:
+                break
+            event.set()
 
 
 def bind_claim(claim):
@@ -46,9 +77,16 @@ def gpu_permit(service: str, handle=None):
     if bypass:
         yield None
         return
+    wake = None
+    if service == "LLM":
+        wake = threading.Event()
+        with _llm_waiters_lock:
+            _llm_waiters.append(wake)
     try:
-        delay = 0.2
+        delay = _LLM_POLL_FIRST if wake is not None else 0.2
         while True:
+            if wake is not None:
+                wake.clear()   # before polling: a wake-up arriving mid-poll must not be lost
             if handle is not None:
                 handle.check()
             elif claim is not None:
@@ -73,30 +111,40 @@ def gpu_permit(service: str, handle=None):
                 if allowed and service == "TTS" and managed:
                     allowed = db.scalar(select(GPURequest.id).where(
                         GPURequest.service == "TTS", GPURequest.status == "running").limit(1)) is None
+                free_slots = 1
                 if allowed and service == "LLM":
                     active_llm = db.scalar(select(func.count()).select_from(GPURequest).where(
                         GPURequest.service == "LLM", GPURequest.status == "running"))
                     allowed = active_llm < llm_limit
-                # Oldest request is admitted first; a stream of short requests cannot starve it.
+                    free_slots = max(1, llm_limit - active_llm)
+                # Oldest requests are admitted first; a stream of short requests cannot starve
+                # them. Every free slot is filled in ONE poll round — admitting a single
+                # request per round capped the engine feed at one request per poll interval.
                 if allowed and managed:
                     # Paused requests must not block runnable requests behind them.
-                    first = db.scalar(select(GPURequest.id).outerjoin(Task, Task.id == GPURequest.task_id).where(
-                                      GPURequest.service == service, GPURequest.status == "waiting",
-                                      (GPURequest.task_id.is_(None)) | (Task.status == "running"))
-                                      .order_by(GPURequest.created_at, GPURequest.id).limit(1))
-                    allowed = first == request_id
+                    first = db.scalars(select(GPURequest.id).outerjoin(Task, Task.id == GPURequest.task_id).where(
+                                       GPURequest.service == service, GPURequest.status == "waiting",
+                                       (GPURequest.task_id.is_(None)) | (Task.status == "running"))
+                                       .order_by(GPURequest.created_at, GPURequest.id).limit(free_slots)).all()
+                    allowed = request_id in first
                 if allowed:
                     request.status = "running"
                     if managed and service == "LLM":
                         request.process = {**request.process, "llm_runtime": state.get("llm_runtime") or platform_llm(db).model_dump()}
                     state["served"] = True
                     break
-            time.sleep(delay)
-            # Bounded backoff: every waiting permit runs this DB-locked poll cycle,
-            # so a deep backlog must not turn the wait into constant 5 Hz polling.
-            delay = min(delay * 2, 2.0)
+            if wake is not None:
+                wake.wait(delay)
+                delay = min(delay * 2, _LLM_POLL_MAX)
+            else:
+                time.sleep(delay)
+                # Bounded backoff: every waiting permit runs this DB-locked poll cycle,
+                # so a deep backlog must not turn the wait into constant 5 Hz polling.
+                delay = min(delay * 2, 2.0)
+        _leave_llm_queue(wake)   # admitted: stop being a wake-up target while the call runs
         yield request_id
     finally:
+        _leave_llm_queue(wake)
         with transaction() as (db, _state):
             request = db.get(GPURequest, request_id)
             if request:
@@ -104,6 +152,8 @@ def gpu_permit(service: str, handle=None):
                     _state.update(state="ERROR", error="TTS 子进程尚未确认退出", reason="process exit unconfirmed")
                 else:
                     db.delete(request)
+        if service == "LLM":
+            _llm_wake(1)   # a slot just freed (or a waiter left): hand it to the next in line
 
 
 def release_paused_tts(request_id):
@@ -120,7 +170,10 @@ def release_paused_tts(request_id):
 def llm_admitted(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
+        queued_at = time.monotonic()
+        claim = _claim.get()
         with gpu_permit("LLM", kwargs.get("handle")) as request_id:
+            admitted_at = time.monotonic()
             from ..database import SessionLocal
             from ...core.config import LLMConfig
             runtime = None
@@ -138,7 +191,12 @@ def llm_admitted(function):
                         args[index] = value
                     else:
                         kwargs[key] = value
-            return function(*args, **kwargs)
+            try:
+                return function(*args, **kwargs)
+            finally:
+                # One line per model call: time spent waiting for a permit vs. in the call itself.
+                _trace.info("llm_call task=%s wait=%.3f run=%.3f", claim.task_id if claim else "-",
+                            admitted_at - queued_at, time.monotonic() - admitted_at)
     return wrapped
 
 

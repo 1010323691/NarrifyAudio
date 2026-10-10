@@ -928,3 +928,78 @@ def test_concurrent_admission_reuses_connections_without_waiting_on_cache(tmp_pa
             assert claim_allowed("text.format", db)
     finally:
         engine.dispose()
+
+
+def test_llm_waiter_is_woken_by_a_release_instead_of_sleeping_out_its_backoff(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 3.0)       # a wake-up-less waiter would sleep up to 3 s
+    holding, release, admitted = threading.Event(), threading.Event(), {}
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def waiter():
+        with gpu_permit("LLM"):
+            admitted["at"] = time.monotonic()
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    second = threading.Thread(target=waiter)
+    second.start()
+    time.sleep(2.5)                                            # past 3 old-style backoff rounds (polls at 0.2, 0.6, 1.4, 3.4 s)
+    released_at = time.monotonic()
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert "at" in admitted and admitted["at"] - released_at < 0.5
+
+
+def test_llm_permits_are_admitted_oldest_first(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
+    holding, release, order = threading.Event(), threading.Event(), []
+
+    def holder():
+        with gpu_permit("LLM"):
+            holding.set()
+            release.wait(10)
+
+    def waiter(name):
+        with gpu_permit("LLM"):
+            order.append(name)
+
+    first = threading.Thread(target=holder)
+    first.start()
+    assert holding.wait(3)
+    threads = []
+    for name in ("a", "b", "c"):
+        thread = threading.Thread(target=waiter, args=(name,))
+        thread.start()
+        threads.append(thread)
+        time.sleep(0.15)                                       # fix the arrival order
+    release.set()
+    for thread in [first, *threads]:
+        thread.join(8)
+    assert order == ["a", "b", "c"]
+
+
+def test_llm_admission_logs_wait_and_run_time(tmp_path, monkeypatch, caplog):
+    import logging
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 4)
+
+    @admission.llm_admitted
+    def call(*args, **kwargs):
+        return "ok"
+
+    with caplog.at_level(logging.INFO, logger="audiobook.llm_trace"):
+        assert call("http://x", "key", "model") == "ok"
+    assert any("llm_call" in r.getMessage() and "wait=" in r.getMessage() and "run=" in r.getMessage()
+               for r in caplog.records)
