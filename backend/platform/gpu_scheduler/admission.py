@@ -96,21 +96,6 @@ def _leave_llm_queue(waiter) -> None:
             pass
 
 
-def _llm_wake_after(waiter) -> None:
-    """Pass the wake-up on: ``waiter`` was woken but could not be admitted (an older waiter
-    lives in another process), so the slot goes to the next parked waiter in line."""
-    with _llm_waiters_lock:
-        queue = list(_llm_waiters)
-        try:
-            index = queue.index(waiter)
-        except ValueError:
-            return
-        for other in queue[index + 1:]:
-            other.event.set()          # never lose a wake-up for a waiter about to park
-            if other.parked:
-                return
-
-
 def _llm_wake(count: int = 1) -> None:
     """Wake the ``count`` longest-waiting parked LLM waiters of this process. Waiters that are
     not parked still get their event set (so a wake-up arriving just before they park is not
@@ -161,9 +146,7 @@ def gpu_permit(service: str, handle=None):
         first_rank = None   # queue position when the request first looked (for llm_trace)
         admit_info = None
 
-        def park(timeout: float, was_woken: bool) -> None:
-            if was_woken:
-                _llm_wake_after(wake)   # woken for a slot we could not take: hand it on
+        def park(timeout: float) -> None:
             wake.parked = True
             try:
                 wake.event.wait(timeout)
@@ -171,9 +154,7 @@ def gpu_permit(service: str, handle=None):
                 wake.parked = False
 
         while True:
-            was_woken = False
             if wake is not None:
-                was_woken = wake.event.is_set()
                 wake.event.clear()   # before polling: a wake-up arriving mid-poll must not be lost
             if handle is not None:
                 handle.check()
@@ -187,7 +168,7 @@ def gpu_permit(service: str, handle=None):
                     # Not this request's turn: sleep without touching the host lock. Waiters near
                     # the front keep a short backoff, the rest sleep long and rely on wake-ups.
                     delay = min(delay * 2, _LLM_NEAR_POLL_MAX) if near else _LLM_POLL_MAX
-                    park(delay, was_woken)
+                    park(delay)
                     continue
             # Read the current admin limit with the admission session, so a
             # different process's config cache cannot admit excess requests.
@@ -235,7 +216,7 @@ def gpu_permit(service: str, handle=None):
                     state["served"] = True
                     break
             if wake is not None:
-                park(delay, was_woken)
+                park(delay)
                 delay = min(delay * 2, _LLM_POLL_MAX)
             else:
                 time.sleep(delay)

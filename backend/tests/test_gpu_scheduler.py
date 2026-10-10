@@ -934,7 +934,8 @@ def test_llm_waiter_is_woken_by_a_release_instead_of_sleeping_out_its_backoff(tm
     from backend.platform.gpu_scheduler import admission
     activate(enabled_config(tmp_path), "LLM")
     monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
-    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)      # a wake-up-less waiter would sleep far longer
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    monkeypatch.setattr(admission, "_LLM_NEAR_POLL_MAX", 10.0)   # only a real wake-up can be prompt
     holding, release, admitted = threading.Event(), threading.Event(), {}
 
     def holder():
@@ -1010,6 +1011,7 @@ def test_llm_free_slots_are_filled_in_one_round_without_exceeding_the_limit(tmp_
     activate(enabled_config(tmp_path), "LLM")
     monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
     monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    monkeypatch.setattr(admission, "_LLM_NEAR_POLL_MAX", 10.0)   # only a real wake-up can be prompt
     guard = threading.Lock()
     running = peak = 0
     release_holders, release_waiters = threading.Event(), threading.Event()
@@ -1077,7 +1079,7 @@ def test_llm_free_slots_are_filled_in_one_round_without_exceeding_the_limit(tmp_
     assert set(order) == {f"w{i}" for i in range(1, 7)}
 
 
-def test_llm_wake_goes_to_parked_waiters_and_is_handed_on():
+def test_llm_wake_budget_is_spent_only_on_parked_waiters():
     from backend.platform.gpu_scheduler import admission
     a, b, c = (admission._Waiter() for _ in range(3))
     with admission._llm_waiters_lock:
@@ -1087,15 +1089,11 @@ def test_llm_wake_goes_to_parked_waiters_and_is_handed_on():
             waiter.parked = True
         admission._llm_wake(1)
         assert a.event.is_set() and not b.event.is_set()
-        admission._llm_wake_after(a)                           # a was woken but could not take the slot
-        assert b.event.is_set() and not c.event.is_set()
         for waiter in (a, b, c):
             waiter.event.clear()
         a.parked = False                                       # head is blocked elsewhere (paused / polling)
         admission._llm_wake(1)
         assert a.event.is_set() and b.event.is_set() and not c.event.is_set()   # a flagged, budget spent on b
-        admission._llm_wake_after(c)                           # nobody behind the last one: no error
-        admission._llm_wake_after(admission._Waiter())         # not in the queue: no error
     finally:
         with admission._llm_waiters_lock:
             for waiter in (a, b, c):
@@ -1110,6 +1108,7 @@ def test_llm_slot_skips_a_head_waiter_that_is_blocked_by_a_paused_task(tmp_path,
     activate(enabled_config(tmp_path), "LLM")
     monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
     monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    monkeypatch.setattr(admission, "_LLM_NEAR_POLL_MAX", 10.0)   # only a real wake-up can be prompt
     owner, project, task, attempt = new_id(), new_id(), new_id(), new_id()
     with SessionLocal.begin() as db:
         db.add(User(id=owner, username="gpu" + owner[:8], email=f"{owner}@example.test", password_hash="unused-test-hash"))
