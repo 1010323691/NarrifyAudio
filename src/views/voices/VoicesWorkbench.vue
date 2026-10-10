@@ -9,7 +9,7 @@ import WorkbenchStatus from '@/components/ui/WorkbenchStatus.vue'
 import MiniAudioPlayer from '@/components/ui/MiniAudioPlayer.vue'
 import Skeleton from '@/components/ui/Skeleton.vue'
 import Pager from '@/views/textformat/Pager.vue'
-import { Copy, Loader2, Merge, Users, X } from 'lucide-vue-next'
+import { Copy, GitMerge, Loader2, Merge, Users, X } from 'lucide-vue-next'
 
 type PhaseBadge = { label: string; variant: 'default' | 'secondary' | 'destructive' | 'success' | 'warning' | 'outline'; spin: boolean }
 const props = defineProps<{
@@ -27,6 +27,9 @@ const props = defineProps<{
   cloneRunning: boolean
   genderBusy: boolean
   overlayOpen: boolean
+  batchVisible: boolean
+  batchCount: number
+  batchDisabled: boolean
   foundationBadge: (v: VoiceItem) => PhaseBadge
   cloneBadge: (v: VoiceItem) => PhaseBadge
   previewUrl: (v: VoiceItem) => string
@@ -38,6 +41,7 @@ const emit = defineEmits<{
   refresh: []
   gender: [voice: VoiceItem, element: HTMLElement]
   merge: [voice: VoiceItem]
+  batchMerge: []
   pick: [voice: VoiceItem]
   foundation: [voice: VoiceItem]
   clone: [voice: VoiceItem]
@@ -107,7 +111,17 @@ function detailKeydown(event: KeyboardEvent) {
         :filters="[{ key: 'all', label: '全部', count: pagination?.counts.all }, { key: 'pending', label: '待完善', count: pendingCount }]"
         :loading="loading"
         @refresh="emit('refresh')"
-      />
+      >
+        <template #filters>
+          <button
+            v-if="batchVisible" type="button" class="workbench-filter ml-auto whitespace-nowrap" :disabled="batchDisabled"
+            :title="batchDisabled ? '配音任务进行中，请待其结束后再合并角色' : '集中批量合并疑似同一角色'" @click="emit('batchMerge')"
+          >
+            <GitMerge class="h-3.5 w-3.5" />批量合并疑似角色
+            <span v-if="batchCount" class="rounded-full bg-primary px-1.5 text-[10px] leading-4 text-primary-foreground tabular-nums" :aria-label="`${batchCount} 个角色待处理`">{{ batchCount }}</span>
+          </button>
+        </template>
+      </WorkbenchToolbar>
       <div v-if="loadError" class="voice-load-error" role="alert">
         <p>{{ loadError }}</p><p v-if="speakers.length" class="mt-1 text-muted-foreground">正在展示上次已知状态。</p>
         <Button variant="outline" class="mt-2 h-8" :disabled="loading" @click="emit('refresh')">重试加载</Button>
@@ -120,7 +134,7 @@ function detailKeydown(event: KeyboardEvent) {
           </tbody>
           <tbody v-else>
             <tr v-for="v in visible" :key="v.name" :class="{ 'voice-selected': selectedName === v.name }" @click="select(v, $event)">
-              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :title="v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '性别未标记'" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button><span v-if="v.alias_of" class="min-w-0 max-w-[40%] truncate text-[11px] text-muted-foreground" :title="`关联提示：${v.alias_of}，确认后可手动合并`">→ {{ v.alias_of }}</span></div></td>
+              <td><div class="flex min-w-0 items-center gap-2"><span class="voice-sex" :title="v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '性别未标记'" :class="v.gender === 'male' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : v.gender === 'female' ? 'bg-rose-500/10 text-rose-700 dark:text-rose-300' : 'bg-muted text-muted-foreground'">{{ v.gender === 'male' ? '男' : v.gender === 'female' ? '女' : '未' }}</span><button type="button" class="voice-name" :aria-pressed="selectedName === v.name" :title="v.name" @click.stop="select(v)">{{ v.name }}</button><span v-if="v.alias_of" class="min-w-0 max-w-[40%] truncate text-[11px] text-muted-foreground" :title="`关联提示：${v.alias_of}${v.alias_basis ? `（${v.alias_basis}）` : ''}，确认后可手动合并`">→ {{ v.alias_of }}</span></div></td>
               <td class="voice-number tabular-nums">{{ v.line_count }}</td>
               <td><WorkbenchStatus class="inline-flex items-center" :variant="foundationBadge(v).variant"><Loader2 v-if="foundationBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ foundationBadge(v).label }}</WorkbenchStatus></td>
               <td><WorkbenchStatus class="inline-flex items-center" :variant="cloneBadge(v).variant"><Loader2 v-if="cloneBadge(v).spin" class="mr-1 h-3 w-3 animate-spin" />{{ cloneBadge(v).label }}</WorkbenchStatus></td>
@@ -151,7 +165,7 @@ function detailKeydown(event: KeyboardEvent) {
       <Button v-if="narrow" variant="ghost" class="mb-2 ml-auto flex h-8 w-8 p-0" aria-label="关闭角色详情" @click="closeDetail"><X class="h-4 w-4" /></Button>
       <template v-if="selected">
         <div class="flex flex-wrap items-start justify-between gap-2">
-          <div class="min-w-0 flex-1"><h2 class="break-words text-sm font-semibold">{{ selected.name }}</h2><p class="mt-1 text-[11px] text-muted-foreground">{{ selected.line_count }} 句台词<span v-if="selected.alias_of"> · 关联提示 {{ selected.alias_of }}（需手动合并）</span></p></div>
+          <div class="min-w-0 flex-1"><h2 class="break-words text-sm font-semibold">{{ selected.name }}</h2><p class="mt-1 text-[11px] text-muted-foreground">{{ selected.line_count }} 句台词<span v-if="selected.alias_of"> · 关联提示 {{ selected.alias_of }}<template v-if="selected.alias_basis">（{{ selected.alias_basis }}）</template>（需手动合并）</span></p></div>
           <button type="button" class="voice-gender" :disabled="genderBusy || foundationRunning || cloneRunning" aria-label="修改角色性别" @click="emit('gender', selected, $event.currentTarget as HTMLElement)">{{ selected.gender === 'male' ? '男' : selected.gender === 'female' ? '女' : '性别未定' }}</button>
         </div>
         <div class="voice-tabs" role="tablist" aria-label="角色详情">

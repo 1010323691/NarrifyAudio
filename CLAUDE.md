@@ -39,6 +39,7 @@ npm.cmd run test:workbench       # 章节核对工作台组合回归（node:test
 npm.cmd run test:script-parse-workbench # 文本解析工作台组合回归（node:test 沙箱跑 useScriptParseWorkbench 行状态/提交/缓存/竞态）
 npm.cmd run test:admin-charts    # 后台图表纯几何函数回归（scale.ts：刻度/折线断点/仪表弧/环图扇区）
 npm.cmd run test:voices-workbench # 角色音色工作台组合回归（node:test 沙箱跑 Voices.vue 加载/提交/合并/竞态逻辑）
+npm.cmd run test:batch-merge     # 批量合并疑似角色回归（指向树推导/排序/选中展开/新增候选/竞态与版本冲突）
 .\.venv\Scripts\python.exe -m pytest backend/tests -n 4 --dist loadscope  # 后端全量测试（4 进程并行，见下方说明）
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py  # 单个文件
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_script.py -k 名称片段  # 单个用例
@@ -74,6 +75,7 @@ npm.cmd run test:voices-workbench # 角色音色工作台组合回归（node:tes
 - **新增任务类型**：`task_registry` 表 + 对应分发器的 executor + `platform/task_submission.py` 提交校验 + 前端 `src/utils/taskTypes.ts` / `taskLabels.ts`（类型前缀知识还重复在 `ProjectOverview.vue`，需同步；管理端的服务组归类以后端 `task_registry.task_worker_group` 为准）。
 - **UI 页面/交互**：`src/views/X.vue` + `src/router.ts` 注册（项目阶段页面加 `meta: { projectStage: true }`）+ `src/api/` 对应客户端；长时操作一律走任务提交 + 轮询/SSE，不在请求里同步跑。
 - **配置项**：项目配置随工程存 DB（`/api/config` 读写活动工作区配置，永不写根模板）；LLM 凭据等由管理控制台管（`api/admin.py` + `platform/system_config.py` 的 `SystemConfig`）；`core/config.py` 的功能默认值由 `platform.system_config` 注册的 provider 供给（分层契约要求 core 不反向 import platform）。
+- **角色合并 / 疑似角色提示**：指向关系不再实时重算，持久化在 `04_voice_profiles/role_links/<范围>.json`（`core/role_links.py`：links/vetoes/new_candidates/records + 乐观锁 `version`，范围 = `__all__` 或单个解析文件）。`engines/role_merge.py` 是唯一写入口：批量合并/撤销/忽略都在 `foundation-publication.lock` 内整体读改写，多文件写失败会回滚；撤销前校验台词文本哈希与归属。匹配规则与命中依据在 `core/role_hints.py`（`suggest_role_links` / `rematch_one`）。接口在 `api/tts.py` 的 `/voices/merge-graph|merge-batch|merge-undo|link-veto|merge-review-seen`，旧 `merge-speakers` 复用同一实现；列表的 `alias_of`/`alias_basis` 读同一张表。前端入口 `views/voices/BatchMergeDialog.vue` + `composables/useBatchMerge.ts`（纯推导在 `batchMergeGraph.ts`）。
 - **额度/计费**：`platform/quota.py`（按操作 `QuotaHold`）。
 - **DB 结构变更**：`backend/migrations/` 加 Alembic 迁移（链从 0001 起，head 须与 `platform/models.py` 一致；不可逆变更先备份）。
 - **并发/并行度**：`core/concurrency.py` 的 `merge_concurrency_limit()` 按逻辑 CPU 数的一半、限制在 1～4 槽；`merge_gate()` 由音频合并与 BGM 混音共用，Worker 启动等量的专用执行线程领取 `tts.merge` / `bgm.mix`，主循环排除这两类任务。正式执行链路的 `_workspace_engine_lock` 对具名合并/混音使用项目共享锁及章节排他锁，允许不同章节重叠，仍与其他项目写任务互斥，并持锁覆盖产物发布/提交；未指定音频包的旧式合并继续使用项目排他锁。LLM gate 由 Worker 的 parse 协调器每轮按管理端 `parse_worker_concurrency` 配置经 `set_concurrency` 动态调整（默认 4、上限 32，parse worker 池随并发伸缩、上限 64 槽），LLM 解析可并行至 32。调整并行度时同时检查 Worker 调度槽位、项目/章节锁和引擎侧的 acquire 点（`engines/bgm.py`、`merge.py`、`music.py`、`script.py`、`voices.py`）；合并/混音槽位是进程级限制，多个 Worker 进程不会共用该门禁。

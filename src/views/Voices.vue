@@ -6,6 +6,8 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, 
 import { useAuthStore } from '@/stores/auth'
 import { useProjectStore } from '@/stores/project'
 import VoicesWorkbench from './voices/VoicesWorkbench.vue'
+import BatchMergeDialog from './voices/BatchMergeDialog.vue'
+import { useBatchMerge } from '@/composables/useBatchMerge'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settings'
 import { latestEntryTasks } from '@/composables/useLabelDerivedTasks'
@@ -216,6 +218,7 @@ async function applyGender(v: VoiceItem, g: 'male' | 'female' | '') {
     await setGender(v.name, g)
     v.gender = g
     closeGenderMenu()
+    void batch.refresh(true) // gender feeds the matching, so links may move
     toast({
       title: g ? `性别已标记为「${g === 'male' ? '男' : '女'}」` : '已清除性别标记',
       variant: 'success',
@@ -242,6 +245,10 @@ const script = '__all__'
 const ACTIVE: string[] = ['pending', 'queued', 'retrying', 'running', 'paused', 'cancelling']
 const foundationRunning = computed(() => taskStore.projectTasks.some((t) => t.module === 'voices-foundation' && ACTIVE.includes(t.status)))
 const cloneRunning = computed(() => taskStore.projectTasks.some((t) => t.module === 'voices-clone' && ACTIVE.includes(t.status)))
+
+// 批量合并疑似角色：指向关系表快照驱动工具栏入口（角标 = 仍有待合并角色的目标数）；弹窗自管焦点/Esc。
+const batch = useBatchMerge({ script, captureScope })
+const batchPreviewUrl = (relative: string) => resourcePreviewUrl('04_voice_profiles', relative)
 
 // Button gating: a phase is blocked while its own launch is in flight, while the OTHER phase
 // is running (so the LLM and TTS never share the GPU), or with no workspace / script.
@@ -334,6 +341,8 @@ async function loadVoices() {
     listPage.received(r.pagination)
     hasScript.value = r.has_script
     speakers.value = r.speakers
+    // 任务进行中入口置灰且列表按进度高频刷新，指向关系不会变，跳过以免多余请求。
+    if (!foundationRunning.value && !cloneRunning.value) void batch.refresh()
   } catch (e: any) {
     if (current()) voicesLoadError.value = e?.message || '角色加载失败，请重试。'
   } finally {
@@ -382,6 +391,7 @@ watch(() => `${auth.user?.id || ''}:${project.activeProjectId}`, () => {
   closePicker()
   closeMerge()
   closeGenderMenu()
+  batch.reset()
 })
 onBeforeUnmount(() => { ++voicesRequest })
 
@@ -422,6 +432,7 @@ onActivated(() => {
     firstActivation = false
     return
   }
+  void batch.refresh(true)
   void loadVoices()
   void taskStore.refresh().then(() => reattachTasks())
 })
@@ -585,6 +596,7 @@ async function confirmMerge() {
       description: `已将 ${r.source} 的 ${r.replaced} 条台词并入 ${r.target}${r.files.length ? `（${r.files.join('、')}）` : ''}`,
     })
     closeMerge()
+    void batch.refresh(true) // a single merge changes the link table too
     loadVoices()
   } catch (e: any) {
     mergeError.value = e?.message || '合并失败'
@@ -709,9 +721,10 @@ watch(
         :speakers="speakers" :prompts="prompts" :loading="voicesLoading" :load-error="voicesLoadError" :has-script="hasScript"
         :foundation-blocked="foundationBlocked" :clone-blocked="cloneBlocked" :foundation-busy="foundationBusy"
         :foundation-running="foundationRunning" :clone-running="cloneRunning" :gender-busy="genderBusy"
-        :overlay-open="Boolean(activeOverlay)"
+        :overlay-open="Boolean(activeOverlay) || batch.open.value"
+        :batch-visible="batch.hasAny.value" :batch-count="batch.badge.value" :batch-disabled="foundationRunning || cloneRunning"
         :foundation-badge="foundationBadge" :clone-badge="cloneBadge" :preview-url="previewUrl" :pick-label="pickLabel" :pick-disabled="pickDisabled"
-        @refresh="loadVoices" @gender="openGenderMenu" @merge="openMerge" @pick="openPicker"
+        @refresh="loadVoices" @gender="openGenderMenu" @merge="openMerge" @batch-merge="batch.openDialog()" @pick="openPicker"
         @foundation="regenFoundation" @clone="remakeClone" @copy="copyDescriptionToPrompt" @prompt="(name, value) => prompts[name] = value"
       />
       <Card class="voices-production" aria-label="角色声音制作">
@@ -792,6 +805,8 @@ watch(
       <template #icon><XCircle class="h-4 w-4 shrink-0" /></template>
       {{ error }}
     </Alert>
+
+    <BatchMergeDialog :batch="batch" scope-label="全部文件" :preview-url="batchPreviewUrl" @close="batch.refresh(true); loadVoices()" />
 
     <!-- 选择音色 overlay：试听该角色全部候选克隆音频，单选一个为最终音色（单选后行内试听随之切换） -->
     <div
@@ -982,7 +997,7 @@ watch(
         <ul class="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
           <li>替换 {{ mergeSourceItem?.name }} 的 {{ mergeSourceItem?.line_count ?? 0 }} 条台词（当前范围：
             全部已解析章节）。</li>
-          <li>删除 {{ mergeSourceItem?.name }} 的声音配置；指向它的别名将改指向目标角色。</li>
+          <li>删除 {{ mergeSourceItem?.name }} 的声音配置；合并记录可在「批量合并疑似角色」中撤销。</li>
           <li>其候选音频文件保留在磁盘上，不会被删除。</li>
         </ul>
         <Alert v-if="mergeError" variant="destructive">{{ mergeError }}</Alert>
