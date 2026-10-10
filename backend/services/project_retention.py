@@ -15,12 +15,11 @@ from sqlalchemy.orm import Session
 from ..platform.database import LockSessionLocal, SessionLocal
 from ..platform.models import Project, Task, User, utcnow
 from ..platform.storage import lock_storage_migration, safe_project_workspace_path, storage_migration
-from ..platform.system_config import project_retention
+from ..platform.system_config import project_retention, retention_started_at
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
-from .projects import as_utc, permanently_delete_project, trash_expires_at
+from .projects import DEFAULT_WORKSPACE_NAME, as_utc, permanently_delete_project, trash_expires_at
 from .task_operations import cancel_task_record
 
-DEFAULT_WORKSPACE_NAME = "默认工作空间"  # provisioned for every account; never expires on its own
 
 logger = logging.getLogger(__name__)
 _RETENTION_LOCK_ID = 7526202610
@@ -52,7 +51,7 @@ def purge_expired_projects(limit: int = 20) -> int:
 def _purge_expired_with_session(db: Session, limit: int) -> int:
     purged = 0
     now = utcnow()
-    retention = project_retention(db)
+    retention, floor = project_retention(db), retention_started_at(db)
     rows = db.execute(
         select(Project.id, User.username)
         .join(User, User.id == Project.owner_id)
@@ -67,7 +66,7 @@ def _purge_expired_with_session(db: Session, limit: int) -> int:
         if project is None:
             continue
         deleted_at = as_utc(project.deleted_at)
-        if trash_expires_at(deleted_at, retention["trash_days"]) > now:
+        if trash_expires_at(deleted_at, retention["trash_days"], floor) > now:
             continue
         workspace_path = safe_project_workspace_path(db, username, project.id)
         if workspace_path is None:
@@ -80,12 +79,13 @@ def _purge_expired_with_session(db: Session, limit: int) -> int:
             db.rollback()
             logger.exception("Failed to purge expired project: %s", project.id)
     if purged < limit:
-        purged += _purge_naturally_expired(db, limit - purged, now, retention["project_ttl_days"])
+        purged += _purge_naturally_expired(db, limit - purged, now, retention["project_ttl_days"], floor)
     return purged
 
 
 CANCEL_GRACE_SECONDS = 30.0   # how long running tasks get to notice their cancel before the project is deleted
 _CANCEL_POLL_SECONDS = 1.0
+_RUNNING_STATES = ("running", "cancelling")
 
 
 def _cancel_unfinished(db: Session, project: Project) -> int:
@@ -104,12 +104,14 @@ def _wait_for_cancellation(db: Session, project_ids: list[str]) -> None:
     deadline = time.monotonic() + CANCEL_GRACE_SECONDS
     while time.monotonic() < deadline:
         db.rollback()
-        if not db.scalar(select(Task.id).where(Task.project_id.in_(project_ids), Task.status == "running").limit(1)):
+        if not db.scalar(select(Task.id).where(
+            Task.project_id.in_(project_ids), Task.status.in_(_RUNNING_STATES),
+        ).limit(1)):
             return
         time.sleep(_CANCEL_POLL_SECONDS)
 
 
-def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int:
+def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int, floor=None) -> int:
     """Permanently delete live projects older than ``ttl_days``, even with unfinished tasks.
 
     Unfinished tasks are asked to cancel first, given a short grace to stop, and
@@ -118,6 +120,8 @@ def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int
     if ttl_days <= 0:
         return 0
     cutoff = now - timedelta(days=ttl_days)
+    if floor is not None and floor >= cutoff:
+        return 0   # projects are aged from no earlier than the retention start: nothing can be due yet
     rows = db.execute(
         select(Project.id, User.username)
         .join(User, User.id == Project.owner_id)

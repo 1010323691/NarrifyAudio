@@ -115,3 +115,39 @@ def normalize_project_retention(value: Any) -> dict[str, int]:
 def project_retention(db: Session) -> dict[str, int]:
     row = db.get(SystemConfig, PROJECT_RETENTION_KEY)
     return normalize_project_retention(row.value if row is not None else None)
+
+
+RETENTION_STARTED_KEY = "retention.started_at"
+
+
+def retention_started_at(db: Session):
+    """When project expiry first became active (None before the first daily pass).
+
+    Existing projects and trash entries are aged from no earlier than this moment, so
+    switching the feature on never deletes data that was already past the default
+    deadlines; explicit administrator changes to the day counts still apply at once."""
+    from datetime import datetime, timezone
+
+    row = db.get(SystemConfig, RETENTION_STARTED_KEY)
+    try:
+        value = datetime.fromisoformat(row.value["at"]) if row is not None else None
+    except (KeyError, TypeError, ValueError):
+        return None
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def ensure_retention_started(db: Session):
+    started = retention_started_at(db)
+    if started is None:
+        from datetime import datetime, timezone
+
+        started = datetime.now(timezone.utc)
+        row = db.get(SystemConfig, RETENTION_STARTED_KEY)
+        if row is None:
+            db.add(SystemConfig(key=RETENTION_STARTED_KEY, value={"at": started.isoformat()}))
+        else:
+            row.value = {"at": started.isoformat()}
+        db.commit()
+    return started

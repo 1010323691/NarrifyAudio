@@ -26,11 +26,19 @@ def client():
 @pytest.fixture(autouse=True)
 def _reset_retention(monkeypatch):
     monkeypatch.setattr("backend.services.project_retention.CANCEL_GRACE_SECONDS", 0.0)
+    _clear_config()
     yield
+    _clear_config()
+
+
+def _clear_config():
+    from backend.platform.system_config import RETENTION_STARTED_KEY
+
     with SessionLocal.begin() as db:
-        row = db.get(SystemConfig, PROJECT_RETENTION_KEY)
-        if row is not None:
-            db.delete(row)
+        for key in (PROJECT_RETENTION_KEY, RETENTION_STARTED_KEY, "retention.last_run"):
+            row = db.get(SystemConfig, key)
+            if row is not None:
+                db.delete(row)
 
 
 def _set_retention(ttl: int = 0, trash: int = 30) -> None:
@@ -252,16 +260,23 @@ def test_daily_retention_pass_runs_once_per_local_day(monkeypatch):
         row = db.get(SystemConfig, "retention.last_run")
         if row is not None:
             db.delete(row)
-    worker._retention_state["done_on"] = ""
-    assert worker._retention_pass() == (0, True) and calls == ["p"]
-    assert worker._retention_pass() == (0, True) and calls == ["p"]   # same day: cheap no-op
-    worker._retention_state["done_on"] = ""                            # restart the same day: DB marker blocks it
-    worker._retention_pass()
+    worker._retention_state.update(done_on="", thread=None)
+
+    def run_pass():
+        result = worker._retention_pass()
+        if worker._retention_state["thread"] is not None:
+            worker._retention_state["thread"].join()
+        return result
+
+    assert run_pass() == (0, True) and calls == ["p"]
+    assert run_pass() == (0, True) and calls == ["p"]                  # same day: cheap no-op
+    worker._retention_state.update(done_on="", thread=None)            # restart the same day: DB marker blocks it
+    run_pass()
     assert calls == ["p"]
     with SessionLocal.begin() as db:
         db.get(SystemConfig, "retention.last_run").value = {"date": "2000-01-01"}
-    worker._retention_state["done_on"] = ""
-    worker._retention_pass()                                           # a later day: runs again
+    worker._retention_state.update(done_on="", thread=None)
+    run_pass()                                                         # a later day: runs again
     assert calls == ["p", "p"]
 
 
@@ -296,6 +311,93 @@ def test_daily_pass_is_not_marked_done_while_storage_is_migrating(monkeypatch):
         row = db.get(SystemConfig, "retention.last_run")
         if row is not None:
             db.delete(row)
-    worker._retention_state["done_on"] = ""
+    worker._retention_state.update(done_on="", thread=None)
     worker._retention_pass()
+    worker._retention_state["thread"].join()
     assert calls == [] and worker._retention_state["done_on"] == ""
+
+
+def test_cancel_grace_waits_for_cancelling_tasks_and_gives_up_after_the_deadline(client, monkeypatch):
+    import threading
+    from backend.services import project_retention as retention
+
+    user_id, _username, csrf = _account(client)
+    project = _project(client, csrf)
+    with SessionLocal.begin() as db:
+        task = Task(id=str(uuid.uuid4()), owner_id=user_id, project_id=project["id"], task_type="tts.batch",
+                    status="running", payload={})
+        db.add(task)
+        task_id = task.id
+    _set_retention(ttl=1)
+    _age(project["id"], created_days=5)
+    monkeypatch.setattr(retention, "CANCEL_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(retention, "_CANCEL_POLL_SECONDS", 0.05)
+    seen = {}
+
+    def worker_acknowledges_later():
+        import time
+        for _ in range(100):                      # wait until the retention pass has requested the cancel
+            with SessionLocal() as db:
+                seen["status_before_ack"] = db.scalar(select(Task.status).where(Task.id == task_id))
+            if seen["status_before_ack"] == "cancelling":
+                break
+            time.sleep(0.05)
+        time.sleep(0.3)
+        with SessionLocal.begin() as db:
+            db.get(Task, task_id).status = "cancelled"
+        seen["acked_at"] = time.monotonic()
+
+    thread = threading.Thread(target=worker_acknowledges_later)
+    thread.start()
+    purge_expired_projects()
+    deleted_at = __import__("time").monotonic()
+    thread.join()
+    assert seen["status_before_ack"] == "cancelling"
+    assert deleted_at >= seen["acked_at"]           # deletion waited for the acknowledgement
+    assert not _exists(project["id"])
+
+    stuck = _project(client, csrf)
+    with SessionLocal.begin() as db:
+        db.add(Task(id=str(uuid.uuid4()), owner_id=user_id, project_id=stuck["id"], task_type="tts.batch",
+                    status="running", payload={}))
+    _age(stuck["id"], created_days=5)
+    monkeypatch.setattr(retention, "CANCEL_GRACE_SECONDS", 0.2)
+    purge_expired_projects()                          # nobody acknowledges: deleted after the deadline anyway
+    assert not _exists(stuck["id"])
+
+
+def test_projects_that_predate_the_retention_start_are_aged_from_it(client):
+    from backend.platform.system_config import RETENTION_STARTED_KEY, ensure_retention_started
+
+    _, _, csrf = _account(client)
+    old = _project(client, csrf)
+    trashed = _project(client, csrf)
+    _trash(client, csrf, trashed["id"])
+    _age(old["id"], created_days=400)
+    _age(trashed["id"], created_days=400, trashed_days=100)
+    _set_retention(ttl=30, trash=7)
+    with SessionLocal.begin() as db:
+        row = db.get(SystemConfig, RETENTION_STARTED_KEY)
+        if row is not None:
+            db.delete(row)
+    with SessionLocal() as db:
+        ensure_retention_started(db)               # first daily pass ever: the clock starts now
+    purge_expired_projects()
+    assert _exists(old["id"]) and _exists(trashed["id"])
+    with SessionLocal.begin() as db:
+        db.get(SystemConfig, RETENTION_STARTED_KEY).value = {"at": (utcnow() - timedelta(days=31)).isoformat()}
+    purge_expired_projects()
+    assert not _exists(old["id"]) and not _exists(trashed["id"])
+    with SessionLocal.begin() as db:
+        db.delete(db.get(SystemConfig, RETENTION_STARTED_KEY))
+
+
+def test_default_workspace_name_is_reserved(client):
+    _, _, csrf = _account(client)
+    headers = {"X-CSRF-Token": csrf}
+    assert client.post("/api/v1/projects", headers=headers, json={"name": "默认工作空间"}).status_code == 422
+    normal = _project(client, csrf)
+    assert client.patch(f"/api/v1/projects/{normal['id']}", headers=headers, json={"name": "默认工作空间"}).status_code == 422
+    listed = client.get("/api/v1/projects?page=1&page_size=50").json()["items"]
+    default = next(item for item in listed if item["name"] == "默认工作空间")
+    assert client.patch(f"/api/v1/projects/{default['id']}", headers=headers, json={"name": "改名了"}).status_code == 422

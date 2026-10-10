@@ -29,7 +29,6 @@ from backend.platform.models import (
 )
 from backend.platform.storage import configured_storage_root
 from backend.services.project_retention import purge_expired_projects
-from backend.worker import _project_retention_loop
 
 
 @pytest.fixture(scope="module")
@@ -268,48 +267,6 @@ def test_expired_project_purge_removes_database_rows_and_resumes_staged_cleanup(
         assert db.scalar(select(func.count()).select_from(TaskResult).where(TaskResult.task_id == task.id)) == 0
         assert db.scalar(select(func.count()).select_from(TextFormatFlow).where(TextFormatFlow.project_id == project["id"])) == 0
         assert db.scalar(select(func.count()).select_from(ChapterReviewMark).where(ChapterReviewMark.project_id == project["id"])) == 0
-
-
-def test_project_retention_check_runs_from_worker_loop(monkeypatch: pytest.MonkeyPatch):
-    import threading
-
-    stop = threading.Event()
-    calls = []
-
-    def purge_once():
-        calls.append(True)
-        stop.set()
-
-    monkeypatch.setattr("backend.worker.purge_expired_projects", purge_once)
-    _project_retention_loop(stop)
-    assert calls == [True]
-
-
-def test_project_retention_retries_once_after_startup_skip(monkeypatch: pytest.MonkeyPatch):
-    class ImmediateStop:
-        waits: list[float] = []
-        stopped = False
-
-        def is_set(self):
-            return self.stopped
-
-        def wait(self, timeout):
-            self.waits.append(timeout)
-            return self.stopped
-
-    stop = ImmediateStop()
-    calls = []
-
-    def skip_then_complete():
-        calls.append(True)
-        if len(calls) == 2:
-            stop.stopped = True
-        return 0
-
-    monkeypatch.setattr("backend.worker.purge_expired_projects", skip_then_complete)
-    _project_retention_loop(stop)
-    assert len(calls) == 2
-    assert stop.waits == [60, 24 * 60 * 60]
 
 
 def test_restore_casefold_conflict_returns_success_instead_of_expired_status(client: TestClient):

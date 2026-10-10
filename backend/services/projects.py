@@ -23,6 +23,9 @@ from ..platform.workspace_layout import (
 from ..platform.storage import project_workspace_path
 
 
+DEFAULT_WORKSPACE_NAME = "默认工作空间"  # provisioned for every account; reserved, and exempt from natural expiry
+
+
 class ActiveProjectTasksError(ValueError):
     pass
 
@@ -72,13 +75,18 @@ def as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
-def trash_expires_at(deleted_at: datetime, trash_days: int) -> datetime:
-    return as_utc(deleted_at) + timedelta(days=trash_days)
+def trash_expires_at(deleted_at: datetime, trash_days: int, floor: datetime | None = None) -> datetime:
+    """``floor``: the retention start; older trash entries are aged from it (see retention_started_at)."""
+    start = as_utc(deleted_at)
+    return (max(start, floor) if floor is not None else start) + timedelta(days=trash_days)
 
 
-def project_expires_at(project: Project, project_ttl_days: int) -> datetime | None:
+def project_expires_at(project: Project, project_ttl_days: int, floor: datetime | None = None) -> datetime | None:
     """Natural expiry of a live project (None = never expires)."""
-    return as_utc(project.created_at) + timedelta(days=project_ttl_days) if project_ttl_days > 0 else None
+    if project_ttl_days <= 0:
+        return None
+    start = as_utc(project.created_at)
+    return (max(start, floor) if floor is not None else start) + timedelta(days=project_ttl_days)
 
 
 def move_project_to_trash(db: Session, project: Project) -> None:
@@ -100,12 +108,12 @@ def move_project_to_trash(db: Session, project: Project) -> None:
 
 def restore_project(db: Session, project: Project) -> None:
     """Restore a trashed project before the administrator-set trash deadline."""
-    from ..platform.system_config import project_retention
+    from ..platform.system_config import project_retention, retention_started_at
 
-    retention = project_retention(db)
-    if project.deleted_at is None or trash_expires_at(project.deleted_at, retention["trash_days"]) <= utcnow():
+    retention, floor = project_retention(db), retention_started_at(db)
+    if project.deleted_at is None or trash_expires_at(project.deleted_at, retention["trash_days"], floor) <= utcnow():
         raise ValueError("项目已超过回收期限")
-    expiry = project_expires_at(project, retention["project_ttl_days"])
+    expiry = project_expires_at(project, retention["project_ttl_days"], floor)
     if expiry is not None and expiry <= utcnow():
         # Restoring would hand the project straight to the next expiry pass.
         raise ValueError("项目已超过保质期，无法恢复")

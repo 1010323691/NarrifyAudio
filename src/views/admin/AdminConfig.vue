@@ -85,7 +85,7 @@ async function saveRetention() {
     error.value = '项目保质期为 0～3650 天的整数（0 表示不过期），回收站保留为 1～3650 天的整数'
     return
   }
-  if (ttl > 0 && !window.confirm(`确认保存？创建已超过 ${ttl} 天的现有项目会在下一轮清理（约 1 分钟内）被永久删除，包括音频、文件、日志和数据库记录，且不可恢复。`)) return
+  if (ttl > 0 && !window.confirm(`确认保存？创建已超过 ${ttl} 天的现有项目会在下一次每日清理（本地 0 点）被永久删除（若功能首次启用不足 ${ttl} 天，则从启用时刻起算），包括音频、文件、日志和数据库记录，且不可恢复。`)) return
   try { retention.value = await api.updateProjectRetentionSettings({ project_ttl_days: ttl, trash_days: trash }); toast({ title: '项目保留期限已保存', variant: 'success' }) }
   catch (cause) { error.value = errorMessage(cause) }
 }

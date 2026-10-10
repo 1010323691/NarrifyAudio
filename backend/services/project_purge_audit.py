@@ -46,13 +46,16 @@ def local_midnight(now: datetime | None = None) -> datetime:
     return moment.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def _key_in_use(db: Session, directory_key: str) -> bool:
+    return db.scalar(select(Project.id).where(Project.directory_key == directory_key).limit(1)) is not None
+
+
 def _candidate_paths(db: Session, record: ProjectPurgeRecord) -> list[Path]:
     root = configured_storage_root(db)
     workspace = root / record.directory_key
     # Directory keys are name-based: a project created (or trashed) later may now own this very
     # directory, and it must never be mistaken for the deleted project's leftovers.
-    key_in_use = db.scalar(select(Project.id).where(Project.directory_key == record.directory_key).limit(1)) is not None
-    paths = [] if key_in_use else [workspace]
+    paths = [] if _key_in_use(db, record.directory_key) else [workspace]
     paths += workspace.parent.glob(f".{record.project_id}.deleting-*")
     try:
         paths.append(internal_path(db, record.owner_id, record.project_id))
@@ -74,8 +77,11 @@ def find_traces(db: Session, record: ProjectPurgeRecord) -> dict:
 
 def _clear_traces(db: Session, record: ProjectPurgeRecord, traces: dict) -> None:
     root = configured_storage_root(db).resolve()
+    workspace = str(configured_storage_root(db) / record.directory_key)
     for raw in traces["paths"]:
         path = Path(raw)
+        if raw == workspace and _key_in_use(db, record.directory_key):
+            continue   # a project claimed this directory since the scan
         if not path.parent.resolve().is_relative_to(root):
             raise OSError(f"Refusing to remove a path outside the storage root: {path}")
         if path.is_symlink() or path.is_file():

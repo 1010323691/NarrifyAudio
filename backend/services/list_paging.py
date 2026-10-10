@@ -103,7 +103,7 @@ def entry_states(db, ctx, task_types):
 def project_page(db, user, page, page_size, query="", trashed=False, filter="all"):
     from sqlalchemy import func, select
     from ..platform.models import Project
-    from ..platform.system_config import project_retention
+    from ..platform.system_config import project_retention, retention_started_at
     from .projects import as_utc, project_expires_at, trash_expires_at
     statement = select(Project).where(Project.owner_id == user.id,
                                       Project.deleted_at.is_not(None) if trashed else Project.deleted_at.is_(None))
@@ -111,20 +111,21 @@ def project_page(db, user, page, page_size, query="", trashed=False, filter="all
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     # Trash expiry follows the administrator-set number of days.
     if trashed:
-        trash_days = project_retention(db)["trash_days"]
+        trash_days, floor = project_retention(db)["trash_days"], retention_started_at(db)
         from ..platform.models import utcnow
         projects = db.scalars(statement.order_by(Project.deleted_at, Project.id)).all()
-        active = sum(trash_expires_at(p.deleted_at, trash_days) > as_utc(utcnow()) for p in projects)
-        projects = [p for p in projects if filter == "all" or (trash_expires_at(p.deleted_at, trash_days) > as_utc(utcnow())) == (filter == "active")]
+        active = sum(trash_expires_at(p.deleted_at, trash_days, floor) > as_utc(utcnow()) for p in projects)
+        projects = [p for p in projects if filter == "all" or (trash_expires_at(p.deleted_at, trash_days, floor) > as_utc(utcnow())) == (filter == "active")]
         total = len(projects)
         projects = page_slice(projects, page, page_size)
     else:
         projects = db.scalars(statement.order_by(Project.updated_at.desc(), Project.id).offset((page-1)*page_size).limit(page_size)).all()
     ttl_days = 0 if trashed else project_retention(db)["project_ttl_days"]
+    live_floor = None if trashed else retention_started_at(db)
     items = [{"id": p.id, "name": p.name, "description": p.description, "directory_key": p.directory_key,
               "created_at": p.created_at.isoformat(), "updated_at": p.updated_at.isoformat(),
-              **({"expires_at": project_expires_at(p, ttl_days).isoformat()} if ttl_days else {}),
-              **({"deleted_at": as_utc(p.deleted_at).isoformat(), "expires_at": trash_expires_at(p.deleted_at, trash_days).isoformat()} if trashed else {})} for p in projects]
+              **({"expires_at": project_expires_at(p, ttl_days, live_floor).isoformat()} if ttl_days else {}),
+              **({"deleted_at": as_utc(p.deleted_at).isoformat(), "expires_at": trash_expires_at(p.deleted_at, trash_days, floor).isoformat()} if trashed else {})} for p in projects]
     return {"items": items, "pagination": page_meta(total, page, page_size, {"all": total, **({"active": active} if trashed else {})})}
 
 
