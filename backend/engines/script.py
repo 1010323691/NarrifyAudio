@@ -981,7 +981,7 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
     units = su.segment_chunk(chunk, generation.unit_max_chars)
     n_units = sum(1 for u in units if u.n)
     likely = su.likely_dialogue_numbers(units)
-    narrator_instruct = (generation.narrator_instruct or "").strip() or "平稳中性的叙述语气。"
+    narrator_instruct = _unit_narrator_instruct(generation)
     soft_max = min(150, max(10, int(generation.max_paragraph_chars or 200)))
     user_prompt = (user_prompt_template
                    .replace("{context}", _unit_context(chunk_num, total_chunks, previous_entries))
@@ -1712,9 +1712,128 @@ def _batch_user_prompt(template: str, context: str, size: int, n: int,
     return body + "\n\n" + "\n".join(extra)
 
 
+def _pack_chunk_budget(generation) -> int:
+    """The per-call text budget for packed re-checks: the parse ``chunk_size``, floored at
+    1000 chars so an unusually small chunk size cannot shatter every check into single calls."""
+    return max(1000, int(getattr(generation, "chunk_size", 3000) or 3000))
+
+
+def _unit_narrator_instruct(generation) -> str:
+    return (generation.narrator_instruct or "").strip() or "平稳中性的叙述语气。"
+
+
+def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster, *,
+                           stage: str, head: str) -> list | None:
+    """Numbered-unit counterpart of the JSON re-derivation used by the sentence-split check
+    and the long-paragraph re-split: ONE call labels the units of every entry in ``items``
+    (``[(entry, context_block), …]``), :func:`script_units.assemble` stitches each entry's
+    units back separately, so the model never retypes the text and entry boundaries cannot
+    drift.
+
+    Returns a list parallel to ``items`` — the re-derived ``{speaker, text, instruct}`` parts
+    or ``None`` (reply says nothing to change, or fails the gate: stitching self-check,
+    speaker outside the roster, a "split" into a single speaker with the text unchanged) —
+    or ``None`` overall when the call failed / the reply is unreadable (the caller re-asks
+    entry by entry). Tag-removal safety is :func:`script_units.assemble`'s: ``X`` only on
+    short tag-like units, ``E`` only a contiguous speech-verb phrase.
+    """
+    from . import script_units as su
+
+    sys_prompt, usr_template = unit_prompts
+    narrator_instruct = _unit_narrator_instruct(generation)
+    soft_max = min(150, max(10, int(generation.max_paragraph_chars or 200)))
+    k = len(items)
+    groups: list = []   # (units, first number, last number) per entry
+    sections: list = []
+    blocks: list = []
+    offset = 0
+    for j, (entry, block) in enumerate(items, 1):
+        units = su.segment_chunk(entry.get("text") or "", generation.unit_max_chars)
+        for u in units:
+            if u.n:
+                u.n += offset
+        count = sum(1 for u in units if u.n)
+        groups.append((units, offset, offset + count))
+        offset += count
+        body = su.render_units(units)
+        sections.append(f"【条目 {j}/{k}】\n{body}" if k > 1 else body)
+        if block:
+            blocks.append(f"【条目 {j}/{k} 的前后文】\n{block}" if k > 1 else block)
+    if not offset:
+        return [None] * k
+    context = "\n".join([head] + blocks)
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": usr_template
+         .replace("{context}", context).replace("{units}", "\n\n".join(sections))},
+    ]
+    handle.check()
+    try:
+        reply = _llm_call(llm, generation, messages, handle)
+    except TaskCancelled:
+        raise
+    except LLMUnavailableError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a failed call re-asks entry by entry / casts no vote
+        handle.log(f"  {stage}调用失败：{e}", "WARNING")
+        return None
+    plan = su.parse_unit_reply(reply, offset)
+    if plan.bad_lines * 5 > plan.total_lines:
+        handle.log(f"  {stage}响应无法解析为单元标签（{plan.bad_lines}/{plan.total_lines} 行无效）", "WARNING")
+        return None
+    out: list = []
+    billed = False
+    for (entry, _block), (units, lo, hi) in zip(items, groups):
+        sub = su.UnitPlan(
+            labels={n - lo: lab for n, lab in plan.labels.items() if lo < n <= hi}, ended=True)
+        shifted = [su.Unit(**{**u.__dict__, "n": u.n - lo if u.n else 0}) for u in units]
+        result = su.assemble(
+            shifted, sub, narrator_instruct, soft_max,
+            edit_enabled=generation.edit_enabled, edit_max_delete=generation.edit_max_delete_chars,
+            delete_max_chars=generation.delete_max_chars)
+        parts = result.entries
+        if hi == lo or not result.ok or not parts:
+            out.append(None)
+            continue
+        speakers = {p["speaker"] for p in parts}
+        if not speakers <= roster:
+            out.append(None)
+            continue
+        same_text = _skeleton("".join(p["text"] for p in parts)) == _skeleton(entry.get("text") or "")
+        entry_speaker = (entry.get("speaker") or "").strip()
+        if len(speakers) == 1 and same_text and (
+                speakers == {entry_speaker}                      # nothing re-derived (narration cut at soft_max)
+                or (speakers == {"NARRATOR"} and entry_speaker != "NARRATOR")):   # unlabeled ≠ demote a character
+            out.append(None)
+            continue
+        out.append(parts)
+        billed = True
+    if billed:
+        from ..platform.quota import consume_llm_output
+        consume_llm_output(json.dumps([p for g in out if g for p in g], ensure_ascii=False), stage)
+    return out
+
+
+def _unit_recheck_context(entries, i: int, n: int, roster, note: str) -> str:
+    """Chinese context block for a unit-protocol re-check of ``entries[i]``: the book's
+    characters and the ±n neighbouring entries (context only)."""
+    lines = []
+    names = sorted(roster - {"NARRATOR"})
+    if names:
+        lines.append("本书已出现的角色：" + "、".join(names))
+    window = build_batch_window(entries, i, 1, n)
+    for title, part in (("该条目之前的内容（仅供参考，不要标注）：", [it for it in window if it["index"] < i]),
+                        ("该条目之后的内容（仅供参考，不要标注）：", [it for it in window if it["index"] > i])):
+        if part:
+            lines.append(title)
+            lines.extend(f"{it['speaker']}：{(it['text'] or '').replace(chr(10), ' ')[:100]}" for it in part)
+    return "\n".join([note] + lines) if note else "\n".join(lines)
+
+
 def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, context,
                      roster, stage: str = "断句校验",
-                     single_call: bool = False, budget_deferred=None) -> list | None:
+                     single_call: bool = False, budget_deferred=None,
+                     unit_prompts=None) -> list | None:
     """Re-run the parse LLM on one flagged entry and resolve the re-derivation by
     majority vote — the 角色匹配检查 consensus rule: one first call plus two retries
     (three total), early-stopping the instant a strict majority is decided, and one
@@ -1747,6 +1866,17 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
 
     def one_vote(attempt: int, no_vote_note: str = "，本轮无票") -> None:
         handle.check()  # cooperative cancel / pause between validation calls
+        if unit_prompts is not None:
+            got = rederive_entries_units(handle, llm, generation, unit_prompts, [(entry, context)],
+                                         roster, stage=stage, head="")
+            if not got or got[0] is None:
+                handle.log(f"  {stage}第 {attempt} 次未得到可采纳的重切结果{no_vote_note}", "WARNING")
+                return
+            sig = tuple((p["speaker"], _skeleton(p["text"])) for p in got[0])
+            budget_votes.append(sig)
+            votes.append(sig)
+            parts_by_sig.setdefault(sig, got[0])
+            return
         try:
             reply = _llm_call(llm, generation, messages, handle)
         except TaskCancelled:
@@ -1827,6 +1957,11 @@ def revalidate_entries_packed(handle, llm, generation, sys_prompt, usr_template,
         {"role": "user", "content": usr_template.format(context=context, chunk=chunk)},
     ]
     handle.check()
+    # The reply re-types every packed entry as JSON (~2 tokens per character): never let the
+    # configured max_tokens truncate a pack that chunk_size allowed.
+    need_tokens = 2 * len(chunk) + 512
+    if getattr(generation, "max_tokens", 0) < need_tokens:
+        generation = generation.model_copy(update={"max_tokens": need_tokens})
     try:
         reply = _llm_call(llm, generation, messages, handle)
     except TaskCancelled:
@@ -1868,7 +2003,7 @@ def revalidate_entries_packed(handle, llm, generation, sys_prompt, usr_template,
 
 
 def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, entries,
-                             context_window=4, *, budget_deferred=None) -> tuple:
+                             context_window=4, *, budget_deferred=None, unit_prompts=None) -> tuple:
     """Post-parse sentence-split validation (runs in ``generate_file`` BEFORE the
     mechanical NARRATOR merge, so split-off narration parts merge with their
     neighbours as usual).
@@ -1897,6 +2032,12 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
     # All windows + context strings up front — from the pristine list.
     contexts = {}
     for i in flagged:
+        if unit_prompts is not None:
+            contexts[i] = _unit_recheck_context(
+                entries, i, n, roster,
+                "（复查单个条目：下面的【原文单元】是该条目已存的文字，疑似断句失败——台词引号里夹着"
+                "「……道：」之类的说话标签。请像处理原文一样重新给它打标签。）")
+            continue
         window = build_batch_window(entries, i, 1, n)
         lines = [
             "(Re-check of one entry: the SOURCE TEXT below is a single entry's stored "
@@ -1934,7 +2075,8 @@ def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, 
         snippet = (entries[i].get("text") or "").replace("\n", " ")
         handle.log(f"条目 {i + 1}（疑似断句失败）：{snippet[:60]}{'…' if len(snippet) > 60 else ''}")
         parts = revalidate_entry(handle, llm, generation, sys_prompt, usr_template,
-                                 entries[i], contexts[i], roster, budget_deferred=budget_deferred)
+                                 entries[i], contexts[i], roster, budget_deferred=budget_deferred,
+                                 unit_prompts=unit_prompts)
         if parts is None:
             continue  # 无共识 / 校验未过 → 条目保持原样
         if updated is None:
@@ -2110,6 +2252,33 @@ def _inherit_narrator_instructs(entries: list, flagged: list[int], max_chars: in
     return updated, inherited
 
 
+def _instruct_target_batches(entries: list, targets: list[int], n: int, max_prompt_chars: int) -> list:
+    """Split ``targets`` (ascending) into consecutive batches whose prompt stays within
+    ``max_prompt_chars`` of entry text: a target costs its own text twice (target row + source
+    text) plus its ±n context rows (counted once even when neighbouring targets share them),
+    each row with ~100 chars of JSON overhead. A single target always forms a batch."""
+    def row(i: int) -> int:
+        return len(entries[i].get("text") or "") + 100
+
+    batches: list = []
+    cur: list = []
+    seen: set = set()
+    cost = 0
+    for index in sorted(targets):
+        window = set(range(max(0, index - n), min(len(entries), index + n + 1)))
+        add = row(index) + sum(row(j) for j in window - seen)
+        if cur and cost + add > max_prompt_chars:
+            batches.append(cur)
+            cur, seen, cost = [], set(), 0
+            add = row(index) + sum(row(j) for j in window)
+        cur.append(index)
+        seen |= window
+        cost += add
+    if cur:
+        batches.append(cur)
+    return batches
+
+
 def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_template, entries,
                                  context_window=4, max_chars=INSTRUCT_MAX_CHARS,
                                  *, budget_deferred=None) -> tuple:
@@ -2135,32 +2304,39 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
     if deferred:
         handle.log(f"语音指导待核对：{len(deferred)} 条无法安全继承，未追加 LLM 请求", "WARNING")
     replacement = {}
+    requests = 0
     if targets:
         n = max(0, int(context_window))
-        handle.log(f"instruct flags={len(flagged)}; narrator inherited={len(inherited)}; LLM targets={len(targets)}")
+        batches = _instruct_target_batches(
+            updated, targets, n, 2 * _pack_chunk_budget(generation))
+        handle.log(f"instruct flags={len(flagged)}; narrator inherited={len(inherited)}; "
+                   f"LLM targets={len(targets)}; requests={len(batches)}")
         handle.progress(0.99, f"instruct targets={len(targets)}")
-        handle.check()
-        messages = [
-            {"role": "system", "content": (
-                "只修复目标条目的 instruct 字段，用中文书写。只输出 JSON。"
-                "每个目标下标返回一个对象。绝不改动 index、speaker 或 text。"
-            )},
-            {"role": "user", "content": _instruct_book_prompt(updated, targets, n, max_chars)},
-        ]
-        try:
-            reply = _llm_call(llm, generation, messages, handle)
-        except TaskCancelled:
-            raise
-        except LLMUnavailableError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            handle.log(f"instruct batch call failed: {e}", "WARNING")
-            handle.log(f"语音指导待核对：{len(targets)} 条未修复，不追加请求", "WARNING")
-            return updated, len(flagged), len(inherited)
-        replacement = _parse_instruct_batch(reply, targets, max_chars)
-        for index, value in replacement.items():
-            updated[index] = dict(updated[index])
-            updated[index]["instruct"] = value
+        for batch in batches:
+            handle.check()
+            messages = [
+                {"role": "system", "content": (
+                    "只修复目标条目的 instruct 字段，用中文书写。只输出 JSON。"
+                    "每个目标下标返回一个对象。绝不改动 index、speaker 或 text。"
+                )},
+                {"role": "user", "content": _instruct_book_prompt(updated, batch, n, max_chars)},
+            ]
+            try:
+                reply = _llm_call(llm, generation, messages, handle)
+            except TaskCancelled:
+                raise
+            except LLMUnavailableError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                handle.log(f"instruct batch call failed: {e}", "WARNING")
+                handle.log(f"语音指导待核对：{len(batch)} 条未修复，不追加请求", "WARNING")
+                continue
+            requests += 1
+            got = _parse_instruct_batch(reply, batch, max_chars)
+            replacement.update(got)
+            for index, value in got.items():
+                updated[index] = dict(updated[index])
+                updated[index]["instruct"] = value
 
     fixed = len(inherited) + sum(
         1 for index, value in replacement.items()
@@ -2168,7 +2344,7 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
     )
     handle.log(
         f"instruct repaired={fixed}; narrator inherited={len(inherited)}; "
-        f"LLM requests={1 if targets else 0}"
+        f"LLM requests={requests}"
     )
     unresolved = [index for index in flagged if index not in inherited and index not in replacement]
     if unresolved:
@@ -2242,7 +2418,7 @@ validate_instructs = _validate_instructs_one_call
 
 def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, entries,
                            max_chars, context_window=4, *, budget_deferred=None,
-                           narrator_instruct=None) -> tuple:
+                           narrator_instruct=None, unit_prompts=None) -> tuple:
     """超长条目的 LLM 重切（解析内，断句校验之后、归属抽样之前——重切可能
     产生新归属的台词条目，需要被抽样审计；受 ``generation.check_long_paragraphs``
     门控，由 ``generate_file`` 判断）。
@@ -2253,10 +2429,14 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     未过门保留原条目（**从不猜**），直接交由超长段落机械分段切割（结果没变
     就不再消耗更多 LLM 调用）。重切的目的是拆开被揉在旁白里的角色台词。
 
-    ``generation.long_resplit_pack`` 把若干个超长条目打包进同一次调用
-    （:func:`revalidate_entries_packed`）：``0`` = 以章节（本文件）为单位一包，``N`` = 每包
-    最多 N 条，``1`` = 逐条调用（旧行为）；每包条目文字总量另受 ``max_tokens`` 的一半约束
-    （回复要整段重写成 JSON），回复对不上条目边界时该包退回逐条调用。
+    ``generation.long_resplit_pack`` 把若干个超长条目打包进同一次调用：``0`` = 以章节（本文件）
+    为单位，**一章最多一包**（条目文字不超过 ``chunk_size``、文字加各条上下文不超过其 2 倍；
+    超长条目装不进时只送最长的几条，其余交机械分段）；``N`` = 每包最多 N 条（同样受上述预算
+    约束）；``1`` = 逐条调用（旧行为）。JSON 路径的打包（:func:`revalidate_entries_packed`）要把
+    条目整段重写成 JSON，调用时按包体量自行抬高 ``max_tokens``，回复对不上条目边界时该包退回逐条调用。
+    ``unit_prompts``（``(系统提示词, 用户模板)``，单元协议传入）非空时，重切改走编号单元：
+    条目文字由程序切成编号单元、模型只输出标签行、:func:`rederive_entries_units` 机械拼回——
+    不再逐字重写 JSON，打包的条目边界也不会错位；``None`` 时保持 JSON 路径不变。
     ``narrator_instruct``（单元协议传入管理员配置的固定文本）非空时，重切出的旁白条目统一
     用它作 instruct——重切走的是 JSON 解析提示词，模型会自己写旁白 instruct，与单元协议
     「旁白 instruct 不由模型输出」不一致。
@@ -2286,6 +2466,13 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     blocks = {}   # per-entry "entries before / after" lines (context only)
     contexts = {}  # the single-entry {context}
     for i in flagged:
+        if unit_prompts is not None:
+            blocks[i] = _unit_recheck_context(entries, i, n, frozenset(), "")
+            contexts[i] = _unit_recheck_context(
+                entries, i, n, roster,
+                f"（复查单个条目：下面的【原文单元】是该条目已存的文字，超过 {max_chars} 字，很可能是"
+                "没拆开的旁白与台词。请像处理原文一样重新打标签，把台词单元标出来。）")
+            continue
         window = build_batch_window(entries, i, 1, n)
         lines = []
         before = [it for it in window if it["index"] < i]
@@ -2320,22 +2507,51 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
             "re-emit them.)")
         return head + ("\n" + roster_line if roster_line else "")
 
+    configured = getattr(generation, "long_resplit_pack", 1)
+    # A pack never carries more than one parse chunk (chunk_size) of entry text, and — because
+    # every packed entry also brings its own ±n context block, and the whole prompt must fit
+    # the engine's per-request context (a 20000-token engine rejected whole-chapter packs with
+    # HTTP 400) — text PLUS context stays within twice that. Both limits apply to both protocols.
+    text_cap = _pack_chunk_budget(generation)
+    total_cap = 2 * text_cap
+    if configured == 0 and len(flagged) > 1:
+        # One chapter = at most ONE chunk-sized call. A book of mostly long narration would
+        # otherwise re-run hundreds of paragraphs for little gain: keep the longest entries
+        # that fit one pack and leave the rest to the mechanical split.
+        ranked = sorted(flagged, key=lambda i: (-len(entries[i].get("text") or ""), i))
+        chosen: list = []
+        used_text = used_total = 0
+        for i in ranked:
+            text_len = len(entries[i].get("text") or "")
+            cost = text_len + len(blocks[i])
+            if used_text + text_len <= text_cap and used_total + cost <= total_cap:
+                chosen.append(i)
+                used_text += text_len
+                used_total += cost
+        if not chosen:
+            chosen = ranked[:1]   # a single oversized entry still gets its one call
+        if len(chosen) < len(flagged):
+            handle.log(f"超长段落检查：本章 {len(flagged)} 条超长条目装不进一个 chunk，只重切最长的 "
+                       f"{len(chosen)} 条，其余 {len(flagged) - len(chosen)} 条交机械分段（每章最多 1 次重切调用）")
+        flagged = sorted(chosen)
     order = sorted(flagged, reverse=True)  # application order (see below)
     # 0 = one pack per chapter (this file); the reply re-types every packed entry as JSON
-    # (~2 tokens per character), so a pack's entry text is capped by half of max_tokens.
-    configured = getattr(generation, "long_resplit_pack", 1)
+    # (~2 tokens per character), which revalidate_entries_packed budgets for itself.
     pack_size = max(1, int(configured)) if configured != 0 else len(flagged)
-    pack_chars = max(200, int(getattr(generation, "max_tokens", 4096)) // 2)
     packs: list = []
     cur: list = []
-    cur_chars = 0
+    cur_chars = 0   # entry text in the open pack
+    cur_total = 0   # entry text + context blocks in the open pack
     for i in sorted(flagged):  # reading order inside a pack: the prompt promises "in order"
-        cost = len((entries[i].get("text") or ""))
-        if cur and (len(cur) >= pack_size or cur_chars + cost > pack_chars):
+        text_len = len((entries[i].get("text") or ""))
+        cost = text_len + len(blocks[i])
+        if cur and (len(cur) >= pack_size or cur_chars + text_len > text_cap
+                    or cur_total + cost > total_cap):
             packs.append(cur)
-            cur, cur_chars = [], 0
+            cur, cur_chars, cur_total = [], 0, 0
         cur.append(i)
-        cur_chars += cost
+        cur_chars += text_len
+        cur_total += cost
     if cur:
         packs.append(cur)
 
@@ -2356,7 +2572,16 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
             text_len = len((entries[i].get("text") or "").strip())
             handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
         packed = None
-        if len(pack) > 1:
+        if unit_prompts is not None:
+            packed = rederive_entries_units(
+                handle, llm, generation, unit_prompts, [(entries[i], blocks[i]) for i in pack], roster,
+                stage="超长段落重切",
+                head=(f"（复查 {len(pack)} 个条目：下面的【原文单元】依次是它们已存的文字，每个都超过 "
+                      f"{max_chars} 字，很可能是没拆开的旁白与台词。请像处理原文一样重新打标签，把台词"
+                      "单元标出来；编号连续，条目之间互不相关。）\n"
+                      + ("本书已出现的角色：" + "、".join(sorted(roster - {"NARRATOR"}))
+                         if roster - {"NARRATOR"} else "")))
+        elif len(pack) > 1:
             packed = revalidate_entries_packed(
                 handle, llm, generation, sys_prompt, usr_template,
                 [(entries[i], blocks[i]) for i in pack], roster,
@@ -2370,7 +2595,8 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
             for i in pack:
                 results[i] = revalidate_entry(
                     handle, llm, generation, sys_prompt, usr_template,
-                    entries[i], contexts[i], roster, stage="超长段落重切", single_call=True)
+                    entries[i], contexts[i], roster, stage="超长段落重切", single_call=True,
+                    unit_prompts=unit_prompts)
         done += len(pack)
 
     updated = None
@@ -3083,18 +3309,37 @@ def _run_rejudge_groups(handle, llm: LLMConfig, generation: GenerationConfig,
     batch_cap = max(1, int(generation.check_batch_size or 0))
     if pack_targets > 0:
         groups = merge_overlapping_groups(groups, n, batch_cap)
-    window_json: list[str] = []
-    for grp in groups:
-        grp_set = set(grp)
+    # A call's window text (targets + their context) is capped by the parse chunk: twice
+    # chunk_size, and never above the configured check_pack_max_chars. A group whose own window
+    # is over the cap is halved until each piece fits (a single target always stays whole).
+    window_cap = min(int(getattr(generation, "check_pack_max_chars", 6000)),
+                     2 * _pack_chunk_budget(generation))
+
+    def window_text(grp: list) -> str:
         start, size = grp[0], grp[-1] - grp[0] + 1
-        span = set(range(start, start + size))
-        skip = span - grp_set  # in-span non-targets → context, never re-judged
-        window_json.append(json.dumps(build_batch_window(original, start, size, n, skip=skip),
-                                      ensure_ascii=False, indent=2))
+        skip = set(range(start, start + size)) - set(grp)  # in-span non-targets → context only
+        return json.dumps(build_batch_window(original, start, size, n, skip=skip),
+                          ensure_ascii=False, indent=2)
+
+    fitted: list = []
+
+    def fit(grp: list) -> None:
+        text = window_text(grp)
+        if len(text) <= window_cap or len(grp) < 2:
+            fitted.append((grp, text))
+            return
+        mid = len(grp) // 2
+        fit(grp[:mid])
+        fit(grp[mid:])
+
+    for grp in groups:
+        fit(grp)
+    groups = [g for g, _ in fitted]
+    window_json: list[str] = [w for _, w in fitted]
     packs = plan_rejudge_packs(
         [len(g) for g in groups], [len(w) for w in window_json],
         max_targets=pack_targets,
-        max_chars=int(getattr(generation, "check_pack_max_chars", 6000)),
+        max_chars=window_cap,
         max_windows=int(getattr(generation, "check_pack_max_windows", 8)),
         group_spans=[(g[0], g[-1]) for g in groups], min_gap=2 * max(n, 1),
     )
@@ -3629,6 +3874,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 context_window=int(generation.check_context_window or 0),
                 budget_deferred=budget_deferred,
+                unit_prompts=(unit_sys, unit_usr) if use_units else None,
             )
         else:
             # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
@@ -3652,6 +3898,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 budget_deferred=budget_deferred,
                 narrator_instruct=((generation.narrator_instruct or "").strip() or None)
                 if use_units else None,
+                unit_prompts=(unit_sys, unit_usr) if use_units else None,
             )
         else:
             # 开关关闭：跳过 LLM 语义重切并留一行日志；机械分段兜底（长度硬上界
