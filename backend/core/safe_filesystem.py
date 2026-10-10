@@ -36,7 +36,13 @@ def safe_regular_path(root: Path, relative: str, *, directory: bool = False) -> 
 
 
 def file_identity(stat: os.stat_result) -> tuple[int, ...]:
-    return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino)
+    # POSIX st_dev is not stable across reboots (NVMe/partition minor numbers
+    # are reassigned by enumeration order), which silently invalidated every
+    # stored identity -- deliveries, input versions -- after a restart. The
+    # inode already pins the file within its filesystem, so the device slot is
+    # fixed at 0 there. Windows keeps the volume serial (stable).
+    device = stat.st_dev if os.name == "nt" else 0
+    return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, device, stat.st_ino)
 
 
 def matches_open_file_identity(stat: os.stat_result, expected: tuple[int, ...]) -> bool:
