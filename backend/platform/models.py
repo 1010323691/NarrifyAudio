@@ -169,7 +169,7 @@ class ProjectFile(Base):
     object_key: Mapped[str] = mapped_column(String(700), unique=True, nullable=False)
     object_key_normalized: Mapped[str] = mapped_column(String(64), default=object_key_default, nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), default="application/octet-stream", nullable=False)
-    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     kind: Mapped[str] = mapped_column(String(30), default="input", nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

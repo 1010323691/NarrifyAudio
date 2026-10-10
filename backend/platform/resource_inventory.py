@@ -22,7 +22,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..core.safe_filesystem import is_link_or_junction, safe_regular_path
+from ..core.safe_filesystem import file_identity, is_link_or_junction, safe_regular_path
 from .models import Project, Task, TaskResult, User
 from .storage import configured_storage_root, safe_project_workspace_path
 from .task_lifecycle import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
@@ -315,7 +315,7 @@ def build_index(
                         bucket = categories.setdefault(module, {"key": module, "label": RESOURCE_CATEGORIES[module], "count": 0, "size_bytes": 0})
                         bucket["count"] += 1
                         bucket["size_bytes"] += stat.st_size
-                    batch.append((resource_id(project_id, relative), relative, "" if path.parent == workspace else path.relative_to(workspace).parent.as_posix(), entry.name, module, kind, stat.st_size if kind == "file" else 0, stat.st_mtime_ns, stat.st_ctime_ns, str(stat.st_dev), str(stat.st_ino), path.suffix.lower(), preview_kind(entry.name, module) if kind == "file" else None, natural_key(relative)))
+                    batch.append((resource_id(project_id, relative), relative, "" if path.parent == workspace else path.relative_to(workspace).parent.as_posix(), entry.name, module, kind, stat.st_size if kind == "file" else 0, stat.st_mtime_ns, stat.st_ctime_ns, str(file_identity(stat)[3]), str(stat.st_ino), path.suffix.lower(), preview_kind(entry.name, module) if kind == "file" else None, natural_key(relative)))
                     if len(batch) >= 500:
                         connection.executemany("INSERT INTO entries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", batch)
                         batch.clear()
@@ -387,7 +387,14 @@ def attach_deliveries(connection, records: dict) -> None:
     connection.execute("DELETE FROM eligible_deliveries")
     for relative, record in records.items():
         identity = record["identity"]
-        connection.execute("INSERT OR IGNORE INTO eligible_deliveries SELECT relative_path FROM entries WHERE relative_path=? AND size_bytes=? AND mtime_ns=? AND ctime_ns=? AND device=? AND inode=?", [relative, *identity[:3], str(identity[3]), str(identity[4])])
+        # POSIX device numbers are not stable across reboots (see file_identity),
+        # so records and snapshots written before/after that change only agree
+        # on the other slots there.
+        device_clause, device_args = ("AND device=? ", [str(identity[3])]) if os.name == "nt" else ("", [])
+        connection.execute(
+            "INSERT OR IGNORE INTO eligible_deliveries SELECT relative_path FROM entries WHERE relative_path=? AND size_bytes=? AND mtime_ns=? AND ctime_ns=? "
+            + device_clause + "AND inode=?",
+            [relative, *identity[:3], *device_args, str(identity[4])])
 
 
 def entry_json(row: sqlite3.Row, project: Project, snapshot: dict, delivery: dict | None = None) -> dict:
