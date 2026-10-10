@@ -1266,3 +1266,22 @@ def test_llm_trace_reports_active_limit_and_rank(tmp_path, monkeypatch, caplog):
         call("http://x", "key", "model")
     line = next(r.getMessage() for r in caplog.records if "llm_call" in r.getMessage())
     assert "active=0" in line and "limit=4" in line and "rank=0" in line
+
+
+def test_llm_admission_wakes_one_more_waiter_per_slot_still_free(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
+    wakes = []
+    real_wake = admission._llm_wake
+    monkeypatch.setattr(admission, "_llm_wake", lambda count=1: (wakes.append(count), real_wake(count))[1])
+    with gpu_permit("LLM"):
+        # 3 slots, nothing else running: after taking one, two are still free -> two more waiters are woken
+        assert wakes == [2]
+    assert wakes == [2, 1]        # and leaving hands the freed slot to the next waiter
+    wakes.clear()
+    with SessionLocal.begin() as db:                           # two other calls already running: no slot left over
+        for _ in range(2):
+            db.add(GPURequest(id=new_id(), service="LLM", status="running", owner_pid=os.getpid(), created_at=utcnow()))
+    with gpu_permit("LLM"):
+        assert wakes == []
