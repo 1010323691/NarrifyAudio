@@ -497,6 +497,8 @@ export interface AppConfig {
     base_url: string
     api_key: string
     model_name: string
+    /** 给 system 消息加 NInfer 前缀缓存断点；仅 NInfer 服务可开。 */
+    prompt_cache_breakpoint: boolean
   }
   prompts: {
     system_prompt: string

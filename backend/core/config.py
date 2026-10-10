@@ -126,6 +126,10 @@ class LLMConfig(BaseModel):
     # Stream completion events so the parser can report live rate and progress.
     # Durable task history intentionally does not store raw model output text.
     stream: bool = True
+    # Mark the system message with NInfer's ``prompt_cache_breakpoint`` content-part field so
+    # the (identical) system prompt is saved as a reusable prefix. Enable ONLY for NInfer;
+    # strict OpenAI-compatible gateways may reject the unknown field.
+    prompt_cache_breakpoint: bool = False
 
 
 class PromptsConfig(BaseModel):
