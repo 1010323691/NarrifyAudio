@@ -232,9 +232,11 @@ class GenerationConfig(BaseModel):
     # （实际生效值 = min(两者)）。超过阈值的条目一律送重切——目的是拆开被揉在旁白里的
     # 角色台词，不是缩短旁白。
     long_resplit_chars: int = Field(default=130, ge=10, le=2000)
-    # 超长条目重切的打包数：每次 LLM 调用最多带几个超长条目（1 = 逐条一次调用，旧行为）；
-    # 每包还受 check_pack_max_chars 限制，回复对不上条目边界时该包退回逐条调用。
-    long_resplit_pack: int = Field(default=4, ge=1, le=20)
+    # 超长条目重切的打包数：每次 LLM 调用最多带几个超长条目。0 = 以章节为单位，一个文件
+    # 的全部超长条目一次调用（默认）；1 = 逐条一次调用（旧行为）；N = 每包最多 N 条。
+    # 无论取值，每包条目文字总量还受 max_tokens 约束（回复是整段 JSON，超出会被截断），
+    # 回复对不上条目边界时该包退回逐条调用。
+    long_resplit_pack: int = Field(default=0, ge=0, le=100)
     # 纯标点条目吸收（解析内第六阶段，确定性零 LLM 成本）：整条无任何词字符的条目
     # （独立「……」/「？」等）并入相邻 NARRATOR 条目（标题守卫），无 NARRATOR 邻接则删除。
     absorb_punct_entries: bool = True

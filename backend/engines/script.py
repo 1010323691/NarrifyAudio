@@ -2253,9 +2253,10 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     未过门保留原条目（**从不猜**），直接交由超长段落机械分段切割（结果没变
     就不再消耗更多 LLM 调用）。重切的目的是拆开被揉在旁白里的角色台词。
 
-    ``generation.long_resplit_pack`` > 1 时把若干个超长条目打包进同一次调用
-    （:func:`revalidate_entries_packed`；每包的条数和字数受 ``check_pack_max_chars``
-    约束），回复对不上条目边界时该包退回逐条调用；``1`` = 逐条调用（旧行为）。
+    ``generation.long_resplit_pack`` 把若干个超长条目打包进同一次调用
+    （:func:`revalidate_entries_packed`）：``0`` = 以章节（本文件）为单位一包，``N`` = 每包
+    最多 N 条，``1`` = 逐条调用（旧行为）；每包条目文字总量另受 ``max_tokens`` 的一半约束
+    （回复要整段重写成 JSON），回复对不上条目边界时该包退回逐条调用。
     ``narrator_instruct``（单元协议传入管理员配置的固定文本）非空时，重切出的旁白条目统一
     用它作 instruct——重切走的是 JSON 解析提示词，模型会自己写旁白 instruct，与单元协议
     「旁白 instruct 不由模型输出」不一致。
@@ -2320,13 +2321,16 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         return head + ("\n" + roster_line if roster_line else "")
 
     order = sorted(flagged, reverse=True)  # application order (see below)
-    pack_size = max(1, int(getattr(generation, "long_resplit_pack", 1) or 1))
-    pack_chars = int(getattr(generation, "check_pack_max_chars", 6000))
+    # 0 = one pack per chapter (this file); the reply re-types every packed entry as JSON
+    # (~2 tokens per character), so a pack's entry text is capped by half of max_tokens.
+    configured = getattr(generation, "long_resplit_pack", 1)
+    pack_size = max(1, int(configured)) if configured != 0 else len(flagged)
+    pack_chars = max(200, int(getattr(generation, "max_tokens", 4096)) // 2)
     packs: list = []
     cur: list = []
     cur_chars = 0
     for i in sorted(flagged):  # reading order inside a pack: the prompt promises "in order"
-        cost = len((entries[i].get("text") or "")) + len(blocks[i])
+        cost = len((entries[i].get("text") or ""))
         if cur and (len(cur) >= pack_size or cur_chars + cost > pack_chars):
             packs.append(cur)
             cur, cur_chars = [], 0

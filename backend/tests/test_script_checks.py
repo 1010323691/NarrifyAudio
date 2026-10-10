@@ -605,3 +605,25 @@ def test_long_resplit_uses_fixed_narrator_instruct_under_units_protocol(monkeypa
     out2, _c, _f = script.long_paragraph_resplit(
         Handle(), LLMConfig(), GenerationConfig(), "sys", "{context}\n{chunk}", rows, 130)
     assert [e["instruct"] for e in out2] == ["模型自己写的旁白语气"]  # JSON protocol keeps the model's
+
+
+def test_long_resplit_pack_zero_is_one_call_per_chapter_until_the_output_cap(monkeypatch):
+    rows = [entry("NARRATOR", f"第{k}段长旁白，" * 24) for k in range(6)]
+    calls = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        calls.append(messages[1]["content"])
+        return json.dumps([{"speaker": "NARRATOR", "text": "x"}])  # unpartitionable → singles follow
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    handle = Handle()
+    script.long_paragraph_resplit(handle, LLMConfig(), GenerationConfig(long_resplit_pack=0,
+                                  max_tokens=100000), "sys", "{context}\n{chunk}", rows, 130)
+    assert calls[0].count("【条目 ") == 6 and "6/6" in calls[0]   # 6 entries, ONE packed call
+    assert any("共 1 次调用" in m for _l, m in handle.logs)
+    calls.clear()
+    handle = Handle()
+    script.long_paragraph_resplit(handle, LLMConfig(), GenerationConfig(long_resplit_pack=0,
+                                  max_tokens=1000), "sys", "{context}\n{chunk}", rows, 130)
+    # max_tokens=1000 → 500 chars of entry text per pack; each entry is 168 chars → 2 per pack
+    assert any("共 3 次调用" in m for _l, m in handle.logs)
