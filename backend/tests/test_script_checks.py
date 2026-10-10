@@ -508,25 +508,100 @@ def test_boundary_risk_targets_narrow_to_dialogue_near_boundary():
     assert script.select_boundary_risk_targets(rows, [6, 12], 4, target_window=4) == wide
 
 
-def test_long_resplit_band_skips_plain_narration_but_not_quoted_or_dialogue(monkeypatch):
+def _packed_reply(parts_per_entry):
+    return json.dumps([p for parts in parts_per_entry for p in parts], ensure_ascii=False)
+
+
+def _long_rows():
+    a = entry("NARRATOR", "他走进房间，" * 12 + "“你好。”" + "她笑了笑，" * 12)   # > 130, hides a quote
+    b = entry("NARRATOR", "夜色渐深，" * 30)                                    # > 130, plain narration
+    c = entry("NARRATOR", "窗外下着雨，" * 26)
+    return [entry("甲", "短句。"), a, entry("乙", "短句。"), b, entry("甲", "短句。"), c]
+
+
+def test_long_resplit_packs_entries_and_partitions_the_reply(monkeypatch):
+    rows = _long_rows()
+    a, b, c = rows[1], rows[3], rows[5]
+    a1, a2, a3 = a["text"][:72], "“你好。”", a["text"][72 + 4:]
+    calls = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        calls.append(messages[1]["content"])
+        return _packed_reply([
+            [{"speaker": "NARRATOR", "text": a1}, {"speaker": "甲", "text": "你好。"},
+             {"speaker": "NARRATOR", "text": a3}],
+            [{"speaker": "NARRATOR", "text": b["text"]}],
+            [{"speaker": "NARRATOR", "text": c["text"]}],
+        ])
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    gen = GenerationConfig(long_resplit_pack=4)
+    out, checked, fixed = script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys",
+                                                          "{context}\n{chunk}", rows, 130)
+    assert len(calls) == 1 and checked == 3  # three long entries, ONE call
+    assert "【条目 1/3】" in calls[0] and "【条目 3/3】" in calls[0]
+    assert calls[0].count("Entries immediately before it") >= 1
+    assert fixed == 3 and [e["speaker"] for e in out].count("甲") == 3  # 2 original + the hidden line split out
+    assert script._skeleton("".join(e["text"] for e in out)) == script._skeleton(
+        "".join(e["text"] for e in rows))  # nothing lost; only the quote marks were stripped
+
+
+def test_long_resplit_pack_gates_each_entry_and_falls_back_on_bad_boundaries(monkeypatch):
+    rows = _long_rows()
+    a, b, c = rows[1], rows[3], rows[5]
+    replies = []
+
+    def fake_call(llm, generation, messages, handle=None):
+        return replies.pop(0)
+
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    gen = GenerationConfig(long_resplit_pack=4)
+    # one entry rewritten (text changed → fails its own gate), the others faithful
+    replies.append(_packed_reply([
+        [{"speaker": "NARRATOR", "text": "完全改写了。" * 3}],
+        [{"speaker": "NARRATOR", "text": b["text"]}],
+        [{"speaker": "NARRATOR", "text": c["text"]}],
+    ]))
+    out, checked, fixed = script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys",
+                                                          "{context}\n{chunk}", rows, 130)
+    assert checked == 3 and out[1] == a  # the bad entry kept unchanged; no mechanical split here
+    # A reply whose output boundary straddles two source entries cannot be partitioned: the
+    # pack is re-asked entry by entry (3 more calls, each a single-entry answer).
+    straddle = [{"speaker": "NARRATOR", "text": a["text"] + b["text"][:10]},
+                {"speaker": "NARRATOR", "text": b["text"][10:] + c["text"]}]
+    replies[:] = [json.dumps(straddle, ensure_ascii=False)] + [
+        json.dumps([{"speaker": "NARRATOR", "text": r["text"]}], ensure_ascii=False)
+        for r in (a, b, c)]  # single-entry fallback asks in reading order
+    out, checked, fixed = script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys",
+                                                          "{context}\n{chunk}", rows, 130)
+    assert replies == [] and checked == 3  # 1 packed call + 3 single calls, all consumed
+
+
+def test_long_resplit_pack_one_keeps_one_call_per_entry(monkeypatch):
+    rows = _long_rows()
     asked = []
 
-    def fake_revalidate(handle, llm, generation, sys_prompt, usr_template, entry, context,
-                        roster, **kw):
-        asked.append(entry["text"])
-        return None
+    def fake_call(llm, generation, messages, handle=None):
+        asked.append(messages[1]["content"])
+        return json.dumps([{"speaker": "NARRATOR", "text": "x"}])
 
-    monkeypatch.setattr(script, "revalidate_entry", fake_revalidate)
-    plain = entry("NARRATOR", "他走在路上，" * 24)               # 144 chars, no quotes
-    quoted = entry("NARRATOR", "他说：" + "“好”" + "，走吧。" * 36)   # in the band, has quote chars
-    spoken = entry("甲", "我们走吧。" * 28)                         # a character line in the band
-    over = entry("NARRATOR", "她看着远处，" * 40)                     # > 200: always asked
-    rows = [plain, quoted, spoken, over]
-    gen = GenerationConfig()
-    script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys", "{chunk}", rows, 130,
-                                  hard_chars=200)
-    assert plain["text"] not in asked
-    assert {quoted["text"], spoken["text"], over["text"]} <= set(asked)
-    asked.clear()
-    script.long_paragraph_resplit(Handle(), LLMConfig(), gen, "sys", "{chunk}", rows, 130)
-    assert plain["text"] in asked  # without hard_chars every entry above the trigger is asked
+    monkeypatch.setattr(script, "_llm_call", fake_call)
+    script.long_paragraph_resplit(Handle(), LLMConfig(), GenerationConfig(long_resplit_pack=1),
+                                  "sys", "{context}\n{chunk}", rows, 130)
+    assert len(asked) == 3 and all("【条目" not in p for p in asked)
+
+
+def test_long_resplit_uses_fixed_narrator_instruct_under_units_protocol(monkeypatch):
+    text = "她望向窗外，" * 30
+    quoted = entry("NARRATOR", text, "原来的旁白语气")
+    rows = [quoted]
+    reply = json.dumps([{"speaker": "NARRATOR", "text": text, "instruct": "模型自己写的旁白语气"}],
+                       ensure_ascii=False)
+    monkeypatch.setattr(script, "_llm_call", lambda *a, **k: reply)
+    out, _c, fixed = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(), "sys", "{context}\n{chunk}", rows, 130,
+        narrator_instruct="平稳中性的叙述语气。")
+    assert fixed == 1 and [e["instruct"] for e in out] == ["平稳中性的叙述语气。"]
+    out2, _c, _f = script.long_paragraph_resplit(
+        Handle(), LLMConfig(), GenerationConfig(), "sys", "{context}\n{chunk}", rows, 130)
+    assert [e["instruct"] for e in out2] == ["模型自己写的旁白语气"]  # JSON protocol keeps the model's

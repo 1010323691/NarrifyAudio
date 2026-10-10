@@ -244,22 +244,25 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture
 def legacy_json_protocol():
-    """Pin ``GenerationConfig.parse_protocol`` to the legacy JSON protocol.
+    """Pin the parse defaults the older tests were written against.
 
-    The shipped default is the numbered-unit protocol; the older parse tests script the
-    model's replies as JSON entries and build ``GenerationConfig()`` with defaults. Modules
-    that exercise the JSON protocol opt in with
-    ``pytestmark = pytest.mark.usefixtures("legacy_json_protocol")``; the unit protocol's
-    own tests (``test_script_units.py``) set ``parse_protocol`` explicitly.
+    The shipped defaults are the numbered-unit protocol and packed long-entry re-splits;
+    the older parse tests script the model's replies as JSON entries, one LLM call per
+    long entry, and build ``GenerationConfig()`` with defaults. Modules that exercise that
+    behaviour opt in with ``pytestmark = pytest.mark.usefixtures("legacy_json_protocol")``;
+    the unit protocol's own tests (``test_script_units.py``) set what they need explicitly.
     """
     from backend.core.config import GenerationConfig
 
-    field = GenerationConfig.model_fields["parse_protocol"]
-    original = field.default
-    field.default = "json"
+    pinned = {"parse_protocol": "json", "long_resplit_pack": 1}
+    fields = GenerationConfig.model_fields
+    originals = {name: fields[name].default for name in pinned}
+    for name, value in pinned.items():
+        fields[name].default = value
     GenerationConfig.model_rebuild(force=True)
     try:
         yield
     finally:
-        field.default = original
+        for name, value in originals.items():
+            fields[name].default = value
         GenerationConfig.model_rebuild(force=True)

@@ -1804,6 +1804,69 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
     return parts_by_sig[winner]
 
 
+def revalidate_entries_packed(handle, llm, generation, sys_prompt, usr_template, items,
+                              roster, *, stage: str, header: str) -> list | None:
+    """One parse-LLM call that re-derives several flagged entries at once (``single_call``
+    semantics: a reply that does not pass the fidelity gate changes nothing).
+
+    ``items`` = ``[(entry, context_block), …]``. The entries' texts go into ``{chunk}`` in
+    order, separated by blank lines; ``header`` + each entry's context block go into
+    ``{context}``. The reply's entries are partitioned back onto the source entries by
+    cumulative word-character skeleton length — every source entry must end exactly where an
+    output entry ends — and each slice is then gated by :func:`_reparse_vote` against its own
+    entry, so one bad entry never blocks the others. Returns a list parallel to ``items``
+    (re-derived parts or ``None``), or ``None`` when the call failed or the reply cannot be
+    partitioned (the caller then re-asks entry by entry).
+    """
+    k = len(items)
+    context = header + "\n\n" + "\n\n".join(
+        f"【条目 {j}/{k}】\n{block}" for j, (_e, block) in enumerate(items, 1))
+    chunk = "\n\n".join((e.get("text") or "") for e, _b in items)
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": usr_template.format(context=context, chunk=chunk)},
+    ]
+    handle.check()
+    try:
+        reply = _llm_call(llm, generation, messages, handle)
+    except TaskCancelled:
+        raise
+    except LLMUnavailableError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a failed call re-asks entry by entry
+        handle.log(f"  {stage}打包调用失败，改为逐条重切：{e}", "WARNING")
+        return None
+    parts = _parse_entries_reply(reply)
+    if not parts or not all(isinstance(p, dict) and isinstance(p.get("text"), str) for p in parts):
+        handle.log(f"  {stage}打包响应无法解析为条目数组，改为逐条重切", "WARNING")
+        return None
+    need = [len(_skeleton(e.get("text") or "")) for e, _b in items]
+    groups: list = []
+    cur: list = []
+    acc = 0
+    for part in parts:
+        cur.append(part)
+        acc += len(_skeleton(part["text"]))
+        if acc == need[len(groups)]:
+            groups.append(cur)
+            cur, acc = [], 0
+            if len(groups) == k:
+                break
+        elif acc > need[len(groups)]:
+            break
+    if len(groups) != k or cur:
+        handle.log(f"  {stage}打包响应的条目边界与原文对不上，改为逐条重切", "WARNING")
+        return None
+    results = [
+        group if _reparse_vote(group, entry, roster) is not None else None
+        for group, (entry, _b) in zip(groups, items)
+    ]
+    if any(r is not None for r in results):
+        from ..platform.quota import consume_llm_output
+        consume_llm_output(reply, stage)
+    return results
+
+
 def validate_sentence_splits(handle, llm, generation, sys_prompt, usr_template, entries,
                              context_window=4, *, budget_deferred=None) -> tuple:
     """Post-parse sentence-split validation (runs in ``generate_file`` BEFORE the
@@ -2179,37 +2242,31 @@ validate_instructs = _validate_instructs_one_call
 
 def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, entries,
                            max_chars, context_window=4, *, budget_deferred=None,
-                           hard_chars=None) -> tuple:
+                           narrator_instruct=None) -> tuple:
     """超长条目的 LLM 重切（解析内，断句校验之后、归属抽样之前——重切可能
     产生新归属的台词条目，需要被抽样审计；受 ``generation.check_long_paragraphs``
     门控，由 ``generate_file`` 判断）。
 
     每条超过 ``max_chars`` 字的条目重跑解析 LLM（±n 上下文窗口，与断句失败校验
-    同一形态），经 :func:`revalidate_entry`（stage = 超长段落重切，
-    ``single_call=True``——**每条只重跑一次 LLM**）：过忠实性门即整体替换条目
+    同一形态），**每条只重跑一次**：过忠实性门（:func:`_reparse_vote`）即整体替换条目
     ——单条胜出 = 干净重写（条目可能仍超长，由机械分段兜底），多条胜出 = 语义重切；
     未过门保留原条目（**从不猜**），直接交由超长段落机械分段切割（结果没变
-    就不再消耗更多 LLM 调用）。全部窗口 + 花名册
-    按**原始**条目列表预建，胜出者按**降序下标**应用（重切 1→N 不移动更小下标
-    条目的窗口）。取消立即上抛、不落盘任何文件（基文件在全部阶段返回后才写）。
+    就不再消耗更多 LLM 调用）。重切的目的是拆开被揉在旁白里的角色台词。
+
+    ``generation.long_resplit_pack`` > 1 时把若干个超长条目打包进同一次调用
+    （:func:`revalidate_entries_packed`；每包的条数和字数受 ``check_pack_max_chars``
+    约束），回复对不上条目边界时该包退回逐条调用；``1`` = 逐条调用（旧行为）。
+    ``narrator_instruct``（单元协议传入管理员配置的固定文本）非空时，重切出的旁白条目统一
+    用它作 instruct——重切走的是 JSON 解析提示词，模型会自己写旁白 instruct，与单元协议
+    「旁白 instruct 不由模型输出」不一致。
+    全部窗口 + 花名册按**原始**条目列表预建，胜出者按**降序下标**应用（重切 1→N
+    不移动更小下标条目的窗口）。取消立即上抛、不落盘任何文件（基文件在全部阶段返回后才写）。
 
     返回 ``(entries, checked, fixed)`` —— 更新后的列表（无修改时原列表对象）、
     送 LLM 的超长条目数、被替换的条目数。
     """
     max_chars = max(10, int(max_chars))
     flagged = long_entry_indices(entries, max_chars)
-    if hard_chars is not None:
-        # The trigger sits below the mechanical hard cap: in the band (max_chars, hard_chars]
-        # only entries that can actually hide dialogue are worth an LLM call — a character
-        # line, or narration carrying quote characters. Plain narration there has nothing to
-        # split (the unit protocol already labelled every quote span), so skip it.
-        hard = int(hard_chars)
-        flagged = [
-            i for i in flagged
-            if len((entries[i].get("text") or "").strip()) > hard
-            or (entries[i].get("speaker") or "") != "NARRATOR"
-            or any(ch in _QUOTE_CHARS for ch in (entries[i].get("text") or ""))
-        ]
     if budget_deferred:
         skipped = [i for i in flagged if id(entries[i]) in budget_deferred]
         if skipped:
@@ -2222,19 +2279,14 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
 
     n = max(0, int(context_window))
     roster = frozenset({"NARRATOR", *build_roster(entries)})
+    roster_line = ("Characters in this book: " + ", ".join(sorted(roster - {"NARRATOR"}))
+                   if roster - {"NARRATOR"} else "")
     # All windows + context strings up front — from the pristine list.
-    contexts = {}
+    blocks = {}   # per-entry "entries before / after" lines (context only)
+    contexts = {}  # the single-entry {context}
     for i in flagged:
         window = build_batch_window(entries, i, 1, n)
-        lines = [
-            "(Re-check of one entry: the SOURCE TEXT below is a single entry's stored "
-            f"text that is LONGER than {max_chars} characters — likely a failed split "
-            "that left narration and dialogue (or several paragraphs) in one entry. "
-            "Re-derive its entries exactly as if it were source text, splitting at "
-            "every utterance / scene boundary.)",
-        ]
-        if roster:
-            lines.append("Characters in this book: " + ", ".join(sorted(roster - {"NARRATOR"})))
+        lines = []
         before = [it for it in window if it["index"] < i]
         after = [it for it in window if it["index"] > i]
         if before:
@@ -2243,28 +2295,86 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         if after:
             lines.append("Entries immediately after it (context only — never re-emit them):")
             lines.extend(json.dumps(it, ensure_ascii=False) for it in after)
-        contexts[i] = "\n".join(lines)
+        blocks[i] = "\n".join(lines)
+        head = [
+            "(Re-check of one entry: the SOURCE TEXT below is a single entry's stored "
+            f"text that is LONGER than {max_chars} characters — likely a failed split "
+            "that left narration and dialogue (or several paragraphs) in one entry. "
+            "Re-derive its entries exactly as if it were source text, splitting at "
+            "every utterance / scene boundary.)",
+        ]
+        if roster_line:
+            head.append(roster_line)
+        contexts[i] = "\n".join(head + ([blocks[i]] if blocks[i] else []))
+
+    def pack_header(count: int) -> str:
+        head = (
+            f"(Re-check of {count} separate entries: the SOURCE TEXT below holds the stored text of "
+            f"{count} entries, in order, separated by blank lines. Each is LONGER than {max_chars} "
+            "characters — likely a failed split that left narration and dialogue (or several "
+            "paragraphs) in one entry. Re-derive EACH entry exactly as if it were source text, "
+            "splitting at every utterance / scene boundary. Never merge or move text across two "
+            "entries: the entries you output for entry 1 must reproduce entry 1's text exactly, "
+            "then entry 2's, and so on. The per-entry context blocks are context only — never "
+            "re-emit them.)")
+        return head + ("\n" + roster_line if roster_line else "")
+
+    order = sorted(flagged, reverse=True)  # application order (see below)
+    pack_size = max(1, int(getattr(generation, "long_resplit_pack", 1) or 1))
+    pack_chars = int(getattr(generation, "check_pack_max_chars", 6000))
+    packs: list = []
+    cur: list = []
+    cur_chars = 0
+    for i in sorted(flagged):  # reading order inside a pack: the prompt promises "in order"
+        cost = len((entries[i].get("text") or "")) + len(blocks[i])
+        if cur and (len(cur) >= pack_size or cur_chars + cost > pack_chars):
+            packs.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(i)
+        cur_chars += cost
+    if cur:
+        packs.append(cur)
 
     handle.log(
-        f"超长段落检查：{len(flagged)} 条超过 {max_chars} 字条目，"
-        f"逐条带上下文窗口（±{n} 条）重跑 LLM 重切（每条仅 1 次，未过门交机械分段）…"
+        f"超长段落检查：{len(flagged)} 条超过 {max_chars} 字条目，带上下文窗口（±{n} 条）"
+        f"重跑 LLM 重切（每条仅 1 次，共 {len(packs)} 次调用，未过门交机械分段）…"
     )
     # The mechanical check stages share the [0.9, 1.0) progress band (see
     # generate_file): this stage owns [0.94, 0.96), after sentence-split validation
     # and before the speaker spot audit.
+    results: dict = {}
+    done = 0
+    for pack in packs:
+        handle.check()
+        handle.progress(0.94 + 0.02 * done / len(flagged), f"超长段落重切 {done}/{len(flagged)}")
+        for i in pack:
+            snippet = (entries[i].get("text") or "").replace("\n", " ")
+            text_len = len((entries[i].get("text") or "").strip())
+            handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
+        packed = None
+        if len(pack) > 1:
+            packed = revalidate_entries_packed(
+                handle, llm, generation, sys_prompt, usr_template,
+                [(entries[i], blocks[i]) for i in pack], roster,
+                stage="超长段落重切", header=pack_header(len(pack)))
+        if packed is not None:
+            for i, parts in zip(pack, packed):
+                results[i] = parts
+                if parts is None:
+                    handle.log(f"  条目 {i + 1} 单次重切未通过 → 条目保持原样（交由机械分段兜底）", "WARNING")
+        else:
+            for i in pack:
+                results[i] = revalidate_entry(
+                    handle, llm, generation, sys_prompt, usr_template,
+                    entries[i], contexts[i], roster, stage="超长段落重切", single_call=True)
+        done += len(pack)
+
     updated = None
     fixed = 0
     # Descending index order: applying a re-split (1 → N entries) never shifts the
     # index a LATER (lower) entry's already-built window refers to.
-    for seq, i in enumerate(sorted(flagged, reverse=True), 1):
-        handle.check()
-        handle.progress(0.94 + 0.02 * seq / len(flagged), f"超长段落重切 {seq}/{len(flagged)}")
-        snippet = (entries[i].get("text") or "").replace("\n", " ")
-        text_len = len((entries[i].get("text") or "").strip())
-        handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
-        parts = revalidate_entry(handle, llm, generation, sys_prompt, usr_template,
-                                 entries[i], contexts[i], roster, stage="超长段落重切",
-                                 single_call=True)
+    for i in order:
+        parts = results.get(i)
         if parts is None:
             continue  # 单次重切未过忠实性门 → 条目保持原样（机械分段兜底）
         if updated is None:
@@ -2273,7 +2383,9 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
             {
                 "speaker": (p.get("speaker") or "").strip(),
                 "text": p.get("text") or "",
-                "instruct": p.get("instruct") or "",
+                "instruct": (narrator_instruct
+                             if narrator_instruct and (p.get("speaker") or "").strip() == "NARRATOR"
+                             else p.get("instruct") or ""),
             }
             for p in parts
         ]
@@ -3533,7 +3645,9 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             all_entries, long_checked, long_fixed = long_paragraph_resplit(
                 handle, llm, generation, sys_prompt, usr_template, all_entries,
                 resplit_chars, context_window=int(generation.check_context_window or 0),
-                budget_deferred=budget_deferred, hard_chars=max_para,
+                budget_deferred=budget_deferred,
+                narrator_instruct=((generation.narrator_instruct or "").strip() or None)
+                if use_units else None,
             )
         else:
             # 开关关闭：跳过 LLM 语义重切并留一行日志；机械分段兜底（长度硬上界
