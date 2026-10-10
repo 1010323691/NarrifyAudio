@@ -155,15 +155,16 @@ def _project_resource_dirs(db: Session, project: Project) -> list[Path]:
     return found
 
 
-def permanently_delete_project(db: Session, project: Project, workspace_path: Path) -> None:
+def permanently_delete_project(db: Session, project: Project, workspace_path: Path, *, force: bool = False) -> None:
     """Permanently remove expired project data and its managed workspace.
 
     Failed or interrupted directory removals remain in a deterministic staging
     location. The expired project row stays in the trash so the next worker pass
     can resume cleanup; partially removed data is never moved back as if it were
-    recoverable.
+    recoverable. ``force`` deletes even with unfinished tasks (natural expiry).
     """
-    ensure_project_idle(db, project)
+    if not force:
+        ensure_project_idle(db, project)
     if workspace_path.is_symlink():
         raise OSError("Project workspace must not be a symlink")
     staged_paths = list(workspace_path.parent.glob(f".{project.id}.deleting-*"))

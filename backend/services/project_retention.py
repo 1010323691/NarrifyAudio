@@ -18,6 +18,7 @@ from ..platform.storage import lock_storage_migration, safe_project_workspace_pa
 from ..platform.system_config import project_retention
 from ..platform.task_lifecycle import ACTIVE_TASK_STATUSES
 from .projects import as_utc, permanently_delete_project, trash_expires_at
+from .task_operations import cancel_task_record
 
 DEFAULT_WORKSPACE_NAME = "默认工作空间"  # provisioned for every account; never expires on its own
 
@@ -84,7 +85,7 @@ def _purge_expired_with_session(db: Session, limit: int) -> int:
 
 
 def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int:
-    """Permanently delete live projects older than ``ttl_days`` (idle ones only)."""
+    """Permanently delete live projects older than ``ttl_days`` (unfinished tasks are cancelled first)."""
     if ttl_days <= 0:
         return 0
     cutoff = now - timedelta(days=ttl_days)
@@ -104,11 +105,17 @@ def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int
         ).with_for_update(skip_locked=True))
         if project is None:
             continue
-        busy = db.scalar(select(Task.id).where(
-            Task.owner_id == project.owner_id, Task.project_id == project.id, Task.status.in_(ACTIVE_TASK_STATUSES),
-        ).limit(1))
-        if busy is not None:
-            db.rollback()  # release the row lock; retried on a later pass
+        # Unfinished work does not postpone expiry: first pass asks every task to cancel (workers stop
+        # cooperatively and treat a vanished task row as cancelled), the next pass deletes regardless.
+        running = db.scalars(select(Task).where(
+            Task.owner_id == project.owner_id, Task.project_id == project.id,
+            Task.status.in_(ACTIVE_TASK_STATUSES - {"cancelling"}),
+        ).with_for_update()).all()
+        if running:
+            for task in running:
+                cancel_task_record(db, task)
+            db.commit()
+            logger.info("Expired project %s: cancelled %d unfinished tasks before deletion", project.id, len(running))
             continue
         workspace_path = safe_project_workspace_path(db, username, project.id)
         if workspace_path is None:
@@ -116,7 +123,7 @@ def _purge_naturally_expired(db: Session, limit: int, now, ttl_days: int) -> int
             db.rollback()
             continue
         try:
-            permanently_delete_project(db, project, workspace_path)
+            permanently_delete_project(db, project, workspace_path, force=True)
             purged += 1
             logger.info("Purged expired project %s (older than %s days)", project.id, ttl_days)
         except Exception:

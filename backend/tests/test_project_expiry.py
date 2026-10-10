@@ -105,19 +105,26 @@ def test_live_project_past_its_lifetime_is_removed_with_files_logs_rows_and_expo
         assert db.scalar(select(TaskEvent.id).where(TaskEvent.task_id == task_id)) is None
 
 
-def test_expiry_skips_busy_projects_and_the_default_workspace(client):
+def test_expiry_cancels_unfinished_tasks_then_deletes_anyway_and_spares_the_default_workspace(client):
     user_id, username, csrf = _account(client)
     busy = _project(client, csrf)
     with SessionLocal.begin() as db:
-        db.add(Task(id=str(uuid.uuid4()), owner_id=user_id, project_id=busy["id"], task_type="tts.batch",
+        running_id = str(uuid.uuid4())
+        db.add(Task(id=running_id, owner_id=user_id, project_id=busy["id"], task_type="tts.batch",
                     status="running", payload={}))
         default_id = db.scalar(select(Project.id).where(Project.owner_id == user_id, Project.name == "默认工作空间"))
     _set_retention(ttl=1)
     _age(busy["id"], created_days=10)
     if default_id:
         _age(default_id, created_days=10)
-    purge_expired_projects()
+    purge_expired_projects()  # first pass: cancel request only
     assert _exists(busy["id"])
+    with SessionLocal() as db:
+        assert db.scalar(select(Task.status).where(Task.id == running_id)) in {"cancelling", "cancelled"}
+    purge_expired_projects()  # second pass: deleted although the cancel has not been acknowledged
+    assert not _exists(busy["id"])
+    with SessionLocal() as db:
+        assert db.get(Task, running_id) is None
     if default_id:
         assert _exists(default_id)
 
