@@ -1040,7 +1040,10 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
                 problem = "拼合结果为空"
         if problem is None:
             from ..platform.quota import consume_llm_output
-            consume_llm_output(text, "script.parse")
+            # Bill the assembled script, not the label reply: quota is charged by output
+            # characters, and the labels are ~5× shorter than the JSON the legacy protocol
+            # returned for the same text — billing them would silently cut the cost of a book.
+            consume_llm_output(json.dumps(result.entries, ensure_ascii=False), "script.parse")
             stats["units"] += n_units
             stats["labels"] += len(plan.labels)
             stats["edit_applied"] += result.edit_applied

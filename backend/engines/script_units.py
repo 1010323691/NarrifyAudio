@@ -121,14 +121,15 @@ def _scan_line(line: str) -> list[tuple]:
                     end = j
                     break
             j += 1
-        if end < 0:
+        terminated = end >= 0
+        if not terminated:
             if opener not in _RUNON_OPENERS:
                 i += 1
                 continue
             end = n - 1  # unterminated: the quote runs to the end of the line
         if plain_start < i:
             out.append(("plain", line[plain_start:i], False))
-        out.append(("quote", line[i:end + 1], line[end] == closer and end > i))
+        out.append(("quote", line[i:end + 1], terminated))
         i = end + 1
         plain_start = i
     if plain_start < n:

@@ -459,3 +459,20 @@ def _run_with(workspace, monkeypatch, base, extra):
                         lambda req, *a, **k: _BodyResp(_chat_payload(GOOD_REPLY, "stop")))
     return generate_file(_LogHandle(), str(workspace / "02_split_text" / "ch.txt"), _LLM,
                          PromptsConfig(), GenerationConfig(**{**base, **extra}))
+
+
+def test_units_protocol_bills_the_assembled_script_not_the_label_reply(workspace, monkeypatch):
+    import backend.platform.quota as quota
+
+    charged = []
+    monkeypatch.setattr(quota, "consume_llm_output", lambda output, op="x", **k: charged.append(output))
+    result, out, _seen, _h = _run(workspace, monkeypatch, [(GOOD_REPLY, "stop")])
+    assert len(charged) == 1 and len(charged[0]) > 10 * len(GOOD_REPLY) / 10
+    assert json.loads(charged[0]) == result["entries"]  # billed on the real output, not "4 姜维 | …"
+
+
+def test_segment_nested_unterminated_quote_has_no_trail():
+    units = segment_chunk(f"{LQ}他说{CL}不行，我才不信{RQ}")  # inner 「 never closed; outer closed by ”
+    assert all(u.trail != CR for u in units)
+    open_nested = segment_chunk(f"{CL}外层{CL}内层没有闭合{CR}")
+    assert open_nested[0].trail == ""  # depth never returned to 0 → not a closed span

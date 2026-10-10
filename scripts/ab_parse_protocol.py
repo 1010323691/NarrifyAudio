@@ -283,46 +283,25 @@ def summarize(rows: dict, files: list[Path]) -> dict:
             "spot_fixed": sum(r["result"].get("spot_fixed", 0) for r in ok),
         }
     if len(rows) == 2:
-        common = set(rows["json"]) & set(rows["units"])
-        total = {"aligned": 0, "same": 0, "a_char_b_narr": 0, "a_narr_b_char": 0, "both_char_differ": 0}
-        per_file = {}
-        for name in sorted(common):
-            a, b = rows["json"][name], rows["units"][name]
-            if "error" in a or "error" in b:
-                continue
-            ag = agreement(a["entries"], b["entries"])
-            for key in total:
-                total[key] += ag[key]
-            per_file[name] = round(ag["same"] / ag["aligned"], 4) if ag["aligned"] else None
-        n = total["aligned"]
-        report["agreement"] = {
-            "aligned_chars": n,
-            "speaker_match": (total["same"] / n) if n else None,
-            "json_char_units_narr": (total["a_char_b_narr"] / n) if n else None,
-            "json_narr_units_char": (total["a_narr_b_char"] / n) if n else None,
-            "both_char_differ": (total["both_char_differ"] / n) if n else None,
-            "per_file": per_file,
-        }
+        common = sorted(set(rows["json"]) & set(rows["units"]))
+        pairs = [(n, rows["json"][n]["entries"], rows["units"][n]["entries"]) for n in common
+                 if "error" not in rows["json"][n] and "error" not in rows["units"][n]]
+        report["agreement"] = aggregate_agreement(pairs)
         report["gates"], report["gates_passed"] = evaluate_gates(report)
     return report
 
 
-def merge_baseline(report: dict, rows: dict, base: Path) -> None:
-    """Fill the json side of the report from an earlier run's saved outputs/aggregates."""
-    old = json.loads((base / "report.json").read_text(encoding="utf-8"))
-    report["protocols"]["json"] = old["protocols"]["json"]
+def aggregate_agreement(pairs: list) -> dict:
+    """Speaker agreement over ``(name, json_entries, units_entries)`` pairs, text-aligned."""
     total = {"aligned": 0, "same": 0, "a_char_b_narr": 0, "a_narr_b_char": 0, "both_char_differ": 0}
     per_file = {}
-    for name, row in rows["units"].items():
-        path = base / "json" / (Path(name).stem + ".json")
-        if "error" in row or not path.is_file():
-            continue
-        ag = agreement(json.loads(path.read_text(encoding="utf-8")), row["entries"])
+    for name, a, b in pairs:
+        ag = agreement(a, b)
         for key in total:
             total[key] += ag[key]
         per_file[name] = round(ag["same"] / ag["aligned"], 4) if ag["aligned"] else None
     n = total["aligned"]
-    report["agreement"] = {
+    return {
         "aligned_chars": n,
         "speaker_match": (total["same"] / n) if n else None,
         "json_char_units_narr": (total["a_char_b_narr"] / n) if n else None,
@@ -330,6 +309,18 @@ def merge_baseline(report: dict, rows: dict, base: Path) -> None:
         "both_char_differ": (total["both_char_differ"] / n) if n else None,
         "per_file": per_file,
     }
+
+
+def merge_baseline(report: dict, rows: dict, base: Path) -> None:
+    """Fill the json side of the report from an earlier run's saved outputs/aggregates."""
+    old = json.loads((base / "report.json").read_text(encoding="utf-8"))
+    report["protocols"]["json"] = old["protocols"]["json"]
+    pairs = []
+    for name, row in rows["units"].items():
+        path = base / "json" / (Path(name).stem + ".json")
+        if "error" not in row and path.is_file():
+            pairs.append((name, json.loads(path.read_text(encoding="utf-8")), row["entries"]))
+    report["agreement"] = aggregate_agreement(pairs)
     report["gates"], report["gates_passed"] = evaluate_gates(report)
 
 
