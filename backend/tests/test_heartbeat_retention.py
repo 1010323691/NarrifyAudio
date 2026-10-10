@@ -98,3 +98,27 @@ def test_prune_task_events_keeps_recent_and_unfinished_tasks(client, monkeypatch
     finally:
         with SessionLocal.begin() as db:
             db.query(Task).filter(Task.id.in_(ids.values())).delete(synchronize_session=False)
+
+
+def test_snapshot_of_a_task_whose_events_were_pruned_has_empty_defaults(client):
+    from backend.platform.models import Project
+    from backend.services.task_views import task_snapshot
+    from backend.tests.test_admin_analytics import _register
+
+    _, owner_id, _ = _register(client)
+    with SessionLocal.begin() as db:
+        project_id = db.scalar(select(Project.id).where(Project.owner_id == owner_id))
+        task = Task(id=str(uuid.uuid4()), owner_id=owner_id, project_id=project_id, task_type="tts.batch",
+                    status="succeeded", finished_at=utcnow() - timedelta(days=40), payload={})
+        db.add(task)
+        db.flush()
+        db.add(TaskEvent(task_id=task.id, sequence=1, event_type="log", payload={"msg": "hello"}))
+        task_id = task.id
+    assert metrics_sampler.prune_task_events() == 1
+    try:
+        with SessionLocal() as db:
+            snapshot = task_snapshot(db, db.get(Task, task_id))
+        assert snapshot["logs"] == [] and snapshot["status"]
+    finally:
+        with SessionLocal.begin() as db:
+            db.query(Task).filter(Task.id == task_id).delete()
