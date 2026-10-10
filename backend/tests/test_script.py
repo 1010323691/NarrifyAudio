@@ -34,6 +34,8 @@ from backend.engines.llm_transport import (
 from backend.engines.script import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, INSTRUCT_MAX_WORDS, adaptive_spot_rate, SPOT_CHECK_HISTORY_CAP, _ALIGN_FAIL_MIN, _ALIGN_SUSPICIOUS_MIN, _append_spot_history, _has_attribution_tag, _is_pure_saying_tag, _llm_chat_completion, _load_spot_history, _pick_majority, _quote_parity, _reparse_vote, _risk_tier, _strip_leading_saying_tag, _tag_in, absorb_punct_entries, boundary_check_speakers, build_batch_window, check_chunk_alignment, check_chunk_fidelity, clean_json_string, delete_pure_saying_tags, fix_mojibake, generate_file, group_retry_indices, is_suspicious_entry_text, instruct_entry_indices, instruct_word_count, long_entry_indices, long_paragraph_resplit, merge_adjacent_same_speaker, parse_speaker, parse_speaker_map_full, process_chunk, revalidate_entry, repair_json_array, salvage_json_entries, select_boundary_targets, select_boundary_risk_targets, select_spot_targets, spot_budget, spot_check_speakers, split_chunk_balanced, split_into_chunks, split_long_entries, split_long_text, strip_outer_quotes, suspicious_entry_indices, validate_sentence_splits, validate_instructs
 from backend.engines.text import is_chapter_title
 
+pytestmark = pytest.mark.usefixtures("legacy_json_protocol")  # these tests script the JSON protocol
+
 BS = chr(92)  # backslash — built via chr() so no literal backslashes live in this file
 LQ, RQ = chr(0x201C), chr(0x201D)  # curly double quotes — via chr() (hand-typed quotes are unreliable)
 SQ = chr(0x0022)  # straight double quote — via chr()

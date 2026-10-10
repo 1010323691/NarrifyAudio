@@ -421,3 +421,10 @@ def test_generate_file_units_rejects_early_stop_without_end(workspace, monkeypat
     generate_file(handle, str(src), _LLM, PromptsConfig(), GenerationConfig(**_QUIET))
     assert len(seen) == 2
     assert any("疑似提前停笔" in msg for _lv, msg in handle.logs)
+
+
+def test_shipped_default_is_units_protocol_and_admin_can_switch_back():
+    # No fixture pins the protocol here: this is the real default every deployment gets.
+    assert GenerationConfig().parse_protocol == "units"
+    assert GenerationConfig().chunk_size == 3000
+    assert GenerationConfig(parse_protocol="json").parse_protocol == "json"

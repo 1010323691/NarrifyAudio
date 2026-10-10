@@ -183,6 +183,7 @@ def main() -> int:
     ap.add_argument("--baseline", default="",
                     help="a previous run's --out directory: reuse its json-protocol outputs and "
                          "aggregates instead of re-running them (use with --only-protocol units)")
+    ap.add_argument("--chunk-size", type=int, default=0, help="generation.chunk_size override (0 = default)")
     ap.add_argument("--only-protocol", choices=("json", "units"), default="")
     args = ap.parse_args()
 
@@ -206,6 +207,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     set_concurrency(max(1, args.concurrency))
     gen_kwargs = dict(spot_check_rate=args.spot_rate, spot_check_adaptive=False)
+    if args.chunk_size:
+        gen_kwargs["chunk_size"] = args.chunk_size
     if args.no_checks:
         gen_kwargs.update(spot_check_enabled=False, check_boundary_speakers=False,
                           revalidate_splits=False, validate_instructs=False,

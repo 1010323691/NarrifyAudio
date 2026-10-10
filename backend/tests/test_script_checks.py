@@ -10,6 +10,8 @@ from backend.core.config import GenerationConfig, LLMConfig, PromptsConfig
 from backend.engines import script
 from backend.engines.text import is_chapter_title
 
+pytestmark = pytest.mark.usefixtures("legacy_json_protocol")  # these tests script the JSON protocol
+
 
 class Handle:
     cancelled = False

@@ -225,7 +225,7 @@ class GenerationConfig(BaseModel):
     # 解析协议（管理员配置）："json" = 模型把整段重写成 JSON（旧协议，也是单元协议
     # 失败时逐 chunk 的回退路径）；"units" = 程序把 chunk 切成编号单元，模型只输出
     # 标签，程序机械拼回同样的 {speaker,text,instruct}（输出 token 约降到 1/5～1/7）。
-    parse_protocol: Literal["json", "units"] = "json"
+    parse_protocol: Literal["json", "units"] = "units"
     # 单元协议下旁白的固定 instruct（模型不再输出旁白 instruct）。
     narrator_instruct: str = "平稳中性的叙述语气。"
     # 单元协议的 edit 开关与上限：edit 只允许从单元里删去一段连续的说话动词短语；
