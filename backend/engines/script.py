@@ -1952,11 +1952,10 @@ def instruct_word_count(value) -> int:
     both languages.
     """
     s = str(value or "").strip()
-    cjk = len(_INSTRUCT_CJK_RE.findall(s))
+    rest, cjk = _INSTRUCT_CJK_RE.subn(" ", s)
     if not cjk:
         return len(s.split())
-    rest = _INSTRUCT_CJK_RE.sub(" ", s).split()
-    latin = sum(1 for token in rest if any(ch.isalnum() for ch in token))
+    latin = sum(1 for token in rest.split() if any(ch.isalnum() for ch in token))
     return latin + -(-cjk // INSTRUCT_CJK_CHARS_PER_WORD)
 
 

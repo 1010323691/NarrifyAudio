@@ -237,7 +237,10 @@ def _fallback_ref_text(speaker):
     no usable line: the clip seeds the whole book's clone, so it must be speakable."""
     if speaker == "NARRATOR":
         return "夜色渐渐深了，街上的行人越来越少，只有路灯还静静地亮着，故事就从这里开始。"
-    return f"你好，我是{speaker}。今天天气不错，我们一边走一边慢慢聊吧，有什么想说的都可以告诉我。"
+    # Only a short all-CJK name is read out; Latin/digit/over-long names would break the
+    # 40–60 字 budget or read as a mixed-language clip.
+    who = f"我是{speaker}。" if re.fullmatch(r"[\u4e00-\u9fff]{1,6}", speaker or "") else ""
+    return f"你好，{who}今天天气不错，我们一边走一边慢慢聊吧，有什么想说的都可以告诉我。"
 
 
 def _fallback_persona(speaker, lines):

@@ -2933,7 +2933,9 @@ def _window_from(user: str, end_marker: str) -> list:
     """Extract the context-window JSON array at the head of a re-judgment / re-parse
     user prompt (the window — after an optional label line — precedes the trailing
     instruction block)."""
-    return json.loads(user[user.index("["):user.index(end_marker)])
+    label = "【窗口】\n"
+    start = user.index(label) + len(label) if label in user else 0
+    return json.loads(user[start:user.index(end_marker)])
 
 
 def _two_para_source() -> str:

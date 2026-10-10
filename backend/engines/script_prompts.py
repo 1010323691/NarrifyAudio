@@ -8,46 +8,20 @@ defaults when non-empty — see ``backend/api/config.py`` / ``backend/api/script
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+from .prompt_files import load_separated_prompts
 
 # backend/engines/script_prompts.py -> parents[1] = backend -> backend/resources/...
 _PROMPTS_FILE = Path(__file__).resolve().parents[1] / "resources" / "default_prompts.txt"
-
-_prompt_cache: dict = {"mtime": None, "prompts": None}
 
 
 def load_default_prompts() -> tuple[str, str]:
     """Read ``default_prompts.txt`` and return ``(system_prompt, user_prompt_template)``.
 
-    Uses an mtime-based cache to pick up edits without restarting the app, avoiding
-    redundant disk reads when the file hasn't changed. (Faithful port of the source.)
+    mtime-cached (see :mod:`.prompt_files`), so edits apply without restarting the app.
     """
-    if not _PROMPTS_FILE.exists():
-        raise RuntimeError(
-            f"default_prompts.txt not found at {_PROMPTS_FILE}. "
-            "This file is required for LLM prompt defaults."
-        )
-
-    mtime = os.path.getmtime(_PROMPTS_FILE)
-    if _prompt_cache["mtime"] == mtime and _prompt_cache["prompts"] is not None:
-        return _prompt_cache["prompts"]
-
-    try:
-        raw = _PROMPTS_FILE.read_text(encoding="utf-8")
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Error reading default_prompts.txt: {e}")
-
-    parts = raw.split("---SEPARATOR---", maxsplit=1)
-    if len(parts) != 2:
-        raise RuntimeError(
-            "default_prompts.txt is malformed: expected exactly one '---SEPARATOR---' delimiter."
-        )
-
-    prompts = (parts[0].strip(), parts[1].strip())
-    _prompt_cache["mtime"] = mtime
-    _prompt_cache["prompts"] = prompts
-    return prompts
+    return load_separated_prompts(_PROMPTS_FILE, purpose="LLM prompt defaults")
 
 
 # Cached at import time — the fallbacks used when the config carries no custom prompts.
