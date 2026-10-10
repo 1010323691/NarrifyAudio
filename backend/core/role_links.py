@@ -177,15 +177,22 @@ def rebuild_links(state: dict, names, config: dict, counts: dict | None, cooccur
     state["fingerprint"] = fingerprint(names, config)
 
 
-def ensure_state(path: Path, names, config: dict, counts: dict | None, cooccur: dict | None) -> dict:
-    """Load the table, rebuilding the links when the role set or profiles changed externally."""
+def current_state(path: Path, names, config: dict, counts: dict | None, cooccur: dict | None) -> tuple[dict, bool]:
+    """The table as it should be now, plus whether that differs from disk (rebuilt after external changes)."""
     state = load_state(path)
     if state is not None and state["fingerprint"] == fingerprint(names, config):
-        return state
+        return state, False
     state = state or new_state()
     rebuild_links(state, names, config, counts, cooccur)
     state["version"] += 1
-    save_state(path, state)
+    return state, True
+
+
+def ensure_state(path: Path, names, config: dict, counts: dict | None, cooccur: dict | None) -> dict:
+    """Like ``current_state`` but persists a rebuild. Only call while holding the merge lock."""
+    state, rebuilt = current_state(path, names, config, counts, cooccur)
+    if rebuilt:
+        save_state(path, state)
     return state
 
 

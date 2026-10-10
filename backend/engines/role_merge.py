@@ -2,14 +2,16 @@
 
 Every mutation holds ``role_links.merge_lock_path`` (the foundation-publication lock) for the
 whole read-modify-write, so it cannot interleave with voice publication or another merge.
-Files are written together; if any write fails the already-written ones are restored and the
-link table is left untouched, so a batch either lands completely or not at all.
+Files are written together; if a write raises, the already-written ones are restored and the
+link table is left untouched. That covers errors the process survives: a crash mid-write, or a
+restore that itself fails, can leave files half-merged (the latter is logged and reported).
 """
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +25,7 @@ from ..core.role_hints import fold_script, suggest_role_links
 from . import tts_batch as Batch
 
 _SAMPLE_CHARS = 80
+log = logging.getLogger(__name__)
 
 
 class MergeError(Exception):
@@ -157,6 +160,12 @@ def _locked(layout):
     return exclusive_file_lock(RL.merge_lock_path(layout), timeout=10.0)
 
 
+def _check_busy(busy) -> None:
+    """Re-check, now that the lock is held, that no voice task started since the request guard."""
+    if busy is not None and busy():
+        raise MergeError(409, "配音任务进行中，请待其结束后再修改角色。")
+
+
 def _lock_busy() -> MergeError:
     return MergeError(409, "角色数据正被其他操作占用，请稍后重试。")
 
@@ -198,17 +207,22 @@ def _write_all(changed: dict[Path, list], originals: dict[Path, list], vc: tuple
             pathio.rewrite_json_file(vc[0], vc[1])
             vc_written = True
         after()
-    except Exception:
+    except Exception as error:
+        unrestored: list[str] = []
         for path in reversed(done):
             try:
                 pathio.rewrite_json_file(path, originals[path])
-            except Exception:  # noqa: BLE001 - best effort; keep restoring the rest
-                pass
+            except Exception:  # noqa: BLE001 - keep restoring the rest, then report
+                log.exception("role merge rollback failed for %s", path)
+                unrestored.append(path.name)
         if vc_written:
             try:
                 pathio.rewrite_json_file(vc[0], vc[2])
             except Exception:  # noqa: BLE001
-                pass
+                log.exception("role merge rollback failed for %s", vc[0])
+                unrestored.append(vc[0].name)
+        if unrestored:
+            raise MergeError(500, f"写入失败且以下文件未能还原，请检查后重试：{'、'.join(unrestored)}") from error
         raise
 
 
@@ -240,20 +254,17 @@ def _graph(layout, script, scope: Scope, state: dict) -> dict:
 
 
 def build_graph(layout, script: str | None) -> dict:
+    """Read-only snapshot. A stale table is rebuilt in memory only (same result a write would
+    persist, same version number), so polling never takes the lock or touches disk."""
     scope = read_scope(layout, script)
-    state = RL.load_state(_state_path(layout, script))
-    if state is None or state["fingerprint"] != RL.fingerprint(scope.names, scope.voice_config):
-        try:
-            with _locked(layout):
-                state = _ensure(layout, script, scope)
-        except TimeoutError:
-            raise _lock_busy()
+    state, _ = RL.current_state(_state_path(layout, script), scope.names, scope.voice_config, scope.counts, scope.cooccur)
     return _graph(layout, script, scope, state)
 
 
 # ---------------------------------------------------------------- operations
 
-def merge_batch(layout, script: str | None, target: str, sources: list[str], version: int | None = None) -> dict:
+def merge_batch(layout, script: str | None, target: str, sources: list[str], version: int | None = None,
+                busy=None) -> dict:
     target = (target or "").strip()
     sources = list(dict.fromkeys((s or "").strip() for s in sources))
     if not target or not sources or "" in sources:
@@ -262,6 +273,7 @@ def merge_batch(layout, script: str | None, target: str, sources: list[str], ver
         raise MergeError(400, "源角色与目标角色相同。")
     try:
         with _locked(layout):
+            _check_busy(busy)
             scope = read_scope(layout, script, strict=True)
             for source in sources:
                 if source not in scope.roles:
@@ -303,14 +315,19 @@ def merge_batch(layout, script: str | None, target: str, sources: list[str], ver
                 post_names.append(target)
             outcome = RL.apply_merge(state, target, sources, payloads, post_names, new_vc, scope.cooccur)
 
+            fresh: list[Scope] = []
+
             def commit():
+                # Files are already rewritten: fingerprint what the reader will see from now on.
+                fresh.append(read_scope(layout, script))
+                state["fingerprint"] = RL.fingerprint(fresh[0].names, fresh[0].voice_config)
                 RL.save_state(_state_path(layout, script), state)
 
             _write_all(changed, scope.files, (scope.vc_path, new_vc, original_vc) if vc_changed else None, commit)
             Batch.invalidate_speaker_outputs([*sources, target], layout)
 
             replaced = sum(p["line_count"] for p in payloads.values())
-            after = read_scope(layout, script)
+            after = fresh[0]
             return {"ok": True, "target": target, "sources": sources, "source": sources[0], "replaced": replaced,
                     "files": [p.name for p in changed], "orphans": outcome["orphans"],
                     "rematched": outcome["rematched"], "graph": _graph(layout, script, after, state)}
@@ -318,9 +335,10 @@ def merge_batch(layout, script: str | None, target: str, sources: list[str], ver
         raise _lock_busy()
 
 
-def undo_merge(layout, script: str | None, record_id: str, version: int | None = None) -> dict:
+def undo_merge(layout, script: str | None, record_id: str, version: int | None = None, busy=None) -> dict:
     try:
         with _locked(layout):
+            _check_busy(busy)
             scope = read_scope(layout, script, strict=True)
             state = _ensure(layout, script, scope)
             _check_version(state, version)
@@ -351,21 +369,27 @@ def undo_merge(layout, script: str | None, record_id: str, version: int | None =
             post_names = [*scope.names, source]
             RL.undo_merge(state, record_id, post_names, new_vc)
 
+            fresh: list[Scope] = []
+
             def commit():
+                # Files are already rewritten: fingerprint what the reader will see from now on.
+                fresh.append(read_scope(layout, script))
+                state["fingerprint"] = RL.fingerprint(fresh[0].names, fresh[0].voice_config)
                 RL.save_state(_state_path(layout, script), state)
 
             vc = (scope.vc_path, new_vc, original_vc) if vc_changed else None
             _write_all(changed, originals, vc, commit)
             Batch.invalidate_speaker_outputs([source, record["target"]], layout)
-            after = read_scope(layout, script)
+            after = fresh[0]
             return {"ok": True, "source": source, "target": record["target"], "graph": _graph(layout, script, after, state)}
     except TimeoutError:
         raise _lock_busy()
 
 
-def _link_change(layout, script, version, operate) -> dict:
+def _link_change(layout, script, version, operate, busy=None) -> dict:
     try:
         with _locked(layout):
+            _check_busy(busy)
             scope = read_scope(layout, script)
             state = _ensure(layout, script, scope)
             _check_version(state, version)
@@ -379,14 +403,14 @@ def _link_change(layout, script, version, operate) -> dict:
         raise _lock_busy()
 
 
-def add_veto(layout, script, source: str, target: str, version: int | None = None) -> dict:
+def add_veto(layout, script, source: str, target: str, version: int | None = None, busy=None) -> dict:
     return _link_change(layout, script, version, lambda state, scope: RL.add_veto(
-        state, source, target, scope.names, scope.voice_config, scope.cooccur))
+        state, source, target, scope.names, scope.voice_config, scope.cooccur), busy)
 
 
-def remove_veto(layout, script, source: str, target: str, version: int | None = None) -> dict:
+def remove_veto(layout, script, source: str, target: str, version: int | None = None, busy=None) -> dict:
     return _link_change(layout, script, version, lambda state, scope: {"restored": RL.remove_veto(
-        state, source, target, scope.names, scope.voice_config)})
+        state, source, target, scope.names, scope.voice_config)}, busy)
 
 
 def mark_reviewed(layout, script, target: str) -> dict:

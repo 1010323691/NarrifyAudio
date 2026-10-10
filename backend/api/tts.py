@@ -21,6 +21,7 @@ import re
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from functools import wraps
 import uuid
 from collections import OrderedDict
@@ -36,6 +37,7 @@ from ..core.config import get_config
 from ..core.bounded_json import read_json, is_script_data
 from ..core.bounded_cache import BoundedCache
 from ..core.file_lock import exclusive_file_lock
+from ..core import role_links as RL
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_layout, resolve_parsed_json, resolve_parsed_json_all, merged_audio_filename
 from ..engines.book import parse_chapter_number
 from ..engines import bgm as Bgm
@@ -470,6 +472,17 @@ def _phase_task_active(ctx: AuthContext | None, db: Session | None) -> bool:
     return False
 
 
+@contextmanager
+def _voice_config_lock(layout):
+    """``voice_config.json`` is rewritten whole; take the merge lock so a gender/pick edit never
+    interleaves with a batch merge (or a foundation publication) holding a stale copy."""
+    try:
+        with exclusive_file_lock(RL.merge_lock_path(layout), timeout=10.0):
+            yield
+    except TimeoutError:
+        raise HTTPException(409, "角色数据正被其他操作占用，请稍后重试。") from None
+
+
 @router.put("/voices/select")
 def select_voice(
     req: SelectVoiceRequest,
@@ -486,37 +499,38 @@ def select_voice(
     if _phase_task_active(ctx, db):
         raise HTTPException(409, "配音任务进行中，请待其结束后再选择音色。")
     layout = get_or_prepare_layout()
-    vc_path = layout.voice_profiles / "voice_config.json"
-    if not vc_path.exists():
-        raise HTTPException(404, "未找到声音配置，请先运行阶段 1 / 阶段 2。")
-    try:
-        voice_config = json.loads(vc_path.read_text("utf-8"))
-        if not isinstance(voice_config, dict):
-            raise ValueError
-    except Exception:  # noqa: BLE001
-        raise HTTPException(400, "声音配置已损坏，无法更新选择。")
-    # Lazy migration of legacy absolute ref_audio values (same as the other read paths).
-    _n, migrated = pathio.migrate_entries_in(vc_path, layout.workspace, "dict", ("ref_audio",))
-    if isinstance(migrated, dict):
-        voice_config = migrated
-    entry = voice_config.get(req.speaker)
-    if not isinstance(entry, dict):
-        raise HTTPException(404, f"声音配置中没有角色：{req.speaker}")
-    cands = V.effective_candidates(entry)
-    if not cands:
-        raise HTTPException(400, "该角色没有可选择的候选音频，请先在阶段 2 生成。")
-    aid = (req.audio_id or "").strip() or None
-    chosen = None
-    if aid is not None:
-        chosen = next((c for c in cands if c["id"] == aid), None)
-        if chosen is None:
-            raise HTTPException(400, f"无效的候选编号：{aid}")
-    active = chosen or cands[0]
-    entry["selected_audio_id"] = aid
-    # Keep the active reference in sync so downstream synthesis uses the picked take.
-    entry["ref_audio"] = active["ref_audio"]
-    pathio.rewrite_json_file(vc_path, voice_config)
-    Batch.invalidate_speaker_outputs([req.speaker], layout)
+    with _voice_config_lock(layout):
+        vc_path = layout.voice_profiles / "voice_config.json"
+        if not vc_path.exists():
+            raise HTTPException(404, "未找到声音配置，请先运行阶段 1 / 阶段 2。")
+        try:
+            voice_config = json.loads(vc_path.read_text("utf-8"))
+            if not isinstance(voice_config, dict):
+                raise ValueError
+        except Exception:  # noqa: BLE001
+            raise HTTPException(400, "声音配置已损坏，无法更新选择。")
+        # Lazy migration of legacy absolute ref_audio values (same as the other read paths).
+        _n, migrated = pathio.migrate_entries_in(vc_path, layout.workspace, "dict", ("ref_audio",))
+        if isinstance(migrated, dict):
+            voice_config = migrated
+        entry = voice_config.get(req.speaker)
+        if not isinstance(entry, dict):
+            raise HTTPException(404, f"声音配置中没有角色：{req.speaker}")
+        cands = V.effective_candidates(entry)
+        if not cands:
+            raise HTTPException(400, "该角色没有可选择的候选音频，请先在阶段 2 生成。")
+        aid = (req.audio_id or "").strip() or None
+        chosen = None
+        if aid is not None:
+            chosen = next((c for c in cands if c["id"] == aid), None)
+            if chosen is None:
+                raise HTTPException(400, f"无效的候选编号：{aid}")
+        active = chosen or cands[0]
+        entry["selected_audio_id"] = aid
+        # Keep the active reference in sync so downstream synthesis uses the picked take.
+        entry["ref_audio"] = active["ref_audio"]
+        pathio.rewrite_json_file(vc_path, voice_config)
+        Batch.invalidate_speaker_outputs([req.speaker], layout)
     return {"ok": True, "speaker": req.speaker, "selected_audio_id": aid,
             "ref_audio": active["ref_audio"]}
 
@@ -550,30 +564,31 @@ def set_gender(
     if g not in ("male", "female", ""):
         raise HTTPException(400, "无效的性别值。")
     layout = get_or_prepare_layout()
-    vc_path = layout.voice_profiles / "voice_config.json"
-    voice_config: dict = {}
-    if vc_path.exists():
-        try:
-            loaded = json.loads(vc_path.read_text("utf-8"))
-            if not isinstance(loaded, dict):
-                raise ValueError
-            voice_config = loaded
-        except Exception:  # noqa: BLE001
-            raise HTTPException(400, "声音配置已损坏，无法设置性别。")
-        _n, migrated = pathio.migrate_entries_in(vc_path, layout.workspace, "dict", ("ref_audio",))
-        if isinstance(migrated, dict):
-            voice_config = migrated
-    entry = voice_config.get(sp)
-    if not isinstance(entry, dict):
-        entry = {}
-    if g:
-        entry["gender"] = g
-    else:
-        entry.pop("gender", None)
-    voice_config[sp] = entry
-    vc_path.parent.mkdir(parents=True, exist_ok=True)
-    pathio.rewrite_json_file(vc_path, voice_config)
-    return {"ok": True, "speaker": sp, "gender": g}
+    with _voice_config_lock(layout):
+        vc_path = layout.voice_profiles / "voice_config.json"
+        voice_config: dict = {}
+        if vc_path.exists():
+            try:
+                loaded = json.loads(vc_path.read_text("utf-8"))
+                if not isinstance(loaded, dict):
+                    raise ValueError
+                voice_config = loaded
+            except Exception:  # noqa: BLE001
+                raise HTTPException(400, "声音配置已损坏，无法设置性别。")
+            _n, migrated = pathio.migrate_entries_in(vc_path, layout.workspace, "dict", ("ref_audio",))
+            if isinstance(migrated, dict):
+                voice_config = migrated
+        entry = voice_config.get(sp)
+        if not isinstance(entry, dict):
+            entry = {}
+        if g:
+            entry["gender"] = g
+        else:
+            entry.pop("gender", None)
+        voice_config[sp] = entry
+        vc_path.parent.mkdir(parents=True, exist_ok=True)
+        pathio.rewrite_json_file(vc_path, voice_config)
+        return {"ok": True, "speaker": sp, "gender": g}
 
 
 class MergeSpeakersRequest(BaseModel):
@@ -592,7 +607,9 @@ def _merge_guard(ctx: AuthContext | None, db: Session | None, action: str) -> No
         raise HTTPException(409, f"配音任务进行中，请待其结束后再{action}。")
 
 
-def _merge_call(function, *args, **kwargs):
+def _merge_call(function, *args, ctx=None, db=None, **kwargs):
+    if ctx is not None:  # re-checked inside the merge lock, closing the gap after the request guard
+        kwargs["busy"] = lambda: _phase_task_active(ctx, db)
     try:
         return function(get_or_prepare_layout(), *args, **kwargs)
     except RM.MergeError as exc:
@@ -620,7 +637,7 @@ def merge_speakers(
         raise HTTPException(400, "角色名不能为空。")
     if src == tgt:
         raise HTTPException(400, "源角色与目标角色相同。")
-    result = _merge_call(RM.merge_batch, req.script, tgt, [src])
+    result = _merge_call(RM.merge_batch, req.script, tgt, [src], ctx=ctx, db=db)
     return {"ok": True, "source": src, "target": tgt, "replaced": result["replaced"], "files": result["files"]}
 
 
@@ -668,7 +685,7 @@ def merge_batch(
 ) -> dict:
     """Merge several roles into one target atomically; orphans are rematched (see ``role_links``)."""
     _merge_guard(ctx, db, "合并角色")
-    return _merge_call(RM.merge_batch, req.script, req.target, req.sources, req.version)
+    return _merge_call(RM.merge_batch, req.script, req.target, req.sources, req.version, ctx=ctx, db=db)
 
 
 @router.post("/voices/merge-undo")
@@ -678,7 +695,7 @@ def merge_undo(
     db: Session = Depends(get_db),
 ) -> dict:
     _merge_guard(ctx, db, "撤销合并")
-    return _merge_call(RM.undo_merge, req.script, req.record_id, req.version)
+    return _merge_call(RM.undo_merge, req.script, req.record_id, req.version, ctx=ctx, db=db)
 
 
 @router.post("/voices/link-veto")
@@ -689,7 +706,7 @@ def link_veto(
 ) -> dict:
     """“不是同一人”: rule out source -> target; the source is rematched elsewhere."""
     _merge_guard(ctx, db, "忽略提示")
-    return _merge_call(RM.add_veto, req.script, req.source, req.target, req.version)
+    return _merge_call(RM.add_veto, req.script, req.source, req.target, req.version, ctx=ctx, db=db)
 
 
 @router.delete("/voices/link-veto")
@@ -702,7 +719,7 @@ def unlink_veto(
     db: Session = Depends(get_db),
 ) -> dict:
     _merge_guard(ctx, db, "恢复提示")
-    return _merge_call(RM.remove_veto, script, source, target, version)
+    return _merge_call(RM.remove_veto, script, source, target, version, ctx=ctx, db=db)
 
 
 @router.post("/voices/merge-review-seen")

@@ -10,6 +10,8 @@ from backend.api.tts import (
     merge_batch, merge_graph, merge_review_seen, merge_undo, unlink_veto,
 )
 from backend.core import role_links as RL
+from backend.core.paths import get_or_prepare_layout
+from backend.engines import role_merge as RM
 from backend.tests.test_voices import _load_vc, _quiet_durable_task_guard, _seed_foundations, _seed_script, clone_ws  # noqa: F401
 
 NAMES = {"林黛玉": 5, "黛玉": 3, "黛玉儿": 2}
@@ -30,18 +32,17 @@ def test_list_reads_link_table_with_basis(ws):
     rows = {r["name"]: r for r in list_voices(script="__all__")["speakers"]}
     assert rows["黛玉"]["alias_of"] == "林黛玉" and rows["黛玉"]["alias_basis"] == "名字包含"
     assert rows["黛玉儿"]["alias_of"] == "黛玉"
-    # listing never persists: the table appears only once the merge graph (or a write) asks for it
-    assert not (ws / "04_voice_profiles" / "role_links").exists()
+    # reads (list and merge-graph) never persist: the table appears with the first write
     merge_graph(script="__all__")
+    assert not (ws / "04_voice_profiles" / "role_links").exists()
+    merge_batch(MergeBatchRequest(script="__all__", target="林黛玉", sources=["黛玉儿"]))
     assert (ws / "04_voice_profiles" / "role_links" / "all.json").is_file()
 
 
 def test_scopes_do_not_share_state_files(ws):
-    merge_graph(script="__all__")
-    merge_graph(script=None)  # newest single file, a different scope
-    merge_graph(script="s.json")
-    names = sorted(p.name for p in (ws / "04_voice_profiles" / "role_links").iterdir())
-    assert len(names) == 2 and "all.json" in names  # None and "s.json" resolve to the same file scope
+    layout = get_or_prepare_layout()
+    assert RM._state_path(layout, None) == RM._state_path(layout, "s.json")  # newest file, not the whole book
+    assert RM._state_path(layout, None) != RM._state_path(layout, "__all__")
     version = merge_graph(script="__all__")["version"]
     list_voices(script=None)
     list_voices(script="s.json")
@@ -131,3 +132,42 @@ def test_veto_and_restore_and_review_seen(ws):
     with pytest.raises(HTTPException) as err:
         link_veto(LinkVetoRequest(script="__all__", source="黛玉儿", target="黛玉"))
     assert err.value.status_code == 404  # that link no longer exists
+
+
+def test_voice_config_only_role_merge_and_undo_keep_version_stable(ws):
+    _seed_foundations(ws, [*NAMES, "幽灵"])  # 幽灵 has a voice entry but no lines
+    out = merge_batch(MergeBatchRequest(script="__all__", target="林黛玉", sources=["幽灵"]))
+    version = out["graph"]["version"]
+    assert merge_graph(script="__all__")["version"] == version
+    undone = merge_undo(MergeUndoRequest(script="__all__", record_id=out["graph"]["records"][0]["id"]))
+    assert "幽灵" in _load_vc(ws)
+    assert merge_graph(script="__all__")["version"] == undone["graph"]["version"]
+
+
+def test_failed_rollback_is_reported_not_swallowed(ws, monkeypatch, caplog):
+    real = RM.pathio.rewrite_json_file
+    state = {"writes": 0}
+
+    def flaky(path, data):
+        state["writes"] += 1
+        if state["writes"] > 1:  # first write lands; the rollback write fails
+            raise OSError("disk gone")
+        return real(path, data)
+
+    link_veto(LinkVetoRequest(script="__all__", source="黛玉儿", target="黛玉"))  # persists the table first
+    monkeypatch.setattr(RL, "save_state", lambda *a: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(RM.pathio, "rewrite_json_file", flaky)
+    with pytest.raises(HTTPException) as err:
+        merge_batch(MergeBatchRequest(script="__all__", target="林黛玉", sources=["黛玉"]))
+    assert err.value.status_code == 500 and "s.json" in err.value.detail
+    assert "rollback failed" in caplog.text
+
+
+def test_task_started_after_the_request_guard_is_caught_inside_the_lock(ws, monkeypatch):
+    calls = iter([False, True])  # request guard passes; re-check under the lock sees a task
+    monkeypatch.setattr(tts_api, "_phase_task_active", lambda *a: next(calls))
+    before = _speakers(ws)
+    with pytest.raises(HTTPException) as err:
+        merge_batch(MergeBatchRequest(script="__all__", target="林黛玉", sources=["黛玉"]), ctx=object(), db=object())
+    assert err.value.status_code == 409
+    assert _speakers(ws) == before
