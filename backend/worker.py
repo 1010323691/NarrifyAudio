@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from typing import Callable
 
 import redis
@@ -189,35 +190,63 @@ def _paused_parse_worker_count(worker_id: str) -> int:
         ) or 0)
 
 
-def _project_retention_loop(stop: threading.Event) -> None:
-    """Check expiry immediately, retry startup contention, then run daily."""
+_retention_state: dict = {"done_on": "", "thread": None}
+_RETENTION_BATCH = 20
+
+
+def _run_daily_retention(today: str) -> None:
+    """The whole daily job, off the maintenance coordinator's thread (it can wait on task
+    cancellation and remove large directories; outbox publishing and lease recovery must not stall)."""
+    from .platform.models import SystemConfig
+    from .platform.storage import lock_storage_migration, storage_migration
+    from .platform.system_config import ensure_retention_started
+    from .services.project_purge_audit import verify_purged_projects
+
     logger = logging.getLogger("audiobook.worker")
-    startup_check = True
-    while not stop.is_set():
-        purged = 0
-        try:
-            purged = purge_expired_projects()
-            purge_resource_artifacts()
-        except Exception:
-            logger.exception("Daily project trash cleanup failed")
-        # The worker can start alongside recovery/migration activity. A second
-        # near-startup pass ensures an initial lock/migration skip is not delayed
-        # until tomorrow. A successful purge proceeds directly to the daily cadence.
-        if startup_check and purged == 0:
-            startup_check = False
-            stop.wait(60)
-            continue
-        startup_check = False
-        stop.wait(24 * 60 * 60)
+    try:
+        with SessionLocal() as db:
+            # The cleanups silently do nothing while storage is migrating; do not count that as today's run.
+            if not lock_storage_migration(db, shared=True) or storage_migration(db) is not None:
+                return
+            ensure_retention_started(db)
+        while purge_expired_projects(limit=_RETENTION_BATCH) >= _RETENTION_BATCH:
+            pass
+        while purge_resource_artifacts(limit=200) >= 200:
+            pass
+        while verify_purged_projects(limit=50) >= 50:
+            pass
+        with SessionLocal.begin() as db:
+            row = db.get(SystemConfig, "retention.last_run")
+            if row is None:
+                db.add(SystemConfig(key="retention.last_run", value={"date": today}))
+            else:
+                row.value = {"date": today}
+        _retention_state["done_on"] = today
+    except Exception:
+        logger.exception("Daily retention failed; will retry on the next pass")
 
 
 def _retention_pass():
-    # Single-round work budget per cleanup kind: a large backlog continues on
-    # the coordinator's next pass (60s) instead of blocking the dispatch loop.
-    projects = purge_expired_projects(limit=20)
-    resources = purge_resource_artifacts(limit=200)
-    incomplete = projects >= 20 or resources >= 200
-    return projects + resources, incomplete
+    """Start the daily cleanup once per local day (at midnight, or after a missed one).
+
+    The coordinator polls this every 60 s while it reports ``incomplete``; the answer is
+    always "incomplete" on purpose, and the cheap date check below keeps the heavy work to
+    once per local day, run on its own thread."""
+    from .platform.models import SystemConfig
+
+    today = datetime.now().astimezone().date().isoformat()
+    thread = _retention_state["thread"]
+    if _retention_state["done_on"] == today or (thread is not None and thread.is_alive()):
+        return 0, True
+    with SessionLocal() as db:
+        row = db.get(SystemConfig, "retention.last_run")
+        if row is not None and isinstance(row.value, dict) and row.value.get("date") == today:
+            _retention_state["done_on"] = today
+            return 0, True
+    thread = threading.Thread(target=_run_daily_retention, args=(today,), name="daily-retention", daemon=True)
+    _retention_state["thread"] = thread
+    thread.start()
+    return 0, True
 
 
 def _host_maintenance_loop(stop):

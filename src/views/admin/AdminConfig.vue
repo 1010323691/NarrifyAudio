@@ -30,14 +30,21 @@ const rootDraft = ref('')
 const quotaDraft = ref('0')
 const savingToggle = ref<'logs' | 'registration' | null>(null)
 const savingQuota = ref(false)
+const retention = ref<api.ProjectRetentionSettings | null>(null)
+const ttlDraft = ref('30')
+const trashDraft = ref('7')
+const savingRetention = ref(false)
 
 const loader = useAdminLoader(async () => {
   await clientDisplay.load()
-  const [s, q, r, limits] = await Promise.all([
+  const [s, q, r, limits, keep] = await Promise.all([
     api.getStorageSettings(), api.getQuotaSettings(), api.getRegistrationSettings(), api.getRuntimeSettings().catch(() => null),
+    api.getProjectRetentionSettings().catch(() => null),
   ])
   return () => {
     storage.value = s; quota.value = q; registration.value = r; runtime.value = limits
+    retention.value = keep
+    if (keep) { ttlDraft.value = String(keep.project_ttl_days); trashDraft.value = String(keep.trash_days) }
     rootDraft.value = s.root_path
     quotaDraft.value = String(q.initial_units)
   }
@@ -64,6 +71,22 @@ async function toggleClientLogs() {
 async function toggleRegistration() {
   if (!registration.value) return
   try { registration.value = await api.updateRegistrationSettings(!registration.value.enabled); toast({ title: '注册设置已保存', variant: 'success' }) }
+  catch (cause) { error.value = errorMessage(cause) }
+}
+async function submitRetention() {
+  if (actionBusy.value) return
+  savingRetention.value = true
+  try { await runAction(saveRetention) }
+  finally { savingRetention.value = false }
+}
+async function saveRetention() {
+  const ttl = Number(ttlDraft.value), trash = Number(trashDraft.value)
+  if (!Number.isInteger(ttl) || ttl < 0 || ttl > 3650 || !Number.isInteger(trash) || trash < 1 || trash > 3650) {
+    error.value = '项目保质期为 0～3650 天的整数（0 表示不过期），回收站保留为 1～3650 天的整数'
+    return
+  }
+  if (ttl > 0 && !window.confirm(`确认保存？创建已超过 ${ttl} 天的现有项目会在下一次每日清理（本地 0 点）被永久删除（若功能首次启用不足 ${ttl} 天，则从启用时刻起算），包括音频、文件、日志和数据库记录，且不可恢复。`)) return
+  try { retention.value = await api.updateProjectRetentionSettings({ project_ttl_days: ttl, trash_days: trash }); toast({ title: '项目保留期限已保存', variant: 'success' }) }
   catch (cause) { error.value = errorMessage(cause) }
 }
 async function saveQuota() {
@@ -100,6 +123,14 @@ async function saveRoot() {
         <div class="admin-setting-row">
           <div><label for="initial-quota">新用户初始额度</label><p>设置新账户获得的制作额度，必须为非负整数。</p></div>
           <div class="controls"><Input id="initial-quota" v-model="quotaDraft" type="number" min="0" class="w-28" /><Button variant="outline" size="sm" class="admin-quota-save" :disabled="!quota || actionBusy" @click="submitQuota">{{ savingQuota ? '保存中…' : '保存' }}</Button></div>
+        </div>
+        <div class="admin-setting-row">
+          <div><label for="project-ttl">项目自然保质期（天）</label><p>项目创建满该天数后整体永久删除：工作空间文件、音频、日志、资源导出与全部数据库记录。默认 30，0 表示不过期；「默认工作空间」不受影响；仍有未完成任务的项目也会被删除（先取消任务）。</p></div>
+          <div class="controls"><Input id="project-ttl" v-model="ttlDraft" type="number" min="0" max="3650" class="w-28" /></div>
+        </div>
+        <div class="admin-setting-row">
+          <div><label for="trash-days">回收站保留（天）</label><p>项目移入回收站后可恢复的天数，到期自动永久删除，默认 7。</p></div>
+          <div class="controls"><Input id="trash-days" v-model="trashDraft" type="number" min="1" max="3650" class="w-28" /><Button variant="outline" size="sm" :disabled="!retention || actionBusy" @click="submitRetention">{{ savingRetention ? '保存中…' : '保存' }}</Button></div>
         </div>
       </CardContent></Card>
       <Card v-else-if="settingsSection === 'storage'"><CardHeader><CardTitle>存储路径</CardTitle></CardHeader><CardContent class="admin-form">

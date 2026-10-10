@@ -15,14 +15,16 @@ from ..platform.deps import AuthContext, get_auth_context
 from ..services.list_paging import project_page
 from ..services.projects import (
     ActiveProjectTasksError,
-    add_calendar_month,
+    DEFAULT_WORKSPACE_NAME,
     as_utc,
+    trash_expires_at,
     create_project as create_project_record,
     move_project_to_trash,
     rename_project,
     restore_project,
 )
 from ..platform.storage import project_workspace_path
+from ..platform.system_config import project_retention, retention_started_at
 from ..platform.workspace_layout import validate_project_name
 from ..core.paths import Layout, WORKSPACE_DIRS, WORKSPACE_DIR_NAMES
 from ..core.request_context import bind_workspace
@@ -73,10 +75,11 @@ def list_trashed_projects(user: User = Depends(require_authenticated_user), db: 
     items = db.scalars(select(Project).where(
         Project.owner_id == user.id, Project.deleted_at.is_not(None),
     ).order_by(Project.deleted_at.desc())).all()
+    trash_days, floor = project_retention(db)["trash_days"], retention_started_at(db)
     return [{
         **_project_json(item, user),
         "deleted_at": as_utc(item.deleted_at).isoformat(),
-        "expires_at": add_calendar_month(as_utc(item.deleted_at)).isoformat(),
+        "expires_at": trash_expires_at(item.deleted_at, trash_days, floor).isoformat(),
     } for item in items]
 
 
@@ -100,6 +103,8 @@ def create_project(payload: ProjectCreate, user: User = Depends(require_csrf), d
         name = validate_project_name(payload.name)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if name == DEFAULT_WORKSPACE_NAME:
+        raise HTTPException(422, "「默认工作空间」是系统保留名称")
     _lock_project_name_scope(db, user)
     if db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.deleted_at.is_(None))) is not None:
         raise HTTPException(409, "项目名称已存在")
@@ -191,6 +196,9 @@ def update_project(project_id: str, payload: ProjectUpdate, user: User = Depends
     project = _owned_project(db, user, project_id, lock=True)
     if payload.name is not None:
         name = payload.name.strip()
+        # The default workspace is exempt from expiry by this name, so it can neither be renamed nor claimed.
+        if (name == DEFAULT_WORKSPACE_NAME) != (project.name == DEFAULT_WORKSPACE_NAME) and name != project.name:
+            raise HTTPException(422, "「默认工作空间」是系统保留名称，不能重命名或被占用")
         duplicate = db.scalar(select(Project).where(Project.owner_id == user.id, Project.name == name, Project.id != project.id, Project.deleted_at.is_(None)))
         if duplicate is not None:
             raise HTTPException(409, "项目名称已存在")

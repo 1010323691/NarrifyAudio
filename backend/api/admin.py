@@ -19,7 +19,9 @@ from ..platform.database import SessionLocal, get_db, pool_status
 from ..platform.deps import AuthContext, get_auth_context, require_admin, require_admin_csrf
 from ..platform.models import AuditLog, Project, ProjectFile, QuotaTransaction, SystemConfig, Task, TaskAttempt, TaskEvent, User, UserQuotaAccount, UserSession, WorkerHeartbeat, utcnow
 from ..platform.security import revoke_session
-from ..platform.system_config import parse_worker_concurrency
+from ..platform.system_config import (
+    MAX_RETENTION_DAYS, PROJECT_RETENTION_KEY, normalize_project_retention, parse_worker_concurrency, project_retention,
+)
 from ..platform.task_admission import llm_task_limit
 from ..platform.tts_resource_budget import tts_batch_activity
 from ..platform.system_probe import database_metrics, gpu_status, host_metrics, queue_status
@@ -384,6 +386,30 @@ def update_quota_settings(payload: InitialQuotaUpdate, actor: User = Depends(req
     db.add(AuditLog(actor_user_id=actor.id, action="admin.initial_quota_changed", target_type="system_config", target_id="quota.initial_units", metadata_json={"units": payload.units}))
     db.commit()
     return {"initial_units": payload.units, "source": "admin"}
+
+
+class ProjectRetentionUpdate(BaseModel):
+    project_ttl_days: int = Field(ge=0, le=MAX_RETENTION_DAYS)  # 0 = projects never expire
+    trash_days: int = Field(ge=1, le=MAX_RETENTION_DAYS)
+
+
+@router.get("/settings/retention")
+def get_project_retention_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)) -> dict:
+    return project_retention(db)
+
+
+@router.patch("/settings/retention")
+def update_project_retention_settings(payload: ProjectRetentionUpdate, actor: User = Depends(require_admin_csrf), db: Session = Depends(get_db)) -> dict:
+    value = normalize_project_retention(payload.model_dump())
+    row = db.get(SystemConfig, PROJECT_RETENTION_KEY)
+    if row is None:
+        db.add(SystemConfig(key=PROJECT_RETENTION_KEY, value=value))
+    else:
+        row.value = value
+    db.add(AuditLog(actor_user_id=actor.id, action="admin.project_retention_changed", target_type="system_config",
+                    target_id=PROJECT_RETENTION_KEY, metadata_json=value))
+    db.commit()
+    return project_retention(db)
 
 
 @router.get("/settings/registration")

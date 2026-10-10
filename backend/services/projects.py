@@ -1,19 +1,18 @@
 """Shared lifecycle rules for user-owned projects and their storage directories."""
 from __future__ import annotations
 
-import calendar
 import os
 import shutil
 import stat
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ..platform.models import (
-    ChapterReviewMark, OutboxEvent, Project, ProjectFile, QuotaHold, QuotaTransaction,
+    ChapterReviewMark, OutboxEvent, Project, ProjectFile, ProjectPurgeRecord, QuotaHold, QuotaTransaction,
     Task, TaskAttempt, TaskEvent, TaskResult, TextFormatFlow, UserSession,
     WorkerHeartbeat, new_id, utcnow,
 )
@@ -22,6 +21,9 @@ from ..platform.workspace_layout import (
     ProjectDirectoryConflict, named_directory_key, relocate_project, ensure_project_directories,
 )
 from ..platform.storage import project_workspace_path
+
+
+DEFAULT_WORKSPACE_NAME = "默认工作空间"  # provisioned for every account; reserved, and exempt from natural expiry
 
 
 class ActiveProjectTasksError(ValueError):
@@ -69,16 +71,22 @@ def rename_project(db: Session, project: Project, name: str) -> None:
     project.name = name
 
 
-def add_calendar_month(value: datetime) -> datetime:
-    """Return the same time one calendar month later, clamping the day."""
-    month = value.month % 12 + 1
-    year = value.year + (1 if value.month == 12 else 0)
-    day = min(value.day, calendar.monthrange(year, month)[1])
-    return value.replace(year=year, month=month, day=day)
-
-
 def as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def trash_expires_at(deleted_at: datetime, trash_days: int, floor: datetime | None = None) -> datetime:
+    """``floor``: the retention start; older trash entries are aged from it (see retention_started_at)."""
+    start = as_utc(deleted_at)
+    return (max(start, floor) if floor is not None else start) + timedelta(days=trash_days)
+
+
+def project_expires_at(project: Project, project_ttl_days: int, floor: datetime | None = None) -> datetime | None:
+    """Natural expiry of a live project (None = never expires)."""
+    if project_ttl_days <= 0:
+        return None
+    start = as_utc(project.created_at)
+    return (max(start, floor) if floor is not None else start) + timedelta(days=project_ttl_days)
 
 
 def move_project_to_trash(db: Session, project: Project) -> None:
@@ -99,9 +107,16 @@ def move_project_to_trash(db: Session, project: Project) -> None:
 
 
 def restore_project(db: Session, project: Project) -> None:
-    """Restore a trashed project before its one-calendar-month expiry."""
-    if project.deleted_at is None or add_calendar_month(as_utc(project.deleted_at)) <= utcnow():
+    """Restore a trashed project before the administrator-set trash deadline."""
+    from ..platform.system_config import project_retention, retention_started_at
+
+    retention, floor = project_retention(db), retention_started_at(db)
+    if project.deleted_at is None or trash_expires_at(project.deleted_at, retention["trash_days"], floor) <= utcnow():
         raise ValueError("项目已超过回收期限")
+    expiry = project_expires_at(project, retention["project_ttl_days"], floor)
+    if expiry is not None and expiry <= utcnow():
+        # Restoring would hand the project straight to the next expiry pass.
+        raise ValueError("项目已超过保质期，无法恢复")
     occupied_names = {
         name.casefold() for name in db.scalars(select(Project.name).where(
             Project.owner_id == project.owner_id,
@@ -127,15 +142,66 @@ def restore_project(db: Session, project: Project) -> None:
     project.deleted_at = None
 
 
-def permanently_delete_project(db: Session, project: Project, workspace_path: Path) -> None:
+def _project_resource_dirs(db: Session, project: Project) -> list[Path]:
+    """Platform-owned files outside the workspace: resource snapshots and export zips."""
+    from ..platform.resource_inventory import ResourceError, internal_path
+
+    export_ids = db.scalars(select(Task.id).where(
+        Task.owner_id == project.owner_id, Task.project_id == project.id, Task.task_type == "resources.package",
+    )).all()
+    found: list[Path] = []
+    try:
+        candidates = [internal_path(db, project.owner_id, project.id)]
+        candidates += [internal_path(db, project.owner_id, "exports", task_id) for task_id in export_ids]
+    except ResourceError as exc:
+        raise OSError(f"Resource storage is not safely accessible: {exc}") from exc
+    for path in candidates:
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise OSError("Resource directory is not a safe directory")
+        if path.exists():
+            found.append(path)
+    return found
+
+
+def purge_project_rows(db: Session, owner_id: str, project_id: str) -> None:
+    """Delete every database row that hangs off a project (not the project row itself)."""
+    from ..platform.models import (
+        CurrentDelivery, DeliveryIndexState, ProjectProgress, ProjectProgressRefresh, TaskBatch,
+    )
+
+    task_ids = select(Task.id).where(Task.owner_id == owner_id, Task.project_id == project_id)
+    db.execute(delete(ProjectProgressRefresh).where(ProjectProgressRefresh.project_id == project_id))
+    db.execute(delete(ProjectProgress).where(ProjectProgress.project_id == project_id))
+    db.execute(delete(CurrentDelivery).where(CurrentDelivery.project_id == project_id))
+    db.execute(delete(DeliveryIndexState).where(DeliveryIndexState.project_id == project_id))
+    db.execute(delete(QuotaHold).where(QuotaHold.task_id.in_(task_ids)))
+    db.execute(delete(QuotaTransaction).where(QuotaTransaction.task_id.in_(task_ids)))
+    db.execute(delete(OutboxEvent).where(OutboxEvent.aggregate_type == "task", OutboxEvent.aggregate_id.in_(task_ids)))
+    db.execute(update(WorkerHeartbeat).where(WorkerHeartbeat.current_task_id.in_(task_ids)).values(current_task_id=None))
+    db.execute(delete(TaskResult).where(TaskResult.task_id.in_(task_ids)))
+    db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
+    db.execute(delete(TaskAttempt).where(TaskAttempt.task_id.in_(task_ids)))
+    db.execute(delete(Task).where(Task.id.in_(task_ids)))
+    db.execute(delete(TaskBatch).where(TaskBatch.owner_id == owner_id, TaskBatch.project_id == project_id))
+    db.execute(delete(ProjectFile).where(ProjectFile.project_id == project_id, ProjectFile.owner_id == owner_id))
+    # These workflow records point directly at the project and have no
+    # database-level cascade. Remove them before deleting the project row.
+    db.execute(delete(ChapterReviewMark).where(ChapterReviewMark.project_id == project_id, ChapterReviewMark.owner_id == owner_id))
+    db.execute(delete(TextFormatFlow).where(TextFormatFlow.project_id == project_id, TextFormatFlow.owner_id == owner_id))
+    db.execute(update(UserSession).where(UserSession.active_project_id == project_id).values(active_project_id=None))
+
+
+def permanently_delete_project(db: Session, project: Project, workspace_path: Path, *, force: bool = False,
+                              reason: str = "manual") -> None:
     """Permanently remove expired project data and its managed workspace.
 
     Failed or interrupted directory removals remain in a deterministic staging
     location. The expired project row stays in the trash so the next worker pass
     can resume cleanup; partially removed data is never moved back as if it were
-    recoverable.
+    recoverable. ``force`` deletes even with unfinished tasks (natural expiry).
     """
-    ensure_project_idle(db, project)
+    if not force:
+        ensure_project_idle(db, project)
     if workspace_path.is_symlink():
         raise OSError("Project workspace must not be a symlink")
     staged_paths = list(workspace_path.parent.glob(f".{project.id}.deleting-*"))
@@ -149,42 +215,21 @@ def permanently_delete_project(db: Session, project: Project, workspace_path: Pa
         if staged_path.is_symlink() or not staged_path.is_dir():
             raise OSError("Staged project workspace is not a safe directory")
 
-    task_ids = select(Task.id).where(Task.owner_id == project.owner_id, Task.project_id == project.id)
+    resource_dirs = _project_resource_dirs(db, project)
+    export_ids = list(db.scalars(select(Task.id).where(
+        Task.owner_id == project.owner_id, Task.project_id == project.id, Task.task_type == "resources.package",
+    )).all())
     try:
-        from ..platform.models import CurrentDelivery, DeliveryIndexState, ProjectProgress, ProjectProgressRefresh
-        db.execute(delete(ProjectProgressRefresh).where(ProjectProgressRefresh.project_id == project.id))
-        db.execute(delete(ProjectProgress).where(ProjectProgress.project_id == project.id))
-        db.execute(delete(CurrentDelivery).where(CurrentDelivery.project_id == project.id))
-        db.execute(delete(DeliveryIndexState).where(DeliveryIndexState.project_id == project.id))
-        db.execute(delete(QuotaHold).where(QuotaHold.task_id.in_(task_ids)))
-        db.execute(delete(QuotaTransaction).where(QuotaTransaction.task_id.in_(task_ids)))
-        db.execute(delete(OutboxEvent).where(
-            OutboxEvent.aggregate_type == "task", OutboxEvent.aggregate_id.in_(task_ids),
-        ))
-        db.execute(update(WorkerHeartbeat).where(WorkerHeartbeat.current_task_id.in_(task_ids)).values(current_task_id=None))
-        db.execute(delete(TaskResult).where(TaskResult.task_id.in_(task_ids)))
-        db.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(task_ids)))
-        db.execute(delete(TaskAttempt).where(TaskAttempt.task_id.in_(task_ids)))
-        db.execute(delete(Task).where(Task.id.in_(task_ids)))
-        from ..platform.models import TaskBatch
-        db.execute(delete(TaskBatch).where(TaskBatch.owner_id == project.owner_id, TaskBatch.project_id == project.id))
-        db.execute(delete(ProjectFile).where(
-            ProjectFile.project_id == project.id, ProjectFile.owner_id == project.owner_id,
-        ))
-        # These workflow records point directly at the project and have no
-        # database-level cascade. Remove them before deleting the project row.
-        db.execute(delete(ChapterReviewMark).where(
-            ChapterReviewMark.project_id == project.id, ChapterReviewMark.owner_id == project.owner_id,
-        ))
-        db.execute(delete(TextFormatFlow).where(
-            TextFormatFlow.project_id == project.id, TextFormatFlow.owner_id == project.owner_id,
-        ))
-        db.execute(update(UserSession).where(UserSession.active_project_id == project.id).values(active_project_id=None))
+        purge_project_rows(db, project.owner_id, project.id)
         db.delete(project)
+        db.add(ProjectPurgeRecord(project_id=project.id, owner_id=project.owner_id, directory_key=project.directory_key,
+                                  reason=reason, export_task_ids=export_ids))
         db.flush()
 
         for staged_path in staged_paths:
             shutil.rmtree(staged_path, onerror=_remove_readonly)
+        for resource_dir in resource_dirs:
+            shutil.rmtree(resource_dir, onerror=_remove_readonly)
         db.commit()
     except Exception:
         db.rollback()

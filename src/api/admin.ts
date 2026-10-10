@@ -227,6 +227,16 @@ export function getRegistrationSettings(): Promise<RegistrationSettings> {
   return http.get('/api/v1/admin/settings/registration')
 }
 
+export interface ProjectRetentionSettings { project_ttl_days: number; trash_days: number }
+
+export function getProjectRetentionSettings(): Promise<ProjectRetentionSettings> {
+  return http.get('/api/v1/admin/settings/retention')
+}
+
+export function updateProjectRetentionSettings(value: ProjectRetentionSettings): Promise<ProjectRetentionSettings> {
+  return http.patch('/api/v1/admin/settings/retention', value)
+}
+
 export function getRuntimeSettings(): Promise<RuntimeSettings> {
   return http.get('/api/v1/admin/settings/runtime')
 }

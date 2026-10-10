@@ -87,3 +87,67 @@ def client_logs_enabled(db: Session) -> bool:
     """One platform-wide display switch; legacy workspace preferences cannot enable it."""
     row = db.get(SystemConfig, "client.logs")
     return bool(row and isinstance(row.value, dict) and row.value.get("enabled") is True)
+
+
+PROJECT_RETENTION_KEY = "retention.projects"
+DEFAULT_PROJECT_TTL_DAYS = 30
+DEFAULT_TRASH_DAYS = 7
+MAX_RETENTION_DAYS = 3650
+
+
+def normalize_project_retention(value: Any) -> dict[str, int]:
+    """Clamp a stored/submitted retention record to its valid range.
+
+    ``project_ttl_days`` is a live project's lifetime from creation (0 keeps
+    projects forever); ``trash_days`` is how long a trashed project stays
+    recoverable (>= 1)."""
+    raw = value if isinstance(value, dict) else {}
+
+    def number(key: str, default: int, low: int) -> int:
+        try:
+            return max(low, min(MAX_RETENTION_DAYS, int(raw.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    return {"project_ttl_days": number("project_ttl_days", DEFAULT_PROJECT_TTL_DAYS, 0), "trash_days": number("trash_days", DEFAULT_TRASH_DAYS, 1)}
+
+
+def project_retention(db: Session) -> dict[str, int]:
+    row = db.get(SystemConfig, PROJECT_RETENTION_KEY)
+    return normalize_project_retention(row.value if row is not None else None)
+
+
+RETENTION_STARTED_KEY = "retention.started_at"
+
+
+def retention_started_at(db: Session):
+    """When project expiry first became active (None before the first daily pass).
+
+    Existing projects and trash entries are aged from no earlier than this moment, so
+    switching the feature on never deletes data that was already past the default
+    deadlines; explicit administrator changes to the day counts still apply at once."""
+    from datetime import datetime, timezone
+
+    row = db.get(SystemConfig, RETENTION_STARTED_KEY)
+    try:
+        value = datetime.fromisoformat(row.value["at"]) if row is not None else None
+    except (KeyError, TypeError, ValueError):
+        return None
+    if value is not None and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def ensure_retention_started(db: Session):
+    started = retention_started_at(db)
+    if started is None:
+        from datetime import datetime, timezone
+
+        started = datetime.now(timezone.utc)
+        row = db.get(SystemConfig, RETENTION_STARTED_KEY)
+        if row is None:
+            db.add(SystemConfig(key=RETENTION_STARTED_KEY, value={"at": started.isoformat()}))
+        else:
+            row.value = {"at": started.isoformat()}
+        db.commit()
+    return started
