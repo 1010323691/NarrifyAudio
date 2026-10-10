@@ -1,5 +1,6 @@
 """Batch merge / undo / veto endpoints over a throwaway workspace."""
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -171,3 +172,20 @@ def test_task_started_after_the_request_guard_is_caught_inside_the_lock(ws, monk
         merge_batch(MergeBatchRequest(script="__all__", target="林黛玉", sources=["黛玉"]), ctx=object(), db=object())
     assert err.value.status_code == 409
     assert _speakers(ws) == before
+
+
+def test_a_write_that_fails_midway_is_restored_too(ws, monkeypatch):
+    path = ws / "03_parsed_json" / "s.json"
+    before = path.read_text("utf-8")
+    real = RM.pathio.rewrite_json_file
+
+    def truncating(target, data):
+        if target == path and data is not None and any(e.get("speaker") == "林黛玉" and e["text"].startswith("黛玉 ") for e in data):
+            Path(target).write_text("{truncated")  # the write dies after clobbering the file
+            raise OSError("disk full")
+        return real(target, data)
+
+    monkeypatch.setattr(RM.pathio, "rewrite_json_file", truncating)
+    with pytest.raises(OSError):
+        merge_batch(MergeBatchRequest(script="__all__", target="林黛玉", sources=["黛玉"]))
+    assert json.loads(path.read_text("utf-8")) == json.loads(before)

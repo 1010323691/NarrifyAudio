@@ -201,11 +201,11 @@ def _write_all(changed: dict[Path, list], originals: dict[Path, list], vc: tuple
     vc_written = False
     try:
         for path, data in changed.items():
+            done.append(path)  # registered first: a write that dies half-way must be restored too
             pathio.rewrite_json_file(path, data)
-            done.append(path)
         if vc is not None:
-            pathio.rewrite_json_file(vc[0], vc[1])
             vc_written = True
+            pathio.rewrite_json_file(vc[0], vc[1])
         after()
     except Exception as error:
         unrestored: list[str] = []
