@@ -131,9 +131,30 @@ def list_llm_models(base_url: str, api_key: str = "", *, timeout: float = 10.0) 
     return names
 
 
+def cache_system_messages(messages: list) -> list:
+    """Copy ``messages`` with each string-content system message turned into a one-part
+    array carrying NInfer's explicit ``prompt_cache_breakpoint``. The input is not mutated."""
+    out = []
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str):
+            m = {**m, "content": [{"type": "text", "text": m["content"],
+                                   "prompt_cache_breakpoint": {"mode": "explicit"}}]}
+        out.append(m)
+    return out
+
+
+def _cache_system_enabled() -> bool:
+    try:
+        from ..core.config import get_config
+        return bool(get_config().llm.prompt_cache_breakpoint)
+    except Exception:  # noqa: BLE001 — config unavailable → plain request
+        return False
+
+
 def build_chat_body(model, messages, temperature, top_p, presence_penalty,
                     max_tokens, top_k=0, min_p=0, banned_tokens=None,
-                    *, stream: bool = False, extra_body: dict | None = None) -> dict:
+                    *, stream: bool = False, extra_body: dict | None = None,
+                    cache_system: bool = False) -> dict:
     """The single source of the ``chat/completions`` business body (Q15).
 
     Non-streaming and streaming requests must differ ONLY by the
@@ -144,12 +165,16 @@ def build_chat_body(model, messages, temperature, top_p, presence_penalty,
     """
     body = {
         "model": model,
-        "messages": messages,
+        "messages": cache_system_messages(messages) if cache_system else messages,
         "temperature": temperature,
         "top_p": top_p,
         "presence_penalty": presence_penalty,
         "max_tokens": max_tokens,
     }
+    if cache_system:
+        # Only the system prefix is worth saving; opt out of the default write at the
+        # end of the (always different) user text so it cannot crowd out the prefix.
+        body["prompt_cache_options"] = {"mode": "explicit"}
     if stream:
         body["stream"] = True
         # Ask OpenAI-compatible servers to include usage in the final frame; harmless
@@ -197,9 +222,11 @@ def request_chat_completion(base_url, api_key, model, messages,
     from ..platform.quota import require_quota
     require_quota("LLM", "llm.operation")
     url = base_url.rstrip("/") + "/chat/completions"
+    cache_system = _cache_system_enabled()
     body = build_chat_body(
         model, messages, temperature, top_p, presence_penalty, max_tokens,
-        top_k=top_k, min_p=min_p, banned_tokens=banned_tokens, extra_body=extra_body)
+        top_k=top_k, min_p=min_p, banned_tokens=banned_tokens, extra_body=extra_body,
+        cache_system=cache_system)
 
     def _post(b):
         data = json.dumps(b, ensure_ascii=False).encode("utf-8")
@@ -227,9 +254,12 @@ def request_chat_completion(base_url, api_key, model, messages,
     except LLMHTTPError as e:
         # Strict gateway rejected the extra keys → transparent one-shot retry
         # WITHOUT them. No extra keys → nothing to fall back to.
-        if not extra_body or e.status not in (400, 422):
+        if e.status not in (400, 422) or not (extra_body or cache_system):
             raise
-        payload = _post({k: v for k, v in body.items() if k not in extra_body})
+        plain = build_chat_body(
+            model, messages, temperature, top_p, presence_penalty, max_tokens,
+            top_k=top_k, min_p=min_p, banned_tokens=banned_tokens)
+        payload = _post(plain)
 
     choices = payload.get("choices") or []
     if not choices:
@@ -278,18 +308,21 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
     from ..platform.quota import require_quota
     require_quota("LLM", "llm.operation")
     url = base_url.rstrip("/") + "/chat/completions"
-    body = build_chat_body(
-        model, messages, temperature, top_p, presence_penalty, max_tokens,
-        top_k=top_k, min_p=min_p, banned_tokens=banned_tokens, stream=True)
+    cache_system = _cache_system_enabled()
 
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
+    def _open(cache: bool):
+        body = build_chat_body(
+            model, messages, temperature, top_p, presence_penalty, max_tokens,
+            top_k=top_k, min_p=min_p, banned_tokens=banned_tokens, stream=True,
+            cache_system=cache)
+        req = urllib.request.Request(
+            url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"), method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+        )
+        return urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
 
     # Coalescing: buffer raw deltas and flush on a throttle so the per-task SSE queue
     # (queue.Queue(maxsize=500), which silently drops when full) never chokes on
@@ -329,7 +362,15 @@ def request_chat_completion_stream(base_url, api_key, model, messages,
         pending.clear()
 
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        try:
+            resp = _open(cache_system)
+        except urllib.error.HTTPError as e:
+            # Strict gateway rejected the cache fields → one-shot retry without them
+            # (same contract as the non-streaming verb); nothing was streamed yet.
+            if not cache_system or e.code not in (400, 422):
+                raise
+            resp = _open(False)
+        with resp:
             for raw in resp:
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):

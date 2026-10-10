@@ -117,6 +117,68 @@ def test_two_paths_share_business_body(monkeypatch):
     assert "stream" not in non and "stream_options" not in non
 
 
+def test_cache_system_marks_only_string_system_messages():
+    msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}]
+    body = build_chat_body(**{**COMMON, "messages": msgs}, cache_system=True)
+    assert body["messages"][0]["content"] == [{
+        "type": "text", "text": "SYS", "prompt_cache_breakpoint": {"mode": "explicit"}}]
+    assert body["messages"][1] == {"role": "user", "content": "hi"}
+    assert msgs[0]["content"] == "SYS"  # caller's list is not mutated
+    assert body["prompt_cache_options"] == {"mode": "explicit"}
+
+    parts = [{"type": "text", "text": "X"}]
+    keep = build_chat_body(
+        **{**COMMON, "messages": [{"role": "system", "content": parts}]}, cache_system=True)
+    assert keep["messages"][0]["content"] is parts
+
+    off = build_chat_body(**{**COMMON, "messages": msgs})
+    assert off["messages"] == msgs
+    assert "prompt_cache_options" not in off
+
+
+def test_cache_system_flag_and_400_fallback(monkeypatch):
+    from backend.engines import llm_transport
+    monkeypatch.setattr(llm_transport, "_cache_system_enabled", lambda: True)
+    sent = []
+
+    def urlopen(req, *a, **k):
+        sent.append(json.loads(req.data))
+        if len(sent) == 1:
+            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, io.BytesIO(b"bad"))
+        return _NonStreamResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    request_chat_completion(
+        "http://x/v1", "key", "m",
+        [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}],
+        temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10)
+    assert isinstance(sent[0]["messages"][0]["content"], list)
+    assert sent[1]["messages"][0]["content"] == "SYS"
+
+
+def test_cache_system_stream_400_fallback(monkeypatch):
+    from backend.engines import llm_transport
+    from backend.engines.llm_transport import request_chat_completion_stream
+    monkeypatch.setattr(llm_transport, "_cache_system_enabled", lambda: True)
+    sent = []
+
+    def urlopen(req, *a, **k):
+        sent.append(json.loads(req.data))
+        if len(sent) == 1:
+            raise urllib.error.HTTPError(req.full_url, 400, "bad", {}, io.BytesIO(b"bad"))
+        return _StreamResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    content, _, _ = request_chat_completion_stream(
+        "http://x/v1", "key", "m",
+        [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}],
+        temperature=0.6, top_p=0.8, presence_penalty=0.0, max_tokens=10)
+    assert content == "ok"
+    assert isinstance(sent[0]["messages"][0]["content"], list)
+    assert sent[1]["messages"][0]["content"] == "SYS"
+    assert "prompt_cache_options" not in sent[1]
+
+
 # --------------------------------------------------------------------------- #
 # 流式动词的 HTTP 错误契约：非 5xx 必须抛 LLMHTTPError（与非流式一致），
 # 否则 404 model_not_found 会被上层当成"瞬时 chunk 失败"吞掉重试。

@@ -281,6 +281,15 @@ watch(
               <p v-else-if="modelsTried" class="mt-1 text-xs text-muted-foreground">该服务没有返回任何模型。</p>
             </div>
           </div>
+          <div class="flex items-center justify-between gap-4">
+            <div class="flex flex-col">
+              <Label for="admin-llm-prompt-cache" class="font-normal">系统提示词前缀缓存</Label>
+              <span class="text-xs text-muted-foreground">
+                给系统提示词加缓存断点，让 NInfer 复用相同前缀、减少重复 prefill。仅对接 NInfer 时开启；其他 OpenAI 兼容服务可能拒绝该字段。
+              </span>
+            </div>
+            <Switch id="admin-llm-prompt-cache" aria-label="系统提示词前缀缓存" v-model="draft.llm.prompt_cache_breakpoint" :disabled="saving" />
+          </div>
         </CardContent>
       </Card>
 
