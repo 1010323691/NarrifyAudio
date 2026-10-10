@@ -157,6 +157,7 @@ export interface VoiceItem {
   clone_status: 'none' | 'done' | 'failed' // Phase 2 (克隆音频) state
   type: string // clone | design | custom | foundation | ''
   alias_of: string // display-only role association hint; never redirects voice synthesis
+  alias_basis?: string // rule behind alias_of (e.g. "名字包含"), shown as the hint tooltip
   gender: 'male' | 'female' | '' // '' = unknown; pre-filled by Phase 1, the badge pick wins
   description: string
   preview: string // path relative to 04_voice_profiles/ (playable via downloadUrl('04_voice_profiles', preview)); '' if none
@@ -180,6 +181,48 @@ export interface MergeSpeakersResult {
   target: string
   replaced: number
   files: string[]
+}
+/** 批量合并疑似角色：角色（仅返回出现在指向关系/合并记录里的）。 */
+export interface MergeRole {
+  name: string
+  gender: 'male' | 'female' | ''
+  line_count: number
+  sample: string // one sample line
+  preview: string // relative to 04_voice_profiles/; '' if none
+  voice_config: boolean // has a voice_config entry (deleted on merge)
+  cloned: boolean // has a finished clone voice
+}
+export interface MergeLink { target: string; basis: string }
+export interface MergeRecord {
+  id: string
+  source: string
+  target: string
+  merged_at: string
+  line_count: number
+  undoable: boolean
+  reason: string
+  children: string[]
+}
+export interface MergeVeto { source: string; target: string; basis: string }
+/** 指向关系表 + 合并记录的快照；version 用于乐观锁（变化后写操作 409）。 */
+export interface MergeGraph {
+  version: number
+  script: string
+  roles: MergeRole[]
+  links: Record<string, MergeLink>
+  records: MergeRecord[]
+  vetoes: MergeVeto[]
+  new_candidates: Record<string, string[]>
+}
+export interface MergeBatchResult {
+  ok: boolean
+  target: string
+  sources: string[]
+  replaced: number
+  files: string[]
+  orphans: string[]
+  rematched: Record<string, string | null>
+  graph: MergeGraph
 }
 export interface PrepareFoundationsOptions {
   speakers?: string[]

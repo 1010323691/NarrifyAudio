@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "test:ci": "node --test scripts/test-state-isolation.mjs scripts/test-project-overview.mjs scripts/test-project-cards.mjs scripts/test-task-center.mjs scripts/test-production-workbench.mjs scripts/test-merge-submission.mjs scripts/test-task-batch-submission.mjs scripts/test-resource-center.mjs scripts/test-admin-console.mjs scripts/test-admin-charts.mjs scripts/test-fit-rows.mjs scripts/test-textformat-workbench.mjs scripts/test-script-parse-workbench.mjs scripts/test-voices-workbench.mjs",
+    "test:ci": "node --test scripts/test-state-isolation.mjs scripts/test-project-overview.mjs scripts/test-project-cards.mjs scripts/test-task-center.mjs scripts/test-production-workbench.mjs scripts/test-merge-submission.mjs scripts/test-task-batch-submission.mjs scripts/test-resource-center.mjs scripts/test-admin-console.mjs scripts/test-admin-charts.mjs scripts/test-fit-rows.mjs scripts/test-textformat-workbench.mjs scripts/test-script-parse-workbench.mjs scripts/test-voices-workbench.mjs scripts/test-batch-merge.mjs",
     "test:task-batch-submission": "node scripts/test-task-batch-submission.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
@@ -23,6 +23,7 @@
     "test:script-parse-workbench": "node scripts/test-script-parse-workbench.mjs",
     "test:production-workbench": "node --test scripts/test-production-workbench.mjs scripts/test-merge-submission.mjs scripts/test-task-batch-submission.mjs",
     "test:voices-workbench": "node scripts/test-voices-workbench.mjs",
+    "test:batch-merge": "node scripts/test-batch-merge.mjs",
     "test:gpu-scheduler": "node scripts/test-gpu-scheduler.mjs",
     "test:admin-console": "node scripts/test-admin-console.mjs",
     "test:admin-charts": "node scripts/test-admin-charts.mjs",

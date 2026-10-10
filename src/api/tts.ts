@@ -10,6 +10,8 @@ import type {
   BatchStatusFiles,
   MergeStatusPackages,
   MergeSpeakersResult,
+  MergeGraph,
+  MergeBatchResult,
 } from '@/types'
 
 export interface BatchTaskSubmission {
@@ -80,6 +82,34 @@ export function mergeSpeakers(source: string, target: string, script?: string): 
     target,
     script: script || null,
   })
+}
+
+const mergeQuery = (script?: string) => (script ? `script=${encodeURIComponent(script)}` : '')
+
+/** 批量合并疑似角色：指向关系表 + 合并记录 + 否决 + 未查看的新增候选（含乐观锁 version）。 */
+export function getMergeGraph(script?: string, signal?: AbortSignal): Promise<MergeGraph> {
+  return http.get(`/api/tts/voices/merge-graph?${mergeQuery(script)}`, { signal })
+}
+/** 原子批量合并：sources 全部并入 target（任何一个失败则全部不生效）；version 过期 → 409。 */
+export function mergeBatch(script: string | undefined, target: string, sources: string[], version: number): Promise<MergeBatchResult> {
+  return http.post('/api/tts/voices/merge-batch', { script: script || null, target, sources, version })
+}
+/** 撤销一条合并记录（台词已变化则 409）。 */
+export function undoMerge(script: string | undefined, recordId: string, version: number): Promise<{ ok: boolean; source: string; target: string; graph: MergeGraph }> {
+  return http.post('/api/tts/voices/merge-undo', { script: script || null, record_id: recordId, version })
+}
+/** 忽略：source 不是 target（此后不再互相匹配，source 按无主角色重新匹配）。 */
+export function vetoLink(script: string | undefined, source: string, target: string, version: number): Promise<{ ok: boolean; graph: MergeGraph }> {
+  return http.post('/api/tts/voices/link-veto', { script: script || null, source, target, version })
+}
+/** 恢复被忽略的提示。 */
+export function restoreLink(script: string | undefined, source: string, target: string, version: number): Promise<{ ok: boolean; restored: boolean; graph: MergeGraph }> {
+  const query = [mergeQuery(script), `source=${encodeURIComponent(source)}`, `target=${encodeURIComponent(target)}`, `version=${version}`].filter(Boolean).join('&')
+  return http.del(`/api/tts/voices/link-veto?${query}`)
+}
+/** 标记某目标角色的新增候选已查看（清除「新增」「待复核」）。 */
+export function markMergeReviewed(script: string | undefined, target: string): Promise<{ ok: boolean; cleared: boolean; version: number }> {
+  return http.post('/api/tts/voices/merge-review-seen', { script: script || null, target })
 }
 
 /** 角色配音：记录用户对某角色性别的标记（人名旁的 ♂/♀ 徽章）。同步写（非任务）；
