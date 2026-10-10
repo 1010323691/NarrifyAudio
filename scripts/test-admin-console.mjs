@@ -48,7 +48,7 @@ function harness(view, exports, api = {}, { query = {} } = {}) {
     if (name === '@/api/admin') return {
       userPage: async () => ({ items: [], pagination: { total: 0, page: 1, page_size: 20, counts: {} } }),
       getStorageSettings: async () => ({ root_path: '' }), getQuotaSettings: async () => ({ initial_units: 0 }),
-      getRegistrationSettings: async () => ({ enabled: true }), getRuntimeSettings: async () => ({}),
+      getProjectRetentionSettings: async () => ({ project_ttl_days: 30, trash_days: 7 }), getRegistrationSettings: async () => ({ enabled: true }), getRuntimeSettings: async () => ({}),
       getOverview: async () => ({ services: [] }), getTaskMetrics: async () => ({}), getThroughput: async () => ({}), getMetricsHistory: async () => null,
       ...api,
     }
@@ -116,7 +116,7 @@ test('the final active administrator remains protected', () => {
 test('registration saves block external refreshes and keep the next toggle direction', async () => {
   const save = deferred(); let enabled = true; let reads = 0
   const h = config({
-    getRegistrationSettings: async () => { reads++; return { enabled } },
+    getProjectRetentionSettings: async () => ({ project_ttl_days: 30, trash_days: 7 }), getRegistrationSettings: async () => { reads++; return { enabled } },
     updateRegistrationSettings: async next => { await save.promise; enabled = next; return { enabled } },
   })
   await h.loader.load()
@@ -131,7 +131,7 @@ test('registration saves block external refreshes and keep the next toggle direc
 test('a settings read begun before a mutation cannot restore the previous registration value', async () => {
   const old = deferred(); let enabled = true; let reads = 0
   const h = config({
-    getRegistrationSettings: () => ++reads === 2 ? old.promise : Promise.resolve({ enabled }),
+    getProjectRetentionSettings: async () => ({ project_ttl_days: 30, trash_days: 7 }), getRegistrationSettings: () => ++reads === 2 ? old.promise : Promise.resolve({ enabled }),
     updateRegistrationSettings: async next => { enabled = next; return { enabled } },
   })
   await h.loader.load()
@@ -146,7 +146,7 @@ test('a settings read begun before a mutation cannot restore the previous regist
 test('immediate switches retain confirmed state and own their pending feedback', async () => {
   const save = deferred(); let calls = 0; let reads = 0
   const h = config({
-    getRegistrationSettings: async () => { reads++; return { enabled: true } },
+    getProjectRetentionSettings: async () => ({ project_ttl_days: 30, trash_days: 7 }), getRegistrationSettings: async () => { reads++; return { enabled: true } },
     updateRegistrationSettings: () => { calls++; return save.promise },
   })
   await h.loader.load()
@@ -165,7 +165,7 @@ test('immediate switches retain confirmed state and own their pending feedback',
 
 test('failed immediate saves restore interaction, keep the confirmed state and raise a toast', async () => {
   const h = config({
-    getRegistrationSettings: async () => ({ enabled: true }),
+    getProjectRetentionSettings: async () => ({ project_ttl_days: 30, trash_days: 7 }), getRegistrationSettings: async () => ({ enabled: true }),
     updateRegistrationSettings: async () => { throw new Error('save unavailable') },
   })
   await h.loader.load(); await h.saveToggle('registration')
