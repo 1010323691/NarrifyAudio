@@ -64,7 +64,7 @@ from ..core.task_control import TaskCancelled
 from ..core.paths import ALL_PARSED_JSON, get_or_prepare_layout, resolve_parsed_json, resolve_parsed_json_all
 from ..platform.quota import QuotaInsufficientError
 from ..platform.system_config import parse_worker_concurrency
-from .persona_prompts import PERSONA_SYSTEM_PROMPT, PERSONA_USER_PROMPT
+from .persona_prompts import load_persona_prompts
 from .tts import WorkerWatchdogTimeout, resolve_engine, run_tts_subprocess
 from .tts_batch import (
     _parse_watchdog_indices,
@@ -227,10 +227,22 @@ def pick_ref_text(lines):
     return next((ln.strip() for ln in lines if ln and ln.strip()), "")
 
 
+#: Voice description used when the LLM is unavailable or unparseable (no gender word,
+#: so the gender badge stays 未定).
+FALLBACK_DESCRIPTION = "音色清晰自然，音高适中，语速平稳，适合有声书朗读。"
+
+
+def _fallback_ref_text(speaker):
+    """Last-resort reference-clip text (≈40 字 of calm Chinese) when the character has
+    no usable line: the clip seeds the whole book's clone, so it must be speakable."""
+    if speaker == "NARRATOR":
+        return "夜色渐渐深了，街上的行人越来越少，只有路灯还静静地亮着，故事就从这里开始。"
+    return f"你好，我是{speaker}。今天天气不错，我们一边走一边慢慢聊吧，有什么想说的都可以告诉我。"
+
+
 def _fallback_persona(speaker, lines):
     """A minimal, always-valid persona if the LLM is unavailable or unparseable."""
-    description = f"{speaker} has a clear, natural audiobook voice."
-    return description, pick_ref_text(lines), ""
+    return FALLBACK_DESCRIPTION, pick_ref_text(lines), ""
 
 
 def _normalize_gender(value) -> str:
@@ -514,8 +526,9 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
     cfg = get_config()
     llm = cfg.llm
     pp = cfg.persona_prompts
-    persona_system = pp.system_prompt or PERSONA_SYSTEM_PROMPT
-    persona_user = pp.user_prompt or PERSONA_USER_PROMPT
+    default_system, default_user = load_persona_prompts()  # mtime-cached: file edits apply without restart
+    persona_system = pp.system_prompt or default_system
+    persona_user = pp.user_prompt or default_user
     if not (llm.model_name or "").strip() and not overrides:
         handle.log("警告：未配置 LLM 模型——未提供提示词的角色将使用兜底描述。", "WARNING")
 
@@ -588,7 +601,7 @@ def prepare_foundations(handle, speakers=None, new_only=False, overrides=None, s
             handle.log(f"  [{sp}] 使用兜底描述。", "WARNING")
             gender = gender or _g
         if not ref_text:
-            ref_text = pick_ref_text(lines) or f"{sp} speaks in a clear, natural voice."
+            ref_text = pick_ref_text(lines) or _fallback_ref_text(sp)
         return {
             "speaker": sp,
             "ok": bool(description),
@@ -790,7 +803,7 @@ def generate_voice_candidates(handle, speakers=None, new_only=False, concurrency
         ref_text = (entry.get("ref_text") or "").strip()
         if not ref_text:
             ref_text = pick_ref_text([t for _i, t in samples.get(sp, [])]) \
-                or f"{sp} speaks in a clear, natural voice."
+                or _fallback_ref_text(sp)
         for k in range(1, _target(sp) + 1):
             final_out = layout.voice_profiles / "designed_voices" / safe_filename(f"{_sanitize(sp)}_{ns_map[sp]}_c{k}.wav")
             allocate_workspace_stage = getattr(handle, "allocate_workspace_stage", None)

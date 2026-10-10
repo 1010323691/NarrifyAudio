@@ -1037,7 +1037,7 @@ def _effective_instruct(r, vtype):
         base = (r["vd"].get("description") or "").strip()
         if base and r["instruct"]:
             return f"{base}, {r['instruct']}"
-        return base or r["instruct"] or "A clear, natural speaking voice"
+        return base or r["instruct"] or "音色清晰自然，语速平稳。"
     return ""  # clone: no instruct
 
 
@@ -1772,7 +1772,7 @@ def _run_design_batch(args) -> int:
         if not isinstance(j, dict):
             continue
         text = str(j.get("text") or "").strip()
-        description = str(j.get("description") or "").strip() or "A clear, natural speaking voice"
+        description = str(j.get("description") or "").strip() or "音色清晰自然，语速平稳。"
         rows.append({"index": int(j.get("index", 0)), "sp": str(j.get("sp", "")),
                      "k": int(j.get("k", 1)), "vd": {"description": description},
                      "text": text, "instruct": "", "chars": len(text),

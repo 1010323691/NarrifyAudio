@@ -96,7 +96,7 @@ class BGMConfig(BaseModel):
 
 class PersonaPromptsConfig(BaseModel):
     # Voice-design (persona) prompts for the "角色配音" stage. Empty values fall back
-    # to the bundled defaults in ``backend/engines/persona_prompts.py``.
+    # to the bundled defaults in ``backend/resources/persona_prompts.txt``.
     system_prompt: str = ""
     user_prompt: str = ""
 
