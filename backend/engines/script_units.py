@@ -355,11 +355,22 @@ def validate_edit(orig: str, new: str, max_delete: int = 24) -> bool:
 # Assembly
 # ---------------------------------------------------------------------------
 
+_WATERMARK_RE = re.compile(r"https?://|www\.|\.(?:com|net|org|cn|cc|me|top|info)\b", re.IGNORECASE)
+
+
+def delete_allowed(unit_text: str, max_chars: int) -> bool:
+    """Whether an ``X`` label may delete this unit: a short tag-like unit, or a URL /
+    site-watermark line of any length. A long unit without a URL is story (or a
+    translator's note) and is kept even if the model asked to drop it."""
+    return len(_skeleton(unit_text)) <= max(1, int(max_chars)) or bool(_WATERMARK_RE.search(unit_text))
+
+
 @dataclass
 class AssembleResult:
     entries: list
     edit_applied: int = 0
     edit_rejected: int = 0
+    delete_rejected: int = 0
     deleted: int = 0
     ok: bool = True      # skeleton self-check: no text lost or invented by the stitching
 
@@ -377,10 +388,12 @@ def _instruct_weight(value: str) -> int:
 
 
 def assemble(units: list[Unit], plan: UnitPlan, narrator_instruct: str, soft_max: int = 150,
-             *, edit_enabled: bool = True, edit_max_delete: int = 24) -> AssembleResult:
+             *, edit_enabled: bool = True, edit_max_delete: int = 24,
+             delete_max_chars: int = 30) -> AssembleResult:
     """Stitch labelled units back into ``{speaker, text, instruct}`` entries.
 
-    * Unlisted units are narration; ``X`` units vanish; a quote-wrapped unit labelled as a
+    * Unlisted units are narration; ``X`` units vanish (only short tag-like units or
+      URL / watermark lines — see :func:`delete_allowed`; a longer ``X`` is ignored); a quote-wrapped unit labelled as a
       character loses its outer quote characters.
     * Adjacent same-speaker units merge into one entry — an ``X`` between them is
       transparent (a character's words split only by a pure speech tag are one entry),
@@ -427,6 +440,9 @@ def assemble(units: list[Unit], plan: UnitPlan, narrator_instruct: str, soft_max
             flush()
             pending_x, forced_break = False, False
             continue
+        if label is not None and label.kind == "X" and not delete_allowed(unit.text, delete_max_chars):
+            result.delete_rejected += 1
+            label = None
         if label is not None and label.kind == "X":
             result.deleted += 1
             removed_skeleton += len(_skeleton(unit.text))

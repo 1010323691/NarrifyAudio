@@ -232,6 +232,9 @@ class GenerationConfig(BaseModel):
     # 关闭后带动作的说话标签保持原样（由后续机械阶段兜底）。
     edit_enabled: bool = True
     edit_max_delete_chars: int = Field(default=24, ge=1, le=200)
+    # 单元协议下 X（删除）能删的单元最长词字符数：超过的单元只有含网址 / 水印特征才允许
+    # 删除，其余（译者注、正文）一律保留，防止模型把正文误删。
+    delete_max_chars: int = Field(default=30, ge=1, le=400)
     # 单元协议切分单元的目标上限（字）：超过则在句界 / 子句界再切。
     unit_max_chars: int = Field(default=80, ge=20, le=400)
 

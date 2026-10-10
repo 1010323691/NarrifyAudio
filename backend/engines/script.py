@@ -941,11 +941,22 @@ def _unit_context(chunk_num: int, total_chunks: int, previous_entries) -> str:
     return "\n".join(parts)
 
 
-def _unit_plan_problem(plan, likely_dialogue: list) -> str | None:
-    """Why a parsed label reply must not be trusted, or ``None`` when it is usable."""
+def _unit_plan_problem(plan, likely_dialogue: list, finish_reason=None) -> str | None:
+    """Why a parsed label reply must not be trusted, or ``None`` when it is usable.
+
+    The ``END`` line is the truncation sentinel, but models often just stop after the last
+    label: a natural stop (``finish_reason == "stop"``) without ``END`` is accepted unless
+    the labels end long before obvious dialogue (an early stop); any other finish reason
+    without ``END`` is treated as a cut-off reply.
+    """
     if not plan.ended:
-        return "缺少 END 结束行（疑似被截断）"
-    if plan.bad_lines > max(2, int(plan.total_lines * 0.2)):
+        if finish_reason != "stop":
+            return f"缺少 END 结束行且并非正常停笔（finish_reason={finish_reason}）"
+        last = max(plan.labels, default=0)
+        missed = [n for n in likely_dialogue if n > last]
+        if len(missed) >= 3:
+            return f"标签止于第 {last} 号，其后仍有 {len(missed)} 处整行引号台词（疑似提前停笔）"
+    if plan.bad_lines * 5 > plan.total_lines:  # more than 20% unreadable lines
         return f"无法解析的行过多（{plan.bad_lines}/{plan.total_lines}）"
     if not plan.labels and len(likely_dialogue) >= 3:
         return f"整行引号台词（{len(likely_dialogue)} 处）一个都没有标注"
@@ -1015,12 +1026,13 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
         handle.log(f"chunk {chunk_num}/{total_chunks}: finish_reason={finish_reason} | "
                    f"tokens prompt={pt} completion={ct}（单元 {n_units}）")
         plan = su.parse_unit_reply(text, n_units)
-        problem = _unit_plan_problem(plan, likely)
+        problem = _unit_plan_problem(plan, likely, finish_reason)
         if problem is None:
             result = su.assemble(
                 units, plan, narrator_instruct, soft_max,
                 edit_enabled=generation.edit_enabled,
                 edit_max_delete=generation.edit_max_delete_chars,
+                delete_max_chars=generation.delete_max_chars,
             )
             if not result.ok:
                 problem = "拼合自检未通过（文字有丢失或多出）"
@@ -1033,12 +1045,16 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
             stats["labels"] += len(plan.labels)
             stats["edit_applied"] += result.edit_applied
             stats["edit_rejected"] += result.edit_rejected
+            stats["delete_rejected"] += result.delete_rejected
+            if result.delete_rejected:
+                handle.log(f"chunk {chunk_num}: {result.delete_rejected} 处 X 删除对象过长且无网址特征，已忽略并保留原文", "WARNING")
             if result.edit_rejected:
                 handle.log(f"chunk {chunk_num}: {result.edit_rejected} 处 edit 不合规，已作废并保留原文", "WARNING")
             if attempt > 0:
                 handle.log(f"  Succeeded on retry {attempt + 1}")
             return result.entries
         handle.log(f"chunk {chunk_num}/{total_chunks}: 单元标签无效（{problem}）", "WARNING")
+        handle.log(f"Response preview: {text[:200]!r} … {text[-100:]!r}", "WARNING")
         if finish_reason == "length" and not budget_doubled:
             budget_doubled = True
             handle.log(f"  响应被预算截断 → 重试时翻倍 max_tokens（{max_tokens} → {max_tokens * 2}）", "WARNING")
@@ -3286,7 +3302,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
 
         use_units = generation.parse_protocol == "units"
         unit_stats = {"units": 0, "labels": 0, "edit_applied": 0, "edit_rejected": 0,
-                      "fallback_chunks": 0}
+                      "delete_rejected": 0, "fallback_chunks": 0}
         unit_sys = prompts.unit_system_prompt or DEFAULT_UNIT_SYSTEM_PROMPT
         unit_usr = prompts.unit_user_prompt or DEFAULT_UNIT_USER_PROMPT
         if use_units:
@@ -3603,6 +3619,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             "unit_labels": unit_stats["labels"],
             "unit_edit_applied": unit_stats["edit_applied"],
             "unit_edit_rejected": unit_stats["edit_rejected"],
+            "unit_delete_rejected": unit_stats["delete_rejected"],
             "unit_fallback_chunks": unit_stats["fallback_chunks"],
         }
     finally:

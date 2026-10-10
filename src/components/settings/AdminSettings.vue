@@ -107,6 +107,7 @@ async function save() {
     ...config.generation,
     parse_worker_concurrency: Math.max(1, Math.min(32, Math.trunc(Number(config.generation.parse_worker_concurrency) || 1))),
     edit_max_delete_chars: Math.max(1, Math.min(200, Math.trunc(Number(config.generation.edit_max_delete_chars) || 24))),
+    delete_max_chars: Math.max(1, Math.min(400, Math.trunc(Number(config.generation.delete_max_chars) || 30))),
     unit_max_chars: Math.max(20, Math.min(400, Math.trunc(Number(config.generation.unit_max_chars) || 80))),
     narrator_instruct: String(config.generation.narrator_instruct || '').trim() || '平稳中性的叙述语气。',
   }
@@ -386,7 +387,11 @@ watch(
                 <Input id="admin-setting-narrator-instruct" v-model="draft.generation.narrator_instruct" placeholder="平稳中性的叙述语气。" />
                 <p class="text-xs text-muted-foreground">单元协议下模型不再为旁白输出 instruct，所有旁白条目统一使用这段文字。</p>
               </div>
-              <div class="grid gap-4 sm:grid-cols-3">
+              <div class="grid gap-4 sm:grid-cols-4">
+                <div class="space-y-1.5">
+                  <Label for="admin-setting-delete-max">删除片段最长（字）</Label>
+                  <Input id="admin-setting-delete-max" v-model.number="draft.generation.delete_max_chars" type="number" min="1" max="400" step="5" />
+                </div>
                 <div class="space-y-1.5">
                   <Label for="admin-setting-unit-max">单元长度上限（字）</Label>
                   <Input id="admin-setting-unit-max" v-model.number="draft.generation.unit_max_chars" type="number" min="20" max="400" step="10" />

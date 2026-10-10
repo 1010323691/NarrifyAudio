@@ -214,6 +214,16 @@ def test_assemble_edit_applied_and_rejected():
     assert off.edit_applied == 0 and off.edit_rejected == 1
 
 
+def test_assemble_delete_guard_keeps_long_units_unless_watermark():
+    story = "这是一段并不短的正文叙述，不应该因为模型手滑标了删除就从脚本里消失掉。"
+    url = "本书来自 www.example.com 欢迎访问获取更多更新内容和精彩资源下载地址"
+    text = f"{story}\n\n姜维说，\n\n{url}"
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("1 X\n2 X\n3 X\nEND", len(units)), NARR, delete_max_chars=30)
+    assert res.ok and res.deleted == 2 and res.delete_rejected == 1
+    assert [e["text"] for e in res.entries] == [story]
+
+
 def test_assemble_dialogue_not_merged_across_paragraph_without_tag():
     text = f"{LQ}第一句。{RQ}\n\n{LQ}第二句。{RQ}"
     units = segment_chunk(text)
@@ -368,3 +378,34 @@ def test_generate_file_units_rejects_bad_edit_and_keeps_text(workspace, monkeypa
     assert result["unit_edit_rejected"] == 1 and result["unit_edit_applied"] == 0
     assert any("edit 不合规" in msg for _lv, msg in handle.logs)
     assert "".join(e["text"] for e in out).count("他心想") == 1
+
+
+def test_generate_file_units_accepts_natural_stop_without_end(workspace, monkeypatch):
+    no_end = GOOD_REPLY.rsplit("\nEND", 1)[0]
+    result, out, seen, _ = _run(workspace, monkeypatch, [(no_end, "stop")])
+    assert len(seen) == 1 and result["unit_fallback_chunks"] == 0
+    assert {e["speaker"] for e in out} >= {"姜维", "任昊", "董雪"}
+
+
+def test_generate_file_units_rejects_early_stop_without_end(workspace, monkeypatch):
+    # Labels stop at unit 3 although four whole-line quotes follow → treated as an early
+    # stop: retried, and the retry with the complete labels is used.
+    source = "\n\n".join(["旁白一。", "旁白二。", "旁白三。"] + [f"{LQ}台词{i}。{RQ}" for i in range(4)])
+    early = "3 甲 | x"
+    full = "4-7 甲 | x\nEND"
+    replies = [(early, "stop"), (full, "stop")]
+    seen = []
+
+    def urlopen(req, *a, **k):
+        seen.append(1)
+        reply, finish = replies[min(len(seen), len(replies)) - 1]
+        return _BodyResp(_chat_payload(reply, finish))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    (workspace / "02_split_text").mkdir(parents=True)
+    src = workspace / "02_split_text" / "ch.txt"
+    src.write_bytes(source.encode("utf-8"))
+    handle = _LogHandle()
+    generate_file(handle, str(src), _LLM, PromptsConfig(), GenerationConfig(**_QUIET))
+    assert len(seen) == 2
+    assert any("疑似提前停笔" in msg for _lv, msg in handle.logs)

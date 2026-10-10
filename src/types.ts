@@ -571,6 +571,8 @@ export interface AppConfig {
     edit_enabled: boolean
     /** 单个 edit 最多可删的词字符数。 */
     edit_max_delete_chars: number
+    /** 单元协议下 X 删除的单元最长词字符数（含网址 / 水印特征的除外）。 */
+    delete_max_chars: number
     /** 单元协议下切分单元的长度上限（字）。 */
     unit_max_chars: number
   }
