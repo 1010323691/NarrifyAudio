@@ -42,6 +42,19 @@ def _leave_llm_queue(event) -> None:
             pass
 
 
+def _llm_wake_after(event) -> None:
+    """Pass the wake-up on: ``event``'s owner was woken but could not be admitted (its task is
+    paused, or an older waiter lives in another process), so the slot goes to the next in line."""
+    with _llm_waiters_lock:
+        queue = list(_llm_waiters)
+        try:
+            index = queue.index(event)
+        except ValueError:
+            return
+        if index + 1 < len(queue):
+            queue[index + 1].set()
+
+
 def _llm_wake(count: int = 1) -> None:
     """Wake the ``count`` longest-waiting LLM permit requests of this process."""
     with _llm_waiters_lock:
@@ -84,8 +97,11 @@ def gpu_permit(service: str, handle=None):
             _llm_waiters.append(wake)
     try:
         delay = _LLM_POLL_FIRST if wake is not None else 0.2
+        extra_slots = 0   # slots still free after this admission: wake that many more waiters
         while True:
+            was_woken = False
             if wake is not None:
+                was_woken = wake.is_set()
                 wake.clear()   # before polling: a wake-up arriving mid-poll must not be lost
             if handle is not None:
                 handle.check()
@@ -128,12 +144,15 @@ def gpu_permit(service: str, handle=None):
                                        .order_by(GPURequest.created_at, GPURequest.id).limit(free_slots)).all()
                     allowed = request_id in first
                 if allowed:
+                    extra_slots = free_slots - 1
                     request.status = "running"
                     if managed and service == "LLM":
                         request.process = {**request.process, "llm_runtime": state.get("llm_runtime") or platform_llm(db).model_dump()}
                     state["served"] = True
                     break
             if wake is not None:
+                if was_woken:
+                    _llm_wake_after(wake)   # woken for a slot we could not take: hand it on
                 wake.wait(delay)
                 delay = min(delay * 2, _LLM_POLL_MAX)
             else:
@@ -142,6 +161,8 @@ def gpu_permit(service: str, handle=None):
                 # so a deep backlog must not turn the wait into constant 5 Hz polling.
                 delay = min(delay * 2, 2.0)
         _leave_llm_queue(wake)   # admitted: stop being a wake-up target while the call runs
+        if wake is not None and extra_slots > 0:
+            _llm_wake(extra_slots)   # more free slots than this one request: fill them now
         yield request_id
     finally:
         _leave_llm_queue(wake)

@@ -934,7 +934,7 @@ def test_llm_waiter_is_woken_by_a_release_instead_of_sleeping_out_its_backoff(tm
     from backend.platform.gpu_scheduler import admission
     activate(enabled_config(tmp_path), "LLM")
     monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 1)
-    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 3.0)       # a wake-up-less waiter would sleep up to 3 s
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)      # a wake-up-less waiter would sleep far longer
     holding, release, admitted = threading.Event(), threading.Event(), {}
 
     def holder():
@@ -951,7 +951,7 @@ def test_llm_waiter_is_woken_by_a_release_instead_of_sleeping_out_its_backoff(tm
     assert holding.wait(3)
     second = threading.Thread(target=waiter)
     second.start()
-    time.sleep(2.5)                                            # past 3 old-style backoff rounds (polls at 0.2, 0.6, 1.4, 3.4 s)
+    time.sleep(2.0)                                            # its next un-woken poll would be at ~3.15 s
     released_at = time.monotonic()
     release.set()
     first.join(5)
@@ -1003,3 +1003,95 @@ def test_llm_admission_logs_wait_and_run_time(tmp_path, monkeypatch, caplog):
         assert call("http://x", "key", "model") == "ok"
     assert any("llm_call" in r.getMessage() and "wait=" in r.getMessage() and "run=" in r.getMessage()
                for r in caplog.records)
+
+
+def test_llm_free_slots_are_filled_in_one_round_without_exceeding_the_limit(tmp_path, monkeypatch):
+    from backend.platform.gpu_scheduler import admission
+    activate(enabled_config(tmp_path), "LLM")
+    monkeypatch.setattr(admission, "parse_worker_concurrency", lambda **kwargs: 3)
+    monkeypatch.setattr(admission, "_LLM_POLL_MAX", 10.0)
+    guard = threading.Lock()
+    running = peak = 0
+    release_holders, release_waiters = threading.Event(), threading.Event()
+    held = threading.Semaphore(0)
+    admitted_at, order, errors = {}, [], []
+
+    def enter():
+        nonlocal running, peak
+        with guard:
+            running += 1
+            peak = max(peak, running)
+
+    def leave():
+        nonlocal running
+        with guard:
+            running -= 1
+
+    def holder():
+        try:
+            with gpu_permit("LLM"):
+                enter()
+                held.release()
+                release_holders.wait(10)
+                leave()
+        except Exception as exc:
+            errors.append(exc)
+
+    def waiter(name):
+        try:
+            with gpu_permit("LLM"):
+                enter()
+                admitted_at[name] = time.monotonic()
+                order.append(name)
+                release_waiters.wait(10)
+                leave()
+        except Exception as exc:
+            errors.append(exc)
+
+    holders = [threading.Thread(target=holder) for _ in range(3)]
+    for thread in holders:
+        thread.start()
+    for _ in range(3):
+        assert held.acquire(timeout=3)
+    waiters = []
+    for index in range(6):
+        thread = threading.Thread(target=waiter, args=(f"w{index + 1}",))
+        thread.start()
+        waiters.append(thread)
+        time.sleep(0.1)                                        # fix the arrival order
+    time.sleep(1.5)                                            # every waiter is deep into its backoff
+    released_at = time.monotonic()
+    release_holders.set()                                      # all three slots free up together
+    deadline = time.monotonic() + 3
+    while len(admitted_at) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    try:
+        assert set(order[:3]) == {"w1", "w2", "w3"}            # the three OLDEST, not later arrivals
+        assert max(admitted_at.values()) - released_at < 0.6   # one wake chain, not three backoff rounds
+        assert len(admitted_at) == 3                           # the limit still holds: w4..w6 keep waiting
+    finally:
+        release_waiters.set()
+        for thread in [*holders, *waiters]:
+            thread.join(8)
+    assert peak <= 3 and not errors
+    assert set(order) == {f"w{i}" for i in range(1, 7)}
+
+
+def test_llm_wake_is_handed_to_the_next_waiter_in_line():
+    from backend.platform.gpu_scheduler import admission
+    a, b, c = threading.Event(), threading.Event(), threading.Event()
+    with admission._llm_waiters_lock:
+        admission._llm_waiters.extend([a, b, c])
+    try:
+        admission._llm_wake(1)
+        assert a.is_set() and not b.is_set()
+        admission._llm_wake_after(a)                           # a was woken but could not take the slot
+        assert b.is_set() and not c.is_set()
+        admission._llm_wake_after(c)                           # nobody behind the last one: no error
+        assert not c.is_set()
+        admission._llm_wake_after(threading.Event())           # not in the queue: no error
+    finally:
+        with admission._llm_waiters_lock:
+            for event in (a, b, c):
+                if event in admission._llm_waiters:
+                    admission._llm_waiters.remove(event)
