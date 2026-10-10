@@ -410,7 +410,7 @@
 .admin-shell .vc-legend button.is-off { opacity: .4; text-decoration: line-through; }
 .admin-shell .vc-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .admin-shell .vc-legend i, .admin-shell .vc-donut__legend i, .admin-shell .vc-tip i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
-.admin-shell .vc text { font-size: 11px; fill: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+:where(.admin-shell .vc, .admin-shell .vc-plot) text { font-size: 11px; fill: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
 .admin-shell .vc-grid line { stroke: hsl(var(--border)); stroke-width: 1; shape-rendering: crispEdges; }
 .admin-shell .vc-grid line.is-base { stroke: hsl(var(--input)); }
 .admin-shell .vc-xaxis text.is-cat { fill: color-mix(in srgb, hsl(var(--foreground)) 75%, hsl(var(--card))); }

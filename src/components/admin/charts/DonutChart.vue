@@ -45,7 +45,7 @@ const tip = computed(() => {
       </svg>
       <ul class="vc-donut__legend">
         <li v-for="(item, index) in spec.data" :key="item.name" :class="{ 'is-dim': active != null && active !== index }"
-            @pointerenter="active = index" @pointerleave="active = null">
+            @pointermove="enter(index, $event)" @pointerleave="active = null">
           <i :style="{ background: item.color }" /><span>{{ item.name }}</span><strong>{{ spec.format(item.value) }}</strong>
         </li>
       </ul>

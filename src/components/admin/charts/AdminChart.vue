@@ -20,7 +20,7 @@ const spec = computed(() => props.option(chartTokens()))
 </script>
 
 <template>
-  <div class="admin-chart" role="img" :aria-label="label" :style="{ height: `${height}px` }">
+  <div class="admin-chart" role="group" :aria-label="label" :style="{ height: `${height}px` }">
     <TimeSeriesChart v-if="spec.kind === 'time'" :spec="spec" />
     <BarChart v-else-if="spec.kind === 'bar'" :spec="spec" />
     <DonutChart v-else-if="spec.kind === 'donut'" :spec="spec" />
