@@ -33,3 +33,14 @@ def test_identity_matches_handles_legacy_and_missing_records(tmp_path):
     assert identity_matches(file_identity(path.stat()), legacy)
     assert not identity_matches(None, legacy)
     assert identity_matches(None, None)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows compares the volume serial")
+def test_attach_deliveries_matches_legacy_device_record():
+    import sqlite3
+    from backend.platform.resource_inventory import attach_deliveries
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE entries(relative_path TEXT, size_bytes INT, mtime_ns INT, ctime_ns INT, device TEXT, inode TEXT)")
+    connection.execute("INSERT INTO entries VALUES('08_bgm/a.mp3', 10, 1, 2, '0', '99')")
+    attach_deliveries(connection, {"08_bgm/a.mp3": {"identity": [10, 1, 2, 66308, 99]}})
+    assert connection.execute("SELECT relative_path FROM eligible_deliveries").fetchall() == [("08_bgm/a.mp3",)]

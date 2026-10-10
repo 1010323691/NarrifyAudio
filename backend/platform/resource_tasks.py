@@ -179,7 +179,7 @@ def _execute_resource_package(claim: TaskClaim) -> TaskOutcome:
                 context.check()
                 before = path.stat()
                 expected = (record["size_bytes"], record["mtime_ns"], record["ctime_ns"], int(record["device"]), int(record["inode"]))
-                if file_identity(before) != expected:
+                if not identity_matches(file_identity(before), expected):
                     raise ResourceError(f"文件已变化，请刷新后重试：{description['relative_path']}")
                 with SessionLocal() as db:
                     current_user = db.get(User, claim.owner_id)
@@ -205,7 +205,7 @@ def _execute_resource_package(claim: TaskClaim) -> TaskOutcome:
                         context.check()
                         output.write(chunk)
                         copied += len(chunk)
-                    if not matches_open_file_identity(os.fstat(source.fileno()), expected) or file_identity(path.stat()) != expected:
+                    if not matches_open_file_identity(os.fstat(source.fileno()), expected) or not identity_matches(file_identity(path.stat()), expected):
                         raise ResourceError(f"打包期间文件变化：{description['relative_path']}")
                 update_progress(claim, min(95, int(copied * 95 / max(1, total_bytes))), f"打包 {index + 1}/{len(selected)}：{description['name']}")
         context.check()
@@ -298,7 +298,7 @@ def _execute_resource_cleanup(claim: TaskClaim) -> TaskOutcome:
                         path = safe_regular_path(root, record["relative_path"])
                         expected = (record["size_bytes"], record["mtime_ns"], record["ctime_ns"], int(record["device"]), int(record["inode"]))
                         current = path.stat()
-                        if current.st_mtime_ns >= cutoff or file_identity(current) != expected:
+                        if current.st_mtime_ns >= cutoff or not identity_matches(file_identity(current), expected):
                             result["skipped_count"] += 1
                             continue
                         path.unlink()

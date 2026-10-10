@@ -387,7 +387,14 @@ def attach_deliveries(connection, records: dict) -> None:
     connection.execute("DELETE FROM eligible_deliveries")
     for relative, record in records.items():
         identity = record["identity"]
-        connection.execute("INSERT OR IGNORE INTO eligible_deliveries SELECT relative_path FROM entries WHERE relative_path=? AND size_bytes=? AND mtime_ns=? AND ctime_ns=? AND device=? AND inode=?", [relative, *identity[:3], str(identity[3]), str(identity[4])])
+        # POSIX device numbers are not stable across reboots (see file_identity),
+        # so records and snapshots written before/after that change only agree
+        # on the other slots there.
+        device_clause, device_args = ("AND device=? ", [str(identity[3])]) if os.name == "nt" else ("", [])
+        connection.execute(
+            "INSERT OR IGNORE INTO eligible_deliveries SELECT relative_path FROM entries WHERE relative_path=? AND size_bytes=? AND mtime_ns=? AND ctime_ns=? "
+            + device_clause + "AND inode=?",
+            [relative, *identity[:3], *device_args, str(identity[4])])
 
 
 def entry_json(row: sqlite3.Row, project: Project, snapshot: dict, delivery: dict | None = None) -> dict:

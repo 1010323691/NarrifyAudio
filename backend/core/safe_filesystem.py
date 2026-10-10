@@ -66,5 +66,5 @@ def matches_open_file_identity(stat: os.stat_result, expected: tuple[int, ...]) 
     # for the same freshly written NTFS file. Retain size, write time, volume
     # and file id here; callers still compare the full path identity before
     # and after reading. POSIX change time remains part of the handle check.
-    indices = (0, 1, 3, 4) if os.name == "nt" else (0, 1, 2, 3, 4)
+    indices = (0, 1, 3, 4) if os.name == "nt" else (0, 1, 2, 4)
     return all(actual[index] == expected[index] for index in indices)
