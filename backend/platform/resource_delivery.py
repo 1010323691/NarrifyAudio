@@ -6,7 +6,7 @@ from datetime import timezone
 
 from sqlalchemy import select
 
-from ..core.safe_filesystem import file_identity, safe_regular_path
+from ..core.safe_filesystem import file_identity, identity_matches, safe_regular_path
 from .models import ProjectFile, Task, TaskResult
 from .storage import safe_project_workspace_path
 
@@ -116,7 +116,7 @@ def _historical_delivery_records(db, user, project_id: str) -> dict[str, dict]:
             seen.add(relative)
             try:
                 stat = safe_regular_path(root, relative).stat()
-                if stat.st_size and list(file_identity(stat)) == item.get("identity"):
+                if stat.st_size and identity_matches(file_identity(stat), item.get("identity")):
                     records[relative] = {**item, "task_id": task.id, "label": DELIVERY_TYPES[task.task_type][1], "completed_at": task.finished_at.isoformat() if task.finished_at else None, "version": f"V{task.finished_at.strftime('%Y%m%d-%H%M%S')}" if task.finished_at else None}
             except (OSError, ValueError, RuntimeError):
                 continue

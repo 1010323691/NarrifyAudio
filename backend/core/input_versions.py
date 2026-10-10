@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .safe_filesystem import file_identity, is_link_or_junction, safe_regular_path
+from .safe_filesystem import file_identity, identity_matches, is_link_or_junction, safe_regular_path
 
 _validator = ContextVar("narrify_input_validator", default=None)
 _metadata = ContextVar("narrify_input_metadata", default=None)
@@ -48,17 +48,9 @@ def capture_files(root, names):
     return [{"path": name, "identity": _identity(root, name)} for name in dict.fromkeys(names)]
 
 
-def _same_identity(current, recorded):
-    # Identities recorded before st_dev was dropped from file_identity still
-    # carry a (reboot-unstable) device number in slot 3; ignore it for them.
-    if current and recorded and len(current) == len(recorded) == 5:
-        return current[:3] == recorded[:3] and current[4] == recorded[4]
-    return current == recorded
-
-
 def validate_files(root, records):
     for record in records:
-        if not _same_identity(_identity(root, record["path"]), record["identity"]):
+        if not identity_matches(_identity(root, record["path"]), record["identity"]):
             raise RuntimeError("任务输入已变更，请重新提交。")
 
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from ..core.safe_filesystem import file_identity, is_link_or_junction, safe_regular_path, matches_open_file_identity
+from ..core.safe_filesystem import file_identity, identity_matches, is_link_or_junction, safe_regular_path, matches_open_file_identity
 from .database import SessionLocal
 from .models import Project, Task, User
 from .resource_inventory import (
@@ -220,7 +220,7 @@ def _execute_resource_package(claim: TaskClaim) -> TaskOutcome:
                 current = delivery_records(db, current_user, project_id, [item["relative_path"] for item in descriptions])
                 for item in descriptions:
                     authority = current.get(item["relative_path"])
-                    if not authority or authority["task_id"] != item["_delivery_task_id"] or authority["identity"] != item["_delivery_identity"]:
+                    if not authority or authority["task_id"] != item["_delivery_task_id"] or not identity_matches(authority["identity"], item["_delivery_identity"]):
                         raise ResourceError("成品资格在打包期间已变化，请重新选择", 403)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=EXPORT_RETENTION_SECONDS)
         return _outcome(claim, {

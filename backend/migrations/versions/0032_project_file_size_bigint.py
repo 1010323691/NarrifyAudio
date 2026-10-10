@@ -1,4 +1,7 @@
-"""project_files.size_bytes to BIGINT: packaged ZIPs can exceed 2 GiB."""
+"""project_files.size_bytes to BIGINT: packaged ZIPs can exceed 2 GiB.
+
+Downgrade only works while no row exceeds 2^31-1 bytes (PostgreSQL rejects it otherwise).
+"""
 from alembic import op
 import sqlalchemy as sa
 

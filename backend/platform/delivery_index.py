@@ -5,7 +5,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from ..core.object_keys import object_key_lookup_key
-from ..core.safe_filesystem import file_identity, safe_regular_path
+from ..core.safe_filesystem import file_identity, identity_matches, safe_regular_path
 from .models import CurrentDelivery, DeliveryIndexState, Project, ProjectFile, Task, TaskResult
 from .storage import safe_project_workspace_path
 from .resource_delivery import ARCHIVE_TYPES, DELIVERY_TYPES, _allowed, _relative
@@ -74,7 +74,7 @@ def authorities(db, root, task, result):
         valid = False
         try:
             stat = safe_regular_path(root, relative).stat()
-            valid = bool(stat.st_size and list(file_identity(stat)) == item.get("identity"))
+            valid = bool(stat.st_size and identity_matches(file_identity(stat), item.get("identity")))
         except (OSError, ValueError, RuntimeError):
             pass
         rows.append({"relative_path": relative, "identity": item.get("identity"), "valid": valid})
@@ -151,7 +151,7 @@ def indexed_records(db, user, project_id, root, relatives=None):
     for row in rows:
         try:
             stat = safe_regular_path(root, row.relative_path).stat()
-            if stat.st_size and list(file_identity(stat)) == row.identity:
+            if stat.st_size and identity_matches(file_identity(stat), row.identity):
                 records[row.relative_path] = {"relative_path": row.relative_path, "identity": row.identity,
                     "task_id": row.task_id, "label": DELIVERY_TYPES[row.task_type][1],
                     "completed_at": row.finished_at.isoformat() if row.finished_at else None,

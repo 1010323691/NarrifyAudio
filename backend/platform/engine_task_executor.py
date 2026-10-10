@@ -10,7 +10,7 @@ from typing import Any, Callable
 from ..core import config as core_config
 from ..core.paths import get_or_prepare_layout
 from ..core.task_control import TaskCancelled
-from ..core.safe_filesystem import file_identity
+from ..core.safe_filesystem import file_identity, identity_matches
 from ..platform.database import SessionLocal
 from ..platform.models import User
 from ..platform.storage import safe_display_name
@@ -44,7 +44,7 @@ def _validate_deliveries(claim, payload):
 
 def _check_delivery_identity(path, record):
     try:
-        unchanged = list(file_identity(path.stat())) == record["identity"]
+        unchanged = identity_matches(file_identity(path.stat()), record["identity"])
     except OSError:
         unchanged = False
     if not unchanged:
@@ -54,7 +54,7 @@ def _check_delivery_identity(path, record):
 def _revalidate_deliveries(claim, payload, expected):
     current = _validate_deliveries(claim, payload)
     if any(name not in current or current[name].get("task_id") != record.get("task_id")
-           or current[name].get("identity") != record.get("identity") for name, record in expected.items()):
+           or not identity_matches(current[name].get("identity"), record.get("identity")) for name, record in expected.items()):
         raise TaskExecutionError("delivery_changed", "成品资格或版本在导出期间已变化，请重新选择。")
 
 def _voice_entry_result(payload: dict, result: dict) -> dict:
@@ -216,12 +216,12 @@ def _archive_source(output, source, name, record, claim):
     info = zipfile.ZipInfo.from_file(source, arcname=name)
     info.compress_type = zipfile.ZIP_STORED
     with source.open("rb") as reader, output.open(info, "w", force_zip64=True) as writer:
-        if list(file_identity(os.fstat(reader.fileno()))) != record["identity"]:
+        if not identity_matches(file_identity(os.fstat(reader.fileno())), record["identity"]):
             raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化")
         while chunk := reader.read(1024 * 1024):
             check()
             writer.write(chunk)
-        if list(file_identity(os.fstat(reader.fileno()))) != record["identity"]:
+        if not identity_matches(file_identity(os.fstat(reader.fileno())), record["identity"]):
             raise TaskExecutionError("delivery_changed", "成品在导出期间发生变化")
     _check_delivery_identity(source, record)
     check()

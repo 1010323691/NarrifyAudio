@@ -45,6 +45,21 @@ def file_identity(stat: os.stat_result) -> tuple[int, ...]:
     return (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, device, stat.st_ino)
 
 
+def identity_matches(current, recorded) -> bool:
+    """Compare a fresh identity with a persisted one.
+
+    Identities persisted before ``file_identity`` dropped the POSIX device
+    number carry a real (reboot-unstable) st_dev in slot 3; on POSIX that slot
+    is ignored so those records keep matching. Windows compares everything.
+    """
+    if current is None or recorded is None:
+        return current is recorded
+    current, recorded = list(current), list(recorded)
+    if os.name != "nt" and len(current) == len(recorded) == 5:
+        return current[:3] == recorded[:3] and current[4] == recorded[4]
+    return current == recorded
+
+
 def matches_open_file_identity(stat: os.stat_result, expected: tuple[int, ...]) -> bool:
     actual = file_identity(stat)
     # Windows path stat and handle fstat can return different creation times
