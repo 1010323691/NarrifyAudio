@@ -808,7 +808,8 @@ def test_units_rederive_unlabeled_reply_never_demotes_a_character_entry(monkeypa
     got = script.rederive_entries_units(
         Handle(), LLMConfig(), GenerationConfig(), ("usys", "{context}\n{units}"), [(item, "")],
         frozenset({"NARRATOR", "姜维"}), stage="断句校验", head="")
-    assert got == [None]
+    # Unlisted units of a character entry stay HIS: a bare END is a normal reply, nothing changes.
+    assert got == [script.REDERIVE_UNCHANGED]
 
 
 def test_long_resplit_longest_entry_always_gets_the_pack_even_over_the_budget(monkeypatch):
