@@ -243,9 +243,10 @@ class GenerationConfig(BaseModel):
     # （独立「……」/「？」等）并入相邻 NARRATOR 条目（标题守卫），无 NARRATOR 邻接则删除。
     absorb_punct_entries: bool = True
     # 同人段落合并（解析内机械后处理，确定性零 LLM 成本；置于超长机械分段**之前**）：
-    # 连续同 speaker 条目按词字符数合并（块+段 ≤100 或较短一方 ≤10 强制），边界无收尾
-    # 标点补「。」，instruct 取词字符多者，章标题两侧不合并。≤10 强制合并可造出 >
-    # max_paragraph_chars 的块，由随后的机械分段切回（200 字硬保证不变）。
+    # 连续同 speaker 条目合并，但**单条不超过 max_paragraph_chars 的一半**（动态计算，默认 200→100：
+    # 条目越长 TTS 语速越容易越念越快）。一串超过上限的同人条目按句/段边界切成**尽量均匀**的最少
+    # 几条（150 字 → 75 + 75，而不是 100 + 50），绝不在句中硬切；边界无收尾标点补「。」，
+    # instruct 取词字符多者，章标题两侧不合并。解析阶段的旁白/台词拼合（assemble）同一上限同一算法。
     merge_same_speaker: bool = True
 
     # 解析协议（管理员配置）："json" = 模型把整段重写成 JSON（旧协议，也是单元协议

@@ -11,6 +11,9 @@ from backend.engines.script import _skeleton
 from backend.engines.script_units import (
     NARRATOR,
     assemble,
+    delete_allowed,
+    is_pure_speech_tag,
+    salvage_tag_edit,
     likely_dialogue_numbers,
     parse_unit_reply,
     render_units,
@@ -297,9 +300,9 @@ def test_assemble_property_skeleton_preserved_for_any_labelling():
         res = assemble(units, parse_unit_reply("\n".join(lines) + "\nEND", n), NARR)
         assert res.ok
         kept = _skeleton("".join(e["text"] for e in res.entries))
-        dropped = sum(len(_skeleton(units[int(l.split()[0]) - 1].text))
-                      for l in lines if l.endswith(" X"))
-        assert len(kept) + dropped == len(_skeleton(SAMPLE))
+        # Text can only vanish through deletions the guard allows (pure speech tags, watermarks,
+        # trailing speech clauses); assemble's own self-check (res.ok) proves the accounting.
+        assert len(kept) <= len(_skeleton(SAMPLE))
 
 
 # ---------------------------------------------------------------------------
@@ -486,3 +489,325 @@ def test_unit_plan_accepts_unreported_finish_reason_without_end():
     assert _unit_plan_problem(plan, [4, 5], "stop") is None
     assert "并非正常停笔" in _unit_plan_problem(plan, [4, 5], "length")
     assert "疑似提前停笔" in _unit_plan_problem(parse_unit_reply("1 甲", 13), [3, 4, 5], None)
+
+
+# ---------------------------------------------------------------------------
+# X guard: only pure speech tags / watermarks vanish; action narration is kept
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", ["杜尘笑道：", "他压低声音说，", "老道继续笑道。", "安知鱼问道", "姜维说，"])
+def test_pure_speech_tags_are_deletable(text):
+    assert is_pure_speech_tag(text) and delete_allowed(text, 30)
+
+
+@pytest.mark.parametrize("text", [
+    "顾秋情叹了口气，", "安知鱼摇了摇头，", "顾秋情抿了抿嘴，", "顾秋情呵呵一笑，", "顾秋情咯咯一笑，",
+    "安知鱼闻言有些好笑地说道。",  # one clause but carries narration: still a tag by shape (kept below)
+])
+def test_action_units_without_speech_verb_are_not_tags(text):
+    if text.endswith("说道。"):
+        assert is_pure_speech_tag(text)   # a lone "…地说道" is a tag; tone goes to instruct
+    else:
+        assert not is_pure_speech_tag(text) and not delete_allowed(text, 30)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("安知鱼思考了一会儿，接着问道：", "安知鱼思考了一会儿。"),
+    ("顾秋情摇了摇头，把这些事情放在一旁，说道。", "顾秋情摇了摇头，把这些事情放在一旁。"),
+    ("安知鱼拉了拉顾秋情的手，略微有些强势地说道。", "安知鱼拉了拉顾秋情的手。"),
+    ("安知鱼听到这话，稍微有些心酸，他沉默了一会儿，才说道：", "安知鱼听到这话，稍微有些心酸，他沉默了一会儿。"),
+])
+def test_salvage_keeps_action_drops_speech_clause(text, expected):
+    assert not delete_allowed(text, 30)
+    assert salvage_tag_edit(text) == expected
+    assert validate_edit(text, expected)
+
+
+def test_salvage_none_for_pure_action_or_tag():
+    assert salvage_tag_edit("顾秋情叹了口气，") is None
+    assert salvage_tag_edit("杜尘笑道：") is None
+
+
+def test_assemble_x_on_action_keeps_narration_and_splits_dialogue():
+    text = f"{LQ}你一个人在外面闯荡。{RQ}顾秋情叹了口气，{LQ}不觉得孤单吗？{RQ}"
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("1 顾秋情\n2 X\n3 顾秋情\nEND", len(units)), NARR)
+    assert res.ok and res.deleted == 0 and res.delete_rejected == 1
+    assert [(e["speaker"], e["text"]) for e in res.entries] == [
+        ("顾秋情", "你一个人在外面闯荡。"), (NARRATOR, "顾秋情叹了口气。"), ("顾秋情", "不觉得孤单吗？")]
+
+
+def test_assemble_x_on_action_plus_speech_tag_is_salvaged():
+    text = f"安知鱼思考了一会儿，接着问道：{LQ}你确定吗？{RQ}"
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("1 X\n2 安知鱼\nEND", len(units)), NARR)
+    assert res.ok and res.delete_salvaged == 1 and res.deleted == 0
+    assert [(e["speaker"], e["text"]) for e in res.entries] == [
+        (NARRATOR, "安知鱼思考了一会儿。"), ("安知鱼", "你确定吗？")]
+
+
+def test_assemble_pure_tag_x_still_merges_same_paragraph_quotes():
+    text = f"{LQ}别出声，{RQ}姜维压低声音说，{LQ}有人。{RQ}"
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("1 姜维\n2 X\n3 姜维\nEND", len(units)), NARR)
+    assert res.ok and [e["text"] for e in res.entries] == ["别出声，有人。"]
+
+
+def test_assemble_x_never_merges_dialogue_across_paragraphs():
+    text = f"{LQ}第一句。{RQ}\n\n姜维说道：\n\n{LQ}第二句。{RQ}"
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("1 姜维\n2 X\n3 姜维\nEND", len(units)), NARR)
+    assert res.ok and [e["text"] for e in res.entries] == ["第一句。", "第二句。"]
+
+
+# ---------------------------------------------------------------------------
+# Embedded scare quotes and unquoted "dialogue"
+# ---------------------------------------------------------------------------
+
+def test_embedded_short_quote_stays_in_narration():
+    text = f"对方表现出来的感觉，就好像是隐隐透露着一种{LQ}他不属于你{RQ}的感觉。"
+    units = segment_chunk(text)
+    quote = [u for u in units if u.kind == "quote"][0]
+    assert quote.embedded
+    res = assemble(units, parse_unit_reply(f"{quote.n} 顾秋情 | 内心独白\nEND", len(units)), NARR)
+    assert res.ok and res.demoted == 1
+    assert len(res.entries) == 1 and res.entries[0]["speaker"] == NARRATOR
+    assert "他不属于你" in res.entries[0]["text"]
+
+
+def test_quote_after_speech_intro_is_not_embedded():
+    for text in (f"他喊{LQ}救命{RQ}，然后跑了。", f"他说：{LQ}好的{RQ}然后走了。", f"{LQ}好的。{RQ}他说。"):
+        assert not any(u.embedded for u in segment_chunk(text))
+
+
+def test_unquoted_inner_thought_is_not_dialogue_in_quote_style_chunk():
+    text = "\n\n".join([
+        f"{LQ}甲。{RQ}", f"{LQ}乙。{RQ}", f"{LQ}丙。{RQ}",
+        "她想让两人和解，可不是想给自己找一个情敌……头疼啊……",
+        f"{LQ}咱们回家吧。{RQ}顾秋情说道。",
+    ])
+    units = segment_chunk(text)
+    thought = [u for u in units if u.text.startswith("头疼啊")] or [u for u in units if "情敌" in u.text]
+    target = thought[-1]
+    reply = f"{target.n} 顾秋情\n" + "\n".join(f"{u.n} 顾秋情" for u in units if u.text.startswith(LQ + "咱们"))
+    res = assemble(units, parse_unit_reply(reply + "\nEND", len(units)), NARR)
+    assert res.ok and res.demoted == 1
+    assert any(e["speaker"] == "顾秋情" and e["text"] == "咱们回家吧。" for e in res.entries)
+    assert not any(e["speaker"] == "顾秋情" and "头疼" in e["text"] for e in res.entries)
+
+
+def test_unquoted_dialogue_after_colon_is_kept():
+    text = "\n\n".join([f"{LQ}甲。{RQ}", f"{LQ}乙。{RQ}", f"{LQ}丙。{RQ}", "他说：你好呀"])
+    units = segment_chunk(text)
+    last = units[-1]
+    res = assemble(units, parse_unit_reply(f"{last.n} 他\nEND", len(units)), NARR)
+    assert res.demoted == 0
+
+
+def test_speaker_on_unquoted_tag_unit_becomes_narration_edit():
+    text = "\n\n".join([f"{LQ}甲。{RQ}", f"{LQ}乙。{RQ}", f"{LQ}丙。{RQ}",
+                        f"顾秋情看向了安知鱼，微笑着问道：{LQ}觉得她是个怎样的人？{RQ}"])
+    units = segment_chunk(text)
+    tag = [u for u in units if u.text.startswith("顾秋情看向")][0]
+    q = units[-1]
+    reply = f"1-3 甲\n{tag.n} E 安知鱼 | - | 顾秋情看向了安知鱼，微笑着问。\n{q.n} 安知鱼 | 温和\nEND"
+    res = assemble(units, parse_unit_reply(reply, len(units)), NARR)
+    assert res.ok and res.demoted == 1 and res.edit_applied == 1
+    assert [(e["speaker"], e["text"]) for e in res.entries][-2:] == [
+        (NARRATOR, "顾秋情看向了安知鱼，微笑着问。"), ("安知鱼", "觉得她是个怎样的人？")]
+
+
+def test_unlabelled_quotes_are_reported_but_thoughts_are_exempt():
+    text = "\n\n".join([f"{LQ}第一句话。{RQ}", f"{LQ}第二句话。{RQ}", "他心想：", f"{LQ}这下麻烦了。{RQ}"])
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("1 甲\nEND", len(units)), NARR)
+    quote_nums = [u.n for u in units if u.kind == "quote"]
+    assert res.narrated_quotes == [quote_nums[1]]   # 乙 was skipped; the thought quote is exempt
+
+
+def test_entry_has_unclaimed_quote_flags_dialogue_but_not_thoughts_or_mentions():
+    from backend.engines.script_units import entry_has_unclaimed_quote
+    assert entry_has_unclaimed_quote(f"安知鱼走进小区。{LQ}可卿来了啊……{RQ}顾秋情抿了抿嘴。")
+    assert not entry_has_unclaimed_quote(f"他心想：{LQ}这下麻烦了。{RQ}")
+    assert not entry_has_unclaimed_quote(f"隐隐透露着一种{LQ}他不属于你{RQ}的感觉。")
+    assert not entry_has_unclaimed_quote("没有任何引号的普通旁白。")
+
+
+def test_narrated_quote_indices_only_narrator_entries():
+    from backend.engines.script import narrated_quote_indices
+    entries = [
+        {"speaker": "NARRATOR", "text": f"走进小区。{LQ}可卿来了啊……{RQ}顾秋情抿了抿嘴。", "instruct": ""},
+        {"speaker": "顾秋情", "text": "可卿来了啊……", "instruct": ""},
+        {"speaker": "NARRATOR", "text": "平常的旁白。", "instruct": ""},
+    ]
+    assert narrated_quote_indices(entries) == [0]
+
+
+def test_a_single_unclaimed_quote_pair_is_enough_in_any_bracket_style():
+    from backend.engines.script_units import entry_has_unclaimed_quote
+    assert entry_has_unclaimed_quote(f"他回头。{LQ}哦{RQ}")                       # one-character exclamation
+    assert entry_has_unclaimed_quote(f"他回头。{CL}等一下。{CR}她笑了。")          # Japanese corner brackets
+    assert entry_has_unclaimed_quote("他回头。『等一下。』她笑了。")
+    assert entry_has_unclaimed_quote('他回头。"等一下。"她笑了。')
+
+
+def test_unlabelled_speech_tags_beside_dialogue_are_stripped():
+    text = "\n\n".join([
+        f"{LQ}咱们回家吧。{RQ}顾秋情摇了摇头，把这些事情放在一旁，说道。",
+        f"安知鱼听到这话，稍微有些心酸，他沉默了一会儿，才说道：{LQ}如果你想的话。{RQ}",
+        f"{LQ}好。{RQ}他问道。",
+        "旁白里没有对话的一句，说道。",
+    ])
+    units = segment_chunk(text)
+    quotes = [u.n for u in units if u.kind == "quote"]
+    reply = "\n".join(f"{n} 甲" for n in quotes) + "\nEND"
+    res = assemble(units, parse_unit_reply(reply, len(units)), NARR)
+    got = [e["text"] for e in res.entries]
+    assert res.ok
+    joined = "".join(got)
+    assert "顾秋情摇了摇头，把这些事情放在一旁。" in joined
+    assert "安知鱼听到这话，稍微有些心酸，他沉默了一会儿。" in joined
+    assert "说道" not in joined.replace("旁白里没有对话的一句，说道", "")
+    assert not any("他问道" in t for t in got)              # pure tag with a subject: removed
+    assert any("没有对话的一句，说道" in t for t in got)    # not beside dialogue: untouched
+
+
+def test_rederive_keeps_unlabelled_text_of_a_character_entry_with_that_character(monkeypatch):
+    from backend.engines import script as script_mod
+    from backend.core.config import GenerationConfig
+
+    long_speech = ("性格稍稍有些强势，和我姐姐不太一样，不过性子同样有些急，这一点倒是和我姐姐一样。"
+                   "她好像更注重于强调‘安知鱼才是我们相认的关键’的感觉。顾秋情叹了口气。这弄得我很尴尬啊。")
+    entry = {"speaker": "顾秋情", "text": long_speech, "instruct": "分析性的语气"}
+    seen = {}
+
+    def fake_call(llm, generation, messages, handle):
+        seen["prompt"] = messages[-1]["content"]
+        units = segment_chunk(long_speech, GenerationConfig().unit_max_chars)
+        narr = [u.n for u in units if u.n and u.text.startswith("顾秋情叹了口气")]
+        return "".join(f"{n} N\n" for n in narr) + "END"
+
+    monkeypatch.setattr(script_mod, "_llm_call", fake_call)
+
+    class H:
+        def check(self): pass
+        def log(self, *a, **k): pass
+
+    monkeypatch.setattr("backend.platform.quota.consume_llm_output", lambda *a, **k: None)
+    parts = script_mod.rederive_entries_units(
+        H(), None, GenerationConfig(), ("sys", "{context}\n{units}"), [(entry, "")],
+        frozenset({"NARRATOR", "顾秋情"}), stage="测试", head="")
+    assert parts and parts[0]
+    assert "是角色「顾秋情」说的话" in seen["prompt"]
+    got = [(p["speaker"], p["text"]) for p in parts[0]]
+    assert ("NARRATOR", "顾秋情叹了口气。") in got
+    assert "".join(t for sp, t in got if sp == "顾秋情").startswith("性格稍稍有些强势")
+    assert all(sp in ("顾秋情", "NARRATOR") for sp, _ in got)
+    assert sum(1 for sp, _ in got if sp == "NARRATOR") == 1   # nothing else turned into narration
+
+
+def test_long_admin_narrator_instruct_is_not_flagged_or_rewritten():
+    from backend.engines.script import validate_instructs
+    from backend.core.config import GenerationConfig
+
+    fixed = ("中年男性旁白，声音沉稳成熟、自然有磁性。普通话标准，吐字清晰，语速中等偏慢，节奏平稳。"
+             "语气克制、有叙事感，情绪自然含蓄，不夸张。")
+    entries = [
+        {"speaker": "NARRATOR", "text": "旁白一。", "instruct": fixed},
+        {"speaker": "甲", "text": "台词。", "instruct": "自然的对话语气。"},
+        {"speaker": "NARRATOR", "text": "旁白二。", "instruct": fixed},
+    ]
+
+    class H:
+        def check(self): pass
+        def log(self, *a, **k): pass
+        def progress(self, *a, **k): pass
+
+    got, checked, fixed_n = validate_instructs(
+        H(), None, GenerationConfig(), "", "", entries, max_chars=60, fixed_narrator_instruct=fixed)
+    assert (checked, fixed_n) == (0, 0) and got == entries      # no flag, no LLM call (llm=None would raise)
+
+
+def test_long_resplit_logs_normal_unchanged_reply_as_success(monkeypatch):
+    from backend.engines import script as script_mod
+    from backend.core.config import GenerationConfig
+
+    entry = {"speaker": "NARRATOR", "text": "这是一段没有任何引号的很长的旁白，" * 12, "instruct": "平稳"}
+    monkeypatch.setattr(script_mod, "_llm_call", lambda *a, **k: "END")
+    monkeypatch.setattr("backend.platform.quota.consume_llm_output", lambda *a, **k: None)
+    logs = []
+
+    class H:
+        def check(self): pass
+        def progress(self, *a, **k): pass
+        def log(self, msg, level="INFO"): logs.append((level, msg))
+
+    out, checked, fixed = script_mod.long_paragraph_resplit(
+        H(), None, GenerationConfig(), "s", "u", [entry], 100, context_window=0,
+        unit_prompts=("sys", "{context}\n{units}"))
+    assert (checked, fixed) == (1, 0) and out == [entry]
+    assert any("确认无需重切" in m for lv, m in logs if lv == "INFO")
+    assert not any(lv == "WARNING" for lv, _ in logs)
+    assert any("1 条确认无需改动" in m for _lv, m in logs)
+
+
+# ---------------------------------------------------------------------------
+# Mechanical merging is capped (half the hard cap) and splits EVENLY at sentence ends
+# ---------------------------------------------------------------------------
+
+def test_balanced_groups_splits_150_as_75_75_not_100_50():
+    from backend.engines.script_units import balanced_groups
+    assert balanced_groups([25] * 6, 100) == [(0, 3), (3, 6)]          # 75 + 75
+    assert balanced_groups([50, 50, 50], 100) == [(0, 2), (2, 3)] or balanced_groups([50, 50, 50], 100) == [(0, 1), (1, 3)]
+    assert balanced_groups([30, 30, 30], 100) == [(0, 3)]               # fits: one group
+    assert balanced_groups([120, 10], 100) == [(0, 1), (1, 2)]          # an oversize piece stays whole
+    assert balanced_groups([], 100) == []
+
+
+def test_balanced_groups_prefers_paragraph_cuts_when_equally_even():
+    from backend.engines.script_units import balanced_groups
+    # 4 pieces of 40: cut after piece 2 (80|80) beats 120... both even; the paragraph start wins
+    cost = [0.0, 100.0, 0.0, 100.0]
+    assert balanced_groups([40, 40, 40, 40], 100, cut_cost=cost) == [(0, 2), (2, 4)]
+
+
+def test_assemble_splits_a_long_narration_run_evenly_at_sentence_ends():
+    sentence = "这是一句长度刚好二十五个字的旁白句子内容整整齐齐。"          # 25 chars incl. 。
+    assert len(sentence) == 25
+    text = "\n\n".join([sentence * 3, sentence * 3])                          # two paragraphs, 150 total
+    units = segment_chunk(text)
+    res = assemble(units, parse_unit_reply("END", len(units)), NARR, soft_max=100)
+    assert res.ok
+    assert [len(e["text"]) for e in res.entries] == [75, 75]
+    assert all(e["text"].endswith("。") for e in res.entries)
+
+
+def test_assemble_never_merges_past_the_cap_for_dialogue_either():
+    line = "这是一句台词的内容刚好是二十五个字呢。"
+    quotes = "".join(f"{LQ}{line}{RQ}" for _ in range(8))
+    units = segment_chunk(quotes)
+    reply = "\n".join(f"{u.n} 甲 | 语气" for u in units if u.n) + "\nEND"
+    res = assemble(units, parse_unit_reply(reply, len(units)), NARR, soft_max=60)
+    assert res.ok and all(len(e["text"]) <= 60 for e in res.entries)
+    assert len(res.entries) >= 3
+
+
+def test_merge_adjacent_balances_a_run_instead_of_greedy_fill():
+    from backend.engines.script import merge_adjacent_same_speaker, is_chapter_title
+    entries = [{"speaker": "NARRATOR", "text": chr(0x7532 + i) * 24 + "。", "instruct": "x"} for i in range(6)]
+    out, n = merge_adjacent_same_speaker(entries, is_chapter_title, max_chars=100)
+    assert [len(e["text"]) for e in out] == [75, 75] and n == 4
+
+
+def test_unlabelled_noun_ending_like_a_speech_verb_is_not_stripped():
+    text = f"{LQ}快走。{RQ}那声惨叫。\n\n{LQ}别怕。{RQ}"
+    units = segment_chunk(text)
+    reply = "\n".join(f"{u.n} 甲" for u in units if u.kind == "quote") + "\nEND"
+    res = assemble(units, parse_unit_reply(reply, len(units)), NARR)
+    assert any("那声惨叫" in e["text"] for e in res.entries)
+
+
+def test_balanced_groups_pathological_run_falls_back_to_greedy():
+    from backend.engines.script_units import balanced_groups, _BALANCE_MAX_PIECES
+    groups = balanced_groups([10] * (_BALANCE_MAX_PIECES + 50), 100)
+    assert groups[0] == (0, 10) and groups[-1][1] == _BALANCE_MAX_PIECES + 50

@@ -982,7 +982,7 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
     n_units = sum(1 for u in units if u.n)
     likely = su.likely_dialogue_numbers(units)
     narrator_instruct = _unit_narrator_instruct(generation)
-    soft_max = min(150, max(10, int(generation.max_paragraph_chars or 200)))
+    soft_max = mechanical_merge_cap(generation)
     user_prompt = (user_prompt_template
                    .replace("{context}", _unit_context(chunk_num, total_chunks, previous_entries))
                    .replace("{units}", su.render_units(units)))
@@ -1051,7 +1051,16 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
             stats["edit_rejected"] += result.edit_rejected
             stats["delete_rejected"] += result.delete_rejected
             if result.delete_rejected:
-                handle.log(f"chunk {chunk_num}: {result.delete_rejected} 处 X 删除对象过长且无网址特征，已忽略并保留原文", "WARNING")
+                handle.log(f"chunk {chunk_num}: {result.delete_rejected} 处 X 删除对象不是纯说话标签（含动作/叙述，或过长且无网址特征），已保留原文", "WARNING")
+            if result.narrated_quotes:
+                handle.log(f"chunk {chunk_num}: {len(result.narrated_quotes)} 处引号文字最终作为旁白朗读"
+                           f"（单元 {result.narrated_quotes[:8]}）——交由超长段落检查的重切包复核", "WARNING")
+            if result.delete_salvaged:
+                handle.log(f"chunk {chunk_num}: {result.delete_salvaged} 处 X 删除的是「动作 + 说话标签」，已只去掉说话标签、保留动作旁白")
+            if result.demoted:
+                handle.log(f"chunk {chunk_num}: {result.demoted} 处台词标签已改回旁白（句中引用 / 无引号的心理活动）")
+            stats["delete_salvaged"] = stats.get("delete_salvaged", 0) + result.delete_salvaged
+            stats["demoted"] = stats.get("demoted", 0) + result.demoted
             if result.edit_rejected:
                 handle.log(f"chunk {chunk_num}: {result.edit_rejected} 处 edit 不合规，已作废并保留原文", "WARNING")
                 for orig, new in result.edit_rejections[:3]:
@@ -1069,88 +1078,100 @@ def process_chunk_units(handle, llm, model_name, chunk, chunk_num, total_chunks,
     return fallback()
 
 
+def mechanical_merge_cap(generation) -> int:
+    """Largest entry a MECHANICAL merge may build (code points): half of the administrator's
+    hard cap ``max_paragraph_chars``. TTS output drifts (the voice speeds up) the longer one
+    entry runs, so merging stays well below the re-split threshold; 200 → 100, recomputed from
+    the configured value."""
+    return max(10, int(getattr(generation, "max_paragraph_chars", 0) or 200) // 2)
+
+
 def merge_adjacent_same_speaker(entries, title_test, max_chars=100, short_cap=10):
     """机械合并**连续同 speaker** 条目（解析后的确定性后处理，不经 LLM；NARRATOR 与角色同规则）。
 
     相邻两条同讲者条目会让 TTS 多插一次同人停顿（``pause_same_speaker_ms``）和一个段边界；
-    合并成一条是内容保真的（除边界补「。」外不改任何字符）。自旧「仅 NARRATOR」版推广到
-    **任意说话人**：角色连续短台词也合并（≤10 强制合并会吞掉对白刻意留白——韵律权衡，
-    ``merge_same_speaker`` 开关可一键回退）。
+    合并成一条是内容保真的（除边界补「。」外不改任何字符）。**但单条越长 TTS 越容易跑偏（语速
+    越念越快）**，所以合并后的条目字数**绝不超过** ``max_chars``——调用方传
+    :func:`mechanical_merge_cap`（管理员配置的 ``max_paragraph_chars`` 的一半，动态计算）。
 
-    字数口径 = 词字符数（``_skeleton`` 骨架长度：只留字母/数字/CJK，排除标点/空白/引号）——
-    与「不计标点、空格/换行」一致，**非原文长度**：
-    - 相邻两段同人：合并后总字数 ≤ ``max_chars``（缺省 100）→ 合并；
-    - **强制合并**：较短一方 ≤ ``short_cap``（缺省 10）→ 必合并（即使 > ``max_chars``）；
-    - ≥3 段同人从左到右贪心：维护已合并块，后续段满足（块+该段 ≤ ``max_chars``）或
-      （较短一方 ≤ ``short_cap``）则并入，否则封块、以该段开新块。
+    字数口径 = strip 后 Unicode 码点数（含标点；与 ``max_paragraph_chars`` 硬上限同口径）：
+    - 相邻两段同人：合并后总字数（含边界补的「。」）≤ ``max_chars`` → 合并，否则不合并；
+    - ≥3 段同人从左到右贪心：维护已合并块，后续段满足同一上限则并入，否则封块、以该段开新块；
+    - ``short_cap``（极短碎片）不再强制突破上限：碎片只在合并后仍不超过上限时才并入邻条。
 
     合并产物：``speaker`` 不变；``text`` 首尾相接、**边界若前段尾（去尾空白）无收尾标点**
     （``ends_sentence``：。！？…及闭引号等）则补一个「。」（逐边界判定）；``instruct`` 取块内
-    **词字符数最多**的成员（平手取最左）。
+    **词字符数最多**的成员（平手取最左；词字符 = ``_skeleton`` 骨架长度，只留字母/数字/CJK）。
 
     章标题守卫：标题行**前后两侧**都不合并（章节边界处的停顿正是可听的章节分界）。**恒判、
-    无豁免**——旧不变量「两个非标题拼接不构成 ≤40 字标题」为假（反例 ``"楔"``+``"子"`` 各自
-    非标题、强制合并成 ``"楔子"`` = 章标题），故**每次吸收前**都对运行块文本跑 ``title_test``
-    （``is_chapter_title`` >40 字短路，成本可忽略）：块一旦成为标题即封口、不再并入。
+    无豁免**——每次吸收前都对运行块文本跑 ``title_test``：块一旦成为标题即封口、不再并入。
 
-    字数上限用词字符、机械分段的 200 硬保证用原文长度（两档口径不同，勿「统一」）；**强制
-    合并可造出 >200 字块**，200 硬保证由**本阶段之后**的机械分段（``split_long_entries``）切回
-    ——本函数只保证内容保真 + 说话人归组，不负责 200 上界。
-
-    返回 ``(新条目列表, 合并对数)``（合并对数 = 吸收步数，3 条并 1 条 = 2，同旧口径）；
-    输入列表不被改动。
+    返回 ``(新条目列表, 合并对数)``（合并对数 = 吸收步数，3 条并 1 条 = 2）；输入列表不被改动。
     """
+    from .script_units import balanced_groups
+
     out = []
     merged = 0
-    # 运行块 = [条目 dict(浅拷贝), 块词字符数, 最佳成员词字符数, 最佳 instruct 原值, 是否已合并]
-    block = None
+    limit = max(1, int(max_chars))
 
-    def _wc(t):
-        return len(_skeleton(t))
+    def _size(t):
+        return len(t.strip())
 
-    def _settle(b):
-        # 单条目块原样保留（不注入/不改 instruct）；合并块把 instruct 设为词字符最多
-        # 成员的值——该成员无 instruct 键则删去本键（不凭空造值）。
-        if not b[4]:
+    def _flush(run):
+        """One run of consecutive same-speaker entries -> the fewest, EVENLY sized groups
+        (150 under a 100 cap -> 75 + 75, never 100 + 50). Entries are the atoms: every cut is
+        an entry boundary, i.e. a sentence / paragraph end the earlier stages already made."""
+        nonlocal merged
+        if not run:
             return
-        if b[3] is None:
-            b[0].pop("instruct", None)
-        else:
-            b[0]["instruct"] = b[3]
+        texts = [e.get("text") or "" for e in run]
+        joins = [0 if (t.rstrip() and ends_sentence(t.rstrip())) or not t.rstrip() else 1
+                 for t in texts[:-1]]
+        cost = [0.0] + [0.02 * limit * limit * (1 if ends_sentence(texts[k - 1].rstrip()) else 3)
+                        for k in range(1, len(run))]
+        for lo, hi in balanced_groups([_size(t) for t in texts], limit, joins, cost):
+            chunk = run[lo:hi]
+            if len(chunk) == 1:
+                out.append(dict(chunk[0]))
+                continue
+            text = texts[lo]
+            for k in range(lo + 1, hi):
+                tail = text.rstrip()
+                text = text + ("。" if (tail and not ends_sentence(tail)) else "") + texts[k]
+            merged_entry = dict(chunk[0])
+            merged_entry["text"] = text
+            best, best_ins = len(_skeleton(chunk[0].get("text") or "")), chunk[0].get("instruct")
+            for e in chunk[1:]:
+                weight = len(_skeleton(e.get("text") or ""))
+                if weight > best:
+                    best, best_ins = weight, e.get("instruct")
+            if best_ins is None:
+                merged_entry.pop("instruct", None)
+            else:
+                merged_entry["instruct"] = best_ins
+            out.append(merged_entry)
+            merged += len(chunk) - 1
 
+    run: list = []
+    running = ""        # the run joined greedily, only to notice when it turns into a chapter title
     for e in entries:
         text = e.get("text") or ""
-        nxt_wc = _wc(text)
-        if block is None:
-            # [条目 dict(浅拷贝), 块词字符数, 最佳成员词字符数, 最佳 instruct 原值, 是否已合并]
-            block = [dict(e), nxt_wc, nxt_wc, e.get("instruct"), False]
+        joinable = bool(text) and not title_test(text)
+        if run and joinable and (e.get("speaker") or "") == (run[-1].get("speaker") or ""):
+            tail = running.rstrip()
+            running = running + ("。" if (tail and not ends_sentence(tail)) else "") + text
+            run.append(e)
+            if title_test(running):        # a block that became a title is sealed (never absorbs more)
+                _flush(run)
+                run, running = [], ""
             continue
-        b_text = block[0].get("text") or ""
-        b_wc = block[1]
-        if (
-            text
-            and (e.get("speaker") or "") == (block[0].get("speaker") or "")
-            and not title_test(b_text)
-            and not title_test(text)
-            and (b_wc + nxt_wc <= max_chars or min(b_wc, nxt_wc) <= short_cap)
-        ):
-            # 并入：块尾（去尾空白）无收尾标点则边界补「。」（逐边界判定）
-            stripped_tail = b_text.rstrip()
-            boundary = "。" if (stripped_tail and not ends_sentence(stripped_tail)) else ""
-            block[0]["text"] = b_text + boundary + text
-            block[1] = b_wc + nxt_wc  # 词字符可加（「。」是标点，不入骨架）
-            if nxt_wc > block[2]:
-                block[2] = nxt_wc
-                block[3] = e.get("instruct")
-            block[4] = True
-            merged += 1
+        _flush(run)
+        if joinable:
+            run, running = [e], text
         else:
-            _settle(block)
-            out.append(block[0])
-            block = [dict(e), nxt_wc, nxt_wc, e.get("instruct"), False]
-    if block is not None:
-        _settle(block)
-        out.append(block[0])
+            run, running = [], ""
+            out.append(dict(e))
+    _flush(run)
     return out, merged
 
 
@@ -1722,6 +1743,12 @@ def _unit_narrator_instruct(generation) -> str:
     return (generation.narrator_instruct or "").strip() or "平稳中性的叙述语气。"
 
 
+# Outcome of one entry in a unit re-derivation that came back NORMALLY but changes nothing
+# (the model confirmed the stored split). Distinct from ``None`` = the call or its result was
+# unusable (failed call, unreadable reply, stitching self-check, speaker outside the roster).
+REDERIVE_UNCHANGED = "unchanged"
+
+
 def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster, *,
                            stage: str, head: str) -> list | None:
     """Numbered-unit counterpart of the JSON re-derivation used by the sentence-split check
@@ -1730,9 +1757,10 @@ def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster,
     units back separately, so the model never retypes the text and entry boundaries cannot
     drift.
 
-    Returns a list parallel to ``items`` — the re-derived ``{speaker, text, instruct}`` parts
-    or ``None`` (reply says nothing to change, or fails the gate: stitching self-check,
-    speaker outside the roster, a "split" into a single speaker with the text unchanged) —
+    Returns a list parallel to ``items`` — the re-derived ``{speaker, text, instruct}`` parts,
+    :data:`REDERIVE_UNCHANGED` (a normal reply that leaves the entry as it is), or ``None``
+    (the result is unusable: stitching self-check, speaker outside the roster, or a character
+    entry turned into pure narration) —
     or ``None`` overall when the call failed / the reply is unreadable (the caller re-asks
     entry by entry). Tag-removal safety is :func:`script_units.assemble`'s: ``X`` only on
     short tag-like units, ``E`` only a contiguous speech-verb phrase.
@@ -1741,7 +1769,7 @@ def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster,
 
     sys_prompt, usr_template = unit_prompts
     narrator_instruct = _unit_narrator_instruct(generation)
-    soft_max = min(150, max(10, int(generation.max_paragraph_chars or 200)))
+    soft_max = mechanical_merge_cap(generation)
     k = len(items)
     groups: list = []   # (units, first number, last number) per entry
     sections: list = []
@@ -1756,6 +1784,12 @@ def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster,
         groups.append((units, offset, offset + count))
         offset += count
         body = su.render_units(units)
+        who = (entry.get("speaker") or "").strip()
+        if who and who != "NARRATOR":
+            # A stored character entry has lost its quote marks: unlabelled text is HIS words,
+            # not narration (otherwise a long monologue is re-cut into narrator + fragments).
+            body = (f"（这个条目是角色「{who}」说的话，引号已去掉：没有列出的片段仍由「{who}」说；"
+                    f"确实是叙述的片段写 `编号 N`，别的人说的话写那个人的名字。）\n{body}")
         sections.append(f"【条目 {j}/{k}】\n{body}" if k > 1 else body)
         if block:
             blocks.append(f"【条目 {j}/{k} 的前后文】\n{block}" if k > 1 else block)
@@ -1787,12 +1821,22 @@ def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster,
         sub = su.UnitPlan(
             labels={n - lo: lab for n, lab in plan.labels.items() if lo < n <= hi}, ended=True)
         shifted = [su.Unit(**{**u.__dict__, "n": u.n - lo if u.n else 0}) for u in units]
+        who = (entry.get("speaker") or "").strip()
+        character_entry = bool(who) and who != "NARRATOR"
+        if character_entry:
+            default = su.UnitLabel("S", speaker=who, instruct=(entry.get("instruct") or "").strip())
+            for u in shifted:
+                if u.n and u.kind != "title" and u.n not in sub.labels:
+                    sub.labels[u.n] = default
         result = su.assemble(
             shifted, sub, narrator_instruct, soft_max,
             edit_enabled=generation.edit_enabled, edit_max_delete=generation.edit_max_delete_chars,
-            delete_max_chars=generation.delete_max_chars)
+            delete_max_chars=generation.delete_max_chars, unquoted_guard=not character_entry)
         parts = result.entries
-        if hi == lo or not result.ok or not parts:
+        if hi == lo:
+            out.append(REDERIVE_UNCHANGED)   # nothing to label: a normal reply, nothing to change
+            continue
+        if not result.ok or not parts:
             out.append(None)
             continue
         speakers = {p["speaker"] for p in parts}
@@ -1801,10 +1845,11 @@ def rederive_entries_units(handle, llm, generation, unit_prompts, items, roster,
             continue
         same_text = _skeleton("".join(p["text"] for p in parts)) == _skeleton(entry.get("text") or "")
         entry_speaker = (entry.get("speaker") or "").strip()
-        if len(speakers) == 1 and same_text and (
-                speakers == {entry_speaker}                      # nothing re-derived (narration cut at soft_max)
-                or (speakers == {"NARRATOR"} and entry_speaker != "NARRATOR")):   # unlabeled ≠ demote a character
-            out.append(None)
+        if len(speakers) == 1 and same_text and speakers == {entry_speaker}:
+            out.append(REDERIVE_UNCHANGED)   # re-derived to the same single entry
+            continue
+        if len(speakers) == 1 and same_text and speakers == {"NARRATOR"} and entry_speaker != "NARRATOR":
+            out.append(None)                 # a character entry must not silently become narration
             continue
         out.append(parts)
         billed = True
@@ -1869,6 +1914,9 @@ def revalidate_entry(handle, llm, generation, sys_prompt, usr_template, entry, c
         if unit_prompts is not None:
             got = rederive_entries_units(handle, llm, generation, unit_prompts, [(entry, context)],
                                          roster, stage=stage, head="")
+            if got and got[0] == REDERIVE_UNCHANGED:
+                handle.log(f"  {stage}第 {attempt} 次复核正常：模型确认条目无需改动{no_vote_note}")
+                return
             if not got or got[0] is None:
                 handle.log(f"  {stage}第 {attempt} 次未得到可采纳的重切结果{no_vote_note}", "WARNING")
                 return
@@ -2284,10 +2332,22 @@ def _instruct_target_batches(entries: list, targets: list[int], n: int, max_prom
 
 def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_template, entries,
                                  context_window=4, max_chars=INSTRUCT_MAX_CHARS,
-                                 *, budget_deferred=None) -> tuple:
-    """Mechanically inherit narration directions, then repair remaining targets once."""
+                                 *, budget_deferred=None, fixed_narrator_instruct=None) -> tuple:
+    """Mechanically inherit narration directions, then repair remaining targets once.
+
+    ``fixed_narrator_instruct`` (unit protocol: the administrator-configured narrator direction)
+    marks narration entries that carry exactly that text as authoritative — its length is the
+    administrator's choice, so the ``max_chars`` limit written for model output never applies to
+    it (otherwise a long configured narrator voice flags EVERY narration entry and the repair LLM
+    rewrites each one into a different, shorter direction)."""
     max_chars = max(1, int(max_chars))
-    flagged = instruct_entry_indices(entries, max_chars)
+    fixed = (fixed_narrator_instruct or "").strip()
+
+    def is_fixed(entry) -> bool:
+        return bool(fixed) and isinstance(entry, dict) and (entry.get("speaker") or "").strip() == "NARRATOR" \
+            and str(entry.get("instruct") or "").strip() == fixed
+
+    flagged = [i for i in instruct_entry_indices(entries, max_chars) if not is_fixed(entries[i])]
     if not flagged:
         return entries, 0, 0
 
@@ -2296,8 +2356,9 @@ def _validate_instructs_one_call(handle, llm, generation, sys_prompt, usr_templa
         if not isinstance(entries[index].get("instruct"), str) and index not in inherited:
             updated[index] = {**updated[index], "instruct": ""}
     legacy_flagged = {index for index, entry in enumerate(entries)
-                      if not str(entry.get("instruct") or "").strip()
-                      or instruct_length(entry.get("instruct"), max_chars) >= max_chars}
+                      if not is_fixed(entry)
+                      and (not str(entry.get("instruct") or "").strip()
+                           or instruct_length(entry.get("instruct"), max_chars) >= max_chars)}
     # 收紧继承边界不能扩充旧版原本需要 LLM 的目标集合。
     targets = [index for index in flagged if index not in inherited and index in legacy_flagged
                and (budget_deferred is None or id(entries[index]) not in budget_deferred)
@@ -2419,6 +2480,19 @@ def long_entry_indices(entries: list, max_chars: int) -> list[int]:
 validate_instructs = _validate_instructs_one_call
 
 
+def narrated_quote_indices(entries: list) -> list[int]:
+    """Narration entries that still carry a quote span someone must speak — the model left a
+    line of dialogue unlabelled, so the narrator would read it quote marks and all. Mid-sentence
+    scare quotes and quoted thoughts / written text are not suspects (see
+    :func:`script_units.entry_has_unclaimed_quote`)."""
+    from . import script_units as su
+    return [
+        i for i, e in enumerate(entries)
+        if isinstance(e, dict) and (e.get("speaker") or "").strip() == "NARRATOR"
+        and su.entry_has_unclaimed_quote(e.get("text") or "")
+    ]
+
+
 def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, entries,
                            max_chars, context_window=4, *, budget_deferred=None,
                            narrator_instruct=None, unit_prompts=None) -> tuple:
@@ -2451,6 +2525,10 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     """
     max_chars = max(10, int(max_chars))
     flagged = long_entry_indices(entries, max_chars)
+    # Unit protocol only: narration entries that swallowed quoted dialogue ride in the SAME
+    # per-chapter pack as the over-long ones (no extra call), whatever their length.
+    quoted = set(narrated_quote_indices(entries)) if unit_prompts is not None else set()
+    flagged = sorted(set(flagged) | quoted)
     if budget_deferred:
         skipped = [i for i in flagged if id(entries[i]) in budget_deferred]
         if skipped:
@@ -2521,7 +2599,7 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         # One chapter = at most ONE chunk-sized call. A book of mostly long narration would
         # otherwise re-run hundreds of paragraphs for little gain: keep the longest entries
         # that fit one pack and leave the rest to the mechanical split.
-        ranked = sorted(flagged, key=lambda i: (-len(entries[i].get("text") or ""), i))
+        ranked = sorted(flagged, key=lambda i: (i not in quoted, -len(entries[i].get("text") or ""), i))
         chosen: list = []
         used_text = used_total = 0
         for rank, i in enumerate(ranked):
@@ -2566,6 +2644,7 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
     # generate_file): this stage owns [0.94, 0.96), after sentence-split validation
     # and before the speaker spot audit.
     results: dict = {}
+    unchanged_ok = 0
     done = 0
     for pack in packs:
         handle.check()
@@ -2573,15 +2652,17 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
         for i in pack:
             snippet = (entries[i].get("text") or "").replace("\n", " ")
             text_len = len((entries[i].get("text") or "").strip())
-            handle.log(f"条目 {i + 1}（超长 {text_len} 字）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
+            why = f"超长 {text_len} 字" if i not in quoted else (
+                f"旁白夹引号台词，{text_len} 字" if text_len <= max_chars else f"超长 {text_len} 字且夹引号台词")
+            handle.log(f"条目 {i + 1}（{why}）：{snippet[:40]}{'…' if len(snippet) > 40 else ''}")
         packed = None
         if unit_prompts is not None:
             packed = rederive_entries_units(
                 handle, llm, generation, unit_prompts, [(entries[i], blocks[i]) for i in pack], roster,
                 stage="超长段落重切",
-                head=(f"（复查 {len(pack)} 个条目：下面的【原文单元】依次是它们已存的文字，每个都超过 "
-                      f"{max_chars} 字，很可能是没拆开的旁白与台词。请像处理原文一样重新打标签，把台词"
-                      "单元标出来；编号连续，条目之间互不相关。）\n"
+                head=(f"（复查 {len(pack)} 个条目：下面的【原文单元】依次是它们已存的文字，每个要么超过 "
+                      f"{max_chars} 字，要么是旁白里夹着没人认领的引号台词，很可能是没拆开的旁白与台词。"
+                      "请像处理原文一样重新打标签，把台词单元标出来；编号连续，条目之间互不相关。）\n"
                       + ("本书已出现的角色：" + "、".join(sorted(roster - {"NARRATOR"}))
                          if roster - {"NARRATOR"} else "")))
         elif len(pack) > 1:
@@ -2591,9 +2672,16 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
                 stage="超长段落重切", header=pack_header(len(pack)))
         if packed is not None:
             for i, parts in zip(pack, packed):
+                if parts == REDERIVE_UNCHANGED:
+                    # A normal reply that keeps the entry whole: success, nothing to apply.
+                    results[i] = None
+                    unchanged_ok += 1
+                    handle.log(f"  条目 {i + 1} 复核正常：模型确认无需重切（保持原样）")
+                    continue
                 results[i] = parts
                 if parts is None:
-                    handle.log(f"  条目 {i + 1} 单次重切未通过 → 条目保持原样（交由机械分段兜底）", "WARNING")
+                    handle.log(f"  条目 {i + 1} 重切结果不可用（调用失败 / 无法解析 / 校验未过）→ "
+                               "条目保持原样（交由机械分段兜底）", "WARNING")
         elif unit_prompts is not None and len(pack) == 1:
             # A one-entry unit pack already WAS the single-entry request: re-asking it would
             # send the identical prompt again (and double the cost of a failing call).
@@ -2633,6 +2721,9 @@ def long_paragraph_resplit(handle, llm, generation, sys_prompt, usr_template, en
             handle.log(f"条目 {i + 1} 重切通过：拆分为 {len(parts)} 条（{speakers}）")
         else:
             handle.log(f"条目 {i + 1} 重切通过：重写为单条（仍超长则由机械分段兜底）")
+    if unit_prompts is not None:
+        handle.log(f"超长段落检查：{len(flagged)} 条送检，{fixed} 条重切，{unchanged_ok} 条确认无需改动，"
+                   f"{len(flagged) - fixed - unchanged_ok} 条结果不可用（保持原样）")
     return (updated if updated is not None else entries), len(flagged), fixed
 
 
@@ -3995,6 +4086,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
                 context_window=int(generation.check_context_window or 0),
                 max_chars=int(generation.instruct_max_chars or INSTRUCT_MAX_CHARS),
                 budget_deferred=budget_deferred,
+                fixed_narrator_instruct=_unit_narrator_instruct(generation) if use_units else None,
             )
         else:
             # 开关关闭：整体跳过并留一行日志（防静默被误读为阶段缺失），结果字段保持 0。
@@ -4008,7 +4100,7 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
         # 「。」，instruct 取词字符多者，章标题两侧不合并（恒判、无豁免）。
         if generation.merge_same_speaker:
             all_entries, merged_pairs = merge_adjacent_same_speaker(
-                all_entries, is_chapter_title,
+                all_entries, is_chapter_title, max_chars=mechanical_merge_cap(generation),
             )
             if merged_pairs:
                 handle.log(
@@ -4112,6 +4204,8 @@ def parse_script_file(handle, path, llm: LLMConfig, prompts: PromptsConfig, gene
             "unit_edit_applied": unit_stats["edit_applied"],
             "unit_edit_rejected": unit_stats["edit_rejected"],
             "unit_delete_rejected": unit_stats["delete_rejected"],
+            "unit_delete_salvaged": unit_stats.get("delete_salvaged", 0),
+            "unit_demoted": unit_stats.get("demoted", 0),
             "unit_fallback_chunks": unit_stats["fallback_chunks"],
         }
     finally:

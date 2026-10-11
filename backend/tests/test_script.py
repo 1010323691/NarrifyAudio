@@ -1346,27 +1346,28 @@ def test_same_speaker_merge_limits():
     assert n == 1
     assert out == [{"speaker": "NARRATOR", "text": "甲" * 40 + "。" + "乙" * 40}]
 
-    # merge same speaker forced merge short member
-    # ≤10 强制合并：较短一方 5 字 → 即使合并后 > 100 也必合并
+    # merge same speaker: the cap is hard — a short fragment no longer forces a merge past it
+    # (long TTS entries drift in speed): 100 + 5 + boundary 。 = 106 > 100 → stays apart
     a = {"speaker": "NARRATOR", "text": "甲" * 100}
     b = {"speaker": "NARRATOR", "text": "乙" * 5}
     out, n = merge_adjacent_same_speaker([a, b], is_chapter_title)
-    assert n == 1
-    assert out == [{"speaker": "NARRATOR", "text": "甲" * 100 + "。" + "乙" * 5}]
+    assert n == 0 and out == [a, b]
 
-    # merge same speaker forced merge grows long block
-    # 贪心：块已 100 字，后续 5 字段较短方 ≤10 → 强制并入（块 → 105）；
-    # 再后 50 字段：块 105+50=155>100 且较短方 50>10 → 封块、开新块
+    # a configured (dynamic) cap applies, measured in code points incl. the 。 boundary
+    a = {"speaker": "NARRATOR", "text": "甲" * 30}
+    b = {"speaker": "NARRATOR", "text": "乙" * 30}
+    assert merge_adjacent_same_speaker([a, b], is_chapter_title, max_chars=61)[1] == 1
+    assert merge_adjacent_same_speaker([a, b], is_chapter_title, max_chars=60)[1] == 0
+
+    # greedy: blocks seal at the cap and a new block starts
     entries = [
-        {"speaker": "BOB", "text": "丙" * 100, "instruct": "x"},
-        {"speaker": "BOB", "text": "丁" * 5, "instruct": "y"},
-        {"speaker": "BOB", "text": "戊" * 50, "instruct": "z"},
+        {"speaker": "BOB", "text": "丙" * 40, "instruct": "x"},
+        {"speaker": "BOB", "text": "丁" * 40, "instruct": "y"},
+        {"speaker": "BOB", "text": "戊" * 40, "instruct": "z"},
     ]
     out, n = merge_adjacent_same_speaker(entries, is_chapter_title)
-    assert n == 1
-    assert len(out) == 2
-    assert out[0]["text"] == "丙" * 100 + "。" + "丁" * 5
-    assert out[1]["text"] == "戊" * 50
+    assert n == 1 and len(out) == 2
+    assert out[0]["text"] == "丙" * 40 + "。" + "丁" * 40 and out[1]["text"] == "戊" * 40
 
     # merge same speaker greedy absorbs while within cap
     # 贪心：块+段 ≤100 持续并入；超过即封块
@@ -3760,9 +3761,9 @@ def test_generate_file_merge_before_split_forced_over200(tmp_path, monkeypatch, 
     )
     assert calls["n"] == 2  # 1 解析 + 1 单次重切（采纳原样）
     assert result["long_checked"] == 1 and result["long_fixed"] == 1
-    assert result["merged_same_speaker"] == 1  # 仅 ≤10 强制路径（215 > 100）
-    assert result["long_split"] == 1  # 合并造出的 >200 块由末段切回
-    assert result["count"] == 2  # 216 字 → 定宽切 [200, 16]
+    assert result["merged_same_speaker"] == 0  # 合并不再突破上限（长条目 + 碎片 > max_paragraph_chars/2）
+    assert result["long_split"] == 1  # 超长原条目仍由末段机械分段切回
+    assert result["count"] == 3  # 215 字 → 定宽切 [200, 15] + 独立碎片
     out = json.loads((workspace / "03_parsed_json" / "forced.json").read_text("utf-8"))
     assert all(len(e["text"].strip()) <= 200 for e in out)  # 硬保证
     assert _SKEL("".join(e["text"] for e in out)) == _SKEL(long_a + short_b)  # 骨架无损
